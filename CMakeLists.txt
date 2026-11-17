@@ -31,6 +31,33 @@ option(XXYARA_ENABLE_MAGIC "Enable the optional YARA-X magic module" OFF)
 option(XXYARA_ENABLE_MSI "Enable the experimental YARA-X msi module" OFF)
 option(XXYARA_ENABLE_TEST_PROTO "Enable the test-only test_proto2 and test_proto3 modules" OFF)
 option(XXYARA_ENABLE_PROFILING "Enable YARA-X C API rule profiling" OFF)
+
+# CRT-free build: xxyara.dll, yr.exe, the C examples and the tests link no
+# Microsoft C runtime at all (no ucrt/vcruntime/msvcrt DLL, no static
+# libucrt/libvcruntime/libcmt) and import nothing but KERNEL32. The C runtime
+# they call by its standard names comes from xxfclib: the portable cores in
+# src/crt (UCRT-identical printf, strtod, qsort, ...) and the Windows layer in
+# src/crt/platforms (stdio, entry points, TLS directory), built here as the
+# static library xxyara_crt. The static xxyara.lib is compiled /GS- /Zl, so a
+# /NODEFAULTLIB consumer links it with xxyara_crt and a hosted consumer (the
+# C++ example) links it with its own C runtime. OFF keeps the static Microsoft
+# runtime (/MT); subproject builds are not affected.
+set(_xxyara_no_crt_default OFF)
+if(MSVC AND _xxyara_top_level AND CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64)$")
+    set(_xxyara_no_crt_default ON)
+endif()
+option(XXYARA_NO_CRT "Link xxyara.dll, yr.exe, the C examples and the tests without the Microsoft C runtime (MSVC x64)"
+    ${_xxyara_no_crt_default})
+if(XXYARA_NO_CRT)
+    if(NOT MSVC OR NOT CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64)$")
+        message(FATAL_ERROR "XXYARA_NO_CRT needs MSVC for x64")
+    endif()
+    enable_language(ASM_MASM)
+    # No security-cookie checks (they live in the C runtime) and no default
+    # library records in the C objects.
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:/GS-> $<$<COMPILE_LANGUAGE:C>:/Zl>)
+    string(REGEX REPLACE "[/-](RTC[1csu]|GZ)" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+endif()
 set(XXYARA_REFERENCE_YR "" CACHE FILEPATH
     "Optional official yr executable used for CLI differential tests")
 set(XXYARA_REFERENCE_VBA_YR "" CACHE FILEPATH
@@ -295,6 +322,22 @@ if(NOT TARGET xxfclib::xxfclib)
             src/strings/platforms/xx_string_posix.c
             src/terminal/platforms/xx_terminal_posix.c
             src/threads/platforms/xx_threads_posix.c)
+    endif()
+    # The portable cores of the CRT-free runtime (UCRT-identical formatting,
+    # conversions, qsort, ctype, math, time); the Windows standard-name layer
+    # is the separate xxyara_crt library below.
+    if(XXYARA_NO_CRT)
+        list(APPEND _xxfc_sources
+            src/crt/xx_crt_fmt.c
+            src/crt/xx_crt_scan.c
+            src/crt/xx_crt_strtod.c
+            src/crt/xx_crt_conv.c
+            src/crt/xx_crt_qsort.c
+            src/crt/xx_crt_ctype.c
+            src/crt/xx_crt_string.c
+            src/crt/xx_crt_math.c
+            src/crt/xx_ms_log2.c
+            src/crt/xx_crt_time.c)
     endif()
     list(TRANSFORM _xxfc_sources PREPEND "${XXYARA_XXFCLIB_SOURCE_DIR}/")
     # Reuse the codepage registry's source closure and table options. The
@@ -626,6 +669,56 @@ if(XXYARA_BUILD_TESTS AND BUILD_TESTING)
             "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/algo/adler32/adler32_test.c")
         target_link_libraries(test_adler32 PRIVATE xxfclib::xxfclib)
         add_test(NAME xxyara_adler32 COMMAND test_adler32)
+    endif()
+    # xxfclib's C runtime cores against Microsoft's static UCRT: this test
+    # links the real runtime (/Zl removed the default library records, so the
+    # /MT libraries are named) and compares the two on random and edge cases.
+    if(XXYARA_NO_CRT AND EXISTS "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/crt_ucrt_diff.c")
+        add_executable(test_crt_ucrt_diff "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/crt_ucrt_diff.c"
+            "${XXYARA_XXFCLIB_SOURCE_DIR}/src/crt/platforms/xx_crt_args_windows.c")
+        target_link_libraries(test_crt_ucrt_diff PRIVATE xxfclib::xxfclib
+            $<IF:$<CONFIG:Debug>,libcmtd,libcmt> $<IF:$<CONFIG:Debug>,libvcruntimed,libvcruntime>
+            $<IF:$<CONFIG:Debug>,libucrtd,libucrt>)
+        add_test(NAME xxyara_crt_ucrt_diff COMMAND test_crt_ucrt_diff --scale 1 --log2-exhaustive 512)
+        set_tests_properties(xxyara_crt_ucrt_diff PROPERTIES TIMEOUT 1200)
+    endif()
+    # xx_ms_log2 (the log2 of the CRT-free layer) against the log2 of
+    # Microsoft's static UCRT, bit for bit: specials, powers of two,
+    # subnormals, random doubles, c/n for every n <= 4096 and 200,000 entropy
+    # sums, with the runtime's FMA3 paths on and off.
+    if(XXYARA_NO_CRT AND EXISTS "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/ms_log2_ucrt_test.c")
+        add_executable(test_ms_log2_ucrt "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/ms_log2_ucrt_test.c")
+        target_link_libraries(test_ms_log2_ucrt PRIVATE xxfclib::xxfclib
+            $<IF:$<CONFIG:Debug>,libcmtd,libcmt> $<IF:$<CONFIG:Debug>,libvcruntimed,libvcruntime>
+            $<IF:$<CONFIG:Debug>,libucrtd,libucrt>)
+        add_test(NAME xxyara_ms_log2_ucrt COMMAND test_ms_log2_ucrt)
+        set_tests_properties(xxyara_ms_log2_ucrt PROPERTIES TIMEOUT 1200)
+    endif()
+    # The parts of the runtime that exist only as standard names (streams,
+    # environment, paths, stat, errno): one probe source built against
+    # Microsoft's runtime (test_crt_probe_ucrt) and against xxfclib's
+    # (test_crt_probe); both must print the same.
+    if(XXYARA_NO_CRT AND EXISTS "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/crt_platform_probe.c")
+        add_executable(test_crt_probe "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/crt_platform_probe.c")
+        add_executable(test_crt_probe_ucrt "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/crt_platform_probe.c")
+        target_link_libraries(test_crt_probe PRIVATE xxfclib::xxfclib)
+        target_link_libraries(test_crt_probe_ucrt PRIVATE
+            $<IF:$<CONFIG:Debug>,libcmtd,libcmt> $<IF:$<CONFIG:Debug>,libvcruntimed,libvcruntime>
+            $<IF:$<CONFIG:Debug>,libucrtd,libucrt>)
+        add_test(NAME xxyara_crt_platform_probe COMMAND "${CMAKE_COMMAND}"
+            -DREFERENCE=$<TARGET_FILE:test_crt_probe_ucrt> -DCANDIDATE=$<TARGET_FILE:test_crt_probe>
+            -DWORK=${CMAKE_CURRENT_BINARY_DIR}/crt-platform-probe
+            -P "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/compare_probe_outputs.cmake")
+        set_tests_properties(xxyara_crt_platform_probe PROPERTIES TIMEOUT 1200)
+        # A search that costs a restarting strstr about 64 billion comparisons.
+        add_test(NAME xxyara_crt_strstr_adversarial COMMAND test_crt_probe strstr-adversarial)
+        set_tests_properties(xxyara_crt_strstr_adversarial PROPERTIES TIMEOUT 60
+            PASS_REGULAR_EXPRESSION "match at the end: ok" FAIL_REGULAR_EXPRESSION "WRONG;FOUND")
+        # Loading and unloading the CRT-free DLL leaves no handles behind.
+        if(TARGET xxyara_shared)
+            add_test(NAME xxyara_crt_dll_cycle COMMAND test_crt_probe dll-cycle $<TARGET_FILE:xxyara_shared>)
+            set_tests_properties(xxyara_crt_dll_cycle PROPERTIES TIMEOUT 300)
+        endif()
     endif()
     if(XXYARA_ENABLE_TEST_PROTO)
         set(_xxyara_test_modules xxyara::xxyara)
@@ -1147,4 +1240,49 @@ endif()
 
 if(XXYARA_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
     add_subdirectory(examples)
+endif()
+
+if(XXYARA_NO_CRT)
+    # xxfclib's Windows C runtime under the standard names, for /NODEFAULTLIB
+    # links only: it defines malloc, memcpy, printf's back ends and the entry
+    # points, so a program that also links Microsoft's runtime must not use it.
+    set(_xxyara_crt_sources
+        src/crt/platforms/xx_crt_windows.c
+        src/crt/platforms/xx_crt_stdio_windows.c
+        src/crt/platforms/xx_crt_args_windows.c
+        src/crt/platforms/xx_crt_entry_windows.c
+        src/crt/platforms/xx_crt_main_windows.c
+        src/crt/platforms/xx_crt_wmain_windows.c
+        src/crt/platforms/xx_crt_dll_windows.c
+        src/crt/platforms/xx_crt_dllmain_windows.c
+        src/crt/platforms/xx_crt_tls_windows.c
+        src/platforms/xx_chkstk_windows_x64.asm)
+    list(TRANSFORM _xxyara_crt_sources PREPEND "${XXYARA_XXFCLIB_SOURCE_DIR}/")
+    add_library(xxyara_crt STATIC ${_xxyara_crt_sources})
+    add_library(xxfclib::crt ALIAS xxyara_crt)
+    target_link_libraries(xxyara_crt PUBLIC xxfclib::xxfclib)
+    set_target_properties(xxyara_crt PROPERTIES
+        C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+    # Every executable and the DLL of this tree links CRT-free, except the C++
+    # example (it uses the C++ standard library and exceptions, which need
+    # Microsoft's runtime) and the differential test, which compares
+    # xxfclib's runtime with Microsoft's and therefore links the real one.
+    set(_xxyara_crt_hosted xxyara_example_cpp test_crt_ucrt_diff test_ms_log2_ucrt test_crt_probe_ucrt)
+    get_property(_xxyara_crt_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    if(TARGET xxyara_example_c_static OR TARGET xxyara_example_cpp)
+        get_property(_xxyara_crt_example_targets DIRECTORY examples PROPERTY BUILDSYSTEM_TARGETS)
+        list(APPEND _xxyara_crt_targets ${_xxyara_crt_example_targets})
+    endif()
+    foreach(_xxyara_crt_target IN LISTS _xxyara_crt_targets)
+        get_target_property(_xxyara_crt_type ${_xxyara_crt_target} TYPE)
+        if((_xxyara_crt_type STREQUAL "EXECUTABLE" OR _xxyara_crt_type STREQUAL "SHARED_LIBRARY")
+           AND NOT _xxyara_crt_target IN_LIST _xxyara_crt_hosted)
+            target_link_libraries(${_xxyara_crt_target} PRIVATE xxyara_crt)
+            # LNK4210 reports the .CRT section without a C runtime: here it
+            # holds only TLS callbacks (.CRT$XL*), which the TLS directory of
+            # xx_crt_tls_windows.c calls; C has no static initializers.
+            target_link_options(${_xxyara_crt_target} PRIVATE /NODEFAULTLIB /IGNORE:4210)
+        endif()
+    endforeach()
 endif()

@@ -24,21 +24,30 @@
 /* The YARA-X-exact Cuckoo report parsing moved to xxfclib (xx_cuckoo_yx.h);
  * this file keeps the yx_cuckoo_* module API as thin adapters. The
  * yx_cuckoo_report tag is only a local spelling (condition.h forward-
- * declares it), so the pointers cross over void *. */
+ * declares it), so an yx_cuckoo_report * is in fact an xxfclib
+ * xx_cuckoo_yx_report *. The parse adapters go through a correctly typed
+ * local pointer: only the pointer VALUE crosses as void *, never a write
+ * through an incompatible pointer type. A NULL out stays NULL, so xxfclib
+ * still rejects it instead of returning a report nobody can free. */
 
 bool yx_cuckoo_report_parse(const uint8_t *json, size_t size,
                             yx_cuckoo_report **out)
 {
-    return xx_cuckoo_yx_report_parse(json, size,
-                                     (xx_cuckoo_yx_report **)(void *)out);
+    xx_cuckoo_yx_report *report = NULL;
+    bool ok = xx_cuckoo_yx_report_parse(json, size, out ? &report : NULL);
+    if (out) *out = (yx_cuckoo_report *)(void *)report;
+    return ok;
 }
 
 bool yx_cuckoo_report_parse_ex(const uint8_t *json, size_t size,
     yx_cuckoo_report **out, char *error, size_t error_capacity)
 {
-    return xx_cuckoo_yx_report_parse_ex(json, size,
-                                        (xx_cuckoo_yx_report **)(void *)out,
-                                        error, error_capacity);
+    xx_cuckoo_yx_report *report = NULL;
+    bool ok = xx_cuckoo_yx_report_parse_ex(json, size,
+                                           out ? &report : NULL,
+                                           error, error_capacity);
+    if (out) *out = (yx_cuckoo_report *)(void *)report;
+    return ok;
 }
 
 void yx_cuckoo_report_free(yx_cuckoo_report *report)
@@ -53,6 +62,6 @@ bool yx_cuckoo_query(const yx_cuckoo_report *report,
 {
     return xx_cuckoo_yx_query((const xx_cuckoo_yx_report *)(const void *)report,
                               function,
-                              (xx_cuckoo_yx_match_fn)(void *)matches, opaque,
+                              matches, opaque,
                               has_port, port, count);
 }

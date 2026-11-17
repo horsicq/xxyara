@@ -12820,11 +12820,46 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner,
             if (!yx_cuckoo_report_parse_ex(metadata, metadata_size,
                                          &cuckoo_report, metadata_error,
                                          sizeof(metadata_error))) {
-                char message[1152];
-                snprintf(message, sizeof(message),
-                    "error in module `cuckoo`: invalid metadata%s%s",
-                    metadata_error[0] ? ": " : "", metadata_error);
-                result = yx_fail(YRX_SCAN_ERROR, message);
+                static const char prefix[] = "error in module `cuckoo`: invalid metadata";
+                char *error_text = metadata_error;
+                size_t text_length = strlen(metadata_error);
+                /* serde prints the whole offending value, which renders in
+                 * at most six bytes per report byte ("\u{7f}"). A message
+                 * that filled the buffer is rebuilt at full size; without
+                 * memory for that it stays cut, the error unchanged. */
+                if (text_length == sizeof(metadata_error) - 1 &&
+                    metadata_size <= (SIZE_MAX - 1024) / 6) {
+                    size_t error_capacity = metadata_size * 6 + 1024;
+                    char *full = (char *)malloc(error_capacity);
+                    if (full) {
+                        yx_cuckoo_report *ignored = NULL;
+                        if (!yx_cuckoo_report_parse_ex(metadata, metadata_size,
+                                                       &ignored, full,
+                                                       error_capacity)) {
+                            error_text = full;
+                            text_length = strlen(full);
+                        } else {
+                            yx_cuckoo_report_free(ignored);
+                            free(full);
+                        }
+                    }
+                }
+                char *message = (char *)malloc(sizeof(prefix) + 2 + text_length);
+                if (message) {
+                    memcpy(message, prefix, sizeof(prefix) - 1);
+                    if (text_length) {
+                        memcpy(message + sizeof(prefix) - 1, ": ", 2);
+                        memcpy(message + sizeof(prefix) + 1, error_text, text_length + 1);
+                    } else message[sizeof(prefix) - 1] = 0;
+                    result = yx_fail(YRX_SCAN_ERROR, message);
+                    free(message);
+                } else {
+                    char cut[1152];
+                    snprintf(cut, sizeof(cut), "%s%s%s", prefix,
+                             text_length ? ": " : "", metadata_error);
+                    result = yx_fail(YRX_SCAN_ERROR, cut);
+                }
+                if (error_text != metadata_error) free(error_text);
                 goto done;
             }
             break;

@@ -12,8 +12,8 @@ The goal: **exactly YARA-X's results, faster.**
   test cases.
 - **Faster.** On the [benchmarks](#speed), xxyara is faster than YARA-X on all 12 benchmark cases (1.2x to 54x)
   and on every many-rule workload compiled from source (1.1x to 5.4x).
-- **Self-contained.** `xxyara.dll` (4.7 MB) and `yr.exe` (6.5 MB) import nothing but `KERNEL32.dll`.
-  YARA-X's `yr.exe` is 26.4 MB.
+- **Self-contained.** `xxyara.dll` (4.6 MB) and `yr.exe` (6.4 MB) import nothing but `KERNEL32.dll` and contain
+  no Microsoft C runtime: their C runtime comes from xxfclib. YARA-X's `yr.exe` is 26.4 MB.
 - **Drop-in C API.** `include/yara_x.h` is the YARA-X 1.23.0 C API header. `xxyara.dll` exports the same 55
   functions as YARA-X's `yara_x_capi.dll`, and the xxyara additions live in `include/xxyara_ext.h`. Examples
   for C, C++, Python, C#, PowerShell, Java, Rust and Pascal are in [examples/](examples/README.md).
