@@ -1,0 +1,9 @@
+/* Symbol version script for the shared library on ELF platforms: export only the C API
+ * (include/yara_x.h) and the xxyara extensions (include/xxyara_ext.h). */
+{
+  global:
+    yrx_*;
+    xxyara_*;
+  local:
+    *;
+};

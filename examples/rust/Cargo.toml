@@ -1,0 +1,10 @@
+[package]
+name = "xxyara-scan"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "xxyara example: the YARA-X C API of xxyara.dll / libxxyara.so through Rust FFI"
+
+[[bin]]
+name = "scan"
+path = "src/main.rs"

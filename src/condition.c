@@ -1,0 +1,20840 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#include "condition.h"
+#include "internal.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#include <ctype.h>
+#include <errno.h>
+#include <float.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <math.h>
+#include <stddef.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "module_hash.h"
+#include "module_crx.h"
+#include "module_cuckoo.h"
+#include "module_dex.h"
+#include "module_dotnet.h"
+#include "module_dotnet_method.h"
+#include "module_elf.h"
+#include "module_lnk.h"
+#include "module_macho.h"
+#ifdef XXYARA_ENABLE_MAGIC
+#include "module_magic.h"
+#endif
+#ifdef XXYARA_ENABLE_OLECF
+#include "module_olecf.h"
+#endif
+#ifdef XXYARA_ENABLE_MSI
+#include "module_msi.h"
+#endif
+#include "module_pe.h"
+#include "module_string.h"
+#include "module_zip.h"
+#ifdef XXYARA_ENABLE_VBA
+#include "module_vba.h"
+#endif
+#include "xxfclib/data/xx_data.h"
+#include "xxfclib/algo/bytestats/xx_bytestats.h"
+#include "xxfclib/algo/entropy/xx_entropy.h"
+#include "xxfclib/algo/tlsh/xx_tlsh.h"
+#include "xxfclib/regex/xx_regex_unicode16.h"
+#include "xxfclib/strings/xx_string.h"
+#include "xxfclib/strings/xx_string_casecmp.h"
+#include "xxfclib/strings/xx_string_casefold.h"
+#include "xxfclib/strings/xx_string_uppercase.h"
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include "native_regex.h"
+
+#ifdef _MSC_VER
+static __declspec(thread) size_t yx_console_log_length;
+#else
+static _Thread_local size_t yx_console_log_length;
+#endif
+
+size_t yx_console_current_log_length(void)
+{
+    return yx_console_log_length;
+}
+
+typedef enum {
+    TK_BAD, TK_END, TK_NUMBER, TK_FLOAT, TK_STRING, TK_IDENTIFIER, TK_RESERVED, TK_PATTERN, TK_COUNT,
+    TK_OFFSET, TK_LENGTH, TK_TRUE, TK_FALSE, TK_FILESIZE,
+    TK_ANY, TK_ALL, TK_NONE, TK_OF, TK_THEM, TK_AT, TK_IN, TK_FOR,
+    TK_WITH, TK_NOT, TK_DEFINED, TK_AND, TK_OR,
+    TK_LPAREN, TK_RPAREN, TK_LBRACKET, TK_RBRACKET, TK_COMMA,
+    TK_COLON, TK_DOT, TK_DOTDOT, TK_PLUS, TK_MINUS, TK_STAR, TK_DIV,
+    TK_PERCENT, TK_TILDE, TK_AMP, TK_CARET, TK_PIPE,
+    TK_SHL, TK_SHR, TK_ASSIGN, TK_EQ, TK_NE, TK_LT, TK_LE, TK_GT, TK_GE,
+    TK_CONTAINS, TK_ICONTAINS, TK_STARTSWITH, TK_ISTARTSWITH,
+    TK_ENDSWITH, TK_IENDSWITH, TK_IEQUALS, TK_MATCHES
+} yx_token_kind;
+
+typedef struct {
+    yx_token_kind kind;
+    const char *begin;
+    size_t length;
+    size_t offset;
+    uint64_t number;
+    bool is_unsigned;
+    double floating;
+} yx_token;
+
+typedef enum {
+    N_INTEGER, N_FLOAT, N_STRING, N_REGEX, N_FILESIZE, N_PATTERN, N_COUNT, N_OFFSET, N_LENGTH,
+    N_RULE, N_GLOBAL_INDEXED, N_GLOBAL_DEEP_PATH, N_READ, N_UNARY, N_BINARY, N_OF, N_OF_EXPR, N_FOR_OF, N_FOR_IN,
+    N_WITH, N_MATCHES, N_CALL, N_MODULE_FIELD, N_MODULE_INDEXED_FIELD,
+    N_MODULE_NESTED_INDEXED_FIELD, N_MODULE_TRIPLE_INDEXED_FIELD
+} yx_node_kind;
+
+typedef enum { Q_NUMBER, Q_PERCENT, Q_ANY, Q_ALL, Q_NONE } yx_quantifier;
+typedef enum { FILTER_NONE, FILTER_AT, FILTER_IN } yx_filter;
+
+typedef struct yx_node {
+    yx_node_kind kind;
+    yx_token_kind operation;
+    size_t span_start;
+    size_t span_end;
+    size_t call_start;
+    uint64_t number;
+    bool is_unsigned;
+    bool parenthesized;
+    bool unsigned_unary;
+    bool fold_visited;
+    bool fold_completed;
+    double floating;
+    size_t string_length;
+    char *name;
+    struct yx_node *a;
+    struct yx_node *b;
+    struct yx_node *c;
+    struct yx_node *body;
+    struct yx_node **items;
+    size_t item_count;
+    size_t first_three_index_ends[3];
+    size_t index_primary_starts[3];
+    size_t index_primary_ends[3];
+    size_t first_lookup_end;
+    size_t call_member_start;
+    size_t call_member_end;
+    size_t *deep_index_ends;
+    size_t deep_index_count;
+    bool range_loop;
+    bool map_loop;
+    bool array_loop;
+    bool implicit_value;
+    bool resolved_module_alias;
+    size_t module_alias_prefix_length;
+    bool literal_matches;
+    void *compiled_regex;
+    bool compiled_regex_shared;
+    char **set_names;
+    size_t set_count;
+    /* `with` declarations and pattern set items: where each name starts
+     * (and, for set items, where it ends, a wildcard's `*` included). */
+    size_t *set_name_starts;
+    size_t *set_name_ends;
+    /* `with` statements: their body's type in their own scope, recorded by
+     * the typed warning walk (a `with` has the type of its body). */
+    int with_body_type;
+    /* A `for ... in (range)` loop: the range, parentheses included. */
+    size_t iterable_start, iterable_end;
+    bool set_all;
+    yx_quantifier quantifier;
+    yx_filter filter;
+    unsigned width;
+    bool signed_read;
+    bool floating_read;
+    bool big_endian;
+    /* Memoized validation queries. Struct copies of a node (aliases,
+     * rewritten fields) keep the bytes but not the address, so a cache is
+     * valid only when cache_self is the node itself. */
+    const struct yx_node *cache_self;
+    uint8_t feature_field_cache; /* 0 unknown, 1 no, 2 yes */
+    bool type_cache_valid;
+    int type_cache;
+    const void *type_cache_scope;
+    unsigned type_cache_generation;
+    struct yx_node *next_allocated;
+    /* A parenthesized Boolean term, which YARA-X never parses as an
+     * expression operand. */
+    bool paren_bool;
+    size_t paren_open; /* offset of the outermost '(' of a paren_bool term */
+    /* A read function called with other than one argument. */
+    bool read_arity_error;
+    /* What YARA-X reports when this node's variable frame does not fit
+     * (E047): the whole `for` loop, the `of` expression up to its last
+     * item or anchor, or a `with` statement's declarations. SIZE_MAX when
+     * unknown. */
+    size_t frame_start, frame_end;
+} yx_node;
+
+struct yx_condition {
+    yx_node *root;
+    yx_node *allocated;
+    size_t depth; /* height of the parsed tree */
+    bool fold_failed;
+    /* The allocated nodes of the kinds yx_eval_prepare_names resolves, in
+     * allocation-list order, recorded when compilation succeeds (ready). */
+    const yx_node **name_nodes;
+    size_t name_node_count;
+    bool name_nodes_ready;
+};
+
+/* The evaluator and the compile-time walkers recurse once per operand of a
+ * left-nested chain such as `x and x and ...`. Deep trees run those walks on
+ * a thread whose stack is sized from the tree height. */
+#ifndef YX_DEEP_TREE_DEPTH
+#define YX_DEEP_TREE_DEPTH 192
+#endif
+typedef struct { void (*call)(void *); void *data; } yx_deep_job;
+#ifdef _WIN32
+static DWORD WINAPI yx_deep_thread(LPVOID pointer)
+{ yx_deep_job *job = pointer; job->call(job->data); return 0; }
+#else
+static void *yx_deep_thread(void *pointer)
+{ yx_deep_job *job = pointer; job->call(job->data); return NULL; }
+#endif
+static void yx_run_deep(size_t depth, void (*call)(void *), void *data)
+{
+    yx_deep_job job = {call, data};
+    size_t stack;
+    if (depth < YX_DEEP_TREE_DEPTH) { call(data); return; }
+    stack = depth > ((size_t)1 << 30) / 32768 ? (size_t)1 << 30 : depth * 32768 + ((size_t)32 << 20);
+#ifdef _WIN32
+    {
+        HANDLE thread = CreateThread(NULL, stack, yx_deep_thread, &job,
+                                     STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+        if (thread) {
+            WaitForSingleObject(thread, INFINITE);
+            CloseHandle(thread);
+            return;
+        }
+    }
+#else
+    {
+        pthread_attr_t attributes;
+        pthread_t thread;
+        if (!pthread_attr_init(&attributes)) {
+            bool started = !pthread_attr_setstacksize(&attributes, stack) &&
+                           !pthread_create(&thread, &attributes, yx_deep_thread, &job);
+            pthread_attr_destroy(&attributes);
+            if (started) {
+                pthread_join(thread, NULL);
+                return;
+            }
+        }
+    }
+#endif
+    call(data);
+}
+
+/* Tree height without recursion. */
+static size_t yx_node_depth(const struct yx_node *root)
+{
+    typedef struct { const struct yx_node *node; size_t level; } yx_depth_item;
+    yx_depth_item *stack = NULL;
+    size_t used = 0, capacity = 0, depth = 0;
+    if (!root) return 0;
+#define YX_DEPTH_PUSH(child, at) do { \
+        if ((child)) { \
+            if (used == capacity) { \
+                size_t next = capacity ? capacity * 2 : 64; \
+                yx_depth_item *grown = realloc(stack, next * sizeof(*grown)); \
+                if (!grown) { free(stack); return SIZE_MAX; } \
+                stack = grown; capacity = next; \
+            } \
+            stack[used++] = (yx_depth_item){(child), (at)}; \
+        } } while (0)
+    YX_DEPTH_PUSH(root, 1);
+    while (used) {
+        yx_depth_item item = stack[--used];
+        if (item.level > depth) depth = item.level;
+        YX_DEPTH_PUSH(item.node->a, item.level + 1);
+        YX_DEPTH_PUSH(item.node->b, item.level + 1);
+        YX_DEPTH_PUSH(item.node->c, item.level + 1);
+        YX_DEPTH_PUSH(item.node->body, item.level + 1);
+        for (size_t i = 0; i < item.node->item_count; ++i)
+            YX_DEPTH_PUSH(item.node->items[i], item.level + 1);
+    }
+#undef YX_DEPTH_PUSH
+    free(stack);
+    return depth;
+}
+
+typedef struct {
+    const char *source;
+    size_t position;
+    yx_token token;
+    yx_token previous_token;
+    yx_condition *condition;
+    char *error;
+    size_t error_capacity;
+    unsigned depth;
+    bool failed;
+    bool for_quantifier;
+    unsigned with_depth;
+    /* Constant folding through `with` declarations, whose constant type
+     * values ast2ir propagates: the names in scope while folding, and the
+     * expressions that are constant only through them (never rewritten). */
+    struct yx_fold_binding *fold_bindings;
+    size_t fold_binding_count, fold_binding_capacity;
+    struct yx_fold_virtual *fold_virtuals;
+    size_t fold_virtual_count, fold_virtual_capacity;
+} yx_parser;
+
+typedef enum { V_INTEGER, V_FLOAT, V_STRING, V_MAP, V_STRUCT } yx_value_type;
+
+typedef struct {
+    uint64_t value;
+    double floating;
+    const char *string;
+    size_t string_length;
+    const yx_global_object *object;
+    const yx_vt_value *vt_map;
+    const yx_mo_value *module_map;
+    bool module_map_origin;
+    const void *test_proto_map;
+    const char *vt_path;
+    yx_vt_key vt_keys[3];
+    unsigned vt_key_count;
+    bool vt_element;
+    bool vt_map_origin;
+    yx_value_type type;
+    bool defined;
+    bool module_origin;
+    bool is_unsigned;
+} yx_value;
+
+typedef struct yx_binding {
+    const char *name;
+    yx_value value;
+    const struct yx_binding *parent;
+    bool range_integer; /* stable integer type for compact outer-loop loads */
+} yx_binding;
+
+typedef struct yx_eval_owned_string {
+    struct yx_eval_owned_string *next;
+    char data[];
+} yx_eval_owned_string;
+
+static void yx_loop_programs_destroy(void *head);
+
+/* A plain module field's value in the current scan (yx_field_memo_get). The
+ * entry owns a copy of the field name; longer names are not kept. */
+enum { YX_FIELD_MEMO_SLOTS = 64, YX_FIELD_MEMO_NAME = 64 };
+typedef struct {
+    char name[YX_FIELD_MEMO_NAME];
+    uint64_t hash;
+    unsigned generation;
+    bool used;
+    bool implicit_value;
+    yx_value value;
+} yx_field_memo_entry;
+
+struct yx_eval_string_arena {
+    yx_field_memo_entry *field_memo;
+    unsigned field_memo_generation;
+    const uint8_t *field_memo_data;
+    size_t field_memo_size;
+    void *loop_programs;
+    void *loop_program_buckets;
+    size_t loop_program_bucket_capacity;
+    size_t loop_program_count;
+    void *resolved_names;
+    size_t resolved_name_capacity;
+    size_t resolved_name_storage_capacity;
+    void *pattern_name_map;
+    size_t pattern_name_capacity;
+    bool byte_bounds_ready;
+    uint8_t byte_minimum, byte_maximum;
+    const uint8_t *byte_bounds_data;
+    size_t byte_bounds_size;
+    yx_eval_owned_string *head;
+    yx_dex_result *dex;
+    yx_dotnet_result *dotnet;
+    bool dotnet_attempted;
+#ifdef XXYARA_ENABLE_VBA
+    yx_vba_result *vba;
+    bool vba_attempted;
+#endif
+    yx_zip_result *zip;
+    bool zip_attempted;
+    yx_pe_signature_result pe_signatures;
+    bool pe_signatures_attempted;
+    bool pe_signatures_ok;
+#ifdef XXYARA_ENABLE_MSI
+    yx_pe_signature_result msi_signatures;
+    bool msi_signatures_attempted;
+    bool msi_signatures_ok;
+#endif
+};
+
+static char *yx_eval_alloc_string(const yx_eval_context *ctx, size_t length)
+{
+    yx_eval_owned_string *item;
+    if (!ctx->string_arena || length > SIZE_MAX - sizeof(*item) - 1)
+        return NULL;
+    item = malloc(sizeof(*item) + length + 1);
+    if (!item) return NULL;
+    item->data[length] = '\0';
+    item->next = ctx->string_arena->head;
+    ctx->string_arena->head = item;
+    return item->data;
+}
+
+static void yx_eval_free_strings(yx_eval_string_arena *arena)
+{
+    yx_eval_owned_string *item = arena->head;
+    while (item) {
+        yx_eval_owned_string *next = item->next;
+        free(item);
+        item = next;
+    }
+    arena->head = NULL;
+    yx_dex_destroy(arena->dex);
+    arena->dex = NULL;
+    free(arena->dotnet);
+    arena->dotnet = NULL;
+    arena->dotnet_attempted = false;
+#ifdef XXYARA_ENABLE_VBA
+    if (arena->vba) {
+        yx_vba_result_free(arena->vba);
+        free(arena->vba);
+        arena->vba = NULL;
+    }
+    arena->vba_attempted = false;
+#endif
+    if (arena->zip) {
+        yx_zip_result_free(arena->zip);
+        free(arena->zip);
+        arena->zip = NULL;
+    }
+    arena->zip_attempted = false;
+    yx_pe_signature_result_destroy(&arena->pe_signatures);
+    arena->pe_signatures_attempted = false;
+    arena->pe_signatures_ok = false;
+#ifdef XXYARA_ENABLE_MSI
+    yx_pe_signature_result_destroy(&arena->msi_signatures);
+    arena->msi_signatures_attempted = false;
+    arena->msi_signatures_ok = false;
+#endif
+}
+
+static void yx_eval_free_scratch_cache(yx_eval_string_arena *arena)
+{
+    yx_loop_programs_destroy(arena->loop_programs);
+    arena->loop_programs = NULL;
+    free(arena->loop_program_buckets);
+    arena->loop_program_buckets = NULL;
+    arena->loop_program_bucket_capacity = 0;
+    arena->loop_program_count = 0;
+    free(arena->resolved_names);
+    arena->resolved_names = NULL;
+    arena->resolved_name_capacity = 0;
+    arena->resolved_name_storage_capacity = 0;
+    free(arena->pattern_name_map);
+    arena->pattern_name_map = NULL;
+    arena->pattern_name_capacity = 0;
+    free(arena->field_memo);
+    arena->field_memo = NULL;
+}
+
+yx_eval_string_arena *yx_condition_scratch_create(void)
+{
+    return calloc(1, sizeof(yx_eval_string_arena));
+}
+
+void yx_condition_scratch_new_scan(yx_eval_string_arena *scratch)
+{
+    if (!scratch) return;
+    /* Module field values belong to one scan. */
+    if (++scratch->field_memo_generation == 0) {
+        if (scratch->field_memo)
+            memset(scratch->field_memo, 0, YX_FIELD_MEMO_SLOTS * sizeof(*scratch->field_memo));
+        scratch->field_memo_generation = 1;
+    }
+    scratch->byte_bounds_ready = false;
+    scratch->byte_minimum = scratch->byte_maximum = 0;
+    scratch->byte_bounds_data = NULL;
+    scratch->byte_bounds_size = 0;
+}
+
+void yx_condition_scratch_destroy(yx_eval_string_arena *scratch)
+{
+    if (!scratch) return;
+    yx_eval_free_strings(scratch);
+    yx_eval_free_scratch_cache(scratch);
+    free(scratch);
+}
+
+static const yx_dex_result *yx_eval_dex_result(const yx_eval_context *ctx)
+{
+    if (!ctx->string_arena) return NULL;
+    if (!ctx->string_arena->dex)
+        ctx->string_arena->dex = yx_dex_parse(ctx->data, ctx->size);
+    return ctx->string_arena->dex;
+}
+
+static const yx_dotnet_result *yx_eval_dotnet_result(
+    const yx_eval_context *ctx)
+{
+    yx_eval_string_arena *arena = ctx->string_arena;
+    if (!arena) return NULL;
+    if (!arena->dotnet_attempted) {
+        arena->dotnet_attempted = true;
+        arena->dotnet = calloc(1, sizeof(*arena->dotnet));
+        if (arena->dotnet &&
+            !yx_dotnet_parse(ctx->data, ctx->size, arena->dotnet)) {
+            free(arena->dotnet);
+            arena->dotnet = NULL;
+        }
+    }
+    return arena->dotnet;
+}
+
+#ifdef XXYARA_ENABLE_VBA
+static const yx_vba_result *yx_eval_vba_result(const yx_eval_context *ctx)
+{
+    yx_eval_string_arena *arena = ctx->string_arena;
+    if (!arena) return NULL;
+    if (!arena->vba_attempted) {
+        arena->vba_attempted = true;
+        arena->vba = calloc(1, sizeof(*arena->vba));
+        if (arena->vba &&
+            !yx_vba_parse(ctx->data, ctx->size, arena->vba)) {
+            yx_vba_result_free(arena->vba);
+            free(arena->vba);
+            arena->vba = NULL;
+        }
+    }
+    return arena->vba;
+}
+
+static bool yx_vba_constant(const char *member, uint64_t *value)
+{
+    static const struct { const char *name; uint64_t value; } values[] = {
+        {"MODULE_TYPE_STANDARD", YX_VBA_MODULE_STANDARD},
+        {"MODULE_TYPE_CLASS", YX_VBA_MODULE_CLASS},
+        {"MODULE_TYPE_UNKNOWN", YX_VBA_MODULE_UNKNOWN}
+    };
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        if (strcmp(member, values[i].name) == 0) {
+            if (value) *value = values[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+/* These i64 values are declared by vt.net.EnrichedDomain.Permutation in
+ * YARA-X 1.21.0. They are available to rules even without VT module data. */
+static bool yx_vt_permutation_constant(const char *name, uint64_t *value)
+{
+    static const struct { const char *name; uint64_t value; } values[] = {
+        {"vt.Domain.Permutation.ALL", 31},
+        {"vt.Domain.Permutation.TYPO", 1},
+        {"vt.Domain.Permutation.HOMOGLYPH", 2},
+        {"vt.Domain.Permutation.HYPHENATION", 4},
+        {"vt.Domain.Permutation.SUBDOMAIN", 8},
+        {"vt.Domain.Permutation.BITSQUATTING", 16}
+    };
+    if (!name) return false;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
+        if (strcmp(name, values[i].name) == 0) {
+            if (value) *value = values[i].value;
+            return true;
+        }
+    return false;
+}
+
+static size_t yx_vt_permutation_constant_prefix_length(const char *name)
+{
+    static const char prefix[] = "vt.Domain.Permutation.";
+    char candidate[sizeof("vt.Domain.Permutation.BITSQUATTING")];
+    const char *end;
+    size_t length;
+    if (!name || strncmp(name, prefix, sizeof(prefix) - 1) != 0)
+        return 0;
+    end = strchr(name + sizeof(prefix) - 1, '.');
+    length = end ? (size_t)(end - name) : strlen(name);
+    if (length >= sizeof(candidate)) return 0;
+    memcpy(candidate, name, length);
+    candidate[length] = '\0';
+    return yx_vt_permutation_constant(candidate, NULL) ? length : 0;
+}
+
+typedef struct {
+    const char *field;
+    const char *length_call;
+    size_t offset;
+} yx_dotnet_count_desc;
+
+static bool yx_dotnet_count_member(const char *member, bool length_call,
+                                    const yx_dotnet_result *result,
+                                    uint64_t *value)
+{
+    static const yx_dotnet_count_desc fields[] = {
+        {"number_of_streams", "streams.len",
+         offsetof(yx_dotnet_result, stream_count)},
+        {"number_of_guids", "guids.len",
+         offsetof(yx_dotnet_result, guid_count)},
+        {"number_of_resources", "resources.len",
+         offsetof(yx_dotnet_result, resource_count)},
+        {"number_of_classes", "classes.len",
+         offsetof(yx_dotnet_result, class_count)},
+        {"number_of_assembly_refs", "assembly_refs.len",
+         offsetof(yx_dotnet_result, assembly_ref_count)},
+        {"number_of_modulerefs", "modulerefs.len",
+         offsetof(yx_dotnet_result, module_ref_count)},
+        {"number_of_user_strings", "user_strings.len",
+         offsetof(yx_dotnet_result, user_string_count)},
+        {"number_of_constants", "constants.len",
+         offsetof(yx_dotnet_result, constant_count)},
+        {"number_of_field_offsets", "field_offsets.len",
+         offsetof(yx_dotnet_result, field_offset_count)},
+        /* YARA-X declares this optional scalar but its .NET parser does not
+         * populate it. Rules may refer to it, and its value is undefined. */
+        {"number_of_generic_parameters", NULL, SIZE_MAX}
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        const char *name = length_call ? fields[i].length_call :
+                                         fields[i].field;
+        if (!name || strcmp(member, name) != 0) continue;
+        if (result && value) {
+            if (fields[i].offset == SIZE_MAX) return false;
+            *value = *(const size_t *)((const uint8_t *)result +
+                                       fields[i].offset);
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool yx_dotnet_version_member(const char *member,
+                                      const yx_dotnet_version *version,
+                                      uint64_t *value)
+{
+    if (strcmp(member, "major") == 0) {
+        if (version && value) *value = version->major;
+    } else if (strcmp(member, "minor") == 0) {
+        if (version && value) *value = version->minor;
+    } else if (strcmp(member, "build_number") == 0) {
+        if (version && value) *value = version->build_number;
+    } else if (strcmp(member, "revision_number") == 0) {
+        if (version && value) *value = version->revision_number;
+    } else return false;
+    return true;
+}
+
+static const yx_zip_result *yx_eval_zip_result(const yx_eval_context *ctx)
+{
+    if (ctx->zip_output_present) return ctx->zip_output;
+    yx_eval_string_arena *arena = ctx->string_arena;
+    if (!arena || arena->zip_attempted) return arena ? arena->zip : NULL;
+    arena->zip_attempted = true;
+    arena->zip = calloc(1, sizeof(*arena->zip));
+    if (!arena->zip) return NULL;
+    if (!yx_zip_parse(ctx->data, ctx->size, arena->zip)) {
+        free(arena->zip);
+        arena->zip = NULL;
+    }
+    return arena->zip;
+}
+
+static const yx_pe_signature_result *yx_eval_pe_signatures(
+    const yx_eval_context *ctx)
+{
+    yx_eval_string_arena *arena = ctx->string_arena;
+    if (!arena) return NULL;
+    if (!arena->pe_signatures_attempted) {
+        arena->pe_signatures_attempted = true;
+        arena->pe_signatures_ok = yx_pe_parse_signatures(
+            ctx->data, ctx->size, &arena->pe_signatures);
+    }
+    return arena->pe_signatures_ok ? &arena->pe_signatures : NULL;
+}
+
+#ifdef XXYARA_ENABLE_MSI
+/* The msi module's output. It is never undefined upstream: non-OLECF or
+ * unsigned input yields is_signed false and no signatures, so callers treat
+ * NULL (allocation failure) as the empty list. */
+static const yx_pe_signature_result *yx_eval_msi_signatures(
+    const yx_eval_context *ctx)
+{
+    yx_eval_string_arena *arena = ctx->string_arena;
+    if (!arena) return NULL;
+    if (!arena->msi_signatures_attempted) {
+        arena->msi_signatures_attempted = true;
+        arena->msi_signatures_ok = yx_msi_signatures(
+            ctx->data, ctx->size, &arena->msi_signatures);
+    }
+    return arena->msi_signatures_ok ? &arena->msi_signatures : NULL;
+}
+#endif
+
+/* "pe.signatures." and, with the msi module, "msi.signatures." name the
+ * same repeated pe.Signature; returns the member after the prefix. */
+static const char *yx_signature_member(const char *name)
+{
+    if (!name) return NULL;
+    if (strncmp(name, "pe.signatures.", 14) == 0) return name + 14;
+#ifdef XXYARA_ENABLE_MSI
+    if (strncmp(name, "msi.signatures.", 15) == 0) return name + 15;
+#endif
+    return NULL;
+}
+
+static const yx_pe_signature_result *yx_eval_signature_list(
+    const yx_eval_context *ctx, const char *name)
+{
+#ifdef XXYARA_ENABLE_MSI
+    if (strncmp(name, "msi.", 4) == 0) return yx_eval_msi_signatures(ctx);
+#endif
+    (void)name;
+    return yx_eval_pe_signatures(ctx);
+}
+
+static void yx_fail(yx_parser *p, const char *format, ...)
+{
+    va_list args;
+    int written;
+    if (p->failed) return;
+    p->failed = true;
+    if (!p->error || p->error_capacity == 0) return;
+    written = snprintf(p->error, p->error_capacity, "at byte %zu: ", p->token.offset);
+    if (written < 0 || (size_t)written >= p->error_capacity) return;
+    va_start(args, format);
+    vsnprintf(p->error + written, p->error_capacity - (size_t)written, format, args);
+    va_end(args);
+}
+
+static bool yx_word_is(const char *begin, size_t length, const char *word)
+{
+    return strlen(word) == length && memcmp(begin, word, length) == 0;
+}
+
+static yx_token_kind yx_keyword(const char *begin, size_t length)
+{
+    struct keyword { const char *word; yx_token_kind kind; };
+    static const struct keyword keywords[] = {
+        {"true", TK_TRUE}, {"false", TK_FALSE}, {"filesize", TK_FILESIZE},
+        {"any", TK_ANY}, {"all", TK_ALL}, {"none", TK_NONE},
+        {"of", TK_OF}, {"them", TK_THEM}, {"at", TK_AT},
+        {"in", TK_IN}, {"for", TK_FOR}, {"with", TK_WITH},
+        {"not", TK_NOT},
+        {"defined", TK_DEFINED}, {"and", TK_AND}, {"or", TK_OR},
+        {"contains", TK_CONTAINS}, {"icontains", TK_ICONTAINS},
+        {"startswith", TK_STARTSWITH}, {"istartswith", TK_ISTARTSWITH},
+        {"endswith", TK_ENDSWITH}, {"iendswith", TK_IENDSWITH},
+        {"iequals", TK_IEQUALS}, {"matches", TK_MATCHES},
+        {"ascii", TK_RESERVED}, {"base64", TK_RESERVED},
+        {"base64wide", TK_RESERVED}, {"condition", TK_RESERVED},
+        {"fullword", TK_RESERVED}, {"global", TK_RESERVED},
+        {"import", TK_RESERVED}, {"include", TK_RESERVED},
+        {"meta", TK_RESERVED}, {"nocase", TK_RESERVED},
+        {"private", TK_RESERVED}, {"rule", TK_RESERVED},
+        {"strings", TK_RESERVED}, {"wide", TK_RESERVED},
+        {"xor", TK_RESERVED}
+    };
+    size_t i;
+    for (i = 0; i < sizeof(keywords) / sizeof(keywords[0]); i++) {
+        if (yx_word_is(begin, length, keywords[i].word)) return keywords[i].kind;
+    }
+    return TK_IDENTIFIER;
+}
+
+static int yx_digit_value(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
+    return -1;
+}
+
+static size_t yx_utf8_scalar_width(const char *at)
+{
+    unsigned char first = (unsigned char)at[0];
+    unsigned char second;
+    size_t width;
+    if (first >= 0xc2 && first <= 0xdf) width = 2;
+    else if (first >= 0xe0 && first <= 0xef) width = 3;
+    else if (first >= 0xf0 && first <= 0xf4) width = 4;
+    else return 0;
+    for (size_t i = 1; i < width; ++i)
+        if (!at[i] || ((unsigned char)at[i] & 0xc0) != 0x80) return 0;
+    second = (unsigned char)at[1];
+    if ((first == 0xe0 && second < 0xa0) ||
+        (first == 0xed && second >= 0xa0) ||
+        (first == 0xf0 && second < 0x90) ||
+        (first == 0xf4 && second >= 0x90)) return 0;
+    return width;
+}
+
+/* YARA-X's rule tokenizer permits Unicode decimal digits after an ASCII
+ * identifier start. Unicode letters are not tokenized as identifiers there,
+ * even though JSON globals accept them as struct keys. */
+static size_t yx_unicode_decimal_digit_width(const char *at)
+{
+    static const char pattern[] = "\\A\\p{Nd}\\z";
+    pcre2_code *compiled;
+    pcre2_match_data *matches;
+    PCRE2_SIZE error_offset = 0;
+    int error_code = 0;
+    int matched;
+    size_t width = yx_utf8_scalar_width(at);
+    if (!width) return 0;
+    compiled = pcre2_compile((PCRE2_SPTR) pattern, PCRE2_ZERO_TERMINATED,
+                             PCRE2_UTF | PCRE2_UCP, &error_code,
+                             &error_offset, NULL);
+    if (!compiled) return 0;
+    matches = pcre2_match_data_create_from_pattern(compiled, NULL);
+    if (!matches) {
+        pcre2_code_free(compiled);
+        return 0;
+    }
+    matched = pcre2_match(compiled, (PCRE2_SPTR) at, width,
+                          0, 0, matches, NULL);
+    pcre2_match_data_free(matches);
+    pcre2_code_free(compiled);
+    return matched >= 0 ? width : 0;
+}
+
+/* Rule conditions accept Unicode space separators between tokens. Keep the
+ * byte width so the lexer still reports offsets in the original source. */
+static size_t yx_condition_space_width(const char *at)
+{
+    const unsigned char *bytes = (const unsigned char *)at;
+    if (bytes[0] == ' ' || bytes[0] == '\t' ||
+        bytes[0] == '\r' || bytes[0] == '\n') return 1;
+    if (bytes[0] == 0xc2 && bytes[1] == 0xa0) return 2;
+    if (bytes[0] == 0xe2 && bytes[1] && bytes[2]) {
+        if (bytes[1] == 0x80 &&
+            ((bytes[2] >= 0x80 && bytes[2] <= 0x8a) ||
+             bytes[2] == 0xaf)) return 3;
+        if (bytes[1] == 0x81 && bytes[2] == 0x9f) return 3;
+    }
+    return 0;
+}
+
+static void yx_next(yx_parser *p)
+{
+    const char *s = p->source;
+    size_t start;
+    unsigned char ch;
+    yx_token *t = &p->token;
+    if (p->failed) return;
+    p->previous_token = p->token;
+    for (;;) {
+        size_t width;
+        while ((width = yx_condition_space_width(s + p->position)) != 0)
+            p->position += width;
+        if (s[p->position] == '/' && s[p->position + 1] == '/') {
+            p->position += 2;
+            while (s[p->position] && s[p->position] != '\n') p->position++;
+            continue;
+        }
+        if (s[p->position] == '/' && s[p->position + 1] == '*') {
+            p->position += 2;
+            while (s[p->position] && !(s[p->position] == '*' && s[p->position + 1] == '/')) p->position++;
+            if (!s[p->position]) {
+                t->offset = p->position;
+                yx_fail(p, "unterminated comment");
+                return;
+            }
+            p->position += 2;
+            continue;
+        }
+        break;
+    }
+    start = p->position;
+    ch = (unsigned char)s[start];
+    t->begin = s + start;
+    t->offset = start;
+    t->length = 1;
+    t->number = 0;
+    t->is_unsigned = false;
+    t->floating = 0.0;
+    if (!ch) { t->kind = TK_END; t->length = 0; return; }
+    if ((ch >= 'a' && ch <= 'z') ||
+        (ch >= 'A' && ch <= 'Z') || ch == '_') {
+        p->position++;
+        for (;;) {
+            unsigned char next = (unsigned char) s[p->position];
+            size_t width;
+            if (next < 0x80 && (isalnum(next) || next == '_')) {
+                p->position++;
+                continue;
+            }
+            if (next < 0x80) break;
+            width = yx_unicode_decimal_digit_width(s + p->position);
+            if (!width) break;
+            p->position += width;
+        }
+        t->length = p->position - start;
+        t->kind = yx_keyword(t->begin, t->length);
+        return;
+    }
+    if (ch == '"') {
+        p->position++;
+        while (s[p->position] && s[p->position] != '"') {
+            if (s[p->position] == '\\') {
+                if (!s[p->position + 1]) break;
+                p->position++;
+            }
+            if (s[p->position] == '\n') break;
+            p->position++;
+        }
+        if (s[p->position] != '"') { yx_fail(p, "unterminated string literal"); return; }
+        p->position++;
+        t->kind = TK_STRING;
+        t->length = p->position - start;
+        return;
+    }
+    if (ch == '$' || ch == '#' || ch == '@' || (ch == '!' && s[start + 1] != '=')) {
+        p->position++;
+        if (ch == '$' && s[p->position] == '*') p->position++;
+        else for (;;) {
+            size_t width;
+            if (isalnum((unsigned char)s[p->position]) ||
+                s[p->position] == '_') {
+                p->position++;
+                continue;
+            }
+            width = yx_unicode_decimal_digit_width(s + p->position);
+            if (!width) break;
+            p->position += width;
+        }
+        t->length = p->position - start;
+        t->kind = ch == '$' ? TK_PATTERN : ch == '#' ? TK_COUNT : ch == '@' ? TK_OFFSET : TK_LENGTH;
+        return;
+    }
+    if (isdigit(ch)) {
+        uint64_t value = 0;
+        unsigned base = 10;
+        bool digit_seen = false;
+        bool decimal_float = false;
+        if (ch == '0' && (s[start + 1] == 'x' || s[start + 1] == 'X')) {
+            base = 16; p->position += 2;
+        } else if (ch == '0' && (s[start + 1] == 'o' || s[start + 1] == 'O')) {
+            base = 8; p->position += 2;
+        }
+        /* YARA-X's literals (tokenizer/mod.rs): ([0-9]+_*)+ before an
+         * optional `.([0-9_]+_*)+` fraction; underscores may repeat and
+         * end either part. */
+        if (base == 10) {
+            size_t ahead = start;
+            while (isdigit((unsigned char) s[ahead]) || s[ahead] == '_')
+                ++ahead;
+            decimal_float = s[ahead] == '.' &&
+                            (isdigit((unsigned char) s[ahead + 1]) ||
+                             s[ahead + 1] == '_');
+        }
+        while (s[p->position]) {
+            int digit = yx_digit_value((unsigned char)s[p->position]);
+            if (s[p->position] == '_') {
+                if (!digit_seen) break;
+                p->position++;
+                continue;
+            }
+            if (digit < 0 || (unsigned)digit >= base) break;
+            if (value > (UINT64_MAX - (unsigned)digit) / base) {
+                if (!decimal_float) {
+                    yx_fail(p, "integer literal overflows 64 bits"); return;
+                }
+            } else if (!decimal_float) {
+                value = value * base + (unsigned)digit;
+            }
+            digit_seen = true;
+            p->position++;
+        }
+        if (!digit_seen) {
+            yx_fail(p, "invalid integer literal"); return;
+        }
+        if (decimal_float) {
+            char *decimal, *end;
+            size_t used = 0;
+            p->position++;
+            while (isdigit((unsigned char)s[p->position]) ||
+                   s[p->position] == '_')
+                p->position++;
+            t->kind = TK_FLOAT;
+            t->length = p->position - start;
+            decimal = malloc(t->length + 1);
+            if (!decimal) { yx_fail(p, "out of memory"); return; }
+            for (size_t i = 0; i < t->length; ++i)
+                if (s[start + i] != '_') decimal[used++] = s[start + i];
+            decimal[used] = '\0';
+            /* Rust's f64 parsing accepts `1.` and saturates to infinity. */
+            errno = 0;
+            t->floating = strtod(decimal, &end);
+            if (*end)
+                yx_fail(p, "invalid float literal");
+            free(decimal);
+            return;
+        }
+        if (base == 10 && s[p->position] == 'K' && s[p->position + 1] == 'B') {
+            if (value > UINT64_MAX / 1024) { yx_fail(p, "KB literal overflows signed 64 bits"); return; }
+            value *= 1024; p->position += 2;
+        } else if (base == 10 && s[p->position] == 'M' && s[p->position + 1] == 'B') {
+            if (value > UINT64_MAX / (1024 * 1024)) { yx_fail(p, "MB literal overflows signed 64 bits"); return; }
+            value *= 1024 * 1024; p->position += 2;
+        }
+        t->kind = TK_NUMBER;
+        t->length = p->position - start;
+        t->number = value;
+        t->is_unsigned = value > (uint64_t)INT64_MAX;
+        return;
+    }
+    if (ch >= 0x80) {
+        size_t width = yx_utf8_scalar_width(s + start);
+        if (width) {
+            p->position += width;
+            t->kind = TK_BAD;
+            t->length = width;
+            return;
+        }
+    }
+    p->position++;
+    switch (ch) {
+    case '(': t->kind = TK_LPAREN; break;
+    case ')': t->kind = TK_RPAREN; break;
+    case '[': t->kind = TK_LBRACKET; break;
+    case ']': t->kind = TK_RBRACKET; break;
+    case ',': t->kind = TK_COMMA; break;
+    case ':': t->kind = TK_COLON; break;
+    case '+': t->kind = TK_PLUS; break;
+    case '-': t->kind = TK_MINUS; break;
+    case '*': t->kind = TK_STAR; break;
+    case '/': t->kind = TK_BAD; break;
+    case '\\': t->kind = TK_DIV; break;
+    case '%': t->kind = TK_PERCENT; break;
+    case '~': t->kind = TK_TILDE; break;
+    case '&': t->kind = TK_AMP; break;
+    case '^': t->kind = TK_CARET; break;
+    case '|': t->kind = TK_PIPE; break;
+    case '.':
+        if (s[p->position] == '.') { p->position++; t->kind = TK_DOTDOT; }
+        else t->kind = TK_DOT;
+        break;
+    case '=':
+        if (s[p->position] == '=') { p->position++; t->kind = TK_EQ; }
+        else t->kind = TK_ASSIGN;
+        break;
+    case '!':
+        if (s[p->position] == '=') { p->position++; t->kind = TK_NE; }
+        else t->kind = TK_BAD;
+        break;
+    case '<':
+        if (s[p->position] == '=') { p->position++; t->kind = TK_LE; }
+        else if (s[p->position] == '<') { p->position++; t->kind = TK_SHL; }
+        else t->kind = TK_LT;
+        break;
+    case '>':
+        if (s[p->position] == '=') { p->position++; t->kind = TK_GE; }
+        else if (s[p->position] == '>') { p->position++; t->kind = TK_SHR; }
+        else t->kind = TK_GT;
+        break;
+    default: t->kind = TK_BAD; break;
+    }
+    t->length = p->position - start;
+}
+
+static bool yx_accept(yx_parser *p, yx_token_kind kind)
+{
+    if (p->token.kind != kind) return false;
+    yx_next(p);
+    return true;
+}
+
+/* Keep the primary's source range separately from its flattened module
+ * path. Earlier indices and aliases change the spelling of that path. */
+static bool yx_accept_lookup(yx_parser *p, yx_node *node, unsigned index,
+                               size_t start)
+{
+    if (p->token.kind != TK_LBRACKET) return false;
+    node->index_primary_starts[index] = index ? p->previous_token.offset : start;
+    node->index_primary_ends[index] =
+        p->previous_token.offset + p->previous_token.length;
+    yx_next(p);
+    return true;
+}
+
+static bool yx_expect(yx_parser *p, yx_token_kind kind, const char *description)
+{
+    if (yx_accept(p, kind)) return true;
+    yx_fail(p, "expected %s", description);
+    return false;
+}
+
+/* YARA-X's range operator is two DOT tokens (parser/src/parser/mod.rs
+ * `range`), so spaces or comments may separate the dots: `(0 . . 10)`. */
+static bool yx_accept_range_dots(yx_parser *p)
+{
+    yx_parser preview;
+    if (yx_accept(p, TK_DOTDOT)) return true;
+    if (p->token.kind != TK_DOT) return false;
+    preview = *p;
+    preview.error = NULL;
+    preview.error_capacity = 0;
+    yx_next(&preview);
+    if (preview.failed || preview.token.kind != TK_DOT) return false;
+    yx_next(p);
+    yx_next(p);
+    return true;
+}
+
+static char *yx_copy(const char *start, size_t length)
+{
+    char *result;
+    if (length == SIZE_MAX) return NULL;
+    result = (char *)malloc(length + 1);
+    if (!result) return NULL;
+    memcpy(result, start, length);
+    result[length] = '\0';
+    return result;
+}
+
+static char *yx_decode_string(yx_parser *p, const yx_token *token, size_t *decoded_length)
+{
+    size_t i, used = 0;
+    char *result = (char *)malloc(token->length);
+    if (!result) { yx_fail(p, "out of memory"); return NULL; }
+    for (i = 1; i + 1 < token->length; i++) {
+        unsigned char ch = (unsigned char)token->begin[i];
+        if (ch == '\\') {
+            ch = (unsigned char)token->begin[++i];
+            switch (ch) {
+            case '0': ch = '\0'; break;
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            case 't': ch = '\t'; break;
+            case '"': case '\\': break;
+            case 'x':
+                if (i + 2 >= token->length - 1 ||
+                    yx_digit_value((unsigned char)token->begin[i + 1]) < 0 ||
+                    yx_digit_value((unsigned char)token->begin[i + 1]) >= 16 ||
+                    yx_digit_value((unsigned char)token->begin[i + 2]) < 0 ||
+                    yx_digit_value((unsigned char)token->begin[i + 2]) >= 16) {
+                    free(result); yx_fail(p, "invalid hexadecimal string escape"); return NULL;
+                }
+                ch = (unsigned char)(16 * yx_digit_value((unsigned char)token->begin[i + 1]) +
+                                     yx_digit_value((unsigned char)token->begin[i + 2]));
+                i += 2;
+                break;
+            default:
+                free(result); yx_fail(p, "unsupported string escape"); return NULL;
+            }
+        }
+        result[used++] = (char)ch;
+    }
+    result[used] = '\0';
+    *decoded_length = used;
+    return result;
+}
+
+static yx_node *yx_new_node(yx_parser *p, yx_node_kind kind)
+{
+    yx_node *node = (yx_node *)calloc(1, sizeof(*node));
+    if (!node) { yx_fail(p, "out of memory"); return NULL; }
+    node->kind = kind;
+    node->span_start = SIZE_MAX;
+    node->span_end = SIZE_MAX;
+    node->call_start = SIZE_MAX;
+    node->frame_start = SIZE_MAX;
+    node->frame_end = SIZE_MAX;
+    node->iterable_start = SIZE_MAX;
+    node->iterable_end = SIZE_MAX;
+    node->next_allocated = p->condition->allocated;
+    p->condition->allocated = node;
+    return node;
+}
+
+static yx_node *yx_parse_expr(yx_parser *p, int minimum);
+static bool yx_percent_followed_by_of(const yx_parser *p);
+static bool yx_percent_followed_by_for_in(const yx_parser *p);
+
+static bool yx_read_function(const yx_token *token, unsigned *width,
+                             bool *signed_read, bool *floating_read,
+                             bool *big_endian)
+{
+    char name[16];
+    size_t length = token->length;
+    const char *size_part;
+    if (length >= sizeof(name)) return false;
+    memcpy(name, token->begin, length);
+    name[length] = '\0';
+    *big_endian = false;
+    *floating_read = false;
+    if (length >= 2 && name[length - 2] == 'b' && name[length - 1] == 'e') {
+        *big_endian = true;
+        name[length - 2] = '\0';
+    }
+    if (strncmp(name, "uint", 4) == 0) { *signed_read = false; size_part = name + 4; }
+    else if (strncmp(name, "int", 3) == 0) { *signed_read = true; size_part = name + 3; }
+    else if (strncmp(name, "float", 5) == 0) {
+        *signed_read = false;
+        *floating_read = true;
+        size_part = name + 5;
+    }
+    else return false;
+    if (!*floating_read && strcmp(size_part, "8") == 0) *width = 1;
+    else if (!*floating_read && strcmp(size_part, "16") == 0) *width = 2;
+    else if (strcmp(size_part, "32") == 0) *width = 4;
+    else if (strcmp(size_part, "64") == 0) *width = 8;
+    else return false;
+    return true;
+}
+
+static bool yx_set_add(yx_parser *p, yx_node *node, const char *name, size_t length)
+{
+    char **new_names;
+    char *copy;
+    if (node->set_count == SIZE_MAX / sizeof(char *)) {
+        yx_fail(p, "pattern set is too large"); return false;
+    }
+    copy = yx_copy(name, length);
+    if (!copy) { yx_fail(p, "out of memory"); return false; }
+    new_names = (char **)realloc(node->set_names, (node->set_count + 1) * sizeof(char *));
+    if (!new_names) { free(copy); yx_fail(p, "out of memory"); return false; }
+    node->set_names = new_names;
+    node->set_names[node->set_count++] = copy;
+    return true;
+}
+
+static bool yx_parse_set(yx_parser *p, yx_node *node)
+{
+    if (p->token.kind == TK_THEM)
+        node->frame_end = p->token.offset + p->token.length;
+    if (yx_accept(p, TK_THEM)) { node->set_all = true; return true; }
+    if (!yx_expect(p, TK_LPAREN, "'(' or 'them' after 'of'")) return false;
+    do {
+        yx_token token = p->token;
+        size_t name_length;
+        bool wildcard;
+        if (token.kind != TK_PATTERN) {
+            yx_fail(p, "expected a pattern identifier in set"); return false;
+        }
+        name_length = token.length - 1;
+        yx_next(p);
+        /* The set's span ends at its last item, without the parenthesis. */
+        node->frame_end = p->token.kind == TK_STAR ?
+            p->token.offset + p->token.length : token.offset + token.length;
+        wildcard = yx_accept(p, TK_STAR);
+        if (name_length == 0 && !wildcard) {
+            yx_fail(p, "bare '$' is valid only inside a for-of body"); return false;
+        }
+        if (wildcard) {
+            char *name = (char *)malloc(name_length + 2);
+            if (!name) { yx_fail(p, "out of memory"); return false; }
+            memcpy(name, token.begin + 1, name_length);
+            name[name_length] = '*'; name[name_length + 1] = '\0';
+            if (!yx_set_add(p, node, name, name_length + 1)) { free(name); return false; }
+            free(name);
+        } else if (!yx_set_add(p, node, token.begin + 1, name_length)) return false;
+        {
+            /* Each item's span, for unintended_pattern_in_set. */
+            size_t *starts = (size_t *)realloc(node->set_name_starts,
+                node->set_count * sizeof(*starts));
+            size_t *ends;
+            if (!starts) { yx_fail(p, "out of memory"); return false; }
+            node->set_name_starts = starts;
+            ends = (size_t *)realloc(node->set_name_ends,
+                                     node->set_count * sizeof(*ends));
+            if (!ends) { yx_fail(p, "out of memory"); return false; }
+            node->set_name_ends = ends;
+            starts[node->set_count - 1] = token.offset;
+            ends[node->set_count - 1] = wildcard ?
+                p->previous_token.offset + p->previous_token.length :
+                token.offset + token.length;
+        }
+    } while (yx_accept(p, TK_COMMA));
+    return yx_expect(p, TK_RPAREN, "')' after pattern set");
+}
+
+static bool yx_looks_like_pattern_set(const yx_parser *p)
+{
+    yx_parser preview = *p;
+    if (preview.token.kind == TK_THEM) return true;
+    preview.error = NULL;
+    preview.error_capacity = 0;
+    yx_next(&preview);
+    if (preview.failed || preview.token.kind == TK_RPAREN) return false;
+    for (;;) {
+        if (preview.token.kind != TK_PATTERN) return false;
+        yx_next(&preview);
+        if (preview.failed) return false;
+        if (preview.token.kind == TK_STAR) {
+            yx_next(&preview);
+            if (preview.failed) return false;
+        }
+        if (preview.token.kind == TK_RPAREN) return true;
+        if (preview.token.kind != TK_COMMA) return false;
+        yx_next(&preview);
+        if (preview.failed) return false;
+    }
+}
+
+static bool yx_for_in_add_item(yx_parser *p, yx_node *node, yx_node *item);
+
+static bool yx_parse_range(yx_parser *p, yx_node *node)
+{
+    if (!yx_expect(p, TK_LPAREN, "'(' before range")) return false;
+    node->b = yx_parse_expr(p, 1);
+    if (!node->b) return false;
+    if (!yx_accept_range_dots(p)) {
+        yx_fail(p, "expected '..' in range");
+        return false;
+    }
+    node->c = yx_parse_expr(p, 1);
+    if (!node->c) return false;
+    /* An `of ... in (range)` expression ends at the range's parenthesis. */
+    node->frame_end = p->token.offset + p->token.length;
+    return yx_expect(p, TK_RPAREN, "')' after range");
+}
+
+static yx_node *yx_parse_of(yx_parser *p, yx_quantifier quantifier,
+                            yx_node *quantity, bool for_loop)
+{
+    yx_node *node;
+    if (!yx_expect(p, TK_OF, "'of' after quantifier")) return NULL;
+    bool pattern_set = for_loop || p->token.kind == TK_THEM ||
+                       (p->token.kind == TK_LPAREN &&
+                        yx_looks_like_pattern_set(p));
+    node = yx_new_node(p, for_loop ? N_FOR_OF :
+                         pattern_set ? N_OF : N_OF_EXPR);
+    if (!node) return NULL;
+    node->quantifier = quantifier;
+    node->a = quantity;
+    if (quantity) node->frame_start = quantity->span_start;
+    if (pattern_set) {
+        if (!yx_parse_set(p, node)) return NULL;
+    } else {
+        if (!yx_expect(p, TK_LPAREN, "'(' after 'of'")) return NULL;
+        do {
+            yx_node *item = yx_parse_expr(p, 1);
+            if (!item || !yx_for_in_add_item(p, node, item)) return NULL;
+            node->frame_end = item->span_end;
+        } while (yx_accept(p, TK_COMMA));
+        if (!yx_expect(p, TK_RPAREN, "')' after expression tuple"))
+            return NULL;
+    }
+    if (for_loop) {
+        if (!yx_expect(p, TK_COLON, "':' after pattern set") ||
+            !yx_expect(p, TK_LPAREN, "'(' before for-of body")) return NULL;
+        node->body = yx_parse_expr(p, 1);
+        if (node->body) node->frame_end = p->token.offset + p->token.length;
+        if (!node->body || !yx_expect(p, TK_RPAREN, "')' after for-of body")) return NULL;
+    } else if (pattern_set && yx_accept(p, TK_AT)) {
+        node->filter = FILTER_AT;
+        node->b = yx_parse_expr(p, 10);
+        if (!node->b) return NULL;
+        node->frame_end = node->b->span_end;
+    } else if (pattern_set && yx_accept(p, TK_IN)) {
+        node->filter = FILTER_IN;
+        if (!yx_parse_range(p, node)) return NULL;
+    }
+    return node;
+}
+
+static bool yx_for_in_add_item(yx_parser *p, yx_node *node, yx_node *item)
+{
+    yx_node **grown;
+    if (node->item_count >= SIZE_MAX / sizeof(*grown)) {
+        yx_fail(p, "for-in tuple is too large");
+        return false;
+    }
+    grown = realloc(node->items, (node->item_count + 1) * sizeof(*grown));
+    if (!grown) {
+        yx_fail(p, "out of memory");
+        return false;
+    }
+    node->items = grown;
+    node->items[node->item_count++] = item;
+    return true;
+}
+
+static bool yx_parse_bound_method_arguments(yx_parser *p, yx_node *node)
+{
+    node->call_start = p->token.offset;
+    if (!yx_expect(p, TK_LPAREN, "'(' before method arguments")) return false;
+    if (!yx_accept(p, TK_RPAREN)) {
+        do {
+            yx_node *argument = yx_parse_expr(p, 1);
+            if (!argument || !yx_for_in_add_item(p, node, argument)) return false;
+        } while (yx_accept(p, TK_COMMA));
+        if (!yx_expect(p, TK_RPAREN, "')' after method arguments")) return false;
+    }
+    node->operation = TK_LPAREN;
+    return true;
+}
+
+static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
+                                yx_node *quantity)
+{
+    yx_node *node, *first;
+    yx_token variable = p->token;
+    if (variable.kind != TK_IDENTIFIER) {
+        yx_fail(p, "expected iterator name or 'of' after quantifier");
+        return NULL;
+    }
+    node = yx_new_node(p, N_FOR_IN);
+    if (!node) return NULL;
+    node->quantifier = quantifier;
+    node->a = quantity;
+    node->span_start = variable.offset;
+    node->span_end = variable.offset + variable.length;
+    node->name = yx_copy(variable.begin, variable.length);
+    if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+    yx_next(p);
+    if (yx_accept(p, TK_COMMA)) {
+        variable = p->token;
+        if (variable.kind != TK_IDENTIFIER ||
+            (strlen(node->name) == variable.length &&
+             memcmp(node->name, variable.begin, variable.length) == 0)) {
+            yx_fail(p, "expected a distinct map value name");
+            return NULL;
+        }
+        if (!yx_set_add(p, node, variable.begin, variable.length)) return NULL;
+        node->span_end = variable.offset + variable.length;
+        yx_next(p);
+        node->map_loop = true;
+        if (!yx_expect(p, TK_IN, "'in' after map iterator names"))
+            return NULL;
+        node->b = yx_parse_expr(p, 1);
+        if (!node->b || !yx_expect(p, TK_COLON,
+                                   "':' after map iterable") ||
+            !yx_expect(p, TK_LPAREN, "'(' before for-in body"))
+            return NULL;
+        node->body = yx_parse_expr(p, 1);
+        if (node->body) node->frame_end = p->token.offset + p->token.length;
+        if (!node->body || !yx_expect(p, TK_RPAREN,
+                                      "')' after for-in body"))
+            return NULL;
+        return node;
+    }
+    if (!yx_expect(p, TK_IN, "'in' after iterator name")) return NULL;
+    if (!yx_accept(p, TK_LPAREN)) {
+        node->array_loop = true;
+        node->b = yx_parse_expr(p, 1);
+        if (!node->b ||
+            !yx_expect(p, TK_COLON, "':' after array iterable") ||
+            !yx_expect(p, TK_LPAREN, "'(' before for-in body"))
+            return NULL;
+        node->body = yx_parse_expr(p, 1);
+        if (node->body) node->frame_end = p->token.offset + p->token.length;
+        if (!node->body ||
+            !yx_expect(p, TK_RPAREN, "')' after for-in body"))
+            return NULL;
+        return node;
+    }
+    node->iterable_start = p->previous_token.offset;
+    first = yx_parse_expr(p, 1);
+    if (!first) return NULL;
+    if (yx_accept_range_dots(p)) {
+        node->range_loop = true;
+        node->b = first;
+        node->c = yx_parse_expr(p, 1);
+        if (!node->c) return NULL;
+    } else {
+        if (!yx_for_in_add_item(p, node, first)) return NULL;
+        while (yx_accept(p, TK_COMMA)) {
+            yx_node *item = yx_parse_expr(p, 1);
+            if (!item || !yx_for_in_add_item(p, node, item)) return NULL;
+        }
+    }
+    if (p->token.kind == TK_RPAREN)
+        node->iterable_end = p->token.offset + p->token.length;
+    if (!yx_expect(p, TK_RPAREN, "')' after for-in iterable") ||
+        !yx_expect(p, TK_COLON, "':' after for-in iterable") ||
+        !yx_expect(p, TK_LPAREN, "'(' before for-in body")) return NULL;
+    node->body = yx_parse_expr(p, 1);
+    if (node->body) node->frame_end = p->token.offset + p->token.length;
+    if (!node->body || !yx_expect(p, TK_RPAREN, "')' after for-in body"))
+        return NULL;
+    return node;
+}
+
+static yx_node *yx_parse_with(yx_parser *p)
+{
+    yx_node *node = yx_new_node(p, N_WITH);
+    if (!node) return NULL;
+    ++p->with_depth;
+    for (;;) {
+        yx_token variable = p->token;
+        yx_node *value;
+        if (variable.kind != TK_IDENTIFIER) {
+            yx_fail(p, "expected a variable name after 'with'");
+            return NULL;
+        }
+        if (!yx_set_add(p, node, variable.begin, variable.length)) return NULL;
+        {
+            size_t *starts = (size_t *) realloc(node->set_name_starts,
+                node->set_count * sizeof(*starts));
+            if (!starts) { yx_fail(p, "out of memory"); return NULL; }
+            node->set_name_starts = starts;
+            starts[node->set_count - 1] = variable.offset;
+        }
+        /* The declarations' span, from the first name to the last value. */
+        if (node->frame_start == SIZE_MAX) node->frame_start = variable.offset;
+        yx_next(p);
+        if (!yx_expect(p, TK_ASSIGN, "'=' after with variable")) return NULL;
+        value = yx_parse_expr(p, 1);
+        if (!value || !yx_for_in_add_item(p, node, value)) return NULL;
+        node->frame_end = value->span_end;
+        if (!yx_accept(p, TK_COMMA)) break;
+    }
+    if (!yx_expect(p, TK_COLON, "':' after with bindings") ||
+        !yx_expect(p, TK_LPAREN, "'(' before with body")) return NULL;
+    node->body = yx_parse_expr(p, 1);
+    if (!node->body || !yx_expect(p, TK_RPAREN, "')' after with body"))
+        return NULL;
+    --p->with_depth;
+    return node;
+}
+
+static bool yx_regex_disallowed(const char *regexp)
+{
+    bool in_class = false;
+    for (size_t i = 0; regexp[i]; ++i) {
+        if (regexp[i] == '\\' && regexp[i + 1]) {
+            char escaped = regexp[++i];
+            if (yx_regex_unrecognized_escape((unsigned char)escaped))
+                return true;
+            if ((escaped >= '0' && escaped <= '9') ||
+                (!in_class && (escaped == 'g' || escaped == 'k')))
+                return true;
+            if (escaped == 'K' || escaped == 'Z' || escaped == 'R' ||
+                escaped == 'Q' || escaped == 'E' || escaped == 'C' ||
+                escaped == 'N' || escaped == 'G') return true;
+            continue;
+        }
+        if (regexp[i] == '[' && !in_class) { in_class = true; continue; }
+        if (regexp[i] == ']' && in_class) { in_class = false; continue; }
+        if (!in_class && regexp[i] == '(') {
+            if (regexp[i + 1] == '*') return true;
+            if (regexp[i + 1] != '?') continue;
+            if (regexp[i + 2] == '=' || regexp[i + 2] == '!' ||
+                regexp[i + 2] == '>' || regexp[i + 2] == '|' ||
+                regexp[i + 2] == '(' || regexp[i + 2] == '#' ||
+                regexp[i + 2] == '0' ||
+                regexp[i + 2] == '&' || regexp[i + 2] == '\'') return true;
+            if (regexp[i + 2] == '<' &&
+                (regexp[i + 3] == '=' || regexp[i + 3] == '!')) return true;
+            if (regexp[i + 2] == 'P' && regexp[i + 3] == '=') return true;
+        }
+    }
+    return false;
+}
+
+static int yx_regex_hex_digit(unsigned char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+/* Rust's regex parser interprets Unicode escapes as UTF-8 in byte mode.
+ * PCRE2 interprets \x{...} as one byte unless UTF mode is enabled. Translate
+ * scalar escapes explicitly so both modes use the same bytes on the input.
+ */
+static char *yx_condition_translate_escapes(yx_parser *p, const char *regexp,
+                                             bool unicode)
+{
+    size_t length = strlen(regexp), used = 0;
+    bool in_class = false;
+    char *out;
+    if (length > (SIZE_MAX - 1) / 16) {
+        yx_fail(p, "regular expression is too large");
+        return NULL;
+    }
+    out = malloc(length * 16 + 1);
+    if (!out) {
+        yx_fail(p, "out of memory");
+        return NULL;
+    }
+    for (size_t i = 0; i < length; ++i) {
+        if (regexp[i] == '[' && !in_class) in_class = true;
+        else if (regexp[i] == ']' && in_class) in_class = false;
+        if (regexp[i] == '\\' && i + 1 < length) {
+            char escaped = regexp[i + 1];
+            if (((escaped == 'p' || escaped == 'P') && !unicode) ||
+                ((escaped == 'b' || escaped == 'B') && unicode)) {
+                yx_fail(p, "invalid regular expression");
+                free(out);
+                return NULL;
+            }
+            if (escaped == 'b' && i + 2 < length &&
+                regexp[i + 2] == '{') {
+                const char *replacement = NULL;
+                size_t end = i + 3;
+                while (end < length && regexp[end] != '}') ++end;
+                if (!in_class && end < length) {
+                    size_t name_length = end - (i + 3);
+                    const char *name = regexp + i + 3;
+                    if (name_length == 5 && memcmp(name, "start", 5) == 0)
+                        replacement = "(?<![A-Za-z0-9_])(?=[A-Za-z0-9_])";
+                    else if (name_length == 3 && memcmp(name, "end", 3) == 0)
+                        replacement = "(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])";
+                    else if (name_length == 10 &&
+                             memcmp(name, "start-half", 10) == 0)
+                        replacement = "(?<![A-Za-z0-9_])";
+                    else if (name_length == 8 &&
+                             memcmp(name, "end-half", 8) == 0)
+                        replacement = "(?![A-Za-z0-9_])";
+                }
+                if (!replacement) {
+                    yx_fail(p, "invalid regular expression");
+                    free(out);
+                    return NULL;
+                }
+                {
+                    size_t replacement_length = strlen(replacement);
+                    memcpy(out + used, replacement, replacement_length);
+                    used += replacement_length;
+                }
+                i = end;
+                continue;
+            }
+        }
+        if (regexp[i] == '\\' && i + 1 < length &&
+            (regexp[i + 1] == 'u' || regexp[i + 1] == 'U' ||
+             (regexp[i + 1] == 'x' && regexp[i + 2] == '{'))) {
+            bool fixed = (regexp[i + 1] == 'u' ||
+                          regexp[i + 1] == 'U') && regexp[i + 2] != '{';
+            size_t fixed_digits = regexp[i + 1] == 'U' ? 8u : 4u;
+            size_t at = i + 2, digits = 0;
+            uint32_t scalar = 0;
+            if (!fixed) ++at;
+            while (at < length &&
+                   (fixed ? digits < fixed_digits : regexp[at] != '}')) {
+                int digit = yx_regex_hex_digit((unsigned char)regexp[at]);
+                if (digit < 0 || scalar > (0x10FFFFu - (unsigned)digit) / 16) {
+                    yx_fail(p, "invalid regular expression");
+                    free(out);
+                    return NULL;
+                }
+                scalar = scalar * 16 + (unsigned)digit;
+                ++at;
+                ++digits;
+            }
+            if ((fixed && digits != fixed_digits) ||
+                (!fixed && (!digits || at >= length || regexp[at] != '}')) ||
+                (scalar >= 0xD800 && scalar <= 0xDFFF) ||
+                (in_class && !unicode && scalar > 0x7F)) {
+                yx_fail(p, "invalid regular expression");
+                free(out);
+                return NULL;
+            }
+            if (unicode || scalar <= 0x7F) {
+                used += (size_t)snprintf(out + used, length * 16 + 1 - used,
+                                         "\\x{%X}", scalar);
+            } else {
+                uint8_t bytes[4];
+                size_t count;
+                if (scalar <= 0x7FF) {
+                    bytes[0] = (uint8_t)(0xC0 | (scalar >> 6));
+                    bytes[1] = (uint8_t)(0x80 | (scalar & 0x3F));
+                    count = 2;
+                } else if (scalar <= 0xFFFF) {
+                    bytes[0] = (uint8_t)(0xE0 | (scalar >> 12));
+                    bytes[1] = (uint8_t)(0x80 | ((scalar >> 6) & 0x3F));
+                    bytes[2] = (uint8_t)(0x80 | (scalar & 0x3F));
+                    count = 3;
+                } else {
+                    bytes[0] = (uint8_t)(0xF0 | (scalar >> 18));
+                    bytes[1] = (uint8_t)(0x80 | ((scalar >> 12) & 0x3F));
+                    bytes[2] = (uint8_t)(0x80 | ((scalar >> 6) & 0x3F));
+                    bytes[3] = (uint8_t)(0x80 | (scalar & 0x3F));
+                    count = 4;
+                }
+                memcpy(out + used, "(?:", 3);
+                used += 3;
+                for (size_t j = 0; j < count; ++j)
+                    used += (size_t)snprintf(out + used,
+                                             length * 16 + 1 - used,
+                                             "\\x%02X", bytes[j]);
+                out[used++] = ')';
+            }
+            i = fixed ? at - 1 : at;
+            continue;
+        }
+        out[used++] = regexp[i];
+        if (regexp[i] == '\\' && i + 1 < length) out[used++] = regexp[++i];
+    }
+    out[used] = '\0';
+    return out;
+}
+
+static char *yx_condition_normalize_dots(const char *regexp, bool initial_dotall,
+                                          bool *uses_unicode)
+{
+    size_t length = strlen(regexp), used = 0, depth = 0;
+    size_t capacity;
+    bool in_class = false, dotall = initial_dotall, unicode = false;
+    bool multiline = false, crlf = false;
+    char *out;
+    unsigned char *states;
+    *uses_unicode = false;
+    if (length > (SIZE_MAX - 1) / 24) return NULL;
+    capacity = length * 24 + 1;
+    for (size_t i = 0; i < length; ++i) {
+        if (regexp[i] == '^' || regexp[i] == '$') {
+            if (capacity > SIZE_MAX - 64) return NULL;
+            capacity += 64;
+        }
+    }
+    out = malloc(capacity);
+    states = malloc(length + 1);
+    if (!out || !states) { free(out); free(states); return NULL; }
+    for (size_t i = 0; i < length; ++i) {
+        char ch = regexp[i];
+        if (ch == '[' && !in_class) {
+            size_t after = i, range_count = 0;
+            yx_re_range *ranges = NULL;
+            int parsed = yx_re_class_ranges((const unsigned char *)regexp,
+                length, &after, unicode ? PCRE2_UTF | PCRE2_UCP : 0,
+                &ranges, &range_count);
+            free(ranges);
+            /* A failing class will be diagnosed from the source. Leave
+             * its suffix untouched rather than interpreting its contents
+             * as regexp flags or dot atoms. */
+            if (!parsed) after = length;
+            memcpy(out + used, regexp + i, after - i);
+            used += after - i;
+            i = after - 1;
+            continue;
+        }
+        if (ch == '\\' && i + 1 < length) {
+            out[used++] = ch;
+            out[used++] = regexp[++i];
+            if ((regexp[i] == 'p' || regexp[i] == 'P') &&
+                i + 1 < length && regexp[i + 1] == '{') {
+                do { out[used++] = regexp[++i]; }
+                while (i + 1 < length && regexp[i] != '}');
+            }
+            continue;
+        }
+        if (ch == '[' && !in_class) in_class = true;
+        else if (ch == ']' && in_class) in_class = false;
+        if (!in_class && ch == '(') {
+            size_t end = i + 2;
+            bool next_dotall = dotall, next_unicode = unicode;
+            bool next_multiline = multiline, next_crlf = crlf;
+            bool minus = false;
+            bool flags_only = regexp[i + 1] == '?';
+            if (flags_only) {
+                for (; end < length; ++end) {
+                    char flag = regexp[end];
+                    if (flag == '-') { minus = true; continue; }
+                    if (flag == 's') { next_dotall = !minus; continue; }
+                    if (flag == 'm') { next_multiline = !minus; continue; }
+                    if (flag == 'R') { next_crlf = !minus; continue; }
+                    if (flag == 'u') {
+                        next_unicode = !minus;
+                        if (!minus) *uses_unicode = true;
+                        continue;
+                    }
+                    if (flag == 'i' || flag == 'x' || flag == 'U')
+                        continue;
+                    break;
+                }
+            }
+            if (flags_only && end < length &&
+                (regexp[end] == ')' || regexp[end] == ':') && end > i + 2) {
+                if (regexp[end] == ':')
+                    states[depth++] = (unsigned char)((dotall ? 1 : 0) |
+                                                       (unicode ? 2 : 0) |
+                                                       (multiline ? 4 : 0) |
+                                                       (crlf ? 8 : 0));
+                dotall = next_dotall;
+                unicode = next_unicode;
+                multiline = next_multiline;
+                crlf = next_crlf;
+                size_t first = used;
+                bool emitted_minus = false;
+                out[used++] = '(';
+                out[used++] = '?';
+                for (size_t j = i + 2; j < end; ++j) {
+                    char flag = regexp[j];
+                    if (flag == 'R') continue;
+                    if (flag == '-') { emitted_minus = true; continue; }
+                    if (emitted_minus) {
+                        out[used++] = '-';
+                        emitted_minus = false;
+                    }
+                    out[used++] = flag;
+                }
+                if (regexp[end] == ':') out[used++] = ':';
+                else if (used == first + 2) used = first;
+                else out[used++] = ')';
+                i = end;
+                continue;
+            }
+            states[depth++] = (unsigned char)((dotall ? 1 : 0) |
+                                               (unicode ? 2 : 0) |
+                                               (multiline ? 4 : 0) |
+                                               (crlf ? 8 : 0));
+        } else if (!in_class && ch == ')' && depth) {
+            unsigned char state = states[--depth];
+            dotall = (state & 1) != 0;
+            unicode = (state & 2) != 0;
+            multiline = (state & 4) != 0;
+            crlf = (state & 8) != 0;
+        }
+        if (!in_class && ch == '.' && !dotall) {
+            const char *replacement = unicode ?
+                (crlf ? "[^\\r\\n]" : "[^\\x0a]") :
+                (crlf ? "(?:(?![\\r\\n])\\C)" : "(?:(?!\\x0a)\\C)");
+            size_t replacement_length = strlen(replacement);
+            memcpy(out + used, replacement, replacement_length);
+            used += replacement_length;
+        } else if (!in_class && ch == '.' && !unicode) {
+            out[used++] = '\\';
+            out[used++] = 'C';
+        } else if (!in_class && ch == '^' && multiline && crlf) {
+            /* regex-syntax treats CRLF as one line break in R mode. */
+            static const char start[] =
+                "(?:(?-m:^)|(?<=\\n)|(?<=\\r)(?!\\n))";
+            memcpy(out + used, start, sizeof(start) - 1);
+            used += sizeof(start) - 1;
+        } else if (!in_class && ch == '$' && multiline && crlf) {
+            static const char end[] =
+                "(?:(?-m:$)|(?=\\r)|(?=\\n)(?<!\\r))";
+            memcpy(out + used, end, sizeof(end) - 1);
+            used += sizeof(end) - 1;
+        } else out[used++] = ch;
+    }
+    out[used] = 0;
+    free(states);
+    return out;
+}
+
+/* PCRE2's UTF option applies to the whole regexp, while regex-syntax can
+   restore byte matching with (?-u). For a bounded scalar/byte expression,
+   compile in byte mode and encode \U as its complete UTF-8 byte sequence. */
+typedef struct {
+    size_t close;
+    uint32_t first;
+    uint32_t last;
+} yx_condition_U_class;
+
+static bool yx_condition_parse_U_escape(const char *regexp, size_t length,
+                                         size_t slash, uint32_t *scalar,
+                                         size_t *after)
+{
+    size_t at = slash + 2, digits = 0;
+    uint32_t value = 0;
+    bool braced;
+    if (at >= length || regexp[slash] != '\\' ||
+        regexp[slash + 1] != 'U') return false;
+    braced = regexp[at] == '{';
+    if (braced) ++at;
+    while (at < length && (braced ? regexp[at] != '}' : digits < 8)) {
+        int digit = yx_regex_hex_digit((unsigned char)regexp[at]);
+        if (digit < 0 || value > (0x10FFFFu - (unsigned)digit) / 16u)
+            return false;
+        value = value * 16u + (unsigned)digit;
+        ++digits;
+        ++at;
+    }
+    if (!digits || (!braced && digits != 8) ||
+        (braced && (at >= length || regexp[at++] != '}')) ||
+        (value >= 0xD800u && value <= 0xDFFFu)) return false;
+    *scalar = value;
+    *after = at;
+    return true;
+}
+
+static bool yx_condition_bounded_U_class(const char *regexp, size_t length,
+                                          size_t open,
+                                          yx_condition_U_class *result)
+{
+    size_t at;
+    uint32_t first, last;
+    if (open + 3 >= length || regexp[open] != '[' ||
+        !yx_condition_parse_U_escape(regexp, length, open + 1,
+                                     &first, &at)) return false;
+    last = first;
+    if (at < length && regexp[at] == '-') {
+        if (at + 1 >= length ||
+            !yx_condition_parse_U_escape(regexp, length, at + 1,
+                                         &last, &at)) return false;
+    }
+    if (at >= length || regexp[at] != ']' || last < first) return false;
+    *result = (yx_condition_U_class){at, first, last};
+    return true;
+}
+
+/* Inline (?i) uses regex-syntax 0.8.11's Unicode 16.0.0 simple-fold
+   classes: xxfclib's xx_regex_unicode16_folds rows list, for each scalar,
+   every other member of its class. */
+
+/* A trailing /i modifier in YARA-X groups characters by Rust's lowercase
+   result (xxfclib's simple lowercase table). Inline (?i) instead uses the
+   Unicode simple-fold closure above. */
+static size_t yx_condition_U_trailing_fold_variants(uint32_t scalar,
+                                                     uint32_t variants[4])
+{
+    return xx_string_scalar_lower_variants(scalar, variants);
+}
+
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} yx_condition_rx_builder;
+
+static bool yx_condition_rx_append(yx_condition_rx_builder *builder,
+                                    const char *text, size_t length)
+{
+    size_t needed, capacity;
+    char *grown;
+    if (builder->length == SIZE_MAX ||
+        length > SIZE_MAX - builder->length - 1) return false;
+    needed = builder->length + length + 1;
+    if (needed > builder->capacity) {
+        capacity = builder->capacity ? builder->capacity : 64;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) { capacity = needed; break; }
+            capacity *= 2;
+        }
+        grown = realloc(builder->data, capacity);
+        if (!grown) return false;
+        builder->data = grown;
+        builder->capacity = capacity;
+    }
+    memcpy(builder->data + builder->length, text, length);
+    builder->length += length;
+    builder->data[builder->length] = '\0';
+    return true;
+}
+
+static bool yx_condition_rx_byte(yx_condition_rx_builder *builder,
+                                  unsigned first, unsigned last)
+{
+    char text[20];
+    int length = first == last ?
+        snprintf(text, sizeof(text), "\\x%02X", first) :
+        snprintf(text, sizeof(text), "[\\x%02X-\\x%02X]", first, last);
+    return length > 0 && (size_t)length < sizeof(text) &&
+           yx_condition_rx_append(builder, text, (size_t)length);
+}
+
+/* UTF-8 encodings are lexicographically ordered within each scalar-width
+   interval. Factor the inclusive byte interval into prefix branches. */
+static bool yx_condition_rx_byte_interval(yx_condition_rx_builder *builder,
+                                           const uint8_t lower[4],
+                                           const uint8_t upper[4],
+                                           size_t position, size_t width)
+{
+    uint8_t lower_end[4], upper_start[4];
+    if (position == width) return true;
+    if (lower[position] == upper[position])
+        return yx_condition_rx_byte(builder, lower[position],
+                                    lower[position]) &&
+               yx_condition_rx_byte_interval(builder, lower, upper,
+                                             position + 1, width);
+    memcpy(lower_end, lower, sizeof(lower_end));
+    memcpy(upper_start, upper, sizeof(upper_start));
+    for (size_t i = position + 1; i < width; ++i) {
+        lower_end[i] = 0xBF;
+        upper_start[i] = 0x80;
+    }
+    if (!yx_condition_rx_append(builder, "(?:", 3) ||
+        !yx_condition_rx_byte(builder, lower[position], lower[position]) ||
+        !yx_condition_rx_byte_interval(builder, lower, lower_end,
+                                       position + 1, width)) return false;
+    if ((unsigned)lower[position] + 1 < upper[position]) {
+        if (!yx_condition_rx_append(builder, "|", 1) ||
+            !yx_condition_rx_byte(builder, lower[position] + 1,
+                                  upper[position] - 1)) return false;
+        for (size_t i = position + 1; i < width; ++i)
+            if (!yx_condition_rx_byte(builder, 0x80, 0xBF)) return false;
+    }
+    return yx_condition_rx_append(builder, "|", 1) &&
+           yx_condition_rx_byte(builder, upper[position], upper[position]) &&
+           yx_condition_rx_byte_interval(builder, upper_start, upper,
+                                         position + 1, width) &&
+           yx_condition_rx_append(builder, ")", 1);
+}
+
+static size_t yx_condition_utf8_scalar(uint32_t scalar, uint8_t bytes[4])
+{
+    if (scalar <= 0x7Fu) {
+        bytes[0] = (uint8_t)scalar;
+        return 1;
+    }
+    if (scalar <= 0x7FFu) {
+        bytes[0] = (uint8_t)(0xC0u | (scalar >> 6));
+        bytes[1] = (uint8_t)(0x80u | (scalar & 0x3Fu));
+        return 2;
+    }
+    if (scalar <= 0xFFFFu) {
+        bytes[0] = (uint8_t)(0xE0u | (scalar >> 12));
+        bytes[1] = (uint8_t)(0x80u | ((scalar >> 6) & 0x3Fu));
+        bytes[2] = (uint8_t)(0x80u | (scalar & 0x3Fu));
+        return 3;
+    }
+    bytes[0] = (uint8_t)(0xF0u | (scalar >> 18));
+    bytes[1] = (uint8_t)(0x80u | ((scalar >> 12) & 0x3Fu));
+    bytes[2] = (uint8_t)(0x80u | ((scalar >> 6) & 0x3Fu));
+    bytes[3] = (uint8_t)(0x80u | (scalar & 0x3Fu));
+    return 4;
+}
+
+static bool yx_condition_rx_scalar_range(yx_condition_rx_builder *builder,
+                                          uint32_t first, uint32_t last)
+{
+    static const struct { uint32_t first, last; } widths[] = {
+        {0x000000u, 0x00007Fu}, {0x000080u, 0x0007FFu},
+        {0x000800u, 0x00D7FFu}, {0x00E000u, 0x00FFFFu},
+        {0x010000u, 0x10FFFFu}
+    };
+    bool emitted = false;
+    if (!yx_condition_rx_append(builder, "(?:", 3)) return false;
+    for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); ++i) {
+        uint32_t lower = first > widths[i].first ? first : widths[i].first;
+        uint32_t upper = last < widths[i].last ? last : widths[i].last;
+        uint8_t lower_bytes[4] = {0}, upper_bytes[4] = {0};
+        size_t width;
+        if (lower > upper) continue;
+        if (emitted && !yx_condition_rx_append(builder, "|", 1))
+            return false;
+        width = yx_condition_utf8_scalar(lower, lower_bytes);
+        if (yx_condition_utf8_scalar(upper, upper_bytes) != width ||
+            !yx_condition_rx_byte_interval(builder, lower_bytes, upper_bytes,
+                                            0, width)) return false;
+        emitted = true;
+    }
+    return emitted && yx_condition_rx_append(builder, ")", 1);
+}
+
+static int yx_condition_compare_scalar(const void *lhs, const void *rhs)
+{
+    uint32_t first = *(const uint32_t *)lhs;
+    uint32_t second = *(const uint32_t *)rhs;
+    return (first > second) - (first < second);
+}
+
+static bool yx_condition_has_scalar(const uint32_t *values, size_t count,
+                                     uint32_t scalar)
+{
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (values[mid] < scalar) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < count && values[lo] == scalar;
+}
+
+static bool yx_condition_rx_folded_class(yx_condition_rx_builder *builder,
+                                          uint32_t first, uint32_t last,
+                                          unsigned char fold_mode)
+{
+    size_t count = 0, fold_count;
+    uint32_t *extras;
+    const xx_regex_unicode16_fold *folds = xx_regex_unicode16_folds(&fold_count);
+    if (!fold_mode) return yx_condition_rx_scalar_range(builder, first, last);
+    extras = malloc(fold_count * 3u * sizeof(uint32_t));
+    if (!extras) return false;
+    if (fold_mode == 1) {
+        size_t active_count = 0;
+        size_t mappings = xx_string_lower_mapping_count();
+        uint32_t *active = malloc(mappings * sizeof(*active));
+        if (!active) { free(extras); return false; }
+        for (size_t i = 0; i < mappings; ++i) {
+            uint32_t source, lower;
+            xx_string_lower_mapping_at(i, &source, &lower);
+            if ((source >= first && source <= last) ||
+                (lower >= first && lower <= last))
+                active[active_count++] = lower;
+        }
+        qsort(active, active_count, sizeof(*active),
+              yx_condition_compare_scalar);
+        size_t unique = 0;
+        for (size_t i = 0; i < active_count; ++i)
+            if (!unique || active[i] != active[unique - 1])
+                active[unique++] = active[i];
+        for (size_t i = 0; i < unique; ++i)
+            if (active[i] < first || active[i] > last)
+                extras[count++] = active[i];
+        for (size_t i = 0; i < mappings; ++i) {
+            uint32_t source, lower;
+            xx_string_lower_mapping_at(i, &source, &lower);
+            if ((source < first || source > last) &&
+                yx_condition_has_scalar(active, unique, lower))
+                extras[count++] = source;
+        }
+        free(active);
+    } else {
+        for (size_t i = 0; i < fold_count; ++i) {
+            const xx_regex_unicode16_fold *entry = &folds[i];
+            if (entry->from < first || entry->from > last) continue;
+            for (size_t j = 0; j < entry->count; ++j)
+                if (entry->to[j] < first || entry->to[j] > last)
+                    extras[count++] = entry->to[j];
+        }
+    }
+    qsort(extras, count, sizeof(*extras), yx_condition_compare_scalar);
+    if (!yx_condition_rx_append(builder, "(?:", 3) ||
+        !yx_condition_rx_scalar_range(builder, first, last)) {
+        free(extras);
+        return false;
+    }
+    for (size_t i = 0; i < count;) {
+        uint32_t lower = extras[i], upper = lower;
+        while (++i < count && extras[i] <= upper + 1)
+            if (extras[i] > upper) upper = extras[i];
+        if (!yx_condition_rx_append(builder, "|", 1) ||
+            !yx_condition_rx_scalar_range(builder, lower, upper)) {
+            free(extras);
+            return false;
+        }
+    }
+    free(extras);
+    return yx_condition_rx_append(builder, ")", 1);
+}
+
+static char *yx_condition_expand_single_U_classes(const char *regexp,
+                                                    bool insensitive)
+{
+    size_t length = strlen(regexp), depth = 0;
+    yx_condition_rx_builder builder = {0};
+    unsigned char *states = malloc(length + 1);
+    unsigned char fold_mode = insensitive ? 1 : 0;
+    if (!states) return NULL;
+    for (size_t i = 0; i < length; ++i) {
+        yx_condition_U_class cls;
+        if (regexp[i] == '[' &&
+            yx_condition_bounded_U_class(regexp, length, i, &cls)) {
+            if (!yx_condition_rx_folded_class(&builder, cls.first,
+                                               cls.last, fold_mode)) goto fail;
+            i = cls.close;
+            continue;
+        }
+        if (regexp[i] == '\\' && i + 1 < length) {
+            if (!yx_condition_rx_append(&builder, regexp + i, 2)) goto fail;
+            ++i;
+            continue;
+        }
+        if (regexp[i] == '(') {
+            size_t end = i + 2;
+            unsigned char next_mode = fold_mode;
+            bool minus = false;
+            if (i + 1 < length && regexp[i + 1] == '?') {
+                for (; end < length; ++end) {
+                    char flag = regexp[end];
+                    if (flag == '-') { minus = true; continue; }
+                    if (flag == 'i') {
+                        next_mode = minus ? 0 : 2;
+                        continue;
+                    }
+                    if (strchr("msxURu", flag)) continue;
+                    break;
+                }
+            }
+            if (end > i + 2 && end < length &&
+                (regexp[end] == ')' || regexp[end] == ':')) {
+                if (regexp[end] == ':')
+                    states[depth++] = fold_mode;
+                fold_mode = next_mode;
+                if (!yx_condition_rx_append(&builder, regexp + i,
+                                             end - i + 1)) goto fail;
+                i = end;
+                continue;
+            }
+            states[depth++] = fold_mode;
+        } else if (regexp[i] == ')' && depth) {
+            fold_mode = states[--depth];
+        }
+        if (!yx_condition_rx_append(&builder, regexp + i, 1)) goto fail;
+    }
+    free(states);
+    return builder.data;
+fail:
+    free(states);
+    free(builder.data);
+    return NULL;
+}
+
+/* regex-syntax's Unicode 16 simple folds can contain up to four scalars.
+   Keep each scalar as a complete UTF-8 alternative in the byte matcher. */
+static size_t yx_condition_U_fold_variants(uint32_t scalar,
+                                            uint32_t variants[4])
+{
+    variants[0] = scalar;
+    return 1 + xx_regex_unicode16_fold_peers(scalar, variants + 1);
+}
+
+static char *yx_condition_expand_scoped_U_folds(const char *regexp,
+                                                  bool insensitive)
+{
+    size_t length = strlen(regexp), used = 0, depth = 0;
+    unsigned char *states;
+    char *out;
+    bool unicode = false;
+    unsigned char fold_mode = insensitive ? 1 : 0;
+    if (length > (SIZE_MAX - 1) / 8) return NULL;
+    states = malloc(length + 1);
+    out = malloc(length * 8 + 1);
+    if (!states || !out) { free(states); free(out); return NULL; }
+    for (size_t i = 0; i < length; ++i) {
+        char ch = regexp[i];
+        if (ch == '[') {
+            yx_condition_U_class cls;
+            if (yx_condition_bounded_U_class(regexp, length, i, &cls)) {
+                size_t size = cls.close - i + 1;
+                memcpy(out + used, regexp + i, size);
+                used += size;
+                i = cls.close;
+                continue;
+            }
+        }
+        if (ch == '\\' && i + 1 < length) {
+            if (regexp[i + 1] == 'U') {
+                uint32_t scalar, variants[4];
+                size_t after, count;
+                if (yx_condition_parse_U_escape(regexp, length, i,
+                                                &scalar, &after)) {
+                    count = !unicode || !fold_mode ? 0 :
+                        fold_mode == 1 ?
+                        yx_condition_U_trailing_fold_variants(
+                            scalar, variants) :
+                        yx_condition_U_fold_variants(scalar, variants);
+                    if (count > 1) {
+                        memcpy(out + used, "(?:", 3);
+                        used += 3;
+                        for (size_t j = 0; j < count; ++j) {
+                            if (j) out[used++] = '|';
+                            used += (size_t)snprintf(
+                                out + used, length * 8 + 1 - used,
+                                "\\U%08X", variants[j]);
+                        }
+                        out[used++] = ')';
+                    } else {
+                        memcpy(out + used, regexp + i, after - i);
+                        used += after - i;
+                    }
+                    i = after - 1;
+                    continue;
+                }
+            }
+            out[used++] = ch;
+            out[used++] = regexp[++i];
+            continue;
+        }
+        if (ch == '(') {
+            size_t end = i + 2;
+            bool next_unicode = unicode;
+            unsigned char next_mode = fold_mode;
+            bool minus = false;
+            if (regexp[i + 1] == '?') {
+                for (; end < length; ++end) {
+                    char flag = regexp[end];
+                    if (flag == '-') { minus = true; continue; }
+                    if (flag == 'u') { next_unicode = !minus; continue; }
+                    if (flag == 'i') { next_mode = minus ? 0 : 2; continue; }
+                    if (strchr("msxUR", flag)) continue;
+                    break;
+                }
+            }
+            if (end > i + 2 && end < length &&
+                (regexp[end] == ')' || regexp[end] == ':')) {
+                if (regexp[end] == ':')
+                    states[depth++] = (unsigned char)((unicode ? 1 : 0) |
+                                                       (fold_mode << 1));
+                unicode = next_unicode;
+                fold_mode = next_mode;
+                memcpy(out + used, regexp + i, end - i + 1);
+                used += end - i + 1;
+                i = end;
+                continue;
+            }
+            states[depth++] = (unsigned char)((unicode ? 1 : 0) |
+                                               (fold_mode << 1));
+        } else if (ch == ')' && depth) {
+            unsigned char state = states[--depth];
+            unicode = (state & 1) != 0;
+            fold_mode = state >> 1;
+        }
+        out[used++] = ch;
+    }
+    out[used] = '\0';
+    free(states);
+    return out;
+}
+
+static bool yx_condition_mixed_U_byte(const char *regexp, bool insensitive)
+{
+    size_t length = strlen(regexp), depth = 0;
+    unsigned char *states = malloc(length + 1);
+    bool unicode = false, saw_unicode_U = false, saw_byte_hex = false;
+    bool nocase = insensitive, valid = true;
+    if (!states) return false;
+    for (size_t i = 0; valid && i < length; ++i) {
+        char ch = regexp[i];
+        if (ch == '\\' && i + 1 < length) {
+            char escaped = regexp[i + 1];
+            if (escaped == 'U') {
+                uint32_t scalar;
+                size_t after;
+                if (!yx_condition_parse_U_escape(regexp, length, i,
+                                                 &scalar, &after)) {
+                    valid = false;
+                    break;
+                }
+                if (unicode) {
+                    saw_unicode_U = true;
+                }
+                i = after - 1;
+                continue;
+            } else if (escaped == 'x' && !unicode &&
+                       i + 3 < length &&
+                       yx_regex_hex_digit((unsigned char)regexp[i + 2]) >= 0 &&
+                       yx_regex_hex_digit((unsigned char)regexp[i + 3]) >= 0) {
+                saw_byte_hex = true;
+            } else if (!strchr("\\.^$*+?{}|()/-", escaped)) {
+                valid = false;
+            }
+            ++i;
+            continue;
+        }
+        if (ch == '[') {
+            yx_condition_U_class cls;
+            if (!unicode || !yx_condition_bounded_U_class(
+                    regexp, length, i, &cls)) {
+                valid = false;
+                break;
+            }
+            saw_unicode_U = true;
+            i = cls.close;
+            continue;
+        }
+        if (ch == ']' || ch == '.' || ch == '#' ||
+            (unsigned char)ch >= 0x80) { valid = false; break; }
+        if (ch == '(') {
+            size_t end = i + 2;
+            bool next_unicode = unicode, next_nocase = nocase;
+            bool minus = false;
+            if (regexp[i + 1] == '?') {
+                for (; end < length; ++end) {
+                    char flag = regexp[end];
+                    if (flag == '-') { minus = true; continue; }
+                    if (flag == 'u') { next_unicode = !minus; continue; }
+                    if (flag == 'i') { next_nocase = !minus; continue; }
+                    if (strchr("msxUR", flag)) continue;
+                    break;
+                }
+            }
+            if (!valid) break;
+            if (end > i + 2 && end < length &&
+                (regexp[end] == ')' || regexp[end] == ':')) {
+                if (regexp[end] == ':')
+                    states[depth++] = (unsigned char)((unicode ? 1 : 0) |
+                                                       (nocase ? 2 : 0));
+                unicode = next_unicode;
+                nocase = next_nocase;
+                i = end;
+                continue;
+            }
+            states[depth++] = (unsigned char)((unicode ? 1 : 0) |
+                                               (nocase ? 2 : 0));
+        } else if (ch == ')' && depth) {
+            unsigned char state = states[--depth];
+            unicode = (state & 1) != 0;
+            nocase = (state & 2) != 0;
+        }
+    }
+    free(states);
+    return valid && saw_unicode_U && saw_byte_hex;
+}
+
+/* PCRE2 caps one repetition at 65535. Split simple ASCII literal counts
+ * into adjacent fixed and optional runs. This preserves the accepted string
+ * set, including when the regexp is passed to a module function. */
+static char *yx_condition_expand_large_ascii_repeat(const char *regexp,
+                                                     bool insensitive)
+{
+    const unsigned char atom = (unsigned char)regexp[0];
+    const char *at = regexp + 1;
+    uint32_t lower = 0, upper = 0;
+    uint32_t chunks, remainder, optional = 0;
+    uint32_t limit = insensitive &&
+                     ((atom >= 'a' && atom <= 'z') ||
+                      (atom >= 'A' && atom <= 'Z')) ? 655357u : 1638393u;
+    uint32_t atom_weight = limit == 655357u ? 25u : 10u;
+    bool range = false, open = false;
+    char *out, *cursor;
+    size_t capacity;
+    if (!((atom >= 'a' && atom <= 'z') ||
+          (atom >= 'A' && atom <= 'Z') ||
+          (atom >= '0' && atom <= '9') || atom == '_' || atom == '-') ||
+        *at++ != '{' || *at < '0' || *at > '9') return NULL;
+    do {
+        unsigned digit = (unsigned)(*at++ - '0');
+        if (lower > (limit - digit) / 10u) return NULL;
+        lower = lower * 10u + digit;
+    } while (*at >= '0' && *at <= '9');
+    if (*at == ',') {
+        range = true;
+        ++at;
+        open = *at == '}';
+        if (!open) {
+            if (*at < '0' || *at > '9') return NULL;
+            do {
+                unsigned digit = (unsigned)(*at++ - '0');
+                if (upper > (limit - digit) / 10u) return NULL;
+                upper = upper * 10u + digit;
+            } while (*at >= '0' && *at <= '9');
+            if (upper < lower) return NULL;
+        }
+    }
+    if (*at++ != '}' || *at != '\0') return NULL;
+    /* A bounded optional copy costs 2*w+25 half-units in the reference's
+     * regexp size budget; a required copy costs 2*w. */
+    if (range) {
+        if (open) {
+            if (lower >= limit || lower <= 65535u) return NULL;
+        } else {
+            if (upper <= 65535u) return NULL;
+            if (upper != lower &&
+                (uint64_t)(2u * atom_weight) * lower +
+                (uint64_t)(2u * atom_weight + 25u) * (upper - lower) >
+                    32767850u) return NULL;
+        }
+        if (!open) optional = upper - lower;
+    } else if (lower <= 65535u) return NULL;
+    chunks = lower / 65535u;
+    remainder = lower % 65535u;
+    capacity = (size_t)(chunks + (remainder != 0) +
+                        optional / 65535u + (optional % 65535u != 0) +
+                        open) * 16u + 1u;
+    out = malloc(capacity);
+    if (!out) return NULL;
+    cursor = out;
+    for (uint32_t i = 0; i < chunks; ++i)
+        cursor += snprintf(cursor, capacity - (size_t)(cursor - out),
+                           "%c{65535}", atom);
+    if (remainder)
+        cursor += snprintf(cursor, capacity - (size_t)(cursor - out),
+                           "%c{%u}", atom, remainder);
+    if (open)
+        cursor += snprintf(cursor, capacity - (size_t)(cursor - out),
+                           "%c*", atom);
+    for (uint32_t i = 0; i < optional / 65535u; ++i)
+        cursor += snprintf(cursor, capacity - (size_t)(cursor - out),
+                           "%c{0,65535}", atom);
+    if (optional % 65535u)
+        cursor += snprintf(cursor, capacity - (size_t)(cursor - out),
+                           "%c{0,%u}", atom, optional % 65535u);
+    return out;
+}
+
+/* Extend the same rewrite to a literal run beside the repeated byte.
+ * A single fixed, bounded, or open repeat still denotes the same language
+ * after it is split into PCRE2-sized pieces. Keep the surrounding grammar
+ * deliberately narrow so this does not reinterpret other regexp operators. */
+static char *yx_condition_expand_context_ascii_repeat(const char *regexp,
+                                                       bool insensitive)
+{
+    const char *open = strchr(regexp, '{');
+    const char *close;
+    size_t prefix, suffix, quantifier_length, middle_length;
+    char quantifier[40];
+    char *middle, *out;
+    uint32_t lower = 0, upper = 0, edge_weight = 0, atom_weight;
+    uint32_t fixed_limit;
+    bool range = false, unbounded = false;
+    const char *at;
+    if (!open || open == regexp || !(close = strchr(open + 1, '}')) ||
+        strchr(close + 1, '{')) return NULL;
+    prefix = (size_t)(open - regexp - 1);
+    suffix = strlen(close + 1);
+    if ((!prefix && !suffix) || prefix > 256 || suffix > 256) return NULL;
+    for (const char *at = regexp; at < open; ++at) {
+        if (!((*at >= 'a' && *at <= 'z') ||
+              (*at >= 'A' && *at <= 'Z') ||
+              (*at >= '0' && *at <= '9') || *at == '_' || *at == '-'))
+            return NULL;
+        if (at < open - 1)
+            edge_weight += insensitive &&
+                           ((*at >= 'a' && *at <= 'z') ||
+                            (*at >= 'A' && *at <= 'Z')) ? 25u : 10u;
+    }
+    for (const char *at = close + 1; *at; ++at) {
+        if (!((*at >= 'a' && *at <= 'z') ||
+              (*at >= 'A' && *at <= 'Z') ||
+              (*at >= '0' && *at <= '9') || *at == '_' || *at == '-'))
+            return NULL;
+        edge_weight += insensitive &&
+                       ((*at >= 'a' && *at <= 'z') ||
+                        (*at >= 'A' && *at <= 'Z')) ? 25u : 10u;
+    }
+    atom_weight = insensitive &&
+                  ((open[-1] >= 'a' && open[-1] <= 'z') ||
+                   (open[-1] >= 'A' && open[-1] <= 'Z')) ? 25u : 10u;
+    fixed_limit = (16383936u - edge_weight) / atom_weight;
+    at = open + 1;
+    if (at == close || *at < '0' || *at > '9') return NULL;
+    do {
+        unsigned digit = (unsigned)(*at++ - '0');
+        if (lower > (UINT32_MAX - digit) / 10u) return NULL;
+        lower = lower * 10u + digit;
+    } while (at < close && *at >= '0' && *at <= '9');
+    if (at < close && *at == ',') {
+        range = true;
+        ++at;
+        unbounded = at == close;
+        if (!unbounded) {
+            if (*at < '0' || *at > '9') return NULL;
+            do {
+                unsigned digit = (unsigned)(*at++ - '0');
+                if (upper > (UINT32_MAX - digit) / 10u) return NULL;
+                upper = upper * 10u + digit;
+            } while (at < close && *at >= '0' && *at <= '9');
+            if (upper < lower) return NULL;
+        }
+    }
+    if (at != close) return NULL;
+    if (!range) {
+        if (lower > fixed_limit) return NULL;
+    } else if (unbounded) {
+        if ((uint64_t)edge_weight +
+            (uint64_t)atom_weight * lower + 15u > 16383936u)
+            return NULL;
+    } else if (upper != lower &&
+               (uint64_t)2u * edge_weight +
+               (uint64_t)(2u * atom_weight) * lower +
+               (uint64_t)(2u * atom_weight + 25u) * (upper - lower) >
+                   32767850u) return NULL;
+    else if (upper == lower && lower > fixed_limit) return NULL;
+    quantifier_length = (size_t)(close - open) + 2;
+    if (quantifier_length >= sizeof(quantifier)) return NULL;
+    memcpy(quantifier, open - 1, quantifier_length);
+    quantifier[quantifier_length] = '\0';
+    middle = yx_condition_expand_large_ascii_repeat(quantifier,
+                                                     insensitive);
+    if (!middle) return NULL;
+    middle_length = strlen(middle);
+    out = malloc(prefix + middle_length + suffix + 1);
+    if (out) {
+        memcpy(out, regexp, prefix);
+        memcpy(out + prefix, middle, middle_length);
+        memcpy(out + prefix + middle_length, close + 1, suffix + 1);
+    }
+    free(middle);
+    return out;
+}
+
+/* Recognize the literal HIR forms used by the matches-to-contains lowering.
+ * Captures remain regexps; noncapturing groups, singleton byte classes and
+ * exact zero/one repetitions can disappear during HIR construction. */
+static bool yx_condition_literal_byte(const char **cursor, uint8_t *byte)
+{
+    const char *at = *cursor;
+    unsigned char ch = (unsigned char)*at++;
+    if (!ch) return false;
+    if (ch == '\\') {
+        ch = (unsigned char)*at++;
+        switch (ch) {
+        case 'a': ch = '\a'; break;
+        case 'f': ch = '\f'; break;
+        case 'n': ch = '\n'; break;
+        case 'r': ch = '\r'; break;
+        case 't': ch = '\t'; break;
+        case 'v': ch = '\v'; break;
+        case 'x': {
+            int high = yx_digit_value((unsigned char)at[0]);
+            int low = at[0] ? yx_digit_value((unsigned char)at[1]) : -1;
+            if (high < 0 || high >= 16 || low < 0 || low >= 16) return false;
+            ch = (unsigned char)(high * 16 + low);
+            at += 2;
+            break;
+        }
+        default:
+            if (!ch || isalnum(ch)) return false;
+            break;
+        }
+    }
+    *cursor = at;
+    *byte = ch;
+    return true;
+}
+
+typedef struct {
+    uint64_t bits[4];
+} yx_condition_byte_class;
+
+static void yx_condition_class_add(yx_condition_byte_class *set,
+                                      unsigned first, unsigned last)
+{
+    for (unsigned byte = first; byte <= last; ++byte)
+        set->bits[byte >> 6] |= UINT64_C(1) << (byte & 63u);
+}
+
+static void yx_condition_class_apply(yx_condition_byte_class *left,
+                                        const yx_condition_byte_class *right,
+                                        char operation)
+{
+    for (size_t i = 0; i < 4; ++i) {
+        if (operation == '&') left->bits[i] &= right->bits[i];
+        else if (operation == '-') left->bits[i] &= ~right->bits[i];
+        else if (operation == '~') left->bits[i] ^= right->bits[i];
+        else left->bits[i] |= right->bits[i];
+    }
+}
+
+static bool yx_condition_class_ascii(const char **cursor,
+                                        yx_condition_byte_class *set)
+{
+    static const char *const names[] = {
+        "alnum", "alpha", "ascii", "blank", "cntrl", "digit", "graph",
+        "lower", "print", "punct", "space", "upper", "word", "xdigit"
+    };
+    const char *name = *cursor + 2;
+    bool negated = *name == '^';
+    if (negated) ++name;
+    const char *end = strstr(name, ":]");
+    size_t kind = sizeof(names) / sizeof(names[0]);
+    if (!end) return false;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (strlen(names[i]) == (size_t)(end - name) &&
+            !memcmp(names[i], name, (size_t)(end - name))) {
+            kind = i;
+            break;
+        }
+    if (kind == sizeof(names) / sizeof(names[0])) return false;
+    for (unsigned byte = 0; byte < 256; ++byte) {
+        bool upper = byte >= 'A' && byte <= 'Z';
+        bool lower = byte >= 'a' && byte <= 'z';
+        bool digit = byte >= '0' && byte <= '9';
+        bool alpha = upper || lower;
+        bool keep = false;
+        switch (kind) {
+        case 0: keep = alpha || digit; break;
+        case 1: keep = alpha; break;
+        case 2: keep = byte <= 0x7fu; break;
+        case 3: keep = byte == '\t' || byte == ' '; break;
+        case 4: keep = byte <= 0x1fu || byte == 0x7fu; break;
+        case 5: keep = digit; break;
+        case 6: keep = byte >= '!' && byte <= '~'; break;
+        case 7: keep = lower; break;
+        case 8: keep = byte >= ' ' && byte <= '~'; break;
+        case 9: keep = byte >= '!' && byte <= '~' && !alpha && !digit; break;
+        case 10: keep = (byte >= '\t' && byte <= '\r') || byte == ' '; break;
+        case 11: keep = upper; break;
+        case 12: keep = alpha || digit || byte == '_'; break;
+        case 13: keep = digit || (byte >= 'A' && byte <= 'F') ||
+                        (byte >= 'a' && byte <= 'f'); break;
+        }
+        if (keep != negated) yx_condition_class_add(set, byte, byte);
+    }
+    *cursor = end + 2;
+    return true;
+}
+
+static bool yx_condition_class_parse(const char **cursor,
+                                        yx_condition_byte_class *set,
+                                        unsigned depth);
+
+static bool yx_condition_class_item(const char **cursor,
+                                       yx_condition_byte_class *set,
+                                       bool *literal, uint8_t *byte,
+                                       unsigned depth)
+{
+    const char *at = *cursor;
+    *literal = false;
+    if (*at == '[') {
+        if (!(at[1] == ':' && yx_condition_class_ascii(&at, set)) &&
+            !yx_condition_class_parse(&at, set, depth + 1)) return false;
+    } else if (at[0] == '\\' && at[1] && strchr("dDsSwW", at[1])) {
+        char code = at[1];
+        bool negated = code == 'D' || code == 'S' || code == 'W';
+        for (unsigned value = 0; value < 256; ++value) {
+            bool digit = value >= '0' && value <= '9';
+            bool keep = code == 'd' || code == 'D' ? digit :
+                code == 's' || code == 'S' ?
+                (value >= '\t' && value <= '\r') || value == ' ' :
+                digit || (value >= 'A' && value <= 'Z') ||
+                (value >= 'a' && value <= 'z') || value == '_';
+            if (keep != negated) yx_condition_class_add(set, value, value);
+        }
+        at += 2;
+    } else {
+        /* Raw Unicode in byte classes stays on the original validation and
+         * regexp path. Escaped bytes can still form a UTF-8 literal. */
+        if ((unsigned char)*at >= 0x80 ||
+            !yx_condition_literal_byte(&at, byte)) return false;
+        yx_condition_class_add(set, *byte, *byte);
+        *literal = true;
+    }
+    *cursor = at;
+    return true;
+}
+
+static bool yx_condition_class_parse(const char **cursor,
+                                        yx_condition_byte_class *set,
+                                        unsigned depth)
+{
+    const char *at = *cursor;
+    yx_condition_byte_class left = {{0}}, part = {{0}};
+    char operation = 0;
+    bool negated, leading_dash = false;
+    if (*at != '[' || depth > 256) return false;
+    ++at;
+    negated = *at == '^';
+    if (negated) ++at;
+    /* Rust byte classes treat initial '-' and ']' as literal bytes. */
+    while (*at == '-') {
+        yx_condition_class_add(&part, '-', '-');
+        leading_dash = true;
+        ++at;
+    }
+    if (!leading_dash && *at == ']') {
+        yx_condition_class_add(&part, ']', ']');
+        ++at;
+    }
+    while (*at && *at != ']') {
+        if ((at[0] == '&' && at[1] == '&') ||
+            (at[0] == '-' && at[1] == '-') ||
+            (at[0] == '~' && at[1] == '~')) {
+            if (operation) yx_condition_class_apply(&left, &part, operation);
+            else left = part;
+            part = (yx_condition_byte_class){{0}};
+            operation = *at;
+            at += 2;
+        } else {
+            yx_condition_byte_class item = {{0}};
+            bool literal;
+            uint8_t first = 0;
+            if (!yx_condition_class_item(&at, &item, &literal, &first, depth))
+                return false;
+            if (*at == '-' && at[1] && at[1] != '-' && at[1] != ']') {
+                yx_condition_byte_class last_item = {{0}};
+                bool last_literal;
+                uint8_t last = 0;
+                ++at;
+                if (!literal ||
+                    !yx_condition_class_item(&at, &last_item, &last_literal,
+                                               &last, depth) ||
+                    !last_literal || last < first) return false;
+                item = (yx_condition_byte_class){{0}};
+                yx_condition_class_add(&item, first, last);
+            }
+            yx_condition_class_apply(&part, &item, '|');
+        }
+    }
+    if (*at != ']') return false;
+    if (operation) yx_condition_class_apply(&left, &part, operation);
+    else left = part;
+    if (negated)
+        for (size_t i = 0; i < 4; ++i) left.bits[i] = ~left.bits[i];
+    *set = left;
+    *cursor = at + 1;
+    return true;
+}
+
+/* A hexadecimal scalar escape after its backslash: \xHH, \uHHHH,
+ * \UHHHHHHHH or the braced forms. `fixed_x` tells \xHH, the only form that
+ * stands for a byte outside Unicode mode (regex-syntax Literal::byte). */
+static bool yx_condition_literal_hex(const char **cursor, uint32_t *value,
+                                     bool *fixed_x)
+{
+    const char *at = *cursor;
+    char kind = *at++;
+    unsigned digits = kind == 'x' ? 2 : kind == 'u' ? 4 : 8, count = 0;
+    uint32_t result = 0;
+    bool brace = *at == '{';
+    if (kind != 'x' && kind != 'u' && kind != 'U') return false;
+    *fixed_x = kind == 'x' && !brace;
+    if (brace) {
+        ++at;
+        while (isxdigit((unsigned char)*at) && count < 8) {
+            result = result * 16 + (uint32_t)yx_digit_value((unsigned char)*at);
+            ++at;
+            ++count;
+        }
+        if (!count || *at != '}') return false;
+        ++at;
+    } else {
+        for (; count < digits; ++count) {
+            if (!isxdigit((unsigned char)*at)) return false;
+            result = result * 16 + (uint32_t)yx_digit_value((unsigned char)*at);
+            ++at;
+        }
+    }
+    if (result > 0x10FFFF || (result >= 0xD800 && result <= 0xDFFF))
+        return false;
+    *value = result;
+    *cursor = at;
+    return true;
+}
+
+static size_t yx_condition_utf8_encode(uint32_t value, char *out)
+{
+    if (value < 0x80) { out[0] = (char)value; return 1; }
+    if (value < 0x800) {
+        out[0] = (char)(0xC0 | (value >> 6));
+        out[1] = (char)(0x80 | (value & 0x3F));
+        return 2;
+    }
+    if (value < 0x10000) {
+        out[0] = (char)(0xE0 | (value >> 12));
+        out[1] = (char)(0x80 | ((value >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (value & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (value >> 18));
+    out[1] = (char)(0x80 | ((value >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((value >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (value & 0x3F));
+    return 4;
+}
+
+/* One Unicode-mode scalar: a hexadecimal escape or a raw UTF-8 character. */
+static bool yx_condition_literal_unicode_scalar(const char **cursor,
+                                                uint32_t *value)
+{
+    const char *at = *cursor;
+    unsigned char ch = (unsigned char)*at;
+    bool fixed_x;
+    if (ch == '\\' && (at[1] == 'x' || at[1] == 'u' || at[1] == 'U')) {
+        ++at;
+        if (!yx_condition_literal_hex(&at, value, &fixed_x)) return false;
+        *cursor = at;
+        return true;
+    }
+    if (ch == '\\') {
+        uint8_t byte;
+        if (!yx_condition_literal_byte(&at, &byte) || byte >= 0x80)
+            return false;
+        *value = byte;
+        *cursor = at;
+        return true;
+    }
+    if (ch >= 0xc2 && ch <= 0xf4) {
+        size_t width = ch < 0xe0 ? 2 : ch < 0xf0 ? 3 : 4;
+        uint32_t result = ch & (width == 2 ? 0x1F : width == 3 ? 0x0F : 0x07);
+        for (size_t i = 1; i < width; ++i) {
+            if (((unsigned char)at[i] & 0xC0) != 0x80) return false;
+            result = (result << 6) | ((unsigned char)at[i] & 0x3F);
+        }
+        *value = result;
+        *cursor = at + width;
+        return true;
+    }
+    if (ch >= 0x80 || !ch || ch == '\\' || strchr(".^$*+?{}()[]|", ch))
+        return false;
+    *value = ch;
+    *cursor = at + 1;
+    return true;
+}
+
+static bool yx_condition_literal_expr(const char **cursor, char *bytes,
+                                       size_t *used, unsigned depth,
+                                       bool unicode, bool caseless)
+{
+    const char *at = *cursor;
+    size_t start = *used, first_end = 0;
+    bool alternative = false;
+    if (depth > 256) return false;
+    for (;;) {
+        while (*at && *at != ')' && *at != '|') {
+            size_t atom_start = *used;
+            if (at[0] == '(' && at[1] == '?') {
+                /* `(?:...)`, a flag group `(?u:...)` or flags `(?-u)`.
+                 * Extended groups are no literal; case-insensitive ones are
+                 * while they hold no letter that could fold (below). */
+                const char *flag = at + 2;
+                bool negated = false, scoped_unicode = unicode, scoped_caseless = caseless;
+                while (*flag && (strchr("usmURi-", *flag) ||
+                                 (negated && *flag == 'x'))) {
+                    if (*flag == '-') negated = true;
+                    else if (*flag == 'u') scoped_unicode = !negated;
+                    else if (*flag == 'i') scoped_caseless = !negated;
+                    ++flag;
+                }
+                if (*flag == ')') {
+                    unicode = scoped_unicode;
+                    caseless = scoped_caseless;
+                    at = flag + 1;
+                    continue;
+                }
+                if (*flag != ':') return false;
+                at = flag + 1;
+                if (!yx_condition_literal_expr(&at, bytes, used, depth + 1,
+                                               scoped_unicode, scoped_caseless) ||
+                    *at != ')') return false;
+                ++at;
+            } else if (unicode && *at == '[') {
+                /* A class of one scalar is that literal: `[\U000003A3]`,
+                 * `[é-é]`. */
+                uint32_t first, last;
+                const char *class_at = at + 1;
+                if (!yx_condition_literal_unicode_scalar(&class_at, &first))
+                    return false;
+                last = first;
+                if (*class_at == '-' && class_at[1] != ']') {
+                    ++class_at;
+                    if (!yx_condition_literal_unicode_scalar(&class_at, &last))
+                        return false;
+                }
+                if (*class_at != ']' || first != last) return false;
+                at = class_at + 1;
+                *used += yx_condition_utf8_encode(first, bytes + *used);
+            } else if (unicode && *at == '\\' &&
+                       (at[1] == 'x' || at[1] == 'u' || at[1] == 'U')) {
+                uint32_t value;
+                if (!yx_condition_literal_unicode_scalar(&at, &value))
+                    return false;
+                *used += yx_condition_utf8_encode(value, bytes + *used);
+            } else if (!unicode && *at == '\\' &&
+                       (at[1] == 'u' || at[1] == 'U' ||
+                        (at[1] == 'x' && at[2] == '{'))) {
+                /* Outside Unicode mode only \xHH is a byte; the other
+                 * scalar escapes are characters (regex-syntax
+                 * Literal::byte), so the HIR literal holds the scalar's
+                 * UTF-8 encoding, which is never longer than its escape. */
+                uint32_t value;
+                bool fixed_x;
+                const char *escape = at + 1;
+                if (!yx_condition_literal_hex(&escape, &value, &fixed_x))
+                    return false;
+                *used += yx_condition_utf8_encode(value, bytes + *used);
+                at = escape;
+            } else if (*at == '[') {
+                yx_condition_byte_class set = {{0}};
+                unsigned count = 0;
+                uint8_t only = 0;
+                if (!yx_condition_class_parse(&at, &set, depth + 1)) return false;
+                for (unsigned byte = 0; byte < 256; ++byte)
+                    if (set.bits[byte >> 6] & (UINT64_C(1) << (byte & 63u))) {
+                        only = (uint8_t)byte;
+                        if (++count > 1) return false;
+                    }
+                if (count != 1) return false;
+                bytes[(*used)++] = (char)only;
+            } else {
+                uint8_t byte;
+                if (strchr(".^$*+?{}()", *at)) return false;
+                bool raw_unicode = (unsigned char)*at >= 0xc2;
+                if (!yx_condition_literal_byte(&at, &byte)) return false;
+                bytes[(*used)++] = (char)byte;
+                /* A raw UTF-8 scalar is one regex atom. Hex byte escapes
+                 * retain their separate byte atoms. */
+                if (raw_unicode)
+                    while (((unsigned char)*at & 0xc0) == 0x80)
+                        bytes[(*used)++] = *at++;
+            }
+            /* Case-insensitively, regex-syntax folds only ASCII letters
+             * outside Unicode mode (other bytes and scalars stay literal);
+             * Unicode case folding is not modelled here. */
+            if (caseless) {
+                if (unicode) return false;
+                for (size_t i = atom_start; i < *used; ++i)
+                    if (isalpha((unsigned char)bytes[i]) && (unsigned char)bytes[i] < 0x80)
+                        return false;
+            }
+            if (*at == '{') {
+                bool zero = false;
+                if (!strncmp(at, "{1}", 3)) at += 3;
+                else if (!strncmp(at, "{1,1}", 5)) at += 5;
+                else if (!strncmp(at, "{0}", 3)) { at += 3; zero = true; }
+                else if (!strncmp(at, "{0,0}", 5)) { at += 5; zero = true; }
+                else return false;
+                if (zero) *used = atom_start;
+                if (*at == '?') ++at;
+            }
+        }
+        if (alternative) {
+            size_t length = first_end - start;
+            if (*used - first_end != length ||
+                memcmp(bytes + start, bytes + first_end, length)) return false;
+            *used = first_end;
+        } else {
+            first_end = *used;
+        }
+        if (*at != '|') break;
+        alternative = true;
+        ++at;
+    }
+    *cursor = at;
+    return true;
+}
+
+int yx_condition_regex_literal_bytes(const char *regexp, char **literal,
+                                     size_t *length)
+{
+    char *body = regexp ? yx_regex_compact_extended_hex(regexp) : NULL;
+    char *bytes = body ? malloc(strlen(body) + 1) : NULL;
+    const char *at = body;
+    size_t used = 0;
+    int result = 0;
+    if (!bytes) { free(body); return -1; }
+    if (yx_condition_literal_expr(&at, bytes, &used, 0, false, false) && !*at) {
+        bytes[used] = '\0';
+        *literal = bytes;
+        *length = used;
+        bytes = NULL;
+        result = 1;
+    }
+    free(bytes);
+    free(body);
+    return result;
+}
+
+static bool yx_condition_regex_literal(yx_parser *p, const char *body,
+                                        char **literal, size_t *length)
+{
+    const char *at = body;
+    char *bytes = malloc(strlen(body) + 1);
+    size_t used = 0;
+    if (!bytes) { yx_fail(p, "out of memory"); return false; }
+    if (!yx_condition_literal_expr(&at, bytes, &used, 0, false, false) || *at) {
+        free(bytes);
+        return false;
+    }
+    bytes[used] = '\0';
+    *literal = bytes;
+    *length = used;
+    return true;
+}
+
+static bool yx_parse_condition_regex(yx_parser *p, yx_node *node)
+{
+    const char *start = (p->token.kind == TK_BAD &&
+                         *p->token.begin == '/') ?
+                        p->token.begin : p->source + p->position;
+    const char *cursor;
+    bool insensitive = false, dotall = false;
+    while (isspace((unsigned char)*start)) ++start;
+    if (*start != '/') {
+        yx_fail(p, "expected regular expression after 'matches'");
+        return false;
+    }
+    cursor = start + 1;
+    while (*cursor) {
+        if (*cursor == '\n' || *cursor == '\r') {
+            yx_fail(p, "unterminated regular expression");
+            return false;
+        }
+        if (*cursor == '\\' && cursor[1]) {
+            if (cursor[1] == '\n' || cursor[1] == '\r') {
+                yx_fail(p, "unterminated regular expression");
+                return false;
+            }
+            cursor += 2;
+            continue;
+        }
+        /* The lexer's regexp token ends at the first unescaped slash, even
+         * inside a bracketed class. */
+        if (*cursor == '/') break;
+        ++cursor;
+    }
+    if (!*cursor) { yx_fail(p, "unterminated regular expression"); return false; }
+    node->name = yx_copy(start + 1, (size_t)(cursor - start - 1));
+    if (!node->name) { yx_fail(p, "out of memory"); return false; }
+    {
+        char *relaxed = yx_normalize_regexp_braces(
+            node->name, yx_condition_relaxed_regexps);
+        if (!relaxed) { yx_fail(p, "out of memory"); return false; }
+        free(node->name);
+        node->name = relaxed;
+    }
+    if (yx_regex_disallowed(node->name)) {
+        yx_fail(p, "unsupported regular expression construct");
+        return false;
+    }
+    if (yx_regex_inline_r_flag_error(node->name, strlen(node->name),
+                                     NULL, NULL)) {
+        yx_fail(p, "invalid regular expression");
+        return false;
+    }
+    {
+        yx_regex_ast_err ast_error;
+        if (yx_regex_ast_error(node->name, strlen(node->name), &ast_error)) {
+            yx_fail(p, "invalid regular expression");
+            return false;
+        }
+    }
+    if (yx_regex_nesting_error(node->name, strlen(node->name), NULL, NULL)) {
+        yx_fail(p, "invalid regular expression");
+        return false;
+    }
+    ++cursor;
+    while (*cursor == 'i' || *cursor == 's') {
+        if (*cursor == 'i') insensitive = true;
+        else dotall = true;
+        ++cursor;
+    }
+    /* The Validator rejects a leading arbitrary-length, all-bytes prefix. */
+    if (yx_regex_arbitrary_prefix(node->name, strlen(node->name), dotall,
+                                  NULL, NULL)) {
+        yx_fail(p, "invalid regular expression");
+        return false;
+    }
+    if (yx_regex_automata_size_large(node->name, strlen(node->name),
+            (insensitive ? YX_MOD_NOCASE : 0) |
+            (dotall ? YX_MOD_DOTALL : 0))) {
+        yx_fail(p, "invalid regular expression");
+        return false;
+    }
+    char *compacted = yx_regex_compact_extended_hex(node->name);
+    if (!compacted) { yx_fail(p, "out of memory"); return false; }
+#ifdef XXYARA_NATIVE_REGEX
+    {
+        int status;
+        node->compiled_regex = yx_re_compile_search(compacted,
+            strlen(compacted), insensitive, dotall, &status);
+        free(compacted);
+        if (status < 0) { yx_fail(p, "out of memory"); return false; }
+    }
+#else
+    {
+        bool uses_unicode = false;
+        bool mixed_U_byte = false;
+        uint32_t options = PCRE2_DOLLAR_ENDONLY | PCRE2_AUTO_CALLOUT |
+                           (insensitive ? PCRE2_CASELESS : 0) |
+                           (dotall ? PCRE2_DOTALL : 0);
+        options |= YX_RE_YARA_ESCAPES;
+        PCRE2_SIZE error_offset = 0;
+        int error = 0;
+        char *folded_U = mixed_U_byte ?
+            yx_condition_expand_scoped_U_folds(compacted, insensitive) : NULL;
+        char *normalized = !mixed_U_byte || folded_U ?
+            yx_condition_normalize_dots(folded_U ? folded_U : compacted,
+                                        dotall, &uses_unicode) : NULL;
+        char *translated;
+        pcre2_compile_context *context;
+        free(folded_U);
+        free(compacted);
+        if (!normalized) { yx_fail(p, "out of memory"); return false; }
+        if (mixed_U_byte) {
+            char *expanded_classes =
+                yx_condition_expand_single_U_classes(normalized, insensitive);
+            free(normalized);
+            normalized = expanded_classes;
+            if (!normalized) { yx_fail(p, "out of memory"); return false; }
+        }
+        /* The native adapter tracks Unicode per scope and lowers scalar
+         * escapes itself. Keep that information until its class parser. */
+        translated = normalized;
+        if (!translated) return false;
+        char *expanded = yx_condition_expand_large_ascii_repeat(
+            translated, insensitive);
+        if (!expanded)
+            expanded = yx_condition_expand_context_ascii_repeat(
+                translated, insensitive);
+        if (expanded) { free(translated); translated = expanded; }
+        context = pcre2_compile_context_create(NULL);
+        if (!context || pcre2_set_newline(context, PCRE2_NEWLINE_LF) != 0) {
+            free(translated);
+            pcre2_compile_context_free(context);
+            yx_fail(p, "cannot prepare regular expression");
+            return false;
+        }
+        node->compiled_regex = pcre2_compile((PCRE2_SPTR)translated,
+                                             PCRE2_ZERO_TERMINATED, options,
+                                             &error, &error_offset, context);
+        pcre2_compile_context_free(context);
+        free(translated);
+    }
+#endif
+    if (!node->compiled_regex) {
+        yx_fail(p, "invalid regular expression");
+        return false;
+    }
+    if (node->kind == N_MATCHES) {
+        char *literal = NULL;
+        size_t length = 0;
+        char *body = yx_regex_compact_extended_hex(node->name);
+        if (!body) { yx_fail(p, "out of memory"); return false; }
+        bool is_literal = yx_condition_regex_literal(p, body, &literal, &length);
+        free(body);
+        if (p->failed) return false;
+        if (is_literal) {
+            yx_node *right = yx_new_node(p, N_STRING);
+            if (!right) { free(literal); return false; }
+            right->name = literal;
+            right->string_length = length;
+            right->span_start = (size_t)(start - p->source);
+            right->span_end = (size_t)(cursor - p->source);
+            pcre2_code_free((pcre2_code *)node->compiled_regex);
+            node->compiled_regex = NULL;
+            free(node->name);
+            node->name = NULL;
+            node->kind = N_BINARY;
+            node->operation = insensitive ? TK_ICONTAINS : TK_CONTAINS;
+            node->literal_matches = true;
+            node->b = right;
+            node->span_start = node->a ? node->a->span_start : SIZE_MAX;
+            node->span_end = right->span_end;
+        }
+    }
+    p->position = (size_t)(cursor - p->source);
+    yx_next(p);
+    return true;
+}
+
+/* The first three indexes retain the existing representation used by module
+ * fields.  A fourth index switches a JSON-global path to a growable list;
+ * each offset marks where the corresponding bracket followed the field name. */
+static yx_node *yx_parse_after_third_index(yx_parser *p, yx_node *node,
+                                            size_t length)
+{
+    bool has_trailing_field = false;
+    for (;;) {
+        while (yx_accept(p, TK_DOT)) {
+            yx_token member = p->token;
+            char *grown;
+            if (member.kind != TK_IDENTIFIER ||
+                length > SIZE_MAX - member.length - 2) {
+                yx_fail(p, "expected indexed field name");
+                return NULL;
+            }
+            grown = realloc(node->name, length + member.length + 2);
+            if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+            node->name = grown;
+            node->name[length++] = '.';
+            memcpy(node->name + length, member.begin, member.length);
+            length += member.length;
+            node->name[length] = '\0';
+            has_trailing_field = true;
+            yx_next(p);
+        }
+        if (!yx_accept(p, TK_LBRACKET)) break;
+        if (!node->deep_index_ends) {
+            node->deep_index_ends = malloc(4 * sizeof(size_t));
+            if (!node->deep_index_ends) {
+                yx_fail(p, "out of memory");
+                return NULL;
+            }
+            memcpy(node->deep_index_ends, node->first_three_index_ends,
+                   3 * sizeof(size_t));
+            node->deep_index_count = 3;
+        }
+        if (node->deep_index_count >= SIZE_MAX / sizeof(size_t)) {
+            yx_fail(p, "indexed path is too large");
+            return NULL;
+        }
+        size_t *grown = realloc(node->deep_index_ends,
+                                (node->deep_index_count + 1) * sizeof(size_t));
+        if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+        node->deep_index_ends = grown;
+        node->deep_index_ends[node->deep_index_count++] = length;
+        yx_node *index = yx_parse_expr(p, 1);
+        if (!index || !yx_expect(p, TK_RBRACKET,
+                                 "']' after indexed global path"))
+            return NULL;
+        if (!yx_for_in_add_item(p, node, index)) return NULL;
+        has_trailing_field = false;
+    }
+    if (node->deep_index_ends) {
+        node->kind = N_GLOBAL_DEEP_PATH;
+    } else {
+        node->kind = N_MODULE_TRIPLE_INDEXED_FIELD;
+        if (!has_trailing_field) {
+            static const char suffix[] = ".value";
+            char *grown = realloc(node->name, length + sizeof(suffix));
+            if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+            node->name = grown;
+            memcpy(node->name + length, suffix, sizeof(suffix));
+            node->implicit_value = true;
+        }
+    }
+    if (yx_accept(p, TK_LPAREN)) {
+        if (length < 4 || strcmp(node->name + length - 4, ".len") != 0 ||
+            !yx_expect(p, TK_RPAREN, "')' after indexed array length")) {
+            yx_fail(p, "unsupported indexed function");
+            return NULL;
+        }
+        node->operation = TK_LPAREN;
+    }
+    return node;
+}
+
+static int yx_precedence(yx_token_kind kind);
+/* Constructs YARA-X parses only as Boolean terms, never as expressions. */
+static bool yx_boolean_term(const yx_node *n)
+{
+    if (n->paren_bool) return true;
+    switch (n->kind) {
+    case N_INTEGER: return n->operation == TK_TRUE || n->operation == TK_FALSE;
+    case N_PATTERN: case N_OF: case N_OF_EXPR: case N_FOR_OF: case N_FOR_IN: case N_WITH: case N_MATCHES:
+        return true;
+    case N_UNARY: return n->operation == TK_NOT || n->operation == TK_DEFINED;
+    case N_BINARY: return n->operation == TK_AND || n->operation == TK_OR || yx_precedence(n->operation) == 4 ||
+                          yx_precedence(n->operation) == 5;
+    default: return false;
+    }
+}
+
+static void yx_fail_at(yx_parser *p, size_t offset, const char *format, ...)
+{
+    va_list args;
+    int written;
+    if (p->failed) return;
+    p->failed = true;
+    if (!p->error || p->error_capacity == 0) return;
+    written = snprintf(p->error, p->error_capacity, "at byte %zu: ", offset);
+    if (written < 0 || (size_t)written >= p->error_capacity) return;
+    va_start(args, format);
+    vsnprintf(p->error + written, p->error_capacity - (size_t)written, format, args);
+    va_end(args);
+}
+
+/* Length of the source token at offset. */
+static size_t yx_source_token_length(const char *source, size_t offset)
+{
+    const char *at = source + offset;
+    size_t n = 0;
+    static const char *const pairs[] = {"==", "!=", "<=", ">=", "<<", ">>", ".."};
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); ++i)
+        if (at[0] == pairs[i][0] && at[1] == pairs[i][1]) return 2;
+    if (isalpha((unsigned char)*at) || *at == '_' || *at == '$' || *at == '#' || *at == '@' || *at == '!') {
+        n = 1;
+        for (;;) {
+            size_t width;
+            unsigned char c = (unsigned char)at[n];
+            if (isalnum(c) || c == '_' || c == '*') { ++n; continue; }
+            width = yx_unicode_decimal_digit_width(at + n);
+            if (!width) break;
+            n += width;
+        }
+        return n;
+    }
+    return *at ? 1 : 0;
+}
+
+/* Unclosed parentheses before offset, lexing the condition again. */
+static size_t yx_paren_depth_at(const yx_parser *p, size_t offset)
+{
+    yx_parser lexer;
+    size_t depth = 0;
+    memset(&lexer, 0, sizeof(lexer));
+    lexer.source = p->source;
+    yx_next(&lexer);
+    while (!lexer.failed && lexer.token.kind != TK_END && lexer.token.kind != TK_BAD && lexer.token.offset < offset) {
+        if (lexer.token.kind == TK_LPAREN) ++depth;
+        else if (lexer.token.kind == TK_RPAREN && depth) --depth;
+        yx_next(&lexer);
+    }
+    return depth;
+}
+
+/* Where YARA-X's expression parser stops inside the Boolean term n used as
+ * an operand: at a token that cannot start an expression, or at the first
+ * operator after an expression that only a Boolean term accepts. */
+static bool yx_expression_failure(const yx_parser *p, const yx_node *n, size_t depth, size_t *offset,
+                                  const char **expected)
+{
+    if (depth > 64 || n->span_start == SIZE_MAX) return false;
+    switch (n->kind) {
+    case N_INTEGER: case N_UNARY: case N_PATTERN: case N_WITH:
+    case N_OF: case N_OF_EXPR: case N_FOR_OF: case N_FOR_IN: {
+        /* The term's first token: after its own parentheses when it has
+         * them, since quantifier spans may start at a later token. */
+        size_t start = n->span_start;
+        if (n->paren_bool && n->paren_open != SIZE_MAX) {
+            start = n->paren_open;
+            while (p->source[start] == '(' || isspace((unsigned char)p->source[start])) ++start;
+        }
+        const char *at = p->source + start;
+        if (n->kind != N_INTEGER && n->kind != N_UNARY && n->kind != N_PATTERN &&
+            !isalpha((unsigned char)*at)) return false;
+        *offset = start;
+        *expected = "expression or identifier";
+        return true;
+    }
+    case N_BINARY: case N_MATCHES: {
+        const yx_node *left = n->a;
+        if (!left) return false;
+        if (yx_boolean_term(left)) return yx_expression_failure(p, left, depth + 1, offset, expected);
+        if (left->span_end == SIZE_MAX) return false;
+        size_t at = left->span_end;
+        while (p->source[at] && (isspace((unsigned char)p->source[at]) || p->source[at] == ')')) ++at;
+        if (!p->source[at]) return false;
+        *offset = at;
+        *expected = left->kind == N_COUNT ? "`in`, operator or `)`" : "operator or `)`";
+        return true;
+    }
+    default: return false;
+    }
+}
+
+/* A parenthesized Boolean term as an expression operand. */
+static bool yx_reject_boolean_operand(yx_parser *p, const yx_node *operand)
+{
+    size_t offset;
+    const char *expected;
+    if (!operand || !operand->paren_bool) return false;
+    if (!yx_expression_failure(p, operand, 0, &offset, &expected)) return false;
+    yx_fail_at(p, offset, "syntax-expected %zu %s", yx_source_token_length(p->source, offset), expected);
+    return true;
+}
+
+static const char *yx_call_result_type_name(const yx_node *node);
+
+static yx_node *yx_parse_primary(yx_parser *p)
+{
+    yx_node *node;
+    yx_token token = p->token;
+    if (yx_accept(p, TK_LPAREN)) {
+        node = yx_parse_expr(p, 1);
+        if (!node || !yx_expect(p, TK_RPAREN, "')'")) return NULL;
+        node->parenthesized = true;
+        if (yx_boolean_term(node)) {
+            node->paren_bool = true;
+            node->paren_open = token.offset;
+        }
+        return node;
+    }
+    if (token.kind == TK_NUMBER || token.kind == TK_TRUE || token.kind == TK_FALSE) {
+        node = yx_new_node(p, N_INTEGER);
+        if (!node) return NULL;
+        node->span_start = token.offset;
+        node->span_end = token.offset + token.length;
+        node->number = token.kind == TK_TRUE ? 1 : token.kind == TK_FALSE ? 0 : token.number;
+        node->is_unsigned = token.kind == TK_NUMBER && token.is_unsigned;
+        if (token.kind == TK_TRUE || token.kind == TK_FALSE)
+            node->operation = token.kind;
+        yx_next(p);
+        return node;
+    }
+    if (token.kind == TK_FLOAT) {
+        node = yx_new_node(p, N_FLOAT);
+        if (!node) return NULL;
+        node->span_start = token.offset;
+        node->span_end = token.offset + token.length;
+        node->floating = token.floating;
+        yx_next(p);
+        return node;
+    }
+    if (token.kind == TK_STRING) {
+        node = yx_new_node(p, N_STRING);
+        if (!node) return NULL;
+        node->name = yx_decode_string(p, &token, &node->string_length);
+        if (!node->name) return NULL;
+        yx_next(p);
+        return node;
+    }
+    if (token.kind == TK_BAD && *token.begin == '/') {
+        node = yx_new_node(p, N_REGEX);
+        if (!node || !yx_parse_condition_regex(p, node)) return NULL;
+        return node;
+    }
+    if (yx_accept(p, TK_FILESIZE)) return yx_new_node(p, N_FILESIZE);
+    if (yx_accept(p, TK_WITH)) return yx_parse_with(p);
+    if (token.kind == TK_ANY || token.kind == TK_ALL || token.kind == TK_NONE) {
+        yx_quantifier q = token.kind == TK_ANY ? Q_ANY : token.kind == TK_ALL ? Q_ALL : Q_NONE;
+        yx_next(p);
+        node = yx_parse_of(p, q, NULL, false);
+        if (node) node->frame_start = token.offset;
+        return node;
+    }
+    if (yx_accept(p, TK_FOR)) {
+        yx_quantifier q = Q_NUMBER;
+        yx_node *quantity = NULL;
+        if (p->token.kind == TK_ANY || p->token.kind == TK_ALL || p->token.kind == TK_NONE) {
+            q = p->token.kind == TK_ANY ? Q_ANY : p->token.kind == TK_ALL ? Q_ALL : Q_NONE;
+            yx_next(p);
+        } else {
+            bool saved = p->for_quantifier;
+            p->for_quantifier = true;
+            quantity = yx_parse_expr(p, 4);
+            p->for_quantifier = saved;
+            if (!quantity) return NULL;
+            if (p->token.kind == TK_PERCENT &&
+                (yx_percent_followed_by_of(p) ||
+                 yx_percent_followed_by_for_in(p))) {
+                q = Q_PERCENT;
+                yx_next(p);
+            }
+        }
+        node = p->token.kind == TK_OF ? yx_parse_of(p, q, quantity, true) :
+               yx_parse_for_in(p, q, quantity);
+        /* A loop's E047 span starts at `for`. */
+        if (node) node->frame_start = token.offset;
+        return node;
+    }
+    if (token.kind == TK_PATTERN || token.kind == TK_COUNT ||
+        token.kind == TK_OFFSET || token.kind == TK_LENGTH) {
+        yx_node_kind kind = token.kind == TK_PATTERN ? N_PATTERN :
+                            token.kind == TK_COUNT ? N_COUNT :
+                            token.kind == TK_OFFSET ? N_OFFSET : N_LENGTH;
+        node = yx_new_node(p, kind);
+        if (!node) return NULL;
+        node->name = yx_copy(token.begin + 1, token.length - 1);
+        if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+        yx_next(p);
+        if ((kind == N_OFFSET || kind == N_LENGTH) && yx_accept(p, TK_LBRACKET)) {
+            node->a = yx_parse_expr(p, 1);
+            if (!node->a || !yx_expect(p, TK_RBRACKET, "']' after match index")) return NULL;
+        }
+        return node;
+    }
+    if (token.kind == TK_IDENTIFIER) {
+        unsigned width = 0;
+        bool signed_read = false, floating_read = false, big_endian = false;
+        bool read_function = yx_read_function(
+            &token, &width, &signed_read, &floating_read, &big_endian);
+        yx_next(p);
+        if (read_function && p->token.kind == TK_LPAREN) {
+            node = yx_new_node(p, N_READ);
+            if (!node) return NULL;
+            node->name = yx_copy(token.begin, token.length);
+            if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+            node->width = width;
+            node->signed_read = signed_read;
+            node->floating_read = floating_read;
+            node->big_endian = big_endian;
+            if (!yx_expect(p, TK_LPAREN, "'(' after integer read function")) return NULL;
+            /* Any argument list parses; other than one integer argument is
+             * a wrong-arguments error. */
+            if (p->token.kind == TK_RPAREN) {
+                node->read_arity_error = true;
+                node->a = yx_new_node(p, N_INTEGER);
+                if (!node->a) return NULL;
+                yx_next(p);
+                return node;
+            }
+            node->a = yx_parse_expr(p, 1);
+            if (!node->a) return NULL;
+            while (yx_accept(p, TK_COMMA)) {
+                node->read_arity_error = true;
+                if (!yx_parse_expr(p, 1)) return NULL;
+            }
+            if (!yx_expect(p, TK_RPAREN, "')' after read offset")) return NULL;
+            return node;
+        }
+        if (yx_accept(p, TK_DOT)) {
+            yx_token member = p->token;
+            size_t length;
+            if (member.kind != TK_IDENTIFIER) {
+                yx_fail(p, "expected module member name");
+                return NULL;
+            }
+            /* `strings` is a reserved rule keyword in YARA-X and cannot
+               name a module member in a condition. */
+            if (token.length == 3 &&
+                memcmp(token.begin, "dex", 3) == 0 &&
+                member.length == 7 &&
+                memcmp(member.begin, "strings", 7) == 0) {
+                yx_fail(p, "expected module member name");
+                return NULL;
+            }
+            if (token.length > SIZE_MAX - member.length - 2) {
+                yx_fail(p, "module name too long");
+                return NULL;
+            }
+            length = token.length + member.length + 1;
+            node = yx_new_node(p, N_CALL);
+            if (!node) return NULL;
+            node->name = malloc(length + 1);
+            if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+            memcpy(node->name, token.begin, token.length);
+            node->name[token.length] = '.';
+            memcpy(node->name + token.length + 1, member.begin, member.length);
+            node->name[length] = '\0';
+            yx_next(p);
+            while (yx_accept(p, TK_DOT)) {
+                char *grown;
+                member = p->token;
+                if (member.kind != TK_IDENTIFIER) {
+                    yx_fail(p, "expected module member name");
+                    return NULL;
+                }
+                if (length > SIZE_MAX - member.length - 2) {
+                    yx_fail(p, "module name too long");
+                    return NULL;
+                }
+                grown = realloc(node->name, length + member.length + 2);
+                if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                node->name = grown;
+                node->name[length++] = '.';
+                memcpy(node->name + length, member.begin, member.length);
+                length += member.length;
+                node->name[length] = '\0';
+                yx_next(p);
+            }
+            if (yx_accept_lookup(p, node, 0, token.offset)) {
+                char *grown;
+                node->first_three_index_ends[0] = length;
+                node->a = yx_parse_expr(p, 1);
+                if (!node->a || !yx_expect(p, TK_RBRACKET,
+                                           "']' after module index"))
+                    return NULL;
+                if (p->token.kind != TK_DOT) {
+                    static const char suffix[] = ".value";
+                    char *grown;
+                    grown = realloc(node->name, length + sizeof(suffix));
+                    if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                    node->name = grown;
+                    memcpy(node->name + length, suffix, sizeof(suffix));
+                    node->implicit_value = true;
+                    node->kind = N_MODULE_INDEXED_FIELD;
+                    return node;
+                }
+                {
+                    /* A member read from an item that is not a structure
+                     * (`pe.version_info["a"].x`): E002 at the lookup. */
+                    const char *element = yx_mo_schema_element_type_name(node->name);
+                    if (element && strcmp(element, "struct") != 0) {
+                        yx_fail(p, "wrong type span:%zu:%zu:`struct`:%s",
+                                token.offset,
+                                p->previous_token.offset + p->previous_token.length,
+                                element);
+                        return NULL;
+                    }
+                }
+                if (!yx_expect(p, TK_DOT, "'.' after indexed module item"))
+                    return NULL;
+                member = p->token;
+                if (member.kind != TK_IDENTIFIER) {
+                    yx_fail(p, "expected indexed module field name");
+                    return NULL;
+                }
+                if (length > SIZE_MAX - member.length - 2) {
+                    yx_fail(p, "module name too long");
+                    return NULL;
+                }
+                grown = realloc(node->name, length + member.length + 2);
+                if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                node->name = grown;
+                node->name[length++] = '.';
+                memcpy(node->name + length, member.begin, member.length);
+                length += member.length;
+                node->name[length] = '\0';
+                yx_next(p);
+                while (yx_accept(p, TK_DOT)) {
+                    char *grown;
+                    member = p->token;
+                    if (member.kind != TK_IDENTIFIER ||
+                        length > SIZE_MAX - member.length - 2) {
+                        yx_fail(p, "expected indexed module field name");
+                        return NULL;
+                    }
+                    grown = realloc(node->name, length + member.length + 2);
+                    if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                    node->name = grown;
+                    node->name[length++] = '.';
+                    memcpy(node->name + length, member.begin, member.length);
+                    length += member.length;
+                    node->name[length] = '\0';
+                    yx_next(p);
+                }
+                if (yx_accept_lookup(p, node, 1, token.offset)) {
+                    char *grown;
+                    node->first_three_index_ends[1] = length;
+                    node->b = yx_parse_expr(p, 1);
+                    if (!node->b || !yx_expect(p, TK_RBRACKET,
+                                                "']' after nested module index"))
+                        return NULL;
+                    if (p->token.kind != TK_DOT) {
+                        static const char suffix[] = ".value";
+                        grown = realloc(node->name, length + sizeof(suffix));
+                        if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                        node->name = grown;
+                        memcpy(node->name + length, suffix, sizeof(suffix));
+                        node->implicit_value = true;
+                        node->kind = N_MODULE_NESTED_INDEXED_FIELD;
+                        return node;
+                    }
+                    if (!yx_expect(p, TK_DOT,
+                                   "'.' after nested module item"))
+                        return NULL;
+                    member = p->token;
+                    if (member.kind != TK_IDENTIFIER ||
+                        length > SIZE_MAX - member.length - 2) {
+                        yx_fail(p, "expected nested module field name");
+                        return NULL;
+                    }
+                    grown = realloc(node->name, length + member.length + 2);
+                    if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                    node->name = grown;
+                    node->name[length++] = '.';
+                    memcpy(node->name + length, member.begin, member.length);
+                    length += member.length;
+                    node->name[length] = '\0';
+                    yx_next(p);
+                    while (yx_accept(p, TK_DOT)) {
+                        member = p->token;
+                        if (member.kind != TK_IDENTIFIER ||
+                            length > SIZE_MAX - member.length - 2) {
+                            yx_fail(p, "expected nested module field name");
+                            return NULL;
+                        }
+                        grown = realloc(node->name,
+                                        length + member.length + 2);
+                        if (!grown) {
+                            yx_fail(p, "out of memory");
+                            return NULL;
+                        }
+                        node->name = grown;
+                        node->name[length++] = '.';
+                        memcpy(node->name + length, member.begin,
+                               member.length);
+                        length += member.length;
+                        node->name[length] = '\0';
+                        yx_next(p);
+                    }
+                    if (yx_accept_lookup(p, node, 2, token.offset)) {
+                        node->first_three_index_ends[2] = length;
+                        node->c = yx_parse_expr(p, 1);
+                        if (!node->c || !yx_expect(p, TK_RBRACKET,
+                                                  "']' after third module index"))
+                            return NULL;
+                        return yx_parse_after_third_index(p, node, length);
+                    }
+                    if (p->token.kind == TK_LPAREN &&
+                        !yx_parse_bound_method_arguments(p, node)) return NULL;
+                    node->kind = N_MODULE_NESTED_INDEXED_FIELD;
+                    return node;
+                }
+                if (p->token.kind == TK_LPAREN) {
+                    const char *signature_member =
+                        yx_signature_member(node->name);
+                    if (signature_member &&
+                        strcmp(signature_member, "valid_on") == 0) {
+                        node->call_start = p->token.offset;
+                        yx_next(p);
+                        node->b = yx_parse_expr(p, 1);
+                        if (!node->b || !yx_expect(p, TK_RPAREN,
+                                                   "')' after signature timestamp"))
+                            return NULL;
+                        node->operation = TK_LPAREN;
+                    } else if (!yx_parse_bound_method_arguments(p, node)) return NULL;
+                }
+                node->kind = N_MODULE_INDEXED_FIELD;
+                return node;
+            }
+            if (p->token.kind != TK_LPAREN) {
+                node->kind = N_MODULE_FIELD;
+                if (token.length == 2 && memcmp(token.begin, "vt", 2) == 0) {
+                    node->span_start = token.offset;
+                    node->span_end = member.offset + member.length;
+                }
+                return node;
+            }
+            node->call_start = p->token.offset;
+            node->call_member_start = member.offset;
+            node->call_member_end = member.offset + member.length;
+            if (!yx_expect(p, TK_LPAREN, "'(' after module function"))
+                return NULL;
+            if (!yx_accept(p, TK_RPAREN)) {
+                for (;;) {
+                    yx_node *argument = yx_parse_expr(p, 1);
+                    if (!argument || !yx_for_in_add_item(p, node, argument))
+                        return NULL;
+                    if (!yx_accept(p, TK_COMMA)) break;
+                }
+                if (!yx_expect(p, TK_RPAREN, "')' after module arguments"))
+                    return NULL;
+            }
+            /* A member read from a call's result (`pe.imphash().x`): the
+             * result is not a structure (E002 at the call). */
+            if (p->token.kind == TK_DOT) {
+                const char *type = yx_call_result_type_name(node);
+                if (type && strcmp(type, "unknown") != 0 &&
+                    strcmp(type, "struct") != 0) {
+                    yx_fail(p, "wrong type span:%zu:%zu:`struct`:%s",
+                            node->call_member_start,
+                            p->previous_token.offset + p->previous_token.length,
+                            type);
+                    return NULL;
+                }
+            }
+            return node;
+        }
+        if (p->token.kind == TK_LPAREN) {
+            if (!p->with_depth && !(token.length == 11 &&
+                (memcmp(token.begin, "test_proto2", 11) == 0 ||
+                 memcmp(token.begin, "test_proto3", 11) == 0))) {
+                yx_fail(p, "unsupported function '%.*s'", (int)token.length,
+                        token.begin);
+                return NULL;
+            }
+            node = yx_new_node(p, N_CALL);
+            if (!node) return NULL;
+            node->name = yx_copy(token.begin, token.length);
+            if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+            node->call_start = p->token.offset;
+            yx_next(p);
+            if (!yx_accept(p, TK_RPAREN)) {
+                do {
+                    yx_node *argument = yx_parse_expr(p, 1);
+                    if (!argument || !yx_for_in_add_item(p, node, argument)) return NULL;
+                } while (yx_accept(p, TK_COMMA));
+                if (!yx_expect(p, TK_RPAREN, "')' after function arguments")) return NULL;
+            }
+            return node;
+        }
+        node = yx_new_node(p, p->token.kind == TK_LBRACKET ?
+                          N_GLOBAL_INDEXED : N_RULE);
+        if (!node) return NULL;
+        if (node->kind == N_RULE) {
+            node->span_start = token.offset;
+            node->span_end = token.offset + token.length;
+        }
+        node->name = yx_copy(token.begin, token.length);
+        if (!node->name) { yx_fail(p, "out of memory"); return NULL; }
+        if (node->kind == N_GLOBAL_INDEXED) {
+            (void)yx_accept_lookup(p, node, 0, token.offset);
+            node->first_three_index_ends[0] = strlen(node->name);
+            node->a = yx_parse_expr(p, 1);
+            if (!node->a || !yx_expect(p, TK_RBRACKET,
+                                        "']' after global index"))
+                return NULL;
+            node->first_lookup_end = p->previous_token.offset + p->previous_token.length;
+            if (yx_accept(p, TK_DOT)) {
+                size_t length = strlen(node->name);
+                do {
+                    yx_token member = p->token;
+                    char *grown;
+                    if (member.kind != TK_IDENTIFIER ||
+                        length > SIZE_MAX - member.length - 2) {
+                        yx_fail(p, "expected indexed global field name");
+                        return NULL;
+                    }
+                    grown = realloc(node->name,
+                                    length + member.length + 2);
+                    if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                    node->name = grown;
+                    node->name[length++] = '.';
+                    memcpy(node->name + length, member.begin, member.length);
+                    length += member.length;
+                    node->name[length] = '\0';
+                    yx_next(p);
+                } while (yx_accept(p, TK_DOT));
+                if (yx_accept_lookup(p, node, 1, token.offset)) {
+                    static const char suffix[] = ".value";
+                    char *grown;
+                    node->first_three_index_ends[1] = length;
+                    node->b = yx_parse_expr(p, 1);
+                    if (!node->b || !yx_expect(p, TK_RBRACKET,
+                                                "']' after nested global index"))
+                        return NULL;
+                    if (yx_accept(p, TK_DOT)) {
+                        do {
+                            yx_token member = p->token;
+                            if (member.kind != TK_IDENTIFIER ||
+                                length > SIZE_MAX - member.length - 2) {
+                                yx_fail(p, "expected nested global field name");
+                                return NULL;
+                            }
+                            grown = realloc(node->name,
+                                            length + member.length + 2);
+                            if (!grown) {
+                                yx_fail(p, "out of memory");
+                                return NULL;
+                            }
+                            node->name = grown;
+                            node->name[length++] = '.';
+                            memcpy(node->name + length, member.begin,
+                                   member.length);
+                            length += member.length;
+                            node->name[length] = '\0';
+                            yx_next(p);
+                        } while (yx_accept(p, TK_DOT));
+                        if (yx_accept_lookup(p, node, 2, token.offset)) {
+                            node->first_three_index_ends[2] = length;
+                            node->c = yx_parse_expr(p, 1);
+                            if (!node->c || !yx_expect(
+                                    p, TK_RBRACKET,
+                                    "']' after third global index"))
+                                return NULL;
+                            return yx_parse_after_third_index(p, node, length);
+                        }
+                        if (p->token.kind == TK_LPAREN &&
+                            !yx_parse_bound_method_arguments(p, node)) return NULL;
+                        node->kind = N_MODULE_NESTED_INDEXED_FIELD;
+                        return node;
+                    }
+                    grown = realloc(node->name, length + sizeof(suffix));
+                    if (!grown) { yx_fail(p, "out of memory"); return NULL; }
+                    node->name = grown;
+                    memcpy(node->name + length, suffix, sizeof(suffix));
+                    node->implicit_value = true;
+                    node->kind = N_MODULE_NESTED_INDEXED_FIELD;
+                    return node;
+                }
+                node->kind = N_MODULE_INDEXED_FIELD;
+                if (p->token.kind == TK_LPAREN &&
+                    !yx_parse_bound_method_arguments(p, node)) return NULL;
+            }
+        }
+        return node;
+    }
+    if (token.kind == TK_BAD) {
+        if ((unsigned char)*token.begin >= 0x80)
+            yx_fail(p, "expected an expression");
+        else
+            yx_fail(p, "unsupported character '%c'", *token.begin);
+    } else if (token.kind == TK_END) {
+        yx_fail(p, "unexpected end of condition");
+    } else {
+        yx_fail(p, "expected an expression");
+    }
+    return NULL;
+}
+
+static int yx_precedence(yx_token_kind kind)
+{
+    switch (kind) {
+    case TK_OR: return 1;
+    case TK_AND: return 2;
+    case TK_EQ: case TK_NE: case TK_CONTAINS: case TK_ICONTAINS:
+    case TK_STARTSWITH: case TK_ISTARTSWITH: case TK_ENDSWITH:
+    case TK_IENDSWITH: case TK_IEQUALS: case TK_MATCHES: return 4;
+    case TK_LT: case TK_LE: case TK_GT: case TK_GE: return 5;
+    case TK_PIPE: return 6;
+    case TK_CARET: return 7;
+    case TK_AMP: return 8;
+    case TK_SHL: case TK_SHR: return 9;
+    case TK_PLUS: case TK_MINUS: return 10;
+    case TK_STAR: case TK_DIV: case TK_PERCENT: return 11;
+    default: return 0;
+    }
+}
+
+static bool yx_percent_followed_by_of(const yx_parser *p)
+{
+    yx_parser preview = *p;
+    yx_next(&preview);
+    return !preview.failed && preview.token.kind == TK_OF;
+}
+
+static bool yx_percent_followed_by_for_in(const yx_parser *p)
+{
+    yx_parser preview = *p;
+    yx_next(&preview);
+    if (preview.failed || preview.token.kind != TK_IDENTIFIER) return false;
+    yx_next(&preview);
+    return !preview.failed && preview.token.kind == TK_IN;
+}
+
+/* A name a `with` declaration (constant: its folded value) or a loop
+ * variable (not constant) binds while its scope is folded. */
+typedef struct yx_fold_binding {
+    const char *name;
+    yx_node value;
+    bool constant;
+} yx_fold_binding;
+
+/* An expression that is constant through a binding: ast2ir folds it (and
+ * reports its range errors) but the node keeps reading the variable. */
+typedef struct yx_fold_virtual {
+    const yx_node *node;
+    yx_node value;
+} yx_fold_virtual;
+
+static bool yx_fold_bind(yx_parser *p, const char *name, const yx_node *value)
+{
+    if (p->fold_binding_count == p->fold_binding_capacity) {
+        size_t next = p->fold_binding_capacity ? p->fold_binding_capacity * 2 : 8;
+        yx_fold_binding *grown = realloc(p->fold_bindings, next * sizeof(*grown));
+        if (!grown) { yx_fail(p, "out of memory"); return false; }
+        p->fold_bindings = grown;
+        p->fold_binding_capacity = next;
+    }
+    yx_fold_binding *binding = &p->fold_bindings[p->fold_binding_count++];
+    memset(binding, 0, sizeof(*binding));
+    binding->name = name;
+    if (value) {
+        binding->value = *value;
+        binding->constant = true;
+    }
+    return true;
+}
+
+static bool yx_fold_set_virtual(yx_parser *p, const yx_node *node,
+                                const yx_node *value)
+{
+    if (p->fold_virtual_count == p->fold_virtual_capacity) {
+        size_t next = p->fold_virtual_capacity ? p->fold_virtual_capacity * 2 : 8;
+        yx_fold_virtual *grown = realloc(p->fold_virtuals, next * sizeof(*grown));
+        if (!grown) { yx_fail(p, "out of memory"); return false; }
+        p->fold_virtuals = grown;
+        p->fold_virtual_capacity = next;
+    }
+    p->fold_virtuals[p->fold_virtual_count].node = node;
+    p->fold_virtuals[p->fold_virtual_count++].value = *value;
+    return true;
+}
+
+/* The constant an operand folds to: the node itself (a literal), the value
+ * of the innermost binding of its name, or its value through a binding.
+ * NULL when it is not constant. */
+static const yx_node *yx_fold_value(const yx_parser *p, const yx_node *node)
+{
+    if (!node) return NULL;
+    if (node->kind == N_INTEGER || node->kind == N_FLOAT) return node;
+    if (node->kind == N_RULE && node->name)
+        for (size_t i = p->fold_binding_count; i-- > 0;)
+            if (strcmp(p->fold_bindings[i].name, node->name) == 0)
+                return p->fold_bindings[i].constant ? &p->fold_bindings[i].value : NULL;
+    for (size_t i = p->fold_virtual_count; i-- > 0;)
+        if (p->fold_virtuals[i].node == node) return &p->fold_virtuals[i].value;
+    return NULL;
+}
+
+static bool yx_fold_numeric_impl(yx_parser *p, yx_node *node);
+
+/* Fold non-arithmetic constants after their children have been processed.
+ * Operands constant only through `with` declarations fold into a virtual
+ * value: range errors are reported at the operands' own spans. */
+static bool yx_fold_numeric(yx_parser *p, yx_node *node)
+{
+    const yx_node *a = yx_fold_value(p, node->a);
+    const yx_node *b = yx_fold_value(p, node->b);
+    if ((node->kind == N_UNARY || node->kind == N_BINARY) &&
+        ((a && a != node->a) || (b && b != node->b))) {
+        yx_node copy = *node, left, right;
+        if (a && a != node->a) {
+            left = *a;
+            left.span_start = node->a->span_start;
+            left.span_end = node->a->span_end;
+            copy.a = &left;
+        }
+        if (b && b != node->b) {
+            right = *b;
+            right.span_start = node->b->span_start;
+            right.span_end = node->b->span_end;
+            copy.b = &right;
+        }
+        if (!yx_fold_numeric_impl(p, &copy)) return false;
+        if (copy.kind == N_INTEGER || copy.kind == N_FLOAT) {
+            copy.a = copy.b = NULL;
+            return yx_fold_set_virtual(p, node, &copy);
+        }
+        return true;
+    }
+    return yx_fold_numeric_impl(p, node);
+}
+
+static bool yx_fold_numeric_impl(yx_parser *p, yx_node *node)
+{
+    yx_node *a = node->a, *b = node->b;
+    bool a_numeric = a && (a->kind == N_INTEGER || a->kind == N_FLOAT);
+    bool b_numeric = b && (b->kind == N_INTEGER || b->kind == N_FLOAT);
+    if (node->kind == N_UNARY && a_numeric) {
+        node->is_unsigned = a->is_unsigned;
+        node->unsigned_unary = a->is_unsigned &&
+            (node->operation == TK_MINUS || node->operation == TK_TILDE);
+        if (node->operation == TK_MINUS) {
+            if (a->kind == N_FLOAT) {
+                node->kind = N_FLOAT;
+                node->floating = -a->floating;
+            } else {
+                if ((a->is_unsigned && a->number > (UINT64_C(1) << 63)) ||
+                    (!a->is_unsigned && a->number == (uint64_t)INT64_MIN)) {
+                    yx_fail(p, "number out of range span %zu..%zu",
+                            node->span_start, node->span_end);
+                    return false;
+                }
+                node->kind = N_INTEGER;
+                node->number = (uint64_t)(0 - a->number);
+                node->is_unsigned = false;
+            }
+        } else if (node->operation == TK_PLUS) {
+            node->kind = a->kind;
+            node->number = a->number;
+            node->floating = a->floating;
+        } else if (node->operation == TK_TILDE && a->kind == N_INTEGER) {
+            node->kind = N_INTEGER;
+            node->number = ~a->number;
+        }
+        return true;
+    }
+    if (node->kind == N_BINARY &&
+        (node->operation == TK_SHL || node->operation == TK_SHR) &&
+        b && b->kind == N_INTEGER && !b->is_unsigned && (int64_t)b->number < 0) {
+        /* A constant negative shift count is rejected even when the left
+           operand is dynamic (for example, `filesize << -1`). */
+        if (b->span_start != SIZE_MAX && b->span_end != SIZE_MAX)
+            yx_fail(p, "unexpected negative shift count span %zu..%zu",
+                    b->span_start, b->span_end);
+        else
+            yx_fail(p, "unexpected negative shift count");
+        return false;
+    }
+    if (node->kind != N_BINARY || !a_numeric || !b_numeric) return true;
+    node->is_unsigned = a->is_unsigned || b->is_unsigned;
+    if (node->operation == TK_SHL || node->operation == TK_SHR)
+        node->is_unsigned = a->is_unsigned;
+    if (node->operation == TK_DIV &&
+        (a->kind == N_FLOAT || b->kind == N_FLOAT)) {
+        double x = a->kind == N_FLOAT ? a->floating : a->is_unsigned ?
+                   (double)a->number : (double)(int64_t)a->number;
+        double y = b->kind == N_FLOAT ? b->floating : b->is_unsigned ?
+                   (double)b->number : (double)(int64_t)b->number;
+        node->kind = N_FLOAT;
+        node->floating = x / y;
+        node->is_unsigned = false;
+        return true;
+    }
+    if (a->kind != N_INTEGER || b->kind != N_INTEGER) return true;
+    switch (node->operation) {
+    case TK_AMP: node->number = a->number & b->number; break;
+    case TK_CARET: node->number = a->number ^ b->number; break;
+    case TK_PIPE: node->number = a->number | b->number; break;
+    case TK_DIV:
+        if (!b->number || (!node->is_unsigned && a->number == (uint64_t)INT64_MIN &&
+                          b->number == UINT64_MAX)) return true;
+        node->number = node->is_unsigned ? a->number / b->number :
+            (uint64_t)((int64_t)a->number / (int64_t)b->number);
+        break;
+    case TK_PERCENT:
+        if (!b->number) return true;
+        node->number = node->is_unsigned ? a->number % b->number :
+            a->number == (uint64_t)INT64_MIN && b->number == UINT64_MAX ? 0 :
+            (uint64_t)((int64_t)a->number % (int64_t)b->number);
+        break;
+    case TK_SHL: case TK_SHR:
+        if (b->number >= 64) node->number = 0;
+        else if (node->operation == TK_SHL) node->number = a->number << b->number;
+        else if (b->number == 0) node->number = a->number;
+        else node->number = (a->number >> b->number) |
+                            (!a->is_unsigned && (int64_t)a->number < 0 ? UINT64_MAX << (64 - b->number) : 0);
+        break;
+    default: return true;
+    }
+    node->kind = N_INTEGER;
+    return true;
+}
+
+typedef struct {
+    bool any;
+    bool all_constant;
+    bool is_float;
+    bool is_unsigned;
+    bool negative;
+    bool overflow;
+    /* An operand is constant only through a `with` declaration. */
+    bool bound;
+    uint64_t low, high;
+    double value;
+} yx_fold_accumulator;
+
+static bool yx_fold_node(yx_parser *p, yx_node *node);
+
+/* Sign/magnitude i128 arithmetic keeps constant folding exact on C11
+ * implementations without a native 128-bit integer, including MSVC. */
+static void yx_fold_integer(yx_fold_accumulator *acc, uint64_t magnitude,
+                              bool negative, yx_token_kind operation)
+{
+    if (operation == TK_STAR) {
+        uint32_t a[4] = {(uint32_t)acc->low, (uint32_t)(acc->low >> 32),
+                         (uint32_t)acc->high, (uint32_t)(acc->high >> 32)};
+        uint32_t b[2] = {(uint32_t)magnitude, (uint32_t)(magnitude >> 32)};
+        uint32_t product[6] = {0};
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t carry = 0;
+            for (unsigned j = 0; j < 2; ++j) {
+                uint64_t part = (uint64_t)a[i] * b[j] + product[i + j] + carry;
+                product[i + j] = (uint32_t)part;
+                carry = part >> 32;
+            }
+            product[i + 2] = (uint32_t)carry;
+        }
+        acc->overflow |= product[4] != 0 || product[5] != 0;
+        acc->low = (uint64_t)product[0] | (uint64_t)product[1] << 32;
+        acc->high = (uint64_t)product[2] | (uint64_t)product[3] << 32;
+        acc->negative = acc->negative != negative;
+    } else {
+        if (operation == TK_MINUS && magnitude) negative = !negative;
+        if (acc->negative == negative) {
+            uint64_t previous = acc->low;
+            acc->low += magnitude;
+            acc->high += acc->low < previous;
+        } else if (acc->high || acc->low >= magnitude) {
+            uint64_t previous = acc->low;
+            acc->low -= magnitude;
+            acc->high -= previous < magnitude;
+        } else {
+            acc->low = magnitude - acc->low;
+            acc->negative = negative;
+        }
+    }
+    if (!acc->high && !acc->low) acc->negative = false;
+    acc->overflow |= acc->high > (UINT64_C(1) << 63) ||
+        (acc->high == (UINT64_C(1) << 63) && (!acc->negative || acc->low != 0));
+}
+
+static void yx_fold_accumulate(yx_fold_accumulator *acc, const yx_node *node,
+                               yx_token_kind operation)
+{
+    double value;
+    if (node->kind != N_INTEGER && node->kind != N_FLOAT) {
+        acc->all_constant = false;
+        return;
+    }
+    if (node->kind == N_FLOAT) acc->is_float = true;
+    acc->is_unsigned |= node->is_unsigned;
+    value = node->kind == N_FLOAT ? node->floating : node->is_unsigned ?
+            (double)node->number : (double)(int64_t)node->number;
+    if (!acc->any) {
+        acc->value = value;
+        acc->negative = !node->is_unsigned && (int64_t)node->number < 0;
+        acc->low = acc->negative ? (uint64_t)0 - node->number : node->number;
+        acc->any = true;
+    } else if (acc->all_constant) {
+        if (operation == TK_PLUS) acc->value += value;
+        else if (operation == TK_MINUS) acc->value -= value;
+        else acc->value *= value;
+        if (node->kind == N_INTEGER) {
+            bool negative = !node->is_unsigned && (int64_t)node->number < 0;
+            yx_fold_integer(acc, negative ? (uint64_t)0 - node->number : node->number,
+                            negative, operation);
+        }
+    }
+}
+
+/* The upstream AST combines a left-associated chain of the same operator
+ * into one n-ary operation, even across parentheses. Fold the entire chain
+ * before checking its range, so (MAX * MAX) * 0 can fold to zero. */
+static bool yx_fold_chain(yx_parser *p, yx_node *node,
+                          yx_token_kind operation,
+                          yx_fold_accumulator *acc)
+{
+    const yx_node *value;
+    if (node->kind == N_BINARY && node->operation == operation) {
+        node->fold_visited = true;
+        if (!yx_fold_chain(p, node->a, operation, acc) ||
+            !yx_fold_node(p, node->b)) return false;
+        node = node->b;
+    } else if (!yx_fold_node(p, node)) return false;
+    value = yx_fold_value(p, node);
+    if (value && value != node) acc->bound = true;
+    yx_fold_accumulate(acc, value ? value : node, operation);
+    return true;
+}
+
+static bool yx_fold_node_impl(yx_parser *p, yx_node *node)
+{
+    if (!node) return true;
+    if (node->kind == N_BINARY &&
+        (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+         node->operation == TK_STAR)) {
+        yx_fold_accumulator acc = {0};
+        acc.all_constant = true;
+        if (!yx_fold_chain(p, node, node->operation, &acc)) return false;
+        if (!acc.all_constant) return true;
+        yx_node folded = *node;
+        if (acc.is_float) {
+            folded.kind = N_FLOAT;
+            folded.floating = acc.value;
+        } else {
+            if (acc.overflow || acc.high ||
+                (acc.is_unsigned ? acc.negative :
+                 acc.negative ? acc.low > (UINT64_C(1) << 63) : acc.low > INT64_MAX)) {
+                if (node->span_start != SIZE_MAX &&
+                    node->span_end != SIZE_MAX)
+                    yx_fail(p, "%snumber out of range span %zu..%zu",
+                            acc.is_unsigned ? "unsigned " : "",
+                            node->span_start, node->span_end);
+                else
+                    yx_fail(p, "%snumber out of range", acc.is_unsigned ? "unsigned " : "");
+                return false;
+            }
+            folded.kind = N_INTEGER;
+            folded.number = acc.negative ? (uint64_t)0 - acc.low : acc.low;
+            folded.is_unsigned = acc.is_unsigned;
+        }
+        if (acc.bound) {
+            folded.a = folded.b = NULL;
+            return yx_fold_set_virtual(p, node, &folded);
+        }
+        node->kind = folded.kind;
+        node->floating = folded.floating;
+        node->number = folded.number;
+        node->is_unsigned = folded.is_unsigned;
+        return true;
+    }
+    for (size_t i = 0; i < node->item_count; ++i) {
+        if (!yx_fold_node(p, node->items[i])) return false;
+        /* A `with` declaration binds its name to its folded value. */
+        if (node->kind == N_WITH && node->set_names && i < node->set_count &&
+            !yx_fold_bind(p, node->set_names[i], yx_fold_value(p, node->items[i])))
+            return false;
+    }
+    if (!yx_fold_node(p, node->a) || !yx_fold_node(p, node->b) ||
+        !yx_fold_node(p, node->c)) return false;
+    if (node->kind == N_WITH || node->kind == N_FOR_IN) {
+        /* Loop variables hide outer declarations of their names. */
+        size_t mark = node->kind == N_WITH ?
+            p->fold_binding_count - (node->set_names ? node->set_count : 0) :
+            p->fold_binding_count;
+        bool ok = true;
+        if (node->kind == N_FOR_IN) {
+            if (node->name) ok = yx_fold_bind(p, node->name, NULL);
+            for (size_t i = 0; ok && node->set_names && i < node->set_count; ++i)
+                ok = yx_fold_bind(p, node->set_names[i], NULL);
+        }
+        ok = ok && yx_fold_node(p, node->body);
+        p->fold_binding_count = mark;
+        if (!ok) return false;
+    } else if (!yx_fold_node(p, node->body)) return false;
+    return yx_fold_numeric(p, node);
+}
+
+static bool yx_fold_node(yx_parser *p, yx_node *node)
+{
+    bool result;
+    if (!node) return true;
+    node->fold_visited = true;
+    result = yx_fold_node_impl(p, node);
+    node->fold_completed = result;
+    return result;
+}
+
+/* The syntax check rejects conditions nested beyond YARA-X's MAX_CST_DEPTH
+ * (1000) with "nesting limit reached", so every accepted condition parses
+ * well within this bound; it only protects the recursion when the syntax
+ * check could not run. */
+#define YX_PARSE_DEPTH_LIMIT 2048
+
+static yx_node *yx_parse_expr(yx_parser *p, int minimum)
+{
+    yx_node *left, *right, *node;
+    yx_token_kind prefix, operation;
+    size_t prefix_start;
+    int precedence;
+    if (++p->depth > YX_PARSE_DEPTH_LIMIT) {
+        yx_fail(p, "condition nesting limit exceeded");
+        p->depth--;
+        return NULL;
+    }
+    prefix = p->token.kind;
+    prefix_start = p->token.offset;
+    if (prefix == TK_PLUS) {
+        yx_fail(p, "expected an expression");
+        --p->depth;
+        return NULL;
+    }
+    if (prefix == TK_MINUS || prefix == TK_PLUS || prefix == TK_TILDE ||
+        prefix == TK_NOT || prefix == TK_DEFINED) {
+        node = yx_new_node(p, N_UNARY);
+        if (!node) { p->depth--; return NULL; }
+        node->operation = prefix;
+        yx_next(p);
+        node->a = yx_parse_expr(p, prefix == TK_NOT || prefix == TK_DEFINED ? 3 : 12);
+        if ((prefix == TK_MINUS || prefix == TK_TILDE) && yx_reject_boolean_operand(p, node->a)) {
+            p->depth--;
+            return NULL;
+        }
+        if (node->a && node->a->span_end != SIZE_MAX) {
+            node->span_start = prefix_start;
+            node->span_end = node->a->span_end;
+        }
+        if (prefix == TK_MINUS && node->a && node->a->kind == N_INTEGER &&
+            !node->a->parenthesized && !node->a->a && node->a->is_unsigned) {
+            if (node->a->number != (UINT64_C(1) << 63)) {
+                yx_fail(p, "integer literal overflows 64 bits span %zu..%zu",
+                        prefix_start, node->a->span_end);
+                --p->depth;
+                return NULL;
+            }
+            node->kind = N_INTEGER;
+            node->number = node->a->number;
+        }
+        left = node->a ? node : NULL;
+    } else left = yx_parse_primary(p);
+    /* Every primary expression needs a source range for typed diagnostics,
+     * including keyword values such as filesize and pattern-count nodes.
+     * Keep any more specific range assigned by its own parser. */
+    if (left && left->span_start == SIZE_MAX) {
+        left->span_start = prefix_start;
+        left->span_end = p->token.offset;
+        while (left->span_end > left->span_start &&
+               isspace((unsigned char)p->source[left->span_end - 1]))
+            --left->span_end;
+    }
+    while (left && !p->failed) {
+        if (p->for_quantifier && p->token.kind == TK_PERCENT &&
+            yx_percent_followed_by_for_in(p)) break;
+        if (minimum <= 13 && (p->token.kind == TK_AT || p->token.kind == TK_IN)) {
+            yx_token_kind filter = p->token.kind;
+            if (left->kind != N_PATTERN && left->kind != N_COUNT) {
+                yx_fail(p, "'at' and 'in' require a pattern or pattern count"); break;
+            }
+            if (left->filter != FILTER_NONE || (left->kind == N_COUNT && filter == TK_AT)) {
+                yx_fail(p, "invalid pattern offset filter"); break;
+            }
+            yx_next(p);
+            if (filter == TK_AT) {
+                left->filter = FILTER_AT;
+                left->b = yx_parse_expr(p, 10);
+                if (!left->b) break;
+            } else {
+                left->filter = FILTER_IN;
+                if (!yx_parse_range(p, left)) break;
+            }
+            continue;
+        }
+        if (minimum <= 3 && p->token.kind == TK_OF) {
+            left = yx_parse_of(p, Q_NUMBER, left, false);
+            continue;
+        }
+        if (p->token.kind == TK_PERCENT && yx_percent_followed_by_of(p)) {
+            if (minimum <= 3) {
+                yx_next(p);
+                left = yx_parse_of(p, Q_PERCENT, left, false);
+                continue;
+            }
+            break;
+        }
+        operation = p->token.kind;
+        precedence = yx_precedence(operation);
+        if (precedence < minimum || precedence == 0) break;
+        if (left->paren_bool && operation != TK_AND && operation != TK_OR) {
+            /* A Boolean term takes no comparison or arithmetic operator. */
+            yx_fail_at(p, p->token.offset, "syntax-expected %zu operator or `%s`",
+                       yx_source_token_length(p->source, p->token.offset),
+                       yx_paren_depth_at(p, p->token.offset) ? ")" : "}");
+            break;
+        }
+        if (operation == TK_MATCHES) {
+            const char *operand = p->source + p->position;
+            node = yx_new_node(p, N_MATCHES);
+            if (!node) break;
+            node->a = left;
+            while (isspace((unsigned char)*operand)) ++operand;
+            if (*operand != '/') {
+                /* YARA-X parses any expression here and rejects it by
+                 * type once it is compiled. */
+                yx_next(p);
+                right = yx_parse_expr(p, precedence + 1);
+                if (!right) break;
+                node->b = right;
+                if (left->span_start != SIZE_MAX && right->span_end != SIZE_MAX) {
+                    node->span_start = left->span_start;
+                    node->span_end = right->span_end;
+                }
+                left = node;
+                continue;
+            }
+            if (!yx_parse_condition_regex(p, node)) break;
+            left = node;
+            continue;
+        }
+        yx_next(p);
+        right = yx_parse_expr(p, precedence + 1);
+        if (!right) break;
+        if (operation != TK_AND && operation != TK_OR && yx_reject_boolean_operand(p, right)) break;
+        node = yx_new_node(p, N_BINARY);
+        if (!node) break;
+        node->operation = operation;
+        node->a = left;
+        node->b = right;
+        if (left->span_start != SIZE_MAX && right->span_end != SIZE_MAX) {
+            node->span_start = left->span_start;
+            node->span_end = right->span_end;
+        }
+        left = node;
+    }
+    p->depth--;
+    return p->failed ? NULL : left;
+}
+
+typedef struct { yx_parser *parser; yx_node *root; } yx_fold_job;
+static void yx_fold_thunk(void *data)
+{ yx_fold_job *job = data; (void)yx_fold_node(job->parser, job->root); }
+
+/* The nodes yx_eval_prepare_names resolves, so that an evaluation visits
+ * only those instead of every allocated node (each in its own cache lines).
+ * The name table is an accelerator: a node it misses takes the ordinary name
+ * lookup. Without memory the evaluation walks the allocation list. */
+static bool yx_name_node_kind(const yx_node *node)
+{
+    return node->kind == N_CALL || node->kind == N_PATTERN || node->kind == N_COUNT ||
+           node->kind == N_OFFSET || node->kind == N_LENGTH;
+}
+
+static void yx_condition_record_name_nodes(yx_condition *condition)
+{
+    size_t count = 0;
+    for (const yx_node *node = condition->allocated; node; node = node->next_allocated)
+        if (yx_name_node_kind(node)) ++count;
+    if (count) {
+        size_t at = 0;
+        condition->name_nodes = (const yx_node **)malloc(count * sizeof(*condition->name_nodes));
+        if (!condition->name_nodes) return;
+        for (const yx_node *node = condition->allocated; node; node = node->next_allocated)
+            if (yx_name_node_kind(node)) condition->name_nodes[at++] = node;
+    }
+    condition->name_node_count = count;
+    condition->name_nodes_ready = true;
+}
+
+yx_condition *yx_condition_compile_diagnostics(const char *expression, char *error,
+                                   size_t error_capacity, yx_condition **failed)
+{
+    yx_condition *condition;
+    yx_parser parser;
+    bool fold_failed = false;
+    if (failed) *failed = NULL;
+    if (error && error_capacity) error[0] = '\0';
+    if (!expression) {
+        if (error && error_capacity) snprintf(error, error_capacity, "null condition expression");
+        return NULL;
+    }
+    condition = (yx_condition *)calloc(1, sizeof(*condition));
+    if (!condition) {
+        if (error && error_capacity) snprintf(error, error_capacity, "out of memory");
+        return NULL;
+    }
+    memset(&parser, 0, sizeof(parser));
+    parser.source = expression;
+    parser.condition = condition;
+    parser.error = error;
+    parser.error_capacity = error_capacity;
+    yx_next(&parser);
+    condition->root = yx_parse_expr(&parser, 1);
+    if (!parser.failed && parser.token.kind != TK_END) {
+        yx_fail(&parser, "unexpected token '%.*s'", (int)parser.token.length, parser.token.begin);
+    }
+    if (!parser.failed && condition->root) {
+        yx_fold_job job = {&parser, condition->root};
+        condition->depth = yx_node_depth(condition->root);
+        yx_run_deep(condition->depth, yx_fold_thunk, &job);
+        fold_failed = parser.failed;
+    }
+    free(parser.fold_bindings);
+    free(parser.fold_virtuals);
+    if (parser.failed || !condition->root) {
+        if (fold_failed && failed) {
+            condition->fold_failed = true;
+            *failed = condition;
+        } else yx_condition_destroy(condition);
+        return NULL;
+    }
+    yx_condition_record_name_nodes(condition);
+    return condition;
+}
+
+yx_condition *yx_condition_compile(const char *expression, char *error,
+                                   size_t error_capacity)
+{
+    return yx_condition_compile_diagnostics(expression, error, error_capacity, NULL);
+}
+
+void yx_condition_destroy(yx_condition *condition)
+{
+    yx_node *node, *next;
+    if (!condition) return;
+    for (node = condition->allocated; node; node = next) {
+        size_t i;
+        next = node->next_allocated;
+        free(node->name);
+        if (node->compiled_regex && !node->compiled_regex_shared) {
+            pcre2_code_free((pcre2_code *)node->compiled_regex);
+        }
+        for (i = 0; i < node->set_count; i++) free(node->set_names[i]);
+        free(node->set_names);
+        free(node->set_name_starts);
+        free(node->set_name_ends);
+        free(node->items);
+        free(node->deep_index_ends);
+        free(node);
+    }
+    free(condition->name_nodes);
+    free(condition);
+}
+
+#ifdef XXYARA_VERIFY_LOAD
+static bool yx_node_fields_equal(const yx_node *a, const yx_node *b)
+{
+    if (a->kind != b->kind || a->operation != b->operation || a->span_start != b->span_start ||
+        a->span_end != b->span_end || a->call_start != b->call_start || a->number != b->number ||
+        a->is_unsigned != b->is_unsigned || a->parenthesized != b->parenthesized ||
+        a->unsigned_unary != b->unsigned_unary || a->fold_visited != b->fold_visited ||
+        a->fold_completed != b->fold_completed || memcmp(&a->floating, &b->floating, sizeof(a->floating)) ||
+        a->string_length != b->string_length || !a->name != !b->name ||
+        (a->name && (strcmp(a->name, b->name) || memcmp(a->name, b->name, a->string_length))) ||
+        !a->a != !b->a || !a->b != !b->b || !a->c != !b->c || !a->body != !b->body ||
+        a->item_count != b->item_count ||
+        memcmp(a->first_three_index_ends, b->first_three_index_ends, sizeof(a->first_three_index_ends)) ||
+        memcmp(a->index_primary_starts, b->index_primary_starts, sizeof(a->index_primary_starts)) ||
+        memcmp(a->index_primary_ends, b->index_primary_ends, sizeof(a->index_primary_ends)) ||
+        a->first_lookup_end != b->first_lookup_end || a->call_member_start != b->call_member_start ||
+        a->call_member_end != b->call_member_end || a->deep_index_count != b->deep_index_count ||
+        !a->deep_index_ends != !b->deep_index_ends ||
+        (a->deep_index_ends && memcmp(a->deep_index_ends, b->deep_index_ends, a->deep_index_count * sizeof(size_t))) ||
+        a->range_loop != b->range_loop || a->map_loop != b->map_loop || a->array_loop != b->array_loop ||
+        a->implicit_value != b->implicit_value || a->resolved_module_alias != b->resolved_module_alias ||
+        a->module_alias_prefix_length != b->module_alias_prefix_length || a->literal_matches != b->literal_matches ||
+        !a->compiled_regex != !b->compiled_regex || a->compiled_regex_shared != b->compiled_regex_shared ||
+        a->set_count != b->set_count || !a->set_name_starts != !b->set_name_starts ||
+        !a->set_name_ends != !b->set_name_ends ||
+        (a->set_name_starts && memcmp(a->set_name_starts, b->set_name_starts, a->set_count * sizeof(size_t))) ||
+        (a->set_name_ends && memcmp(a->set_name_ends, b->set_name_ends, a->set_count * sizeof(size_t))) ||
+        a->with_body_type != b->with_body_type || a->iterable_start != b->iterable_start ||
+        a->iterable_end != b->iterable_end || a->set_all != b->set_all || a->quantifier != b->quantifier ||
+        a->filter != b->filter || a->width != b->width || a->signed_read != b->signed_read ||
+        a->floating_read != b->floating_read || a->big_endian != b->big_endian ||
+        a->feature_field_cache != b->feature_field_cache || a->type_cache_valid != b->type_cache_valid ||
+        a->type_cache != b->type_cache || a->paren_bool != b->paren_bool || a->paren_open != b->paren_open ||
+        a->read_arity_error != b->read_arity_error || a->frame_start != b->frame_start ||
+        a->frame_end != b->frame_end) return false;
+    for (size_t i = 0; i < a->set_count; ++i)
+        if (!a->set_names[i] != !b->set_names[i] || (a->set_names[i] && strcmp(a->set_names[i], b->set_names[i])))
+            return false;
+    return true;
+}
+
+bool yx_condition_equal(const yx_condition *a, const yx_condition *b)
+{
+    const yx_node **stack;
+    size_t used = 0, capacity = 64;
+    bool equal = true;
+    if (!a || !b) return !a && !b;
+    if (a->depth != b->depth || a->fold_failed != b->fold_failed || !a->root != !b->root) return false;
+    if (!a->root) return true;
+    stack = malloc(capacity * 2 * sizeof(*stack));
+    if (!stack) return false;
+    stack[used++] = a->root;
+    stack[used++] = b->root;
+    while (equal && used) {
+        const yx_node *y = stack[--used], *x = stack[--used];
+        if (!yx_node_fields_equal(x, y)) { equal = false; break; }
+        size_t children = 4 + x->item_count;
+        if ((used + 2 * children) / 2 > capacity) {
+            size_t next = capacity;
+            while ((used + 2 * children) / 2 > next) next *= 2;
+            const yx_node **grown = realloc(stack, next * 2 * sizeof(*grown));
+            if (!grown) { equal = false; break; }
+            stack = grown; capacity = next;
+        }
+        const yx_node *xs[4] = {x->a, x->b, x->c, x->body}, *ys[4] = {y->a, y->b, y->c, y->body};
+        for (size_t i = 0; i < 4; ++i)
+            if (xs[i]) { stack[used++] = xs[i]; stack[used++] = ys[i]; }
+        for (size_t i = 0; i < x->item_count; ++i) {
+            if (!x->items[i] != !y->items[i]) { equal = false; break; }
+            if (x->items[i]) { stack[used++] = x->items[i]; stack[used++] = y->items[i]; }
+        }
+    }
+    free(stack);
+    return equal;
+}
+#endif
+
+static yx_value yx_defined(uint64_t value)
+{
+    yx_value result = {0};
+    result.value = value;
+    result.type = V_INTEGER;
+    result.defined = true;
+    return result;
+}
+
+static yx_value yx_defined_integer(uint64_t value, bool is_unsigned)
+{
+    yx_value result = yx_defined(value);
+    result.is_unsigned = is_unsigned;
+    return result;
+}
+
+static yx_value yx_defined_float(double value)
+{
+    yx_value result = {0};
+    result.floating = value;
+    result.type = V_FLOAT;
+    /* IEEE NaN and infinities produced by float32/64 reads and arithmetic
+       are values in YARA-X. Literal/global input validation is separate. */
+    result.defined = true;
+    return result;
+}
+
+static yx_value yx_defined_string(const char *value, size_t length)
+{
+    yx_value result = {0};
+    result.string = value;
+    result.string_length = length;
+    result.type = V_STRING;
+    result.defined = value != NULL;
+    return result;
+}
+
+static yx_value yx_defined_struct(const yx_global_object *object)
+{
+    yx_value result = {0};
+    result.object = object;
+    result.type = V_STRUCT;
+    result.defined = object != NULL;
+    return result;
+}
+
+static yx_value yx_defined_map(void)
+{
+    yx_value result = {0};
+    result.type = V_MAP;
+    result.defined = true;
+    return result;
+}
+
+static yx_value yx_undefined(void)
+{
+    yx_value result = {0};
+    return result;
+}
+
+static bool yx_truth(yx_value value)
+{
+    if (!value.defined) return false;
+    if (value.type == V_FLOAT) return value.floating != 0.0;
+    if (value.type == V_STRING) return value.string_length != 0;
+    return value.value != 0;
+}
+
+static bool yx_name_matches(const char *actual, const char *requested)
+{
+    size_t length;
+    if (!actual || !requested) return false;
+    if (actual[0] == '$') actual++;
+    length = strlen(requested);
+    if (length && requested[length - 1] == '*')
+        return strncmp(actual, requested, length - 1) == 0;
+    return strcmp(actual, requested) == 0;
+}
+
+typedef struct {
+    const char *const *pattern_names;
+    size_t pattern_count;
+    const char *const *imports;
+    size_t import_count;
+    const char *const *features;
+    size_t feature_count;
+    bool *used;
+    yx_condition_identifier_resolver identifier_exists;
+    void *user_data;
+    char *error;
+    size_t error_capacity;
+} yx_validation;
+
+static bool yx_validation_has_feature(const yx_validation *state,
+                                       const char *feature)
+{
+    for (size_t i = 0; i < state->feature_count; ++i)
+        if (strcmp(state->features[i], feature) == 0) return true;
+    return false;
+}
+
+static char *yx_global_len_base(const char *name)
+{
+    const char *dot = strchr(name, '.');
+    if (!dot || strcmp(dot, ".len") != 0) return NULL;
+    return yx_copy(name, (size_t)(dot - name));
+}
+
+typedef enum {
+    YX_STATIC_UNKNOWN, YX_STATIC_INT, YX_STATIC_FLOAT,
+    YX_STATIC_STRING, YX_STATIC_BOOL, YX_STATIC_REGEX, YX_STATIC_MAP,
+    YX_STATIC_ARRAY, YX_STATIC_STRUCT, YX_STATIC_FUNCTION
+} yx_static_type;
+
+typedef struct yx_module_array_desc {
+    const char *path;
+    const yx_global_array *schema;
+    unsigned parent_indices;
+} yx_module_array_desc;
+
+#include "module_collection_schema.h"
+#include "vt_schema.h"
+#include "vt_collection_schema.h"
+#include "test_proto_schema.h"
+
+/* `var.valid_on(timestamp)`, the pe.Signature method, on a loop variable
+ * bound to an element of pe.signatures or msi.signatures. */
+static bool yx_signature_scope_method(const yx_global_object *object,
+                                      const char *root, const char *name)
+{
+    size_t length = root ? strlen(root) : 0;
+    return object == &yx_module_schema_pe_Signature_object && name &&
+           length && strncmp(name, root, length) == 0 &&
+           strcmp(name + length, ".valid_on") == 0;
+}
+
+/* Without the test-only modules (YARA-X release builds) their names are
+ * ordinary unknown identifiers. This file is built once for both library
+ * variants, so the C API layer tells which one is linked. */
+static bool yx_test_proto_path(const char *path)
+{
+    return yx_test_proto_modules_enabled && path &&
+           ((strncmp(path, "test_proto2", 11) == 0 ||
+             strncmp(path, "test_proto3", 11) == 0) &&
+            (!path[11] || path[11] == '.'));
+}
+
+static const yx_tp_function *yx_test_proto_function(const char *path)
+{
+    if (!path || !yx_test_proto_path(path)) return NULL;
+    for (size_t i = 0; i < sizeof(yx_tp_functions) / sizeof(yx_tp_functions[0]); ++i) {
+        const yx_tp_function *function = &yx_tp_functions[i];
+        if (strcmp(path, function->path) == 0 && !*function->receiver)
+            return function;
+        if (*function->receiver && strncmp(path, "test_proto2.", 12) == 0) {
+            const char *last = strrchr(path, '.');
+            if (last && strcmp(last + 1, function->path + 12) == 0 &&
+                (strncmp(path + 12, "nested.", 7) == 0 ||
+                 strncmp(path + 12, "array_struct.", 13) == 0))
+                return function;
+        }
+    }
+    return NULL;
+}
+
+static const yx_tp_native_map *yx_test_proto_map(const char *path, size_t length)
+{
+    if (!yx_test_proto_path(path)) return NULL;
+    for (size_t i = 0; i < sizeof(yx_tp_maps) / sizeof(yx_tp_maps[0]); ++i)
+        if (strlen(yx_tp_maps[i].path) == length &&
+            memcmp(path, yx_tp_maps[i].path, length) == 0)
+            return &yx_tp_maps[i];
+    return NULL;
+}
+
+static unsigned yx_module_node_indices(const yx_node *node)
+{
+    return node->kind == N_MODULE_INDEXED_FIELD ? 1 :
+           node->kind == N_MODULE_NESTED_INDEXED_FIELD ? 2 :
+           node->kind == N_MODULE_TRIPLE_INDEXED_FIELD ? 3 : 0;
+}
+
+static const yx_vt_field *yx_vt_node_field(const yx_node *node,
+                                           bool *length_call)
+{
+    size_t length;
+    bool call;
+    if (!node || !node->name ||
+        (strncmp(node->name, "vt.", 3) != 0 && !yx_test_proto_path(node->name)) ||
+        (node->kind != N_MODULE_FIELD && node->kind != N_CALL &&
+         node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+         node->kind != N_MODULE_TRIPLE_INDEXED_FIELD)) return NULL;
+    length = strlen(node->name);
+    call = node->kind == N_CALL || node->operation == TK_LPAREN;
+    bool len = call && length > 4 &&
+               strcmp(node->name + length - 4, ".len") == 0;
+    if (len) length -= 4;
+    bool test_proto = yx_test_proto_path(node->name);
+    const yx_vt_field *fields = test_proto ? yx_tp_fields : yx_vt_fields;
+    size_t count = test_proto ? sizeof(yx_tp_fields) / sizeof(yx_tp_fields[0]) :
+                               sizeof(yx_vt_fields) / sizeof(yx_vt_fields[0]);
+    for (size_t i = 0; i < count; ++i) {
+        const yx_vt_field *field = &fields[i];
+        if (field->indices != yx_module_node_indices(node) ||
+            field->element != node->implicit_value ||
+            strlen(field->path) != length ||
+            memcmp(field->path, node->name, length) != 0) continue;
+        if (len && field->type != YX_VT_ARRAY && field->type != YX_VT_MAP &&
+            !(test_proto && field->type == YX_VT_STRING))
+            return NULL;
+        if (length_call) *length_call = len;
+        return field;
+    }
+    return NULL;
+}
+
+/* Methods of vt.net.EnrichedIP (in_range) and vt.net.EnrichedDomain
+ * (permutation_of), which YARA-X binds to every field of those types:
+ * vt.net and vt.metadata.itw. Returns 1 for in_range, 2 for
+ * permutation_of, 0 otherwise; *raw receives the struct's `raw` path. */
+static int yx_vt_method(const char *name, const char **raw)
+{
+    static const struct { const char *method; const char *raw; int kind; }
+    methods[] = {
+        {"vt.net.ip.in_range", "vt.net.ip.raw", 1},
+        {"vt.metadata.itw.ip.in_range", "vt.metadata.itw.ip.raw", 1},
+        {"vt.net.domain.permutation_of", "vt.net.domain.raw", 2},
+        {"vt.metadata.itw.domain.permutation_of",
+         "vt.metadata.itw.domain.raw", 2}
+    };
+    if (!name || strncmp(name, "vt.", 3) != 0) return 0;
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i)
+        if (strcmp(name, methods[i].method) == 0) {
+            if (raw) *raw = methods[i].raw;
+            return methods[i].kind;
+        }
+    return 0;
+}
+
+static yx_static_type yx_vt_static_type(yx_vt_type type)
+{
+    switch (type) {
+    case YX_VT_INT: return YX_STATIC_INT;
+    case YX_VT_FLOAT: return YX_STATIC_FLOAT;
+    case YX_VT_BOOL: return YX_STATIC_BOOL;
+    case YX_VT_STRING: return YX_STATIC_STRING;
+    case YX_VT_STRUCT: return YX_STATIC_STRUCT;
+    case YX_VT_ARRAY: return YX_STATIC_ARRAY;
+    case YX_VT_MAP: return YX_STATIC_MAP;
+    }
+    return YX_STATIC_UNKNOWN;
+}
+
+static const yx_module_array_desc *yx_module_array_lookup(
+    const char *path, size_t length, unsigned parent_indices)
+{
+    if (yx_test_proto_path(path))
+        for (size_t i = 0; i < sizeof(yx_tp_arrays) / sizeof(yx_tp_arrays[0]); ++i) {
+            const yx_module_array_desc *array = &yx_tp_arrays[i];
+            if (array->parent_indices == parent_indices &&
+                strlen(array->path) == length &&
+                memcmp(array->path, path, length) == 0) return array;
+        }
+    if (length > 3 && memcmp(path, "vt.", 3) == 0)
+        for (size_t i = 0; i < sizeof(yx_vt_arrays) / sizeof(yx_vt_arrays[0]); ++i) {
+            const yx_module_array_desc *array = &yx_vt_arrays[i];
+            if (array->parent_indices == parent_indices &&
+                strlen(array->path) == length &&
+                memcmp(array->path, path, length) == 0) return array;
+        }
+    for (size_t i = 0; i < sizeof(yx_module_arrays) /
+                            sizeof(yx_module_arrays[0]); ++i) {
+        const yx_module_array_desc *array = &yx_module_arrays[i];
+        if (array->parent_indices == parent_indices &&
+            strlen(array->path) == length &&
+            memcmp(array->path, path, length) == 0)
+            return array;
+    }
+    return NULL;
+}
+
+static const yx_module_array_desc *yx_module_array_node(
+    const yx_node *node, bool length_call)
+{
+    size_t length;
+    if (!node || !node->name ||
+        (node->kind != N_MODULE_FIELD && node->kind != N_CALL &&
+         node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD) ||
+        node->implicit_value) return NULL;
+    length = strlen(node->name);
+    if (length_call) {
+        if ((node->kind != N_CALL && node->operation != TK_LPAREN) ||
+            length < 4 || strcmp(node->name + length - 4, ".len") != 0)
+            return NULL;
+        length -= 4;
+    } else if (node->kind == N_CALL || node->operation == TK_LPAREN)
+        return NULL;
+    return yx_module_array_lookup(node->name, length,
+                                   yx_module_node_indices(node));
+}
+
+static const yx_module_array_desc *yx_module_scalar_node(
+    const yx_node *node, yx_static_type *type)
+{
+    unsigned indices = node ? yx_module_node_indices(node) : 0;
+    if (!indices || !node->name || node->operation == TK_LPAREN) return NULL;
+    for (size_t i = 0; i < sizeof(yx_module_arrays) /
+                            sizeof(yx_module_arrays[0]); ++i) {
+        const yx_module_array_desc *array = &yx_module_arrays[i];
+        size_t length = strlen(array->path);
+        yx_global_type field_type;
+        if (array->parent_indices + 1 != indices ||
+            strncmp(node->name, array->path, length) != 0 ||
+            node->name[length] != '.') continue;
+        if (array->schema->element_type != YX_GLOBAL_STRUCT) {
+            if (!node->implicit_value ||
+                strcmp(node->name + length + 1, "value") != 0) continue;
+            field_type = array->schema->element_type;
+        } else {
+            const yx_global_object *object = array->schema->items[0].object;
+            size_t field;
+            if (node->implicit_value) {
+                if (!strcmp(node->name + length + 1, "value")) {
+                    if (type) *type = YX_STATIC_STRUCT;
+                    return array;
+                }
+                continue;
+            }
+            for (field = 0; field < object->count; ++field)
+                if (strcmp(object->fields[field].name,
+                           node->name + length + 1) == 0) break;
+            if (field == object->count ||
+                object->fields[field].type == YX_GLOBAL_ARRAY) continue;
+            field_type = object->fields[field].type;
+        }
+        if (type) *type = field_type == YX_GLOBAL_STR ? YX_STATIC_STRING :
+                          field_type == YX_GLOBAL_BOOL ? YX_STATIC_BOOL :
+                          field_type == YX_GLOBAL_FLOAT ? YX_STATIC_FLOAT :
+                          YX_STATIC_INT;
+        return array;
+    }
+    return NULL;
+}
+
+typedef enum {
+    YX_DOTNET_ARRAY_NONE, YX_DOTNET_ARRAY_GUIDS,
+    YX_DOTNET_ARRAY_USER_STRINGS, YX_DOTNET_ARRAY_CONSTANTS,
+    YX_DOTNET_ARRAY_MODULEREFS, YX_DOTNET_ARRAY_FIELD_OFFSETS,
+    YX_DOTNET_ARRAY_STREAMS, YX_DOTNET_ARRAY_CLASSES,
+    YX_DOTNET_ARRAY_CLASS_METHODS, YX_DOTNET_ARRAY_CLASS_BASE_TYPES,
+    YX_DOTNET_ARRAY_CLASS_GENERIC_PARAMETERS,
+    YX_DOTNET_ARRAY_METHOD_GENERIC_PARAMETERS,
+    YX_DOTNET_ARRAY_METHOD_PARAMETERS
+} yx_dotnet_array_kind;
+
+static yx_dotnet_array_kind yx_dotnet_array_from_name(const char *name)
+{
+    if (strcmp(name, "dotnet.guids") == 0) return YX_DOTNET_ARRAY_GUIDS;
+    if (strcmp(name, "dotnet.user_strings") == 0)
+        return YX_DOTNET_ARRAY_USER_STRINGS;
+    if (strcmp(name, "dotnet.constants") == 0)
+        return YX_DOTNET_ARRAY_CONSTANTS;
+    if (strcmp(name, "dotnet.modulerefs") == 0)
+        return YX_DOTNET_ARRAY_MODULEREFS;
+    if (strcmp(name, "dotnet.field_offsets") == 0)
+        return YX_DOTNET_ARRAY_FIELD_OFFSETS;
+    if (strcmp(name, "dotnet.streams") == 0)
+        return YX_DOTNET_ARRAY_STREAMS;
+    if (strcmp(name, "dotnet.classes") == 0)
+        return YX_DOTNET_ARRAY_CLASSES;
+    return YX_DOTNET_ARRAY_NONE;
+}
+
+static yx_global_field yx_dotnet_stream_schema_fields[] = {
+    {.name = "name", .type = YX_GLOBAL_STR},
+    {.name = "offset", .type = YX_GLOBAL_INT},
+    {.name = "size", .type = YX_GLOBAL_INT}
+};
+
+static yx_global_object yx_dotnet_stream_schema = {
+    yx_dotnet_stream_schema_fields, 3
+};
+
+static yx_global_array yx_dotnet_generic_parameter_schema_array = {
+    YX_GLOBAL_STR, NULL, 0
+};
+
+static yx_global_field yx_dotnet_parameter_schema_fields[] = {
+    {.name = "name", .type = YX_GLOBAL_STR},
+    {.name = "type", .type = YX_GLOBAL_STR}
+};
+
+static yx_global_object yx_dotnet_parameter_schema = {
+    yx_dotnet_parameter_schema_fields, 2
+};
+
+static yx_global_scalar_value yx_dotnet_parameter_schema_items[] = {
+    {.object = &yx_dotnet_parameter_schema}
+};
+
+static yx_global_array yx_dotnet_parameter_schema_array = {
+    YX_GLOBAL_STRUCT, yx_dotnet_parameter_schema_items, 1
+};
+
+static yx_global_field yx_dotnet_method_schema_fields[] = {
+    {.name = "name", .type = YX_GLOBAL_STR},
+    {.name = "visibility", .type = YX_GLOBAL_STR},
+    {.name = "return_type", .type = YX_GLOBAL_STR},
+    {.name = "abstract", .type = YX_GLOBAL_BOOL},
+    {.name = "static", .type = YX_GLOBAL_BOOL},
+    {.name = "virtual", .type = YX_GLOBAL_BOOL},
+    {.name = "final", .type = YX_GLOBAL_BOOL},
+    {.name = "number_of_generic_parameters", .type = YX_GLOBAL_INT},
+    {.name = "number_of_parameters", .type = YX_GLOBAL_INT},
+    {.name = "generic_parameters", .type = YX_GLOBAL_ARRAY,
+     .value.array = &yx_dotnet_generic_parameter_schema_array},
+    {.name = "parameters", .type = YX_GLOBAL_ARRAY,
+     .value.array = &yx_dotnet_parameter_schema_array}
+};
+
+static yx_global_object yx_dotnet_method_schema = {
+    yx_dotnet_method_schema_fields, 11
+};
+
+static yx_global_scalar_value yx_dotnet_method_schema_items[] = {
+    {.object = &yx_dotnet_method_schema}
+};
+
+static yx_global_array yx_dotnet_method_schema_array = {
+    YX_GLOBAL_STRUCT, yx_dotnet_method_schema_items, 1
+};
+
+static yx_global_array yx_dotnet_base_type_schema_array = {
+    YX_GLOBAL_STR, NULL, 0
+};
+
+static yx_global_field yx_dotnet_class_schema_fields[] = {
+    {.name = "fullname", .type = YX_GLOBAL_STR},
+    {.name = "name", .type = YX_GLOBAL_STR},
+    {.name = "namespace", .type = YX_GLOBAL_STR},
+    {.name = "visibility", .type = YX_GLOBAL_STR},
+    {.name = "type", .type = YX_GLOBAL_STR},
+    {.name = "abstract", .type = YX_GLOBAL_BOOL},
+    {.name = "sealed", .type = YX_GLOBAL_BOOL},
+    {.name = "number_of_base_types", .type = YX_GLOBAL_INT},
+    {.name = "number_of_generic_parameters", .type = YX_GLOBAL_INT},
+    {.name = "number_of_methods", .type = YX_GLOBAL_INT},
+    {.name = "methods", .type = YX_GLOBAL_ARRAY,
+     .value.array = &yx_dotnet_method_schema_array},
+    {.name = "base_types", .type = YX_GLOBAL_ARRAY,
+     .value.array = &yx_dotnet_base_type_schema_array},
+    {.name = "generic_parameters", .type = YX_GLOBAL_ARRAY,
+     .value.array = &yx_dotnet_generic_parameter_schema_array}
+};
+
+static yx_global_object yx_dotnet_class_schema = {
+    yx_dotnet_class_schema_fields, 13
+};
+
+static yx_static_type yx_dotnet_class_member_type(const char *member)
+{
+    if (strcmp(member, "abstract") == 0 ||
+        strcmp(member, "sealed") == 0)
+        return YX_STATIC_BOOL;
+    if (strcmp(member, "number_of_base_types") == 0 ||
+        strcmp(member, "number_of_generic_parameters") == 0 ||
+        strcmp(member, "number_of_methods") == 0 ||
+        strcmp(member, "base_types.len") == 0 ||
+        strcmp(member, "generic_parameters.len") == 0 ||
+        strcmp(member, "methods.len") == 0)
+        return YX_STATIC_INT;
+    if (strcmp(member, "fullname") == 0 ||
+        strcmp(member, "name") == 0 ||
+        strcmp(member, "namespace") == 0 ||
+        strcmp(member, "visibility") == 0 ||
+        strcmp(member, "type") == 0)
+        return YX_STATIC_STRING;
+    if (strcmp(member, "methods") == 0 ||
+        strcmp(member, "base_types") == 0 ||
+        strcmp(member, "generic_parameters") == 0)
+        return YX_STATIC_ARRAY;
+    return YX_STATIC_UNKNOWN;
+}
+
+static yx_static_type yx_dotnet_class_nested_type(const char *member)
+{
+    if (strcmp(member, "base_types.value") == 0 ||
+        strcmp(member, "generic_parameters.value") == 0 ||
+        strcmp(member, "methods.name") == 0 ||
+        strcmp(member, "methods.visibility") == 0 ||
+        strcmp(member, "methods.return_type") == 0)
+        return YX_STATIC_STRING;
+    if (strcmp(member, "methods.abstract") == 0 ||
+        strcmp(member, "methods.static") == 0 ||
+        strcmp(member, "methods.virtual") == 0 ||
+        strcmp(member, "methods.final") == 0)
+        return YX_STATIC_BOOL;
+    if (strcmp(member, "methods.number_of_generic_parameters") == 0 ||
+        strcmp(member, "methods.number_of_parameters") == 0 ||
+        strcmp(member, "methods.generic_parameters.len") == 0 ||
+        strcmp(member, "methods.parameters.len") == 0)
+        return YX_STATIC_INT;
+    if (strcmp(member, "methods.generic_parameters") == 0 ||
+        strcmp(member, "methods.parameters") == 0)
+        return YX_STATIC_ARRAY;
+    return YX_STATIC_UNKNOWN;
+}
+
+static yx_static_type yx_dotnet_class_triple_type(const char *member)
+{
+    if (strcmp(member, "methods.generic_parameters.value") == 0 ||
+        strcmp(member, "methods.parameters.name") == 0 ||
+        strcmp(member, "methods.parameters.type") == 0)
+        return YX_STATIC_STRING;
+    return YX_STATIC_UNKNOWN;
+}
+
+static yx_static_type yx_pe_certificate_type(const char *member)
+{
+    if (strcmp(member, "issuer") == 0 ||
+        strcmp(member, "subject") == 0 ||
+        strcmp(member, "thumbprint") == 0 ||
+        strcmp(member, "algorithm") == 0 ||
+        strcmp(member, "algorithm_oid") == 0 ||
+        strcmp(member, "serial") == 0)
+        return YX_STATIC_STRING;
+    if (strcmp(member, "version") == 0 ||
+        strcmp(member, "not_before") == 0 ||
+        strcmp(member, "not_after") == 0)
+        return YX_STATIC_INT;
+    return YX_STATIC_UNKNOWN;
+}
+
+static yx_static_type yx_pe_signature_type(const char *member)
+{
+    yx_static_type certificate_type = yx_pe_certificate_type(member);
+    if (certificate_type != YX_STATIC_UNKNOWN) return certificate_type;
+    if (strcmp(member, "verified") == 0 ||
+        strcmp(member, "valid_on") == 0)
+        return YX_STATIC_BOOL;
+    if (strcmp(member, "digest_alg") == 0 ||
+        strcmp(member, "digest") == 0 ||
+        strcmp(member, "file_digest") == 0 ||
+        strcmp(member, "signer_info.program_name") == 0 ||
+        strcmp(member, "signer_info.more_info") == 0 ||
+        strcmp(member, "signer_info.digest") == 0 ||
+        strcmp(member, "signer_info.digest_alg") == 0)
+        return YX_STATIC_STRING;
+    if (strcmp(member, "number_of_certificates") == 0 ||
+        strcmp(member, "number_of_countersignatures") == 0 ||
+        strcmp(member, "certificates.len") == 0 ||
+        strcmp(member, "countersignatures.len") == 0 ||
+        strcmp(member, "signer_info.chain.len") == 0)
+        return YX_STATIC_INT;
+    return YX_STATIC_UNKNOWN;
+}
+
+static yx_static_type yx_pe_signature_nested_type(const char *path)
+{
+    static const char certificates[] = "certificates.";
+    static const char signer_chain[] = "signer_info.chain.";
+    static const char counters[] = "countersignatures.";
+    /* pe.signatures or msi.signatures (the same pe.Signature shape). */
+    path = yx_signature_member(path);
+    if (!path) return YX_STATIC_UNKNOWN;
+    if (strncmp(path, certificates, sizeof(certificates) - 1) == 0)
+        return yx_pe_certificate_type(path + sizeof(certificates) - 1);
+    if (strncmp(path, signer_chain, sizeof(signer_chain) - 1) == 0)
+        return yx_pe_certificate_type(path + sizeof(signer_chain) - 1);
+    if (strncmp(path, counters, sizeof(counters) - 1) == 0) {
+        const char *member = path + sizeof(counters) - 1;
+        if (strcmp(member, "verified") == 0) return YX_STATIC_BOOL;
+        if (strcmp(member, "sign_time") == 0 ||
+            strcmp(member, "chain.len") == 0)
+            return YX_STATIC_INT;
+        if (strcmp(member, "digest") == 0 ||
+            strcmp(member, "digest_alg") == 0)
+            return YX_STATIC_STRING;
+    }
+    return YX_STATIC_UNKNOWN;
+}
+
+typedef enum {
+    YX_LNK_BOOLEAN, YX_LNK_NUMBER, YX_LNK_TEXT, YX_LNK_BYTES
+} yx_lnk_field_kind;
+
+typedef struct {
+    const char *name;
+    size_t offset;
+    yx_lnk_field_kind kind;
+} yx_lnk_field_desc;
+
+#define LNK_NUM(field) {#field, offsetof(yx_lnk_result, field), YX_LNK_NUMBER}
+#define LNK_TEXT(field) {#field, offsetof(yx_lnk_result, field), YX_LNK_TEXT}
+#define LNK_TRACKER_NUM(field) {"tracker_data." #field, \
+    offsetof(yx_lnk_result, tracker_data) + offsetof(yx_lnk_tracker, field), \
+    YX_LNK_NUMBER}
+#define LNK_TRACKER_TEXT(field) {"tracker_data." #field, \
+    offsetof(yx_lnk_result, tracker_data) + offsetof(yx_lnk_tracker, field), \
+    YX_LNK_TEXT}
+#define LNK_ITEM_NUM(field) {#field, offsetof(yx_lnk_shell_item, field), YX_LNK_NUMBER}
+#define LNK_ITEM_TEXT(field) {#field, offsetof(yx_lnk_shell_item, field), YX_LNK_TEXT}
+#define LNK_ITEM_BYTES(field) {#field, offsetof(yx_lnk_shell_item, field), YX_LNK_BYTES}
+
+static const yx_lnk_field_desc yx_lnk_root_fields[] = {
+    {"is_lnk", offsetof(yx_lnk_result, is_lnk), YX_LNK_BOOLEAN},
+    LNK_TEXT(name), LNK_NUM(creation_time), LNK_NUM(access_time),
+    LNK_NUM(write_time), LNK_NUM(file_size), LNK_NUM(file_attributes),
+    LNK_TEXT(icon_location), LNK_NUM(icon_index), LNK_NUM(show_command),
+    LNK_NUM(drive_type), LNK_NUM(drive_serial_number),
+    LNK_TEXT(volume_label), LNK_TEXT(local_base_path),
+    LNK_TEXT(common_path_suffix), LNK_TEXT(relative_path),
+    LNK_TEXT(working_dir), LNK_TEXT(cmd_line_args),
+    LNK_NUM(overlay_size), LNK_NUM(overlay_offset),
+    LNK_TRACKER_NUM(version), LNK_TRACKER_TEXT(machine_id),
+    LNK_TRACKER_TEXT(droid_volume_id),
+    LNK_TRACKER_TEXT(droid_file_id),
+    LNK_TRACKER_TEXT(droid_birth_volume_id),
+    LNK_TRACKER_TEXT(droid_birth_file_id)
+};
+
+static const yx_lnk_field_desc yx_lnk_item_fields[] = {
+    LNK_ITEM_NUM(item_type), LNK_ITEM_BYTES(data),
+    LNK_ITEM_TEXT(cpl_file_path), LNK_ITEM_TEXT(root_folder_id),
+    LNK_ITEM_TEXT(volume_name), LNK_ITEM_TEXT(volume_id),
+    LNK_ITEM_TEXT(file_entry_name), LNK_ITEM_TEXT(network_location)
+};
+
+#undef LNK_NUM
+#undef LNK_TEXT
+#undef LNK_TRACKER_NUM
+#undef LNK_TRACKER_TEXT
+#undef LNK_ITEM_NUM
+#undef LNK_ITEM_TEXT
+#undef LNK_ITEM_BYTES
+
+static const yx_lnk_field_desc *yx_lnk_field_info(const char *name,
+                                                   bool indexed)
+{
+    const yx_lnk_field_desc *fields = indexed ? yx_lnk_item_fields :
+                                               yx_lnk_root_fields;
+    size_t count = indexed ?
+        sizeof(yx_lnk_item_fields) / sizeof(yx_lnk_item_fields[0]) :
+        sizeof(yx_lnk_root_fields) / sizeof(yx_lnk_root_fields[0]);
+    size_t i;
+    for (i = 0; i < count; ++i)
+        if (strcmp(name, fields[i].name) == 0) return &fields[i];
+    return NULL;
+}
+
+static yx_static_type yx_lnk_field_type(const yx_lnk_field_desc *field)
+{
+    if (!field) return YX_STATIC_UNKNOWN;
+    if (field->kind == YX_LNK_BOOLEAN) return YX_STATIC_BOOL;
+    if (field->kind == YX_LNK_TEXT || field->kind == YX_LNK_BYTES)
+        return YX_STATIC_STRING;
+    return YX_STATIC_INT;
+}
+
+static yx_value yx_eval_lnk_field(const yx_eval_context *ctx,
+                                   const char *name, bool indexed,
+                                   uint64_t index)
+{
+    const yx_lnk_field_desc *field = yx_lnk_field_info(name, indexed);
+    yx_lnk_result parsed = {0};
+    const yx_lnk_result *lnk = ctx->lnk_output;
+    const char *base;
+    yx_value result = yx_undefined();
+    if (!field) return result;
+    if (!lnk) {
+        if (!yx_lnk_parse(ctx->data, ctx->size, &parsed)) return result;
+        lnk = &parsed;
+    }
+    if (indexed) {
+        if (index >= lnk->target_id_list_count) goto done;
+        base = (const char *)&lnk->target_id_list[index];
+    } else {
+        base = (const char *)lnk;
+    }
+    base += field->offset;
+    if (field->kind == YX_LNK_BOOLEAN) {
+        result = yx_defined(*(const bool *)base);
+    } else if (field->kind == YX_LNK_NUMBER) {
+        const yx_lnk_uint *number = (const yx_lnk_uint *)base;
+        if (number->defined) result = yx_defined(number->value);
+    } else {
+        const uint8_t *bytes;
+        size_t length;
+        bool defined;
+        char *owned;
+        if (field->kind == YX_LNK_BYTES) {
+            const yx_lnk_bytes *value = (const yx_lnk_bytes *)base;
+            defined = value->defined;
+            bytes = value->data;
+            length = value->length;
+        } else {
+            const yx_lnk_string *value = (const yx_lnk_string *)base;
+            defined = value->defined;
+            bytes = (const uint8_t *)value->data;
+            length = value->length;
+        }
+        if (defined && (bytes || !length)) {
+            owned = yx_eval_alloc_string(ctx, length);
+            if (owned) {
+                if (length) memcpy(owned, bytes, length);
+                result = yx_defined_string(owned, length);
+            }
+        }
+    }
+done:
+    yx_lnk_result_free(&parsed);
+    return result;
+}
+
+typedef struct {
+    const char *name;
+    size_t text_offset;
+    size_t length_offset;
+} yx_crx_text_desc;
+
+#define CRX_TEXT(field) {#field, offsetof(yx_crx_result, field), \
+                         offsetof(yx_crx_result, field##_length)}
+static const yx_crx_text_desc yx_crx_text_fields[] = {
+    CRX_TEXT(id), CRX_TEXT(version), CRX_TEXT(name),
+    CRX_TEXT(description), CRX_TEXT(raw_name),
+    CRX_TEXT(raw_description), CRX_TEXT(minimum_chrome_version),
+    CRX_TEXT(homepage_url)
+};
+#undef CRX_TEXT
+
+static const yx_crx_text_desc *yx_crx_text_info(const char *name)
+{
+    for (size_t i = 0; i < sizeof(yx_crx_text_fields) /
+                                sizeof(yx_crx_text_fields[0]); ++i)
+        if (strcmp(yx_crx_text_fields[i].name, name) == 0)
+            return &yx_crx_text_fields[i];
+    return NULL;
+}
+
+static bool yx_crx_list_info(const yx_crx_result *result, const char *name,
+                             const yx_crx_string_list **list)
+{
+    if (strcmp(name, "permissions") == 0) {
+        if (result) *list = &result->permissions;
+    } else if (strcmp(name, "host_permissions") == 0) {
+        if (result) *list = &result->host_permissions;
+    } else if (strcmp(name, "optional_permissions") == 0) {
+        if (result) *list = &result->optional_permissions;
+    } else if (strcmp(name, "optional_host_permissions") == 0) {
+        if (result) *list = &result->optional_host_permissions;
+    } else return false;
+    return true;
+}
+
+static yx_value yx_eval_crx_string(const yx_eval_context *ctx,
+                                    const char *bytes, size_t length)
+{
+    char *owned;
+    if (!bytes) return yx_undefined();
+    owned = yx_eval_alloc_string(ctx, length);
+    if (!owned) return yx_undefined();
+    if (length) memcpy(owned, bytes, length);
+    return yx_defined_string(owned, length);
+}
+
+static yx_value yx_eval_pe_certificate_field(const yx_pe_certificate *cert,
+                                               const char *member)
+{
+    const char *string = NULL;
+    if (!cert) return yx_undefined();
+    if (strcmp(member, "issuer") == 0)
+        return cert->issuer ?
+            yx_defined_string(cert->issuer, cert->issuer_length) :
+            yx_undefined();
+    else if (strcmp(member, "subject") == 0)
+        return cert->subject ?
+            yx_defined_string(cert->subject, cert->subject_length) :
+            yx_undefined();
+    else if (strcmp(member, "thumbprint") == 0) string = cert->thumbprint;
+    else if (strcmp(member, "algorithm") == 0) string = cert->algorithm;
+    else if (strcmp(member, "algorithm_oid") == 0)
+        string = cert->algorithm_oid;
+    else if (strcmp(member, "serial") == 0) string = cert->serial;
+    else if (strcmp(member, "version") == 0)
+        return yx_defined((uint64_t)cert->version);
+    else if (strcmp(member, "not_before") == 0)
+        return yx_defined((uint64_t)cert->not_before);
+    else if (strcmp(member, "not_after") == 0)
+        return yx_defined((uint64_t)cert->not_after);
+    return string ? yx_defined_string(string, strlen(string)) :
+                    yx_undefined();
+}
+
+static const yx_pe_certificate *yx_pe_signer_certificate(
+    const yx_pe_signature *signature)
+{
+    if (!signature || !signature->signer_chain_count ||
+        signature->signer_chain_indices[0] >= signature->certificate_count)
+        return NULL;
+    return &signature->certificates[signature->signer_chain_indices[0]];
+}
+
+static yx_value yx_eval_pe_signature_field(const yx_pe_signature *signature,
+                                             const char *member)
+{
+    const char *string = NULL;
+    if (yx_pe_certificate_type(member) != YX_STATIC_UNKNOWN)
+        return yx_eval_pe_certificate_field(
+            yx_pe_signer_certificate(signature), member);
+    if (strcmp(member, "verified") == 0)
+        return yx_defined(signature->verified);
+    if (strcmp(member, "number_of_certificates") == 0 ||
+        strcmp(member, "certificates.len") == 0)
+        return yx_defined(signature->certificate_count);
+    if (strcmp(member, "number_of_countersignatures") == 0 ||
+        strcmp(member, "countersignatures.len") == 0)
+        return yx_defined(signature->countersignature_count);
+    if (strcmp(member, "signer_info.chain.len") == 0)
+        return yx_defined(signature->signer_chain_count);
+    if (strcmp(member, "digest_alg") == 0)
+        string = signature->digest_alg;
+    else if (strcmp(member, "digest") == 0)
+        string = signature->digest;
+    else if (strcmp(member, "file_digest") == 0)
+        string = signature->file_digest;
+    else if (strcmp(member, "signer_info.program_name") == 0)
+        string = signature->program_name;
+    else if (strcmp(member, "signer_info.more_info") == 0)
+        string = signature->more_info;
+    else if (strcmp(member, "signer_info.digest") == 0)
+        string = signature->signer_digest;
+    else if (strcmp(member, "signer_info.digest_alg") == 0)
+        string = signature->signer_digest_alg;
+    return string ? yx_defined_string(string, strlen(string)) :
+                    yx_undefined();
+}
+
+static yx_value yx_eval_pe_signature_nested_field(
+    const yx_pe_signature *signature, uint64_t index, const char *path)
+{
+    static const char certificates[] = "certificates.";
+    static const char signer_chain[] = "signer_info.chain.";
+    static const char counters[] = "countersignatures.";
+    /* pe.signatures or msi.signatures (the same pe.Signature shape). */
+    path = yx_signature_member(path);
+    if (!path) return yx_undefined();
+    if (strncmp(path, certificates, sizeof(certificates) - 1) == 0) {
+        if (index >= signature->certificate_count) return yx_undefined();
+        return yx_eval_pe_certificate_field(
+            &signature->certificates[index],
+            path + sizeof(certificates) - 1);
+    }
+    if (strncmp(path, signer_chain, sizeof(signer_chain) - 1) == 0) {
+        size_t mapped;
+        if (index >= signature->signer_chain_count)
+            return yx_undefined();
+        mapped = signature->signer_chain_indices[index];
+        if (mapped >= signature->certificate_count) return yx_undefined();
+        return yx_eval_pe_certificate_field(
+            &signature->certificates[mapped],
+            path + sizeof(signer_chain) - 1);
+    }
+    if (strncmp(path, counters, sizeof(counters) - 1) == 0) {
+        const yx_pe_countersignature *counter;
+        const char *member = path + sizeof(counters) - 1;
+        const char *string = NULL;
+        if (index >= signature->countersignature_count)
+            return yx_undefined();
+        counter = &signature->countersignatures[index];
+        if (strcmp(member, "verified") == 0)
+            return yx_defined(counter->verified);
+        if (strcmp(member, "sign_time") == 0)
+            return counter->has_sign_time ?
+                   yx_defined((uint64_t)counter->sign_time) :
+                   yx_undefined();
+        if (strcmp(member, "chain.len") == 0)
+            return yx_defined(counter->chain_count);
+        if (strcmp(member, "digest") == 0) string = counter->digest;
+        else if (strcmp(member, "digest_alg") == 0)
+            string = counter->digest_alg;
+        return string ? yx_defined_string(string, strlen(string)) :
+                        yx_undefined();
+    }
+    return yx_undefined();
+}
+
+typedef struct {
+    uint64_t target;
+    uint64_t current;
+    bool found;
+    yx_pe_resource resource;
+} yx_pe_resource_lookup;
+
+typedef struct {
+    uint64_t target;
+    uint64_t current;
+    bool found;
+    yx_pe_export entry;
+} yx_pe_export_lookup;
+
+static void yx_pe_export_lookup_visit(void *opaque,
+                                       const yx_pe_export *entry)
+{
+    yx_pe_export_lookup *lookup = opaque;
+    if (lookup->current++ == lookup->target) {
+        lookup->entry = *entry;
+        lookup->found = true;
+    }
+}
+
+static yx_value yx_eval_pe_export(const yx_eval_context *ctx,
+                                  uint64_t index, const char *member)
+{
+    yx_pe_export_lookup lookup = {.target = index};
+    const yx_pe_export *entry;
+    if (ctx->deadline) {
+        entry = yx_pe_scan_cache_export(&ctx->deadline->pe_cache,
+            ctx->data, ctx->size, index, ctx->deadline);
+        if (!entry) return yx_undefined();
+    } else {
+        if (!yx_pe_visit_exports(ctx->data, ctx->size,
+                                  yx_pe_export_lookup_visit, &lookup) ||
+            !lookup.found)
+            return yx_undefined();
+        entry = &lookup.entry;
+    }
+    if (strcmp(member, "name") == 0)
+        return entry->name ?
+               yx_defined_string((const char *)entry->name,
+                                 entry->name_length) : yx_undefined();
+    if (strcmp(member, "ordinal") == 0)
+        return yx_defined(entry->ordinal);
+    if (strcmp(member, "rva") == 0)
+        return yx_defined(entry->rva);
+    if (strcmp(member, "offset") == 0)
+        return entry->has_offset ? yx_defined(entry->offset) :
+                                   yx_undefined();
+    if (strcmp(member, "forward_name") == 0)
+        return entry->forward_name ?
+               yx_defined_string((const char *)entry->forward_name,
+                                 entry->forward_name_length) :
+               yx_undefined();
+    return yx_undefined();
+}
+
+static void yx_pe_resource_lookup_visit(void *opaque,
+                                         const yx_pe_resource *resource)
+{
+    yx_pe_resource_lookup *lookup = opaque;
+    if (lookup->current++ == lookup->target) {
+        lookup->resource = *resource;
+        lookup->found = true;
+    }
+}
+
+typedef struct {
+    uint32_t value;
+    bool language_only;
+    bool found;
+} yx_pe_language_lookup;
+
+static void yx_pe_language_lookup_visit(void *opaque,
+                                         const yx_pe_resource *resource)
+{
+    yx_pe_language_lookup *lookup = opaque;
+    if (resource->language.kind == YX_PE_RESOURCE_NUMERIC &&
+        (resource->language.value &
+         (lookup->language_only ? 0xffu : 0xffffu)) == lookup->value)
+        lookup->found = true;
+}
+
+static yx_value yx_eval_pe_resource(const yx_eval_context *ctx,
+                                    uint64_t index, const char *member)
+{
+    yx_pe_resource_directory directory;
+    yx_pe_resource_lookup lookup = {.target = index};
+    const yx_pe_resource *resource;
+    const yx_pe_resource_id *id;
+    if (ctx->deadline) {
+        resource = yx_pe_scan_cache_resource(&ctx->deadline->pe_cache,
+            ctx->data, ctx->size, index, ctx->deadline);
+        if (!resource) return yx_undefined();
+    } else {
+        if (!yx_pe_visit_resources(ctx->data, ctx->size, &directory,
+                                    yx_pe_resource_lookup_visit, &lookup) ||
+            !lookup.found)
+            return yx_undefined();
+        resource = &lookup.resource;
+    }
+    if (strcmp(member, "length") == 0)
+        return yx_defined(resource->length);
+    if (strcmp(member, "rva") == 0)
+        return yx_defined(resource->rva);
+    if (strcmp(member, "offset") == 0)
+        return resource->has_offset ? yx_defined(resource->offset) :
+                                      yx_undefined();
+    id = strcmp(member, "type") == 0 ||
+         strcmp(member, "type_string") == 0 ? &resource->type :
+         strcmp(member, "id") == 0 ||
+         strcmp(member, "name_string") == 0 ? &resource->id :
+                                              &resource->language;
+    if (strcmp(member, "type_string") == 0 ||
+        strcmp(member, "name_string") == 0 ||
+        strcmp(member, "language_string") == 0)
+        return id->kind == YX_PE_RESOURCE_NAMED ?
+               yx_defined_string((const char *)id->name, id->name_length) :
+               yx_undefined();
+    return id->kind == YX_PE_RESOURCE_NUMERIC ? yx_defined(id->value) :
+                                                yx_undefined();
+}
+
+typedef struct {
+    const yx_eval_context *ctx;
+    const char *member;
+    const char *key;
+    size_t key_length;
+    uint64_t target;
+    uint64_t current;
+    yx_value result;
+} yx_pe_version_lookup;
+
+static void yx_pe_version_lookup_visit(void *opaque,
+                                        const char *key, size_t key_length,
+                                        const char *value, size_t value_length)
+{
+    yx_pe_version_lookup *lookup = opaque;
+    bool selected = lookup->key ?
+        lookup->key_length == key_length &&
+        memcmp(lookup->key, key, key_length) == 0 :
+        lookup->current == lookup->target;
+    ++lookup->current;
+    if (selected)
+        lookup->result = strcmp(lookup->member, "key") == 0 ?
+            yx_eval_crx_string(lookup->ctx, key, key_length) :
+            yx_eval_crx_string(lookup->ctx, value, value_length);
+}
+
+static yx_value yx_eval_pe_version(const yx_eval_context *ctx,
+                                   uint64_t index, const char *key,
+                                   size_t key_length, const char *member)
+{
+    if (ctx->deadline) {
+        const yx_pe_version_entry *entry = yx_pe_scan_cache_version(
+            &ctx->deadline->pe_cache, ctx->data, ctx->size, index, key,
+            key_length, ctx->deadline);
+        if (!entry) return yx_undefined();
+        return strcmp(member, "key") == 0 ?
+            yx_eval_crx_string(ctx, entry->key, entry->key_length) :
+            yx_eval_crx_string(ctx, entry->value, entry->value_length);
+    }
+    yx_pe_version_lookup lookup = {
+        .ctx = ctx, .member = member, .key = key,
+        .key_length = key_length, .target = index
+    };
+    if (!yx_pe_visit_version_info(ctx->data, ctx->size,
+                                   yx_pe_version_lookup_visit, &lookup))
+        return yx_undefined();
+    return lookup.result;
+}
+
+static bool yx_eval_pe_count(const yx_eval_context *ctx,
+                               const char *member, uint64_t *value)
+{
+    return ctx->deadline ?
+        yx_pe_scan_cache_count(&ctx->deadline->pe_cache, ctx->data, ctx->size,
+                                 member, value, ctx->deadline) :
+        yx_pe_field(ctx->data, ctx->size, member, value);
+}
+
+static bool yx_eval_pe_visit_versions(const yx_eval_context *ctx,
+    yx_pe_version_visitor visitor, void *opaque)
+{
+    return ctx->deadline ?
+        yx_pe_scan_cache_visit_versions(&ctx->deadline->pe_cache, ctx->data,
+            ctx->size, visitor, opaque, ctx->deadline) :
+        yx_pe_visit_version_info(ctx->data, ctx->size, visitor, opaque);
+}
+
+typedef struct {
+    char **keys;
+    size_t *lengths;
+    size_t count;
+    size_t capacity;
+    bool failed;
+} yx_pe_version_key_set;
+
+static void yx_pe_version_key_count_visit(void *opaque,
+                                           const char *key, size_t key_length,
+                                           const char *value, size_t value_length)
+{
+    yx_pe_version_key_set *set = opaque;
+    (void)value;
+    (void)value_length;
+    if (set->failed) return;
+    for (size_t i = 0; i < set->count; ++i)
+        if (set->lengths[i] == key_length &&
+            memcmp(set->keys[i], key, key_length) == 0)
+            return;
+    if (set->count == set->capacity) {
+        size_t new_capacity = set->capacity ? set->capacity * 2 : 8;
+        char **new_keys;
+        size_t *new_lengths;
+        if (new_capacity < set->capacity ||
+            new_capacity > SIZE_MAX / sizeof(*set->keys) ||
+            new_capacity > SIZE_MAX / sizeof(*set->lengths)) {
+            set->failed = true;
+            return;
+        }
+        new_keys = realloc(set->keys, new_capacity * sizeof(*set->keys));
+        if (!new_keys) { set->failed = true; return; }
+        set->keys = new_keys;
+        new_lengths = realloc(set->lengths,
+                              new_capacity * sizeof(*set->lengths));
+        if (!new_lengths) { set->failed = true; return; }
+        set->lengths = new_lengths;
+        set->capacity = new_capacity;
+    }
+    set->keys[set->count] = malloc(key_length ? key_length : 1);
+    if (!set->keys[set->count]) { set->failed = true; return; }
+    if (key_length) memcpy(set->keys[set->count], key, key_length);
+    set->lengths[set->count] = key_length;
+    ++set->count;
+}
+
+static void yx_pe_version_key_set_free(yx_pe_version_key_set *set)
+{
+    for (size_t i = 0; i < set->count; ++i) free(set->keys[i]);
+    free(set->keys);
+    free(set->lengths);
+}
+
+static yx_value yx_eval_pe_version_map_count(const yx_eval_context *ctx)
+{
+    yx_pe_version_key_set set = {0};
+    bool parsed = yx_eval_pe_visit_versions(ctx,
+                                            yx_pe_version_key_count_visit,
+                                            &set);
+    uint64_t count = (uint64_t)set.count;
+    yx_pe_version_key_set_free(&set);
+    return set.failed ? yx_undefined() :
+           yx_defined(parsed ? count : 0);
+}
+
+static yx_value yx_eval_crx_field(const yx_eval_context *ctx,
+                                   const char *member, bool indexed,
+                                   uint64_t index)
+{
+    yx_crx_result parsed = {0};
+    const yx_crx_result *crx = ctx->crx_output;
+    yx_value result = yx_undefined();
+    if (!crx) {
+        if (!yx_crx_parse(ctx->data, ctx->size, &parsed)) return result;
+        crx = &parsed;
+    }
+    if (indexed) {
+        const yx_crx_string_list *list = NULL;
+        char collection[32];
+        const char *dot = strchr(member, '.');
+        size_t name_length = dot ? (size_t)(dot - member) : 0;
+        if (name_length && name_length < sizeof(collection) && dot &&
+            strcmp(dot + 1, "value") == 0) {
+            memcpy(collection, member, name_length);
+            collection[name_length] = '\0';
+            if (yx_crx_list_info(crx, collection, &list) &&
+                index < list->count)
+                result = yx_eval_crx_string(ctx, list->items[index],
+                                             list->lengths[index]);
+        } else if (strcmp(member, "signatures.key") == 0 &&
+                   index < crx->signature_count &&
+                   crx->signatures[index].key)
+            result = yx_eval_crx_string(ctx, crx->signatures[index].key,
+                            crx->signatures[index].key_length);
+        else if (strcmp(member, "signatures.verified") == 0 &&
+                 index < crx->signature_count)
+            result = yx_defined(crx->signatures[index].verified);
+    } else if (strcmp(member, "is_crx") == 0) {
+        if (crx->is_crx_present) result = yx_defined(crx->is_crx);
+    } else if (strcmp(member, "crx_version") == 0) {
+        if (crx->crx_version_present) result = yx_defined(crx->crx_version);
+    } else if (strcmp(member, "header_size") == 0) {
+        if (crx->header_size_present) result = yx_defined(crx->header_size);
+    } else {
+        const yx_crx_text_desc *info = yx_crx_text_info(member);
+        if (info) {
+            const char *bytes = *(char *const *)((const char *)crx +
+                                                  info->text_offset);
+            size_t length = *(const size_t *)((const char *)crx +
+                                               info->length_offset);
+            result = yx_eval_crx_string(ctx, bytes, length);
+        }
+    }
+    if (crx == &parsed) yx_crx_result_free(&parsed);
+    return result;
+}
+
+static bool yx_elf_indexed_path(const char *path, char collection[32],
+                                 const char **member)
+{
+    const char *start, *separator;
+    size_t length;
+    if (!path || strncmp(path, "elf.", 4) != 0) return false;
+    start = path + 4;
+    separator = strchr(start, '.');
+    if (!separator || !separator[1]) return false;
+    length = (size_t)(separator - start);
+    if (!length || length >= 32) return false;
+    memcpy(collection, start, length);
+    collection[length] = '\0';
+    *member = separator + 1;
+    return true;
+}
+
+static bool yx_macho_indexed_path(const char *path, char collection[32],
+                                   const char **member)
+{
+    const char *start, *separator;
+    size_t length;
+    if (!path || strncmp(path, "macho.", 6) != 0) return false;
+    start = path + 6;
+    separator = strchr(start, '.');
+    if (!separator || !separator[1]) return false;
+    length = (size_t)(separator - start);
+    if (!length || length >= 32) return false;
+    memcpy(collection, start, length);
+    collection[length] = '\0';
+    *member = separator + 1;
+    return true;
+}
+
+static bool yx_dex_indexed_path(const char *path, char collection[32],
+                                 const char **member)
+{
+    static const char *const names[] = {
+        "strings", "types", "protos", "fields", "methods", "class_defs",
+        "map_list.items"
+    };
+    const char *start;
+    if (!path || strncmp(path, "dex.", 4) != 0 || !member)
+        return false;
+    start = path + 4;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        size_t length = strlen(names[i]);
+        if (strncmp(start, names[i], length) == 0 &&
+            start[length] == '.' && start[length + 1]) {
+            memcpy(collection, names[i], length + 1);
+            *member = start + length + 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool yx_dex_nested_name(const char *name,
+                                const char **collection,
+                                const char **nested)
+{
+    if (strcmp(name, "dex.protos.parameters.value") == 0) {
+        *collection = "protos";
+        *nested = "parameters";
+        return true;
+    }
+    if (strcmp(name, "dex.methods.proto.parameters.value") == 0) {
+        *collection = "methods";
+        *nested = "proto.parameters";
+        return true;
+    }
+    return false;
+}
+
+static bool yx_dex_nested_length_name(const char *collection,
+                                       const char *member,
+                                       const char **nested)
+{
+    if (strcmp(collection, "protos") == 0 &&
+        strcmp(member, "parameters.len") == 0) {
+        *nested = "parameters";
+        return true;
+    }
+    if (strcmp(collection, "methods") == 0 &&
+        strcmp(member, "proto.parameters.len") == 0) {
+        *nested = "proto.parameters";
+        return true;
+    }
+    return false;
+}
+
+static yx_static_type yx_crx_indexed_type(const char *path)
+{
+    const char *member, *dot;
+    char collection[32];
+    size_t length;
+    if (strncmp(path, "crx.", 4) != 0) return YX_STATIC_UNKNOWN;
+    member = path + 4;
+    if (strcmp(member, "signatures.key") == 0) return YX_STATIC_STRING;
+    if (strcmp(member, "signatures.verified") == 0) return YX_STATIC_BOOL;
+    dot = strchr(member, '.');
+    if (!dot || strcmp(dot + 1, "value") != 0)
+        return YX_STATIC_UNKNOWN;
+    length = (size_t)(dot - member);
+    if (!length || length >= sizeof(collection)) return YX_STATIC_UNKNOWN;
+    memcpy(collection, member, length);
+    collection[length] = '\0';
+    return yx_crx_list_info(NULL, collection, NULL) ?
+           YX_STATIC_STRING : YX_STATIC_UNKNOWN;
+}
+
+static bool yx_module_root_name(const char *name)
+{
+    static const char *const modules[] = {
+        "math", "hash", "string", "time", "pe", "elf", "macho", "dotnet",
+        "dex", "lnk", "olecf", "vba", "msi", "crx", "zip", "test_proto2",
+        "test_proto3"
+    };
+    if (!name) return false;
+    if (!strncmp(name, "test_proto", 10) && !yx_test_proto_path(name))
+        return false;
+    for (size_t i = 0; i < sizeof(modules) / sizeof(*modules); ++i)
+        if (!strcmp(name, modules[i])) return true;
+    return false;
+}
+
+/* A struct-valued module field without indices, such as `pe.overlay` or
+ * `pe.rich_signature`, from the module's protobuf schema. YARA-X types it as
+ * a struct, so a `with` statement can bind it. */
+static bool yx_module_struct_path(const char *name)
+{
+    return name && strchr(name, '.') &&
+           (strncmp(name, "test_proto", 10) != 0 || yx_test_proto_path(name)) &&
+           yx_mo_schema_path_type(name) == YX_MO_DATA_STRUCT;
+}
+
+static yx_static_type yx_static_node_type(const yx_node *node)
+{
+    yx_static_type left, right;
+    if (!node) return YX_STATIC_UNKNOWN;
+    bool vt_length = false;
+    if ((node->kind == N_RULE || node->kind == N_MODULE_FIELD) &&
+        yx_module_root_name(node->name))
+        return YX_STATIC_STRUCT;
+    const yx_tp_function *tp_function = node ? yx_test_proto_function(node->name) : NULL;
+    if (tp_function) {
+        if (node->kind != N_CALL && node->operation != TK_LPAREN)
+            return YX_STATIC_FUNCTION;
+        if (strcmp(tp_function->path, "test_proto2.add") == 0 &&
+            node->item_count == 2 &&
+            (yx_static_node_type(node->items[0]) == YX_STATIC_FLOAT ||
+             yx_static_node_type(node->items[1]) == YX_STATIC_FLOAT))
+            return YX_STATIC_FLOAT;
+        return yx_vt_static_type(tp_function->result);
+    }
+    const yx_vt_field *vt_field = yx_vt_node_field(node, &vt_length);
+    if (vt_field)
+        return vt_length ? YX_STATIC_INT : yx_vt_static_type(vt_field->type);
+    if (node->kind == N_CALL && yx_vt_method(node->name, NULL))
+        return YX_STATIC_BOOL;
+    if (yx_module_array_node(node, false)) return YX_STATIC_ARRAY;
+    if (yx_module_scalar_node(node, &left)) return left;
+    switch (node->kind) {
+    case N_INTEGER:
+        return node->operation == TK_TRUE || node->operation == TK_FALSE ?
+               YX_STATIC_BOOL : YX_STATIC_INT;
+    case N_FLOAT: return YX_STATIC_FLOAT;
+    case N_STRING: return YX_STATIC_STRING;
+    case N_REGEX: return YX_STATIC_REGEX;
+    case N_FILESIZE: case N_COUNT: case N_OFFSET: case N_LENGTH:
+        return YX_STATIC_INT;
+    case N_READ:
+        return node->floating_read ? YX_STATIC_FLOAT : YX_STATIC_INT;
+    case N_PATTERN: case N_OF: case N_OF_EXPR: case N_FOR_OF:
+    case N_FOR_IN: case N_MATCHES:
+        return YX_STATIC_BOOL;
+    case N_MODULE_FIELD:
+        if (strcmp(node->name, "test_proto2.requires_foo_and_bar") == 0)
+            return YX_STATIC_INT;
+        if (yx_vt_permutation_constant(node->name, NULL))
+            return YX_STATIC_INT;
+        if (yx_module_struct_path(node->name))
+            return YX_STATIC_STRUCT;
+        if (yx_dotnet_array_from_name(node->name) != YX_DOTNET_ARRAY_NONE)
+            return YX_STATIC_ARRAY;
+        if (strcmp(node->name, "dotnet.is_dotnet") == 0)
+            return YX_STATIC_BOOL;
+        if (strcmp(node->name, "dotnet.version") == 0 ||
+            strcmp(node->name, "dotnet.module_name") == 0 ||
+            strcmp(node->name, "dotnet.typelib") == 0 ||
+            strcmp(node->name, "dotnet.assembly.name") == 0 ||
+            strcmp(node->name, "dotnet.assembly.culture") == 0)
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "dotnet.assembly.version.", 24) == 0 &&
+            yx_dotnet_version_member(node->name + 24, NULL, NULL))
+            return YX_STATIC_INT;
+        if (strncmp(node->name, "dotnet.", 7) == 0 &&
+            yx_dotnet_count_member(node->name + 7, false, NULL, NULL))
+            return YX_STATIC_INT;
+#ifdef XXYARA_ENABLE_VBA
+        if (strcmp(node->name, "vba.project_info") == 0)
+            return YX_STATIC_STRUCT;
+        if (strcmp(node->name, "vba.has_macros") == 0)
+            return YX_STATIC_BOOL;
+        if (strcmp(node->name, "vba.project_info.name") == 0 ||
+            strcmp(node->name, "vba.project_info.version") == 0)
+            return YX_STATIC_STRING;
+        if (strcmp(node->name, "vba.project_info.module_count") == 0 ||
+            (strncmp(node->name, "vba.", 4) == 0 &&
+             yx_vba_constant(node->name + 4, NULL)))
+            return YX_STATIC_INT;
+#endif
+        if (strcmp(node->name, "zip.is_zip") == 0)
+            return YX_STATIC_BOOL;
+        if (strncmp(node->name, "zip.", 4) == 0) {
+            uint64_t constant;
+            if (yx_zip_constant(node->name + 4, &constant))
+                return YX_STATIC_INT;
+        }
+        if (strcmp(node->name, "dex.is_dex") == 0)
+            return YX_STATIC_BOOL;
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            uint64_t constant;
+            if (yx_dex_string_field_supported(node->name + 4))
+                return YX_STATIC_STRING;
+            if (yx_dex_numeric_field_supported(node->name + 4) ||
+                yx_dex_constant(node->name + 4, &constant))
+                return YX_STATIC_INT;
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strcmp(node->name, "olecf.is_olecf") == 0)
+            return YX_STATIC_BOOL;
+        if (strncmp(node->name, "olecf.StreamType.", 17) == 0)
+            return YX_STATIC_INT;
+#endif
+        if (strcmp(node->name, "crx.is_crx") == 0) return YX_STATIC_BOOL;
+        if (strcmp(node->name, "crx.crx_version") == 0 ||
+            strcmp(node->name, "crx.header_size") == 0)
+            return YX_STATIC_INT;
+        if (strncmp(node->name, "crx.", 4) == 0 &&
+            yx_crx_text_info(node->name + 4)) return YX_STATIC_STRING;
+        if (strcmp(node->name, "pe.is_pe") == 0) return YX_STATIC_BOOL;
+        if (strcmp(node->name, "pe.is_signed") == 0)
+            return YX_STATIC_BOOL;
+#ifdef XXYARA_ENABLE_MSI
+        if (strcmp(node->name, "msi.is_signed") == 0)
+            return YX_STATIC_BOOL;
+#endif
+        if (strcmp(node->name, "pe.version_info") == 0)
+            return YX_STATIC_MAP;
+        if (strncmp(node->name, "lnk.", 4) == 0) {
+            uint64_t constant;
+            const yx_lnk_field_desc *field =
+                yx_lnk_field_info(node->name + 4, false);
+            return field ? yx_lnk_field_type(field) :
+                   yx_lnk_constant(node->name + 4, &constant) ?
+                   YX_STATIC_INT : YX_STATIC_UNKNOWN;
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) return YX_STATIC_INT;
+        if (strncmp(node->name, "macho.", 6) == 0)
+            return (yx_macho_text_field_supported(node->name + 6) ||
+                    yx_macho_string_field_supported(node->name + 6)) ?
+                   YX_STATIC_STRING : YX_STATIC_INT;
+        if (strncmp(node->name, "pe.", 3) == 0 &&
+            (yx_pe_string_field_supported(node->name + 3) ||
+             strcmp(node->name, "pe.rich_signature.clear_data") == 0))
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "pe.", 3) == 0) return YX_STATIC_INT;
+        if (strcmp(node->name, "math.MEAN_BYTES") == 0)
+            return YX_STATIC_FLOAT;
+        return YX_STATIC_UNKNOWN;
+    case N_MODULE_INDEXED_FIELD:
+#ifdef XXYARA_ENABLE_VBA
+        if (strcmp(node->name, "vba.project_info.references.value") == 0 ||
+            strcmp(node->name, "vba.modules.name") == 0 ||
+            strcmp(node->name, "vba.modules.code") == 0)
+            return YX_STATIC_STRING;
+        if (strcmp(node->name, "vba.modules.type") == 0)
+            return YX_STATIC_INT;
+#endif
+        if (strncmp(node->name, "dotnet.streams.", 15) == 0)
+            return strcmp(node->name + 15, "name") == 0 ?
+                   YX_STATIC_STRING : YX_STATIC_INT;
+        if (strcmp(node->name, "dotnet.guids.value") == 0 ||
+            strcmp(node->name, "dotnet.user_strings.value") == 0 ||
+            strcmp(node->name, "dotnet.constants.value") == 0 ||
+            strcmp(node->name, "dotnet.modulerefs.value") == 0)
+            return YX_STATIC_STRING;
+        if (strcmp(node->name, "dotnet.field_offsets.value") == 0)
+            return YX_STATIC_INT;
+        if (strncmp(node->name, "dotnet.resources.", 17) == 0)
+            return strcmp(node->name + 17, "name") == 0 ?
+                   YX_STATIC_STRING : YX_STATIC_INT;
+        if (strncmp(node->name, "dotnet.assembly_refs.", 21) == 0)
+            return strcmp(node->name + 21, "name") == 0 ||
+                   strcmp(node->name + 21, "public_key_or_token") == 0 ?
+                   YX_STATIC_STRING : YX_STATIC_INT;
+        if (strncmp(node->name, "dotnet.classes.", 15) == 0) {
+            return yx_dotnet_class_member_type(node->name + 15);
+        }
+        if (yx_signature_member(node->name))
+            return yx_pe_signature_type(yx_signature_member(node->name));
+        if (strncmp(node->name, "zip.entries.", 12) == 0) {
+            const char *member = node->name + 12;
+            if (strcmp(member, "file_path") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(member, "compression") == 0 ||
+                strcmp(member, "uncompressed_size") == 0 ||
+                strcmp(member, "compressed_size") == 0)
+                return YX_STATIC_INT;
+        }
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            char collection[32];
+            const char *member;
+            const char *nested;
+            if (yx_dex_indexed_path(node->name, collection, &member)) {
+                if (yx_dex_indexed_string_field_supported(collection, member))
+                    return YX_STATIC_STRING;
+                if (yx_dex_indexed_numeric_field_supported(collection, member) ||
+                    yx_dex_nested_length_name(collection, member, &nested))
+                    return YX_STATIC_INT;
+            }
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strncmp(node->name, "olecf.streams.", 14) == 0) {
+            const char *member = node->name + 14;
+            if (strcmp(member, "name") == 0) return YX_STATIC_STRING;
+            if (strcmp(member, "type") == 0 ||
+                strcmp(member, "size") == 0) return YX_STATIC_INT;
+        }
+#endif
+        if (strncmp(node->name, "crx.", 4) == 0)
+            return yx_crx_indexed_type(node->name);
+        if (strncmp(node->name, "lnk.target_id_list.", 19) == 0)
+            return yx_lnk_field_type(
+                yx_lnk_field_info(node->name + 19, true));
+        if (strncmp(node->name, "macho.", 6) == 0) {
+            char collection[32];
+            const char *member;
+            if (yx_macho_indexed_path(node->name, collection, &member)) {
+                if (yx_macho_indexed_text_field_supported(collection,
+                                                          member))
+                    return YX_STATIC_STRING;
+                if (yx_macho_indexed_string_field_supported(collection, member))
+                    return YX_STATIC_STRING;
+                if (yx_macho_indexed_field_supported(collection, member) ||
+                    (strcmp(collection, "file") == 0 &&
+                     strlen(member) > 4 &&
+                     strcmp(member + strlen(member) - 4, ".len") == 0))
+                    return YX_STATIC_INT;
+            }
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) {
+            char collection[32];
+            const char *member;
+            if (yx_elf_indexed_path(node->name, collection, &member)) {
+                if (yx_elf_indexed_string_field_supported(collection, member))
+                    return YX_STATIC_STRING;
+                if (yx_elf_indexed_field_supported(collection, member))
+                    return YX_STATIC_INT;
+            }
+        }
+        if (strncmp(node->name, "pe.sections.", 12) == 0) {
+            const char *member = node->name + 12;
+            if (yx_pe_section_string_field_supported(member))
+                return YX_STATIC_STRING;
+            if (yx_pe_section_field_supported(member))
+                return YX_STATIC_INT;
+        }
+        if (strcmp(node->name, "pe.version_info.value") == 0)
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "pe.version_info_list.", 21) == 0) {
+            const char *member = node->name + 21;
+            if (strcmp(member, "key") == 0 || strcmp(member, "value") == 0)
+                return YX_STATIC_STRING;
+        }
+        if (strncmp(node->name, "pe.resources.", 13) == 0) {
+            const char *member = node->name + 13;
+            if (strcmp(member, "type_string") == 0 ||
+                strcmp(member, "name_string") == 0 ||
+                strcmp(member, "language_string") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(member, "length") == 0 ||
+                strcmp(member, "rva") == 0 ||
+                strcmp(member, "offset") == 0 ||
+                strcmp(member, "type") == 0 ||
+                strcmp(member, "id") == 0 ||
+                strcmp(member, "language") == 0)
+                return YX_STATIC_INT;
+        }
+        if (strncmp(node->name, "pe.export_details.", 18) == 0) {
+            const char *member = node->name + 18;
+            if (strcmp(member, "name") == 0 ||
+                strcmp(member, "forward_name") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(member, "ordinal") == 0 ||
+                strcmp(member, "rva") == 0 ||
+                strcmp(member, "offset") == 0)
+                return YX_STATIC_INT;
+        }
+        return YX_STATIC_UNKNOWN;
+    case N_MODULE_NESTED_INDEXED_FIELD:
+        if (strncmp(node->name, "dotnet.classes.", 15) == 0)
+            return yx_dotnet_class_nested_type(node->name + 15);
+        if (yx_signature_member(node->name))
+            return yx_pe_signature_nested_type(node->name);
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *collection, *nested;
+            if (yx_dex_nested_name(node->name, &collection, &nested))
+                return YX_STATIC_STRING;
+        }
+        if (strncmp(node->name, "macho.segments.sections.", 24) == 0) {
+            const char *member = node->name + 24;
+            if (yx_macho_section_string_field_supported(member))
+                return YX_STATIC_STRING;
+            if (yx_macho_section_field_supported(member))
+                return YX_STATIC_INT;
+        }
+        if (strncmp(node->name, "macho.file.dylibs.", 18) == 0 &&
+            yx_macho_indexed_text_field_supported(
+                "dylibs", node->name + 18))
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "macho.file.build_version.tools.", 31) == 0) {
+            const char *member = node->name + 31;
+            if (strcmp(member, "version") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(member, "tool") == 0)
+                return YX_STATIC_INT;
+        }
+        return YX_STATIC_UNKNOWN;
+    case N_MODULE_TRIPLE_INDEXED_FIELD:
+        return strncmp(node->name, "dotnet.classes.", 15) == 0 ?
+               yx_dotnet_class_triple_type(node->name + 15) :
+               YX_STATIC_UNKNOWN;
+    case N_WITH: return yx_static_node_type(node->body);
+    case N_CALL:
+        {
+            const char *dot = strchr(node->name, '.');
+            if (dot && strcmp(dot, ".len") == 0)
+                return YX_STATIC_INT;
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (strcmp(node->name, "vba.modules.len") == 0 ||
+            strcmp(node->name, "vba.project_info.references.len") == 0)
+            return YX_STATIC_INT;
+#endif
+#ifdef XXYARA_ENABLE_MAGIC
+        if (strcmp(node->name, "magic.type") == 0 ||
+            strcmp(node->name, "magic.mime_type") == 0)
+            return YX_STATIC_STRING;
+#endif
+        if (strncmp(node->name, "dotnet.", 7) == 0 &&
+            yx_dotnet_count_member(node->name + 7, true, NULL, NULL))
+            return YX_STATIC_INT;
+        if (strcmp(node->name, "zip.entries.len") == 0)
+            return YX_STATIC_INT;
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *member = node->name + 4;
+            if (strcmp(member, "signature") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(member, "contains_string") == 0 ||
+                strcmp(member, "contains_method") == 0 ||
+                strcmp(member, "contains_class") == 0)
+                return YX_STATIC_BOOL;
+            if (strcmp(member, "checksum") == 0)
+                return YX_STATIC_INT;
+            size_t length = strlen(member);
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0)
+                return YX_STATIC_INT;
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strcmp(node->name, "olecf.streams.len") == 0)
+            return YX_STATIC_INT;
+#endif
+        if (strcmp(node->name, "crx.permhash") == 0)
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "crx.", 4) == 0 &&
+            strlen(node->name) > 4 &&
+            strcmp(node->name + strlen(node->name) - 4, ".len") == 0)
+            return YX_STATIC_INT;
+        if (strncmp(node->name, "console.", 8) == 0)
+            return YX_STATIC_BOOL;
+        if (strncmp(node->name, "cuckoo.", 7) == 0)
+            return YX_STATIC_INT;
+        if (strcmp(node->name, "lnk.target_id_list.len") == 0)
+            return YX_STATIC_INT;
+#ifdef XXYARA_ENABLE_MSI
+        if (strcmp(node->name, "msi.signatures.len") == 0)
+            return YX_STATIC_INT;
+#endif
+        if (strcmp(node->name, "pe.sections.len") == 0 ||
+            strcmp(node->name, "pe.signatures.len") == 0 ||
+            strcmp(node->name, "pe.resources.len") == 0 ||
+            strcmp(node->name, "pe.export_details.len") == 0 ||
+            strcmp(node->name, "pe.version_info_list.len") == 0 ||
+            strcmp(node->name, "pe.version_info.len") == 0)
+            return YX_STATIC_INT;
+        if (strcmp(node->name, "pe.locale") == 0 ||
+            strcmp(node->name, "pe.language") == 0)
+            return YX_STATIC_BOOL;
+        if (strncmp(node->name, "macho.", 6) == 0) {
+            if (strcmp(node->name, "macho.has_dylib") == 0 ||
+                strcmp(node->name, "macho.has_rpath") == 0 ||
+                strcmp(node->name, "macho.has_entitlement") == 0 ||
+                strcmp(node->name, "macho.has_import") == 0 ||
+                strcmp(node->name, "macho.has_export") == 0)
+                return YX_STATIC_BOOL;
+            if (strcmp(node->name, "macho.dylib_hash") == 0 ||
+                strcmp(node->name, "macho.entitlement_hash") == 0 ||
+                strcmp(node->name, "macho.import_hash") == 0 ||
+                strcmp(node->name, "macho.export_hash") == 0 ||
+                strcmp(node->name, "macho.symhash") == 0)
+                return YX_STATIC_STRING;
+            return YX_STATIC_INT;
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) {
+            const char *member = node->name + 4;
+            size_t length = strlen(member);
+            if (strcmp(member, "import_md5") == 0 ||
+                strcmp(member, "telfhash") == 0)
+                return YX_STATIC_STRING;
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0)
+                return YX_STATIC_INT;
+        }
+        if (strncmp(node->name, "pe.", 3) == 0 &&
+            yx_pe_function_supported(node->name + 3)) {
+            if (strcmp(node->name, "pe.imphash") == 0)
+                return YX_STATIC_STRING;
+            if (strcmp(node->name, "pe.imports") == 0) {
+                if (node->item_count == 1) return YX_STATIC_INT;
+                if (node->item_count == 2) {
+                    yx_static_type first = yx_static_node_type(node->items[0]);
+                    if (first == YX_STATIC_INT || first == YX_STATIC_REGEX)
+                        return YX_STATIC_INT;
+                    return first == YX_STATIC_STRING ?
+                           (yx_static_node_type(node->items[1]) == YX_STATIC_INT ?
+                            YX_STATIC_INT : YX_STATIC_BOOL) : YX_STATIC_UNKNOWN;
+                }
+                if (node->item_count == 3)
+                    return yx_static_node_type(node->items[1]) ==
+                           YX_STATIC_REGEX ? YX_STATIC_INT : YX_STATIC_BOOL;
+                return YX_STATIC_UNKNOWN;
+            }
+            return strcmp(node->name, "pe.rva_to_offset") == 0 ||
+                   strcmp(node->name, "pe.offset_to_rva") == 0 ||
+                   strcmp(node->name, "pe.section_index") == 0 ||
+                   strcmp(node->name, "pe.calculate_checksum") == 0 ||
+                   strcmp(node->name, "pe.exports_index") == 0 ||
+                   strcmp(node->name, "pe.import_rva") == 0 ||
+                   strcmp(node->name, "pe.delayed_import_rva") == 0 ||
+                   strcmp(node->name, "pe.rich_signature.toolid") == 0 ||
+                   strcmp(node->name, "pe.rich_signature.version") == 0 ?
+                   YX_STATIC_INT : YX_STATIC_BOOL;
+        }
+        if (strcmp(node->name, "math.entropy") == 0 ||
+            strcmp(node->name, "math.percentage") == 0 ||
+            strcmp(node->name, "math.mean") == 0 ||
+            strcmp(node->name, "math.deviation") == 0 ||
+            strcmp(node->name, "math.serial_correlation") == 0 ||
+            strcmp(node->name, "math.monte_carlo_pi") == 0)
+            return YX_STATIC_FLOAT;
+        if (strcmp(node->name, "math.in_range") == 0) return YX_STATIC_BOOL;
+        if (strcmp(node->name, "math.to_string") == 0)
+            return YX_STATIC_STRING;
+        if (strncmp(node->name, "math.", 5) == 0) return YX_STATIC_INT;
+        if (strcmp(node->name, "hash.md5") == 0 ||
+            strcmp(node->name, "hash.sha1") == 0 ||
+            strcmp(node->name, "hash.sha256") == 0)
+            return YX_STATIC_STRING;
+        if (strcmp(node->name, "hash.crc32") == 0 ||
+            strcmp(node->name, "hash.checksum32") == 0)
+            return YX_STATIC_INT;
+        if (strcmp(node->name, "string.length") == 0 ||
+            strcmp(node->name, "string.to_int") == 0)
+            return YX_STATIC_INT;
+        if (strcmp(node->name, "time.now") == 0)
+            return YX_STATIC_INT;
+        return YX_STATIC_UNKNOWN;
+    case N_UNARY:
+        if (node->operation == TK_NOT || node->operation == TK_DEFINED)
+            return YX_STATIC_BOOL;
+        if (node->operation == TK_TILDE) return YX_STATIC_INT;
+        return yx_static_node_type(node->a);
+    case N_BINARY:
+        if (node->operation == TK_AND || node->operation == TK_OR ||
+            (node->operation >= TK_EQ && node->operation <= TK_GE) ||
+            (node->operation >= TK_CONTAINS && node->operation <= TK_IEQUALS))
+            return YX_STATIC_BOOL;
+        left = yx_static_node_type(node->a);
+        right = yx_static_node_type(node->b);
+        if (left == YX_STATIC_FLOAT || right == YX_STATIC_FLOAT)
+            return YX_STATIC_FLOAT;
+        if (left == YX_STATIC_INT && right == YX_STATIC_INT)
+            return YX_STATIC_INT;
+        return YX_STATIC_UNKNOWN;
+    default: return YX_STATIC_UNKNOWN;
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * E048 `condition is too large`. YARA-X 1.23.0 compiles every condition to
+ * WebAssembly (lib/src/compiler/emit.rs) and rejects a rule whose code
+ * exceeds MAX_FUNC_INSTRS, 100,000 instructions (lib/src/wasm/builder.rs).
+ * The count is walrus' LocalFunction::size(): every instruction of every
+ * nested block, loop and if/else sequence, the block instruction included,
+ * plus the four instructions that record the rule's result (eight for a
+ * global rule). Nothing is emitted here: the model follows emit.rs
+ * instruction by instruction over the IR that ast2ir.rs builds from this
+ * tree, with n-ary `and`, `or`, `+`, `-`, `*`, `\` and `%` chains (left
+ * operands of the same operator flatten, parentheses included), constant
+ * folding, `or` operands that collapse into one *Many operation, exception
+ * handlers that become a WASM block only when an undefined value can reach
+ * them, and the lazy call that starts the pattern search.
+ * --------------------------------------------------------------------- */
+
+typedef struct {
+    unsigned catch_cost; /* instructions the handler's catch emits */
+    bool used;           /* some throw_undef targets it */
+} yx_wc_handler;
+
+typedef struct {
+    const char *name;
+    yx_static_type type;
+    bool undef; /* its initializer may throw (vars_with_undef) */
+    /* A `with` declaration with a constant value: ast2ir propagates the
+     * constant type value, so reads of the name and arithmetic fold. */
+    bool constant, truthy, known_bits, unsigned64, non_negative;
+    uint64_t bits;
+} yx_wc_var;
+
+typedef struct {
+    yx_wc_handler *handlers;
+    size_t handler_count, handler_capacity;
+    bool *search; /* emit_search_for_pattern_stack */
+    size_t search_count, search_capacity;
+    yx_wc_var *vars;
+    size_t var_count, var_capacity;
+    const char *const *pattern_names;
+    size_t pattern_count;
+    const yx_global *globals;
+    size_t global_count;
+    bool failed;
+} yx_wc;
+
+typedef struct {
+    yx_static_type type;
+    bool constant;     /* the IR folds it to Expr::Const */
+    bool truthy;       /* a constant's value cast to bool */
+    bool known_bits;   /* constant integer with known bits */
+    uint64_t bits;
+    bool unsigned64;   /* TypeValue::is_unsigned (Uint64 only) */
+    bool non_negative; /* TypeValue::is_non_negative */
+} yx_wc_info;
+
+static uint64_t yx_wc_expr(yx_wc *c, const yx_node *n);
+static uint64_t yx_wc_bool(yx_wc *c, const yx_node *n);
+static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n);
+
+static void yx_wc_push_handler(yx_wc *c, unsigned catch_cost)
+{
+    if (c->handler_count == c->handler_capacity) {
+        size_t next = c->handler_capacity ? c->handler_capacity * 2 : 16;
+        yx_wc_handler *grown = realloc(c->handlers, next * sizeof(*grown));
+        if (!grown) { c->failed = true; return; }
+        c->handlers = grown;
+        c->handler_capacity = next;
+    }
+    c->handlers[c->handler_count].catch_cost = catch_cost;
+    c->handlers[c->handler_count].used = false;
+    ++c->handler_count;
+}
+
+/* catch_undef: true when the handler is wrapped in a block. */
+static bool yx_wc_pop_handler(yx_wc *c)
+{
+    if (c->failed || !c->handler_count) return false;
+    return c->handlers[--c->handler_count].used;
+}
+
+/* throw_undef: the innermost handler's catch, then br. */
+static uint64_t yx_wc_throw(yx_wc *c)
+{
+    yx_wc_handler *handler;
+    if (!c->handler_count) return 1;
+    handler = &c->handlers[c->handler_count - 1];
+    handler->used = true;
+    return (uint64_t)handler->catch_cost + 1;
+}
+
+/* throw_undef_if_non_zero: br_if. */
+static uint64_t yx_wc_throw_if_non_zero(yx_wc *c)
+{
+    if (c->handler_count) c->handlers[c->handler_count - 1].used = true;
+    return 1;
+}
+
+/* emit_call_and_handle_undef: call, if_else { throw_undef }. */
+static uint64_t yx_wc_call_undef(yx_wc *c)
+{
+    return 2 + yx_wc_throw(c);
+}
+
+/* throw_undef_if_zero: local.tee, i64.eqz, if_else { throw }, local.get. */
+static uint64_t yx_wc_throw_if_zero(yx_wc *c)
+{
+    return 4 + yx_wc_throw(c);
+}
+
+static void yx_wc_push_search(yx_wc *c)
+{
+    if (c->search_count == c->search_capacity) {
+        size_t next = c->search_capacity ? c->search_capacity * 2 : 16;
+        bool *grown = realloc(c->search, next * sizeof(*grown));
+        if (!grown) { c->failed = true; return; }
+        c->search = grown;
+        c->search_capacity = next;
+    }
+    c->search[c->search_count++] = true;
+}
+
+static void yx_wc_pop_search(yx_wc *c)
+{
+    if (!c->failed && c->search_count) --c->search_count;
+}
+
+/* emit_lazy_call_to_search_for_patterns: global.get, i32.eqz,
+ * if_else { call }, once per `and`/`or` operand list. */
+static uint64_t yx_wc_search_call(yx_wc *c)
+{
+    if (!c->search_count || !c->search[c->search_count - 1]) return 0;
+    c->search[c->search_count - 1] = false;
+    return 4;
+}
+
+static void yx_wc_push_var(yx_wc *c, const char *name, yx_static_type type,
+                           bool undef)
+{
+    if (!name) return;
+    if (c->var_count == c->var_capacity) {
+        size_t next = c->var_capacity ? c->var_capacity * 2 : 16;
+        yx_wc_var *grown = realloc(c->vars, next * sizeof(*grown));
+        if (!grown) { c->failed = true; return; }
+        c->vars = grown;
+        c->var_capacity = next;
+    }
+    memset(&c->vars[c->var_count], 0, sizeof(c->vars[c->var_count]));
+    c->vars[c->var_count].name = name;
+    c->vars[c->var_count].type = type;
+    c->vars[c->var_count].undef = undef;
+    ++c->var_count;
+}
+
+static const yx_wc_var *yx_wc_find_var(const yx_wc *c, const char *name,
+                                       size_t length)
+{
+    for (size_t i = c->var_count; i-- > 0;)
+        if (strlen(c->vars[i].name) == length &&
+            memcmp(c->vars[i].name, name, length) == 0)
+            return &c->vars[i];
+    return NULL;
+}
+
+/* load_var: the undefined-flag check, then i32.const, load. */
+static uint64_t yx_wc_load_var(yx_wc *c, bool undef)
+{
+    return 2 + (undef ? 5 + yx_wc_throw(c) : 0);
+}
+
+static const yx_global *yx_wc_global(const yx_wc *c, const char *name,
+                                     size_t length)
+{
+    for (size_t i = 0; i < c->global_count; ++i) {
+        const char *global = c->globals[i].name;
+        if (global && strncmp(global, name, length) == 0 &&
+            (!global[length] || global[length] == '.'))
+            return &c->globals[i];
+    }
+    return NULL;
+}
+
+static yx_static_type yx_wc_global_type(const yx_global *global)
+{
+    switch (global->type) {
+    case YX_GLOBAL_BOOL: return YX_STATIC_BOOL;
+    case YX_GLOBAL_INT: return YX_STATIC_INT;
+    case YX_GLOBAL_FLOAT: return YX_STATIC_FLOAT;
+    case YX_GLOBAL_STR: return YX_STATIC_STRING;
+    case YX_GLOBAL_ARRAY: return YX_STATIC_ARRAY;
+    default: return YX_STATIC_STRUCT;
+    }
+}
+
+/* Module fields whose value is a constant (enumeration items and the like):
+ * the IR folds the whole field access into Expr::Const. */
+static bool yx_wc_module_constant(const char *name, bool *floating)
+{
+    uint64_t value = 0;
+    *floating = false;
+    if (!name) return false;
+    if (strcmp(name, "math.MEAN_BYTES") == 0) {
+        *floating = true;
+        return true;
+    }
+    if (yx_vt_permutation_constant(name, NULL)) return true;
+    if (strncmp(name, "pe.", 3) == 0) return yx_pe_constant(name + 3, &value);
+    if (strncmp(name, "elf.", 4) == 0) return yx_elf_constant(name + 4, &value);
+    if (strncmp(name, "macho.", 6) == 0)
+        return yx_macho_constant(name + 6, &value);
+    if (strncmp(name, "dex.", 4) == 0) return yx_dex_constant(name + 4, &value);
+    if (strncmp(name, "zip.", 4) == 0) return yx_zip_constant(name + 4, &value);
+    if (strncmp(name, "lnk.", 4) == 0) return yx_lnk_constant(name + 4, &value);
+#ifdef XXYARA_ENABLE_OLECF
+    if (strncmp(name, "olecf.", 6) == 0)
+        return yx_olecf_constant(name + 6, &value);
+#endif
+#ifdef XXYARA_ENABLE_VBA
+    if (strncmp(name, "vba.", 4) == 0) return yx_vba_constant(name + 4, &value);
+#endif
+    return false;
+}
+
+/* The operands of a left-nested chain of the node's operator, in source
+ * order. The caller frees the array. */
+static const yx_node **yx_wc_operands(yx_wc *c, const yx_node *n,
+                                      size_t *count)
+{
+    const yx_node **operands;
+    const yx_node *at = n;
+    size_t total = 1, i;
+    while (at->kind == N_BINARY && at->operation == n->operation && at->a) {
+        ++total;
+        at = at->a;
+    }
+    operands = malloc(total * sizeof(*operands));
+    if (!operands) {
+        c->failed = true;
+        *count = 0;
+        return NULL;
+    }
+    i = total;
+    at = n;
+    while (at->kind == N_BINARY && at->operation == n->operation && at->a) {
+        operands[--i] = at->b;
+        at = at->a;
+    }
+    operands[--i] = at;
+    *count = total;
+    return operands;
+}
+
+static bool yx_wc_arithmetic_operator(yx_token_kind operation)
+{
+    return operation == TK_PLUS || operation == TK_MINUS ||
+           operation == TK_STAR || operation == TK_DIV ||
+           operation == TK_PERCENT;
+}
+
+static yx_wc_info yx_wc_binary_info(yx_wc *c, const yx_node *n)
+{
+    yx_wc_info info = {YX_STATIC_UNKNOWN, false, false, false, 0, false,
+                       false};
+    const yx_node **operands;
+    size_t count;
+    bool all_constant = true, any_float = false, any_unsigned = false;
+    bool zero_divisor = false;
+    switch (n->operation) {
+    case TK_AND: case TK_OR: {
+        /* ir.and / ir.or: operands whose constant value does not decide
+         * the result are dropped; a deciding one makes it constant. */
+        bool is_and = n->operation == TK_AND, decided = false;
+        size_t kept = 0;
+        info.type = YX_STATIC_BOOL;
+        operands = yx_wc_operands(c, n, &count);
+        if (!operands) return info;
+        for (size_t i = 0; i < count; ++i) {
+            yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+            if (!operand.constant) { ++kept; continue; }
+            if (operand.truthy != is_and) decided = true;
+        }
+        free(operands);
+        if (decided || !kept) {
+            info.constant = true;
+            info.truthy = decided ? !is_and : is_and;
+        }
+        return info;
+    }
+    case TK_EQ: case TK_NE: case TK_LT: case TK_LE: case TK_GT: case TK_GE:
+    case TK_CONTAINS: case TK_ICONTAINS: case TK_STARTSWITH:
+    case TK_ISTARTSWITH: case TK_ENDSWITH: case TK_IENDSWITH: case TK_IEQUALS:
+        info.type = YX_STATIC_BOOL;
+        return info;
+    case TK_SHL: case TK_SHR: case TK_AMP: case TK_PIPE: case TK_CARET: {
+        yx_wc_info left = yx_wc_info_of(c, n->a);
+        yx_wc_info right = yx_wc_info_of(c, n->b);
+        info.type = YX_STATIC_INT;
+        info.unsigned64 = left.unsigned64 ||
+            (n->operation != TK_SHL && n->operation != TK_SHR &&
+             right.unsigned64);
+        info.non_negative = info.unsigned64;
+        info.constant = left.constant && right.constant;
+        info.truthy = true;
+        return info;
+    }
+    default: break;
+    }
+    if (!yx_wc_arithmetic_operator(n->operation)) return info;
+    operands = yx_wc_operands(c, n, &count);
+    if (!operands) return info;
+    for (size_t i = 0; i < count; ++i) {
+        yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+        if (operand.type == YX_STATIC_FLOAT) any_float = true;
+        if (operand.unsigned64) any_unsigned = true;
+        if (!operand.constant) all_constant = false;
+        if (i && operand.known_bits && operand.bits == 0 &&
+            (n->operation == TK_DIV || n->operation == TK_PERCENT))
+            zero_divisor = true;
+    }
+    free(operands);
+    info.type = any_float && n->operation != TK_PERCENT ?
+                YX_STATIC_FLOAT : YX_STATIC_INT;
+    info.unsigned64 = info.type == YX_STATIC_INT && any_unsigned;
+    info.non_negative = info.unsigned64;
+    /* fold_div and fold_rem leave a zero divisor to run time. */
+    info.constant = all_constant && !zero_divisor;
+    info.truthy = true;
+    return info;
+}
+
+static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
+{
+    yx_wc_info info = {YX_STATIC_UNKNOWN, false, false, false, 0, false,
+                       false};
+    if (!n) return info;
+    switch (n->kind) {
+    case N_INTEGER:
+        info.constant = true;
+        info.truthy = n->number != 0;
+        if (n->operation == TK_TRUE || n->operation == TK_FALSE) {
+            info.type = YX_STATIC_BOOL;
+            info.non_negative = true;
+        } else {
+            info.type = YX_STATIC_INT;
+            info.known_bits = true;
+            info.bits = n->number;
+            info.unsigned64 = n->is_unsigned;
+            info.non_negative = n->is_unsigned || (int64_t)n->number >= 0;
+        }
+        return info;
+    case N_FLOAT:
+        info.type = YX_STATIC_FLOAT;
+        info.constant = true;
+        info.truthy = n->floating != 0.0;
+        return info;
+    case N_STRING:
+        info.type = YX_STATIC_STRING;
+        info.constant = true;
+        info.truthy = n->string_length != 0;
+        return info;
+    case N_REGEX:
+        info.type = YX_STATIC_REGEX;
+        info.constant = true;
+        info.truthy = true;
+        return info;
+    case N_FILESIZE: case N_COUNT: case N_OFFSET: case N_LENGTH:
+        info.type = YX_STATIC_INT;
+        return info;
+    case N_PATTERN: case N_OF: case N_OF_EXPR: case N_FOR_OF: case N_FOR_IN:
+    case N_MATCHES:
+        info.type = YX_STATIC_BOOL;
+        return info;
+    case N_READ:
+        info.type = n->floating_read ? YX_STATIC_FLOAT : YX_STATIC_INT;
+        info.unsigned64 = n->width == 8 && !n->signed_read &&
+                          !n->floating_read;
+        info.non_negative = !n->signed_read && !n->floating_read;
+        return info;
+    case N_UNARY: {
+        yx_wc_info operand = yx_wc_info_of(c, n->a);
+        if (n->operation == TK_NOT || n->operation == TK_DEFINED) {
+            info.type = YX_STATIC_BOOL;
+            /* ir.not folds only a constant bool. */
+            if (n->operation == TK_NOT && operand.constant &&
+                operand.type == YX_STATIC_BOOL) {
+                info.constant = true;
+                info.truthy = !operand.truthy;
+            }
+            return info;
+        }
+        if (n->operation == TK_TILDE) {
+            info.type = YX_STATIC_INT;
+            info.unsigned64 = operand.unsigned64;
+            info.non_negative = operand.unsigned64;
+            info.constant = operand.constant;
+            info.truthy = true;
+            return info;
+        }
+        info.type = operand.type;
+        info.constant = operand.constant;
+        info.truthy = operand.truthy;
+        if (n->operation != TK_MINUS) {
+            info.unsigned64 = operand.unsigned64;
+            info.non_negative = operand.non_negative;
+        }
+        return info;
+    }
+    case N_BINARY:
+        return yx_wc_binary_info(c, n);
+    case N_RULE: {
+        const yx_wc_var *var;
+        const yx_global *global;
+        if (!n->name) return info;
+        var = yx_wc_find_var(c, n->name, strlen(n->name));
+        if (var) {
+            info.type = var->type;
+            info.constant = var->constant;
+            info.truthy = var->truthy;
+            info.known_bits = var->known_bits;
+            info.bits = var->bits;
+            info.unsigned64 = var->unsigned64;
+            info.non_negative = var->non_negative;
+            return info;
+        }
+        global = yx_wc_global(c, n->name, strlen(n->name));
+        if (global) {
+            info.type = yx_wc_global_type(global);
+            return info;
+        }
+        info.type = yx_module_root_name(n->name) ? YX_STATIC_STRUCT :
+                                                   YX_STATIC_BOOL;
+        return info;
+    }
+    case N_MODULE_FIELD: {
+        bool floating;
+        if (yx_wc_module_constant(n->name, &floating)) {
+            info.type = floating ? YX_STATIC_FLOAT : YX_STATIC_INT;
+            info.constant = true;
+            info.truthy = true;
+            info.non_negative = !floating;
+            return info;
+        }
+        info.type = yx_static_node_type(n);
+        return info;
+    }
+    case N_WITH:
+        return yx_wc_info_of(c, n->body);
+    default:
+        info.type = yx_static_node_type(n);
+        return info;
+    }
+}
+
+/* Structural equality, for `or` operands that share their target. */
+static bool yx_wc_same(const yx_node *x, const yx_node *y)
+{
+    if (x == y) return true;
+    if (!x || !y) return false;
+    if (x->kind != y->kind || x->operation != y->operation ||
+        x->number != y->number || x->is_unsigned != y->is_unsigned ||
+        x->filter != y->filter || x->quantifier != y->quantifier ||
+        x->item_count != y->item_count || x->set_count != y->set_count ||
+        x->string_length != y->string_length ||
+        memcmp(&x->floating, &y->floating, sizeof(x->floating)) != 0 ||
+        (x->name == NULL) != (y->name == NULL))
+        return false;
+    if (x->name && (x->kind == N_STRING ?
+                    memcmp(x->name, y->name, x->string_length) != 0 :
+                    strcmp(x->name, y->name) != 0))
+        return false;
+    for (size_t i = 0; i < x->set_count; ++i)
+        if (strcmp(x->set_names[i], y->set_names[i]) != 0) return false;
+    if (!yx_wc_same(x->a, y->a) || !yx_wc_same(x->b, y->b) ||
+        !yx_wc_same(x->c, y->c) || !yx_wc_same(x->body, y->body))
+        return false;
+    for (size_t i = 0; i < x->item_count; ++i)
+        if (!yx_wc_same(x->items[i], y->items[i])) return false;
+    return true;
+}
+
+/* A shallow structural hash that equal subtrees share. */
+static uint64_t yx_wc_hash(const yx_node *n, unsigned depth)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    if (!n) return hash;
+    hash = (hash ^ (uint64_t)n->kind) * UINT64_C(1099511628211);
+    hash = (hash ^ (uint64_t)n->operation) * UINT64_C(1099511628211);
+    hash = (hash ^ n->number) * UINT64_C(1099511628211);
+    if (n->name && n->kind != N_STRING)
+        for (const char *at = n->name; *at; ++at)
+            hash = (hash ^ (unsigned char)*at) * UINT64_C(1099511628211);
+    if (depth < 6) {
+        hash ^= yx_wc_hash(n->a, depth + 1) * 3;
+        hash ^= yx_wc_hash(n->b, depth + 1) * 5;
+        hash ^= yx_wc_hash(n->c, depth + 1) * 7;
+    }
+    return hash;
+}
+
+/* collapse_or_operands: a `matches` with a regexp or a string comparison
+ * with a literal string. Returns the operator kind and its target. */
+static int yx_wc_collapse_kind(yx_wc *c, const yx_node *n,
+                               const yx_node **target)
+{
+    yx_wc_info right, left;
+    if (n->kind == N_MATCHES && !n->b) {
+        *target = n->a;
+        return 1;
+    }
+    if (n->kind != N_BINARY) return 0;
+    switch (n->operation) {
+    case TK_EQ: case TK_IEQUALS:
+        right = yx_wc_info_of(c, n->b);
+        if (right.constant && right.type == YX_STATIC_STRING) {
+            *target = n->a;
+            return n->operation == TK_EQ ? 2 : 3;
+        }
+        left = yx_wc_info_of(c, n->a);
+        if (left.constant && left.type == YX_STATIC_STRING) {
+            *target = n->b;
+            return n->operation == TK_EQ ? 2 : 3;
+        }
+        return 0;
+    case TK_CONTAINS: case TK_ICONTAINS: case TK_STARTSWITH:
+    case TK_ISTARTSWITH: case TK_ENDSWITH: case TK_IENDSWITH:
+        right = yx_wc_info_of(c, n->b);
+        if (right.constant && right.type == YX_STATIC_STRING) {
+            *target = n->a;
+            return 4 + (int)(n->operation - TK_CONTAINS);
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static uint64_t yx_wc_and(yx_wc *c, const yx_node *n)
+{
+    size_t count, kept = 0;
+    const yx_node **operands = yx_wc_operands(c, n, &count);
+    uint64_t cost = 0;
+    if (!operands) return 0;
+    for (size_t i = 0; i < count; ++i) {
+        yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+        if (operand.constant && operand.truthy) continue;
+        operands[kept++] = operands[i];
+    }
+    yx_wc_push_search(c);
+    if (kept == 1) {
+        yx_wc_push_handler(c, 1);
+        cost = yx_wc_bool(c, operands[0]);
+        cost += yx_wc_pop_handler(c);
+    } else if (kept > 1) {
+        /* block { block { op; i32.eqz; br_if ... br } i32.const 0 } */
+        yx_wc_push_handler(c, 0);
+        for (size_t i = 0; i < kept; ++i) {
+            cost += yx_wc_bool(c, operands[i]);
+            if (i + 1 < kept) cost += 1 + yx_wc_throw_if_non_zero(c);
+        }
+        cost += 1;
+        cost += yx_wc_pop_handler(c);
+        cost += 2;
+    } else {
+        cost = 1;
+    }
+    yx_wc_pop_search(c);
+    free(operands);
+    return cost;
+}
+
+typedef struct {
+    int kind;
+    const yx_node *target;
+    uint64_t hash;
+    size_t members;
+} yx_wc_group;
+
+static uint64_t yx_wc_or(yx_wc *c, const yx_node *n)
+{
+    size_t count, group_count = 0, collapsed = 0, items, kept = 0;
+    const yx_node **operands = yx_wc_operands(c, n, &count);
+    yx_wc_group *groups;
+    int *group_of;
+    uint64_t cost = 0;
+    if (!operands) return 0;
+    groups = malloc(count * sizeof(*groups));
+    group_of = malloc(count * sizeof(*group_of));
+    if (!groups || !group_of) {
+        free(groups);
+        free(group_of);
+        free(operands);
+        c->failed = true;
+        return 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const yx_node *target = NULL;
+        int kind = yx_wc_collapse_kind(c, operands[i], &target);
+        uint64_t hash;
+        size_t g;
+        group_of[i] = -1;
+        if (!kind) continue;
+        hash = yx_wc_hash(target, 0);
+        for (g = 0; g < group_count; ++g)
+            if (groups[g].kind == kind && groups[g].hash == hash &&
+                yx_wc_same(groups[g].target, target))
+                break;
+        if (g == group_count) {
+            groups[g].kind = kind;
+            groups[g].target = target;
+            groups[g].hash = hash;
+            groups[g].members = 0;
+            ++group_count;
+        }
+        ++groups[g].members;
+        group_of[i] = (int)g;
+    }
+    /* Operands of a group with two or more members become one *Many
+     * operation: target, i32.const set, call. */
+    for (size_t g = 0; g < group_count; ++g)
+        if (groups[g].members >= 2) ++collapsed;
+    items = collapsed;
+    for (size_t i = 0; i < count; ++i) {
+        if (group_of[i] >= 0 && groups[group_of[i]].members >= 2) continue;
+        yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+        ++items;
+        /* ir.or drops false constants; a true one decides the result. */
+        if (operand.constant) {
+            if (operand.truthy) { kept = SIZE_MAX; break; }
+            continue;
+        }
+        operands[kept++] = operands[i];
+    }
+    if (items == 1 && collapsed == 1) {
+        /* A single remaining operand replaces the `or` itself. */
+        for (size_t g = 0; g < group_count; ++g)
+            if (groups[g].members >= 2)
+                cost = yx_wc_expr(c, groups[g].target) + 2;
+    } else if (kept == SIZE_MAX || kept + collapsed == 0) {
+        cost = 1;
+    } else {
+        yx_wc_push_search(c);
+        if (kept + collapsed == 1) {
+            yx_wc_push_handler(c, 1);
+            if (collapsed) {
+                for (size_t g = 0; g < group_count; ++g)
+                    if (groups[g].members >= 2)
+                        cost = yx_wc_expr(c, groups[g].target) + 2;
+            } else {
+                cost = yx_wc_bool(c, operands[0]);
+            }
+            cost += yx_wc_pop_handler(c);
+        } else {
+            /* block { block { (op; br_if)... i32.const 0; br } i32.const 1 } */
+            cost = 5;
+            for (size_t g = 0; g < group_count; ++g) {
+                if (groups[g].members < 2) continue;
+                yx_wc_push_handler(c, 0);
+                cost += yx_wc_expr(c, groups[g].target) + 2 + 1;
+                cost += yx_wc_pop_handler(c);
+            }
+            for (size_t i = 0; i < kept; ++i) {
+                yx_wc_push_handler(c, 0);
+                cost += yx_wc_bool(c, operands[i]) + 1;
+                cost += yx_wc_pop_handler(c);
+            }
+        }
+        yx_wc_pop_search(c);
+    }
+    free(groups);
+    free(group_of);
+    free(operands);
+    return cost;
+}
+
+static uint64_t yx_wc_comparison(yx_wc *c, const yx_node *n)
+{
+    yx_wc_info left = yx_wc_info_of(c, n->a);
+    yx_wc_info right = yx_wc_info_of(c, n->b);
+    yx_static_type left_type = left.type, right_type = right.type;
+    uint64_t cost;
+    if (n->operation == TK_EQ) {
+        /* `bool == 0` is compiled as `not bool`, `bool == 1` as `bool`
+         * (BooleanIntegerComparison). */
+        if (left_type == YX_STATIC_BOOL && right.known_bits &&
+            right.bits == 0)
+            return yx_wc_bool(c, n->a) + 1;
+        if (left.known_bits && left.bits == 0 &&
+            right_type == YX_STATIC_BOOL)
+            return yx_wc_bool(c, n->b) + 1;
+        if (left_type == YX_STATIC_BOOL && right.known_bits &&
+            right.bits == 1)
+            return yx_wc_expr(c, n->a);
+        if (left.known_bits && left.bits == 1 &&
+            right_type == YX_STATIC_BOOL)
+            return yx_wc_expr(c, n->b);
+    }
+    /* emit_operands: int to float conversions, bool to i64 extensions. */
+    cost = yx_wc_expr(c, n->a);
+    if (left_type == YX_STATIC_INT && right_type == YX_STATIC_FLOAT) {
+        ++cost;
+        left_type = YX_STATIC_FLOAT;
+    }
+    if (left_type == YX_STATIC_BOOL) ++cost;
+    cost += yx_wc_expr(c, n->b);
+    if (left_type == YX_STATIC_FLOAT && right_type == YX_STATIC_INT) {
+        ++cost;
+        right_type = YX_STATIC_FLOAT;
+    }
+    if (right_type == YX_STATIC_BOOL) ++cost;
+    if ((left_type == YX_STATIC_INT || right_type == YX_STATIC_INT) &&
+        left_type != YX_STATIC_FLOAT && right_type != YX_STATIC_FLOAT &&
+        left_type != YX_STATIC_STRING && right_type != YX_STATIC_STRING) {
+        /* emit_int_comparison: a signed operand that may be negative
+         * against an unsigned one needs 8 instructions instead of 1. */
+        bool left_unsigned = left_type == YX_STATIC_INT && left.unsigned64;
+        bool right_unsigned = right_type == YX_STATIC_INT &&
+                              right.unsigned64;
+        bool left_non_negative = left_type == YX_STATIC_BOOL ||
+                                 left.non_negative;
+        bool right_non_negative = right_type == YX_STATIC_BOOL ||
+                                  right.non_negative;
+        if (left_unsigned != right_unsigned &&
+            !(left_unsigned && right_non_negative) &&
+            !(right_unsigned && left_non_negative))
+            return cost + 8;
+    }
+    return cost + 1;
+}
+
+static uint64_t yx_wc_arithmetic(yx_wc *c, const yx_node *n)
+{
+    size_t count;
+    const yx_node **operands = yx_wc_operands(c, n, &count);
+    bool is_float = false;
+    uint64_t cost = 0;
+    if (!operands) return 0;
+    for (size_t i = 0; i < count; ++i)
+        if (yx_wc_info_of(c, operands[i]).type == YX_STATIC_FLOAT)
+            is_float = true;
+    for (size_t i = 0; i < count; ++i) {
+        cost += yx_wc_expr(c, operands[i]);
+        if (is_float &&
+            yx_wc_info_of(c, operands[i]).type == YX_STATIC_INT) ++cost;
+        if (i) ++cost;
+    }
+    free(operands);
+    return cost;
+}
+
+/* emit_div: undefined on a zero divisor (and on i64::MIN / -1). */
+static uint64_t yx_wc_div(yx_wc *c, const yx_node *n)
+{
+    size_t count;
+    const yx_node **operands = yx_wc_operands(c, n, &count);
+    yx_wc_info first;
+    bool is_float, is_unsigned;
+    uint64_t cost;
+    if (!operands) return 0;
+    first = yx_wc_info_of(c, operands[0]);
+    is_float = first.type == YX_STATIC_FLOAT;
+    is_unsigned = first.unsigned64;
+    cost = yx_wc_expr(c, operands[0]);
+    for (size_t i = 1; i < count; ++i) {
+        yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+        if (!is_float && operand.type == YX_STATIC_FLOAT) {
+            ++cost;
+            is_float = true;
+        }
+        cost += yx_wc_expr(c, operands[i]);
+        if (operand.unsigned64) is_unsigned = true;
+        if (is_float && operand.type == YX_STATIC_INT) ++cost;
+        if (is_float) ++cost;
+        else if (is_unsigned) cost += yx_wc_throw_if_zero(c) + 1;
+        else cost += 13 + yx_wc_throw(c) + 3;
+    }
+    free(operands);
+    return cost;
+}
+
+static uint64_t yx_wc_mod(yx_wc *c, const yx_node *n)
+{
+    size_t count;
+    const yx_node **operands = yx_wc_operands(c, n, &count);
+    uint64_t cost;
+    if (!operands) return 0;
+    cost = yx_wc_expr(c, operands[0]);
+    for (size_t i = 1; i < count; ++i)
+        cost += yx_wc_expr(c, operands[i]) + yx_wc_throw_if_zero(c) + 1;
+    free(operands);
+    return cost;
+}
+
+static size_t yx_wc_segments(const char *name, size_t from, size_t to)
+{
+    size_t count = 1;
+    if (to <= from) return 0;
+    for (size_t i = from; i < to; ++i)
+        if (name[i] == '.') ++count;
+    return count;
+}
+
+/* emit_lookup_common and its lookup call for a run of fields: 3
+ * instructions per field and the field count, a null object first when the
+ * run starts at the root structure; lookup_object never throws. */
+static uint64_t yx_wc_lookup(yx_wc *c, size_t fields, bool root,
+                             bool object)
+{
+    uint64_t cost = (root ? 1 : 0) + 3 * (uint64_t)fields + 1;
+    return object ? cost + 1 : cost + yx_wc_call_undef(c);
+}
+
+static const yx_node *yx_wc_index(const yx_node *n, size_t i)
+{
+    if (i == 0) return n->a;
+    if (i == 1) return n->b;
+    if (i == 2) return n->c;
+    return i - 3 < n->item_count ? n->items[i - 3] : NULL;
+}
+
+/* Dotted and indexed module fields and globals: FieldAccess and Lookup
+ * expressions. A path that starts with a loop or `with` variable loads it
+ * instead of starting at the root structure. */
+static uint64_t yx_wc_path(yx_wc *c, const yx_node *n, bool object)
+{
+    const char *name = n->name;
+    size_t length, ends[64], index_count = 0, from = 0, first_end;
+    bool root = true, method = false;
+    uint64_t cost = 0;
+    const yx_wc_var *var;
+    if (!name) return 0;
+    length = strlen(name);
+    if (n->kind == N_GLOBAL_DEEP_PATH && n->deep_index_ends) {
+        index_count = n->deep_index_count < 64 ? n->deep_index_count : 64;
+        memcpy(ends, n->deep_index_ends, index_count * sizeof(*ends));
+    } else {
+        index_count = n->kind == N_GLOBAL_INDEXED ? 1 :
+                      yx_module_node_indices(n);
+        memcpy(ends, n->first_three_index_ends,
+               index_count * sizeof(*ends));
+    }
+    if (n->implicit_value && length >= 6) length -= 6;
+    /* A bound method call: the object is the path without the method. */
+    if (n->operation == TK_LPAREN && n->kind != N_MODULE_FIELD &&
+        n->kind != N_RULE) {
+        size_t at = length;
+        while (at > 0 && name[at - 1] != '.') --at;
+        if (at > 0 && (!index_count || at - 1 >= ends[index_count - 1])) {
+            length = at - 1;
+            method = true;
+        }
+    }
+    first_end = 0;
+    while (first_end < length && name[first_end] != '.') ++first_end;
+    if (index_count && first_end > ends[0]) first_end = ends[0];
+    var = yx_wc_find_var(c, name, first_end);
+    if (var) {
+        cost += yx_wc_load_var(c, var->undef);
+        from = first_end < length ? first_end + 1 : length;
+        root = false;
+    }
+    for (size_t i = 0; i < index_count; ++i) {
+        size_t fields = from <= ends[i] ? yx_wc_segments(name, from, ends[i]) : 0;
+        if (fields) cost += yx_wc_lookup(c, fields, root, true);
+        root = false;
+        cost += yx_wc_expr(c, yx_wc_index(n, i));
+        /* array indexing and map lookups may be undefined */
+        cost += yx_wc_call_undef(c);
+        from = ends[i] + 1;
+    }
+    if (from < length) {
+        size_t fields = yx_wc_segments(name, from, length);
+        cost += yx_wc_lookup(c, fields, root, object || method);
+    }
+    if (method) {
+        if (n->item_count)
+            for (size_t i = 0; i < n->item_count; ++i)
+                cost += yx_wc_expr(c, n->items[i]);
+        else if (n->kind == N_MODULE_INDEXED_FIELD && n->b)
+            cost += yx_wc_expr(c, n->b);
+        cost += yx_wc_call_undef(c);
+    }
+    return cost;
+}
+
+/* Values that are structures, arrays or maps: lookup_object. */
+static uint64_t yx_wc_object(yx_wc *c, const yx_node *n)
+{
+    const yx_wc_var *var;
+    if (!n) return 0;
+    if (n->kind == N_RULE) {
+        if (!n->name) return 0;
+        var = yx_wc_find_var(c, n->name, strlen(n->name));
+        if (var) return yx_wc_load_var(c, var->undef);
+        return yx_wc_lookup(c, 1, true, true);
+    }
+    if (n->kind == N_MODULE_FIELD || n->kind == N_MODULE_INDEXED_FIELD ||
+        n->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+        n->kind == N_MODULE_TRIPLE_INDEXED_FIELD ||
+        n->kind == N_GLOBAL_INDEXED || n->kind == N_GLOBAL_DEEP_PATH)
+        return yx_wc_path(c, n, true);
+    return yx_wc_expr(c, n);
+}
+
+/* Module functions whose Rust signature returns a plain value, not an
+ * Option: their calls skip the undefined-result check. */
+static bool yx_wc_call_may_be_undef(const char *name)
+{
+    static const char *const defined_results[] = {
+        "math.min", "math.max", "math.in_range", "math.to_string",
+        "math.to_number", "test_proto2.add", "test_proto2.uppercase",
+        "test_proto2.nested.nested_func"
+    };
+    if (!name) return true;
+    if (strncmp(name, "console.", 8) == 0 || strncmp(name, "cuckoo.", 7) == 0)
+        return false;
+    for (size_t i = 0; i < sizeof(defined_results) / sizeof(*defined_results);
+         ++i)
+        if (strcmp(name, defined_results[i]) == 0) return false;
+    return true;
+}
+
+static uint64_t yx_wc_call(yx_wc *c, const yx_node *n)
+{
+    uint64_t cost = 1;
+    for (size_t i = 0; i < n->item_count; ++i)
+        cost += yx_wc_expr(c, n->items[i]);
+    if (yx_wc_call_may_be_undef(n->name)) cost += 1 + yx_wc_throw(c);
+    return cost;
+}
+
+static uint64_t yx_wc_pattern(yx_wc *c, const yx_node *n)
+{
+    uint64_t cost = yx_wc_search_call(c);
+    /* i32.const id, or the `$` of a for-of body: load_var, i32.wrap_i64 */
+    cost += n->name && n->name[0] ? 1 : 3;
+    if (n->kind == N_PATTERN || n->kind == N_COUNT) {
+        if (n->filter == FILTER_AT) cost += yx_wc_expr(c, n->b);
+        else if (n->filter == FILTER_IN)
+            cost += yx_wc_expr(c, n->b) + yx_wc_expr(c, n->c);
+        return cost + 1;
+    }
+    cost += n->a ? yx_wc_expr(c, n->a) : 1;
+    return cost + yx_wc_call_undef(c);
+}
+
+static bool yx_wc_in_set(const yx_node *n, const char *pattern)
+{
+    if (n->set_all) return true;
+    for (size_t j = 0; j < n->set_count; ++j)
+        if (yx_name_matches(pattern, n->set_names[j])) return true;
+    return false;
+}
+
+/* emit_switch over `branches` instructions in `count` branches. */
+static uint64_t yx_wc_switch(uint64_t branches, size_t count)
+{
+    return 8 + branches + 2 * (uint64_t)(count ? count - 1 : 0);
+}
+
+/* emit_for and the `of`/`for` emitters built on it. */
+static uint64_t yx_wc_loop(yx_wc *c, const yx_node *n, size_t patterns)
+{
+    size_t vars = c->var_count;
+    uint64_t cost = 0, before = 0, after = 0, body;
+    bool counted = n->quantifier == Q_NUMBER || n->quantifier == Q_PERCENT;
+    if (n->kind == N_FOR_IN && (n->array_loop || n->map_loop))
+        cost += 2 + yx_wc_object(c, n->b); /* the iterated object */
+    cost += 1; /* block */
+    if (n->kind == N_FOR_IN && n->range_loop) {
+        yx_wc_info lower = yx_wc_info_of(c, n->b);
+        yx_wc_info upper = yx_wc_info_of(c, n->c);
+        yx_wc_push_handler(c, 2);
+        cost += yx_wc_expr(c, n->c) + yx_wc_expr(c, n->b) + 2;
+        cost += yx_wc_pop_handler(c);
+        cost += 3 + 3 + 14 + 3;
+        if (lower.unsigned64) cost += 4;
+        if (upper.unsigned64) cost += 4;
+        after = 6; /* next_item += 1 */
+    } else if (n->kind == N_FOR_IN && (n->array_loop || n->map_loop)) {
+        cost += 12;
+    } else {
+        cost += 3;
+    }
+    cost += 3; /* i = 0 */
+    if (n->quantifier == Q_NUMBER) {
+        cost += 2 + yx_wc_expr(c, n->a) + 3;
+    } else if (n->quantifier == Q_PERCENT) {
+        yx_wc_info percentage = yx_wc_info_of(c, n->a);
+        cost += 2 + 3 + yx_wc_expr(c, n->a) +
+                (percentage.non_negative ? 0 : 6) + 6 + 3;
+    }
+    cost += 1; /* loop */
+    if (n->kind == N_OF || n->kind == N_FOR_OF) {
+        before = 3 * (uint64_t)patterns + 10;
+    } else if (n->kind == N_OF_EXPR) {
+        uint64_t branches = 0;
+        for (size_t i = 0; i < n->item_count; ++i)
+            branches += yx_wc_bool(c, n->items[i]);
+        before = 4 + yx_wc_switch(branches, n->item_count);
+    } else if (n->range_loop) {
+        yx_wc_push_var(c, n->name, YX_STATIC_INT, false);
+    } else if (n->array_loop) {
+        before = 6 + yx_wc_call_undef(c);
+        yx_wc_push_var(c, n->name, YX_STATIC_UNKNOWN, false);
+    } else if (n->map_loop) {
+        before = 13;
+        yx_wc_push_var(c, n->name, YX_STATIC_UNKNOWN, false);
+        if (n->set_count)
+            yx_wc_push_var(c, n->set_names[0], YX_STATIC_UNKNOWN, false);
+    } else {
+        /* A tuple: each item is caught, and flags the variable undefined. */
+        uint64_t branches = 0;
+        bool used;
+        yx_wc_push_handler(c, 6);
+        for (size_t i = 0; i < n->item_count; ++i)
+            branches += yx_wc_expr(c, n->items[i]);
+        before = 4 + yx_wc_switch(branches, n->item_count);
+        used = yx_wc_pop_handler(c);
+        if (used) before += 6 + 1;
+        yx_wc_push_var(c, n->name,
+                       n->item_count ? yx_wc_info_of(c, n->items[0]).type :
+                                       YX_STATIC_UNKNOWN,
+                       used);
+    }
+    cost += before;
+    yx_wc_push_handler(c, 0);
+    if (n->kind == N_OF) {
+        body = 3; /* load_var, i32.wrap_i64 */
+        if (n->filter == FILTER_AT) body += yx_wc_expr(c, n->b);
+        else if (n->filter == FILTER_IN)
+            body += yx_wc_expr(c, n->b) + yx_wc_expr(c, n->c);
+        body += 1;
+    } else if (n->kind == N_OF_EXPR) {
+        body = 2;
+    } else {
+        body = yx_wc_bool(c, n->body);
+    }
+    if (n->quantifier == Q_ALL) body += 1 + after + 12 + 2;
+    else if (counted) body += 18;
+    else body += 3;
+    body += yx_wc_pop_handler(c);
+    cost += body;
+    cost += n->quantifier == Q_ALL ? 2 : after + 12;
+    cost += counted ? 3 : 1;
+    c->var_count = vars;
+    return cost;
+}
+
+static uint64_t yx_wc_of(yx_wc *c, const yx_node *n)
+{
+    size_t patterns = 0, ranges = 0, singles = 0, run = 0, previous = 0;
+    uint64_t cost = yx_wc_search_call(c);
+    /* Pattern IDs are assumed to follow declaration order. */
+    for (size_t i = 0; i < c->pattern_count; ++i) {
+        if (!yx_wc_in_set(n, c->pattern_names[i])) continue;
+        if (patterns && i == previous + 1) {
+            ++run;
+        } else {
+            if (run == 1) ++singles;
+            ++ranges;
+            run = 1;
+        }
+        previous = i;
+        ++patterns;
+    }
+    if (run == 1) ++singles;
+    if (n->filter == FILTER_NONE &&
+        (n->quantifier == Q_ANY || n->quantifier == Q_ALL)) {
+        uint64_t calls = 2 * (uint64_t)singles + 4 * (uint64_t)(ranges - singles);
+        if (ranges <= 1) return cost + calls;
+        return cost + calls + (n->quantifier == Q_ANY ?
+                               (uint64_t)ranges + 3 :
+                               2 * (uint64_t)ranges + 2);
+    }
+    if (n->filter == FILTER_NONE && n->quantifier == Q_NUMBER && ranges == 1)
+        return cost + 3 + yx_wc_expr(c, n->a);
+    return cost + yx_wc_loop(c, n, patterns);
+}
+
+static uint64_t yx_wc_with(yx_wc *c, const yx_node *n)
+{
+    size_t vars = c->var_count;
+    uint64_t cost = 0;
+    for (size_t i = 0; i < n->item_count && i < n->set_count; ++i) {
+        yx_wc_info value = yx_wc_info_of(c, n->items[i]);
+        bool object = value.type == YX_STATIC_STRUCT ||
+                      value.type == YX_STATIC_ARRAY ||
+                      value.type == YX_STATIC_MAP;
+        bool used;
+        yx_wc_push_handler(c, 6); /* set_var_undef(true) */
+        cost += 2 + (object ? yx_wc_object(c, n->items[i]) :
+                              yx_wc_expr(c, n->items[i]));
+        used = yx_wc_pop_handler(c);
+        if (used) cost += 6 + 1; /* set_var_undef(false), block */
+        yx_wc_push_var(c, n->set_names[i], value.type, used);
+        if (value.constant && n->set_names[i] && c->var_count && !c->failed) {
+            yx_wc_var *var = &c->vars[c->var_count - 1];
+            var->constant = true;
+            var->truthy = value.truthy;
+            var->known_bits = value.known_bits;
+            var->bits = value.bits;
+            var->unsigned64 = value.unsigned64;
+            var->non_negative = value.non_negative;
+        }
+    }
+    cost += yx_wc_expr(c, n->body);
+    c->var_count = vars;
+    return cost;
+}
+
+static uint64_t yx_wc_expr(yx_wc *c, const yx_node *n)
+{
+    yx_wc_info info;
+    if (!n || c->failed) return 0;
+    info = yx_wc_info_of(c, n);
+    if (info.constant) return 1;
+    switch (n->kind) {
+    case N_FILESIZE:
+        /* global.get, local.tee, i64.const, i64.lt_s, if_else, local.get */
+        return 6 + yx_wc_throw(c);
+    case N_PATTERN: case N_COUNT: case N_OFFSET: case N_LENGTH:
+        return yx_wc_pattern(c, n);
+    case N_RULE: {
+        const yx_wc_var *var;
+        if (!n->name) return 6;
+        var = yx_wc_find_var(c, n->name, strlen(n->name));
+        if (var) return yx_wc_load_var(c, var->undef);
+        if (yx_wc_global(c, n->name, strlen(n->name)))
+            return yx_wc_lookup(c, 1, true, false);
+        return 6; /* emit_check_for_rule_match */
+    }
+    case N_READ:
+        return yx_wc_expr(c, n->a) + yx_wc_call_undef(c);
+    case N_UNARY:
+        switch (n->operation) {
+        case TK_NOT:
+            return yx_wc_bool(c, n->a) + 1;
+        case TK_DEFINED: {
+            uint64_t cost;
+            yx_wc_push_handler(c, 1);
+            cost = yx_wc_bool(c, n->a) + 2; /* drop, i32.const 1 */
+            return cost + yx_wc_pop_handler(c);
+        }
+        case TK_MINUS:
+            return yx_wc_expr(c, n->a) +
+                   (yx_wc_info_of(c, n->a).type == YX_STATIC_FLOAT ? 1 : 2);
+        case TK_TILDE:
+            return yx_wc_expr(c, n->a) + 2;
+        default:
+            return yx_wc_expr(c, n->a);
+        }
+    case N_BINARY:
+        switch (n->operation) {
+        case TK_AND: return yx_wc_and(c, n);
+        case TK_OR: return yx_wc_or(c, n);
+        case TK_EQ: case TK_NE: case TK_LT: case TK_LE: case TK_GT: case TK_GE:
+            return yx_wc_comparison(c, n);
+        case TK_PLUS: case TK_MINUS: case TK_STAR:
+            return yx_wc_arithmetic(c, n);
+        case TK_DIV: return yx_wc_div(c, n);
+        case TK_PERCENT: return yx_wc_mod(c, n);
+        case TK_SHL: case TK_SHR:
+            return yx_wc_expr(c, n->a) + yx_wc_expr(c, n->b) + 7;
+        default:
+            /* bitwise operators and string comparisons: a single op */
+            return yx_wc_expr(c, n->a) + yx_wc_expr(c, n->b) + 1;
+        }
+    case N_MATCHES:
+        return yx_wc_expr(c, n->a) + (n->b ? yx_wc_expr(c, n->b) : 1) + 1;
+    case N_OF:
+        return yx_wc_of(c, n);
+    case N_OF_EXPR: case N_FOR_IN:
+        return yx_wc_loop(c, n, 0);
+    case N_FOR_OF: {
+        size_t patterns = 0;
+        for (size_t i = 0; i < c->pattern_count; ++i)
+            if (yx_wc_in_set(n, c->pattern_names[i])) ++patterns;
+        return yx_wc_loop(c, n, patterns);
+    }
+    case N_WITH:
+        return yx_wc_with(c, n);
+    case N_CALL:
+        return yx_wc_call(c, n);
+    default:
+        return yx_wc_path(c, n, false);
+    }
+}
+
+/* emit_bool_expr: integers and floats compare with zero, strings call
+ * str_len first. */
+static uint64_t yx_wc_bool(yx_wc *c, const yx_node *n)
+{
+    yx_static_type type = yx_wc_info_of(c, n).type;
+    uint64_t cost = yx_wc_expr(c, n);
+    if (type == YX_STATIC_INT || type == YX_STATIC_FLOAT) return cost + 2;
+    if (type == YX_STATIC_STRING) return cost + 3;
+    return cost;
+}
+
+typedef struct {
+    yx_wc *c;
+    const yx_node *root;
+    bool global_rule;
+    uint64_t size;
+} yx_wasm_size_job;
+
+static void yx_wasm_size_thunk(void *data)
+{
+    yx_wasm_size_job *job = data;
+    uint64_t cost;
+    yx_wc_push_search(job->c);
+    yx_wc_push_handler(job->c, 1);
+    cost = yx_wc_bool(job->c, job->root);
+    cost += yx_wc_pop_handler(job->c);
+    /* i32.eqz, if_else { [i32.const, call, i32.const 1, return] }
+     * else { i32.const, call } */
+    job->size = cost + (job->global_rule ? 8 : 4);
+}
+
+uint64_t yx_condition_wasm_size(const yx_condition *condition,
+                                bool global_rule,
+                                const char *const *pattern_names,
+                                size_t pattern_count,
+                                const yx_global *globals,
+                                size_t global_count)
+{
+    yx_wc c;
+    yx_wasm_size_job job;
+    if (!condition || !condition->root) return 0;
+    memset(&c, 0, sizeof(c));
+    c.pattern_names = pattern_names;
+    c.pattern_count = pattern_count;
+    c.globals = globals;
+    c.global_count = global_count;
+    job.c = &c;
+    job.root = condition->root;
+    job.global_rule = global_rule;
+    job.size = 0;
+    yx_run_deep(condition->depth, yx_wasm_size_thunk, &job);
+    free(c.handlers);
+    free(c.search);
+    free(c.vars);
+    return c.failed ? 0 : job.size;
+}
+
+typedef struct yx_scope_name {
+    const char *name;
+    yx_static_type type;
+    yx_static_type element_type;
+    int string_case;
+    size_t string_length_constraint;
+    bool imported_module;
+    bool is_unsigned;
+    const yx_global_object *object;
+    const yx_global_array *array;
+    const yx_node *module_binding;
+    const yx_node *regexp_binding;
+    const struct yx_scope_name *parent;
+    /* A `with` declaration in the typed warning walk: set when an
+     * expression in its scope reads it (unused_identifier). */
+    bool *used;
+    /* The typed warning walk's value of a `with` variable, or the
+     * collection a loop variable iterates (value_item): integer ranges and
+     * constants of eq_check read through them. */
+    const yx_node *value_binding;
+    bool value_item;
+    /* A table entry stands for table_count entries hashed by name, such
+     * as the earlier rules of a namespace. Its own name is empty and it
+     * has no type, so walkers matching on other properties skip it; name
+     * lookups go through yx_scope_named. */
+    const struct yx_scope_name *table;
+    size_t table_count;
+    const uint32_t *table_slots;
+    size_t table_slot_count; /* a power of two */
+} yx_scope_name;
+
+static uint64_t yx_scope_hash(const char *name, size_t length)
+{
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < length; ++i) hash = (hash ^ (unsigned char)name[i]) * 1099511628211ull;
+    return hash;
+}
+
+/* Open-addressing lookup in a table entry's slots (entry index + 1). */
+static const yx_scope_name *yx_scope_table_find(const yx_scope_name *head, const char *name, size_t length)
+{
+    if (!head->table_slot_count) return NULL;
+    size_t mask = head->table_slot_count - 1;
+    for (size_t at = (size_t)yx_scope_hash(name, length) & mask;; at = (at + 1) & mask) {
+        uint32_t slot = head->table_slots[at];
+        if (!slot) return NULL;
+        const yx_scope_name *entry = &head->table[slot - 1];
+        if (!strncmp(entry->name, name, length) && !entry->name[length]) return entry;
+    }
+}
+
+/* The scope from entry outward, with each table replaced by its entry
+ * named name[0..length) or skipped. Table entries point past their table,
+ * so walkers continue with yx_scope_named(at->parent, ...). */
+static const yx_scope_name *yx_scope_named(const yx_scope_name *entry, const char *name, size_t length)
+{
+    while (entry && entry->table) {
+        const yx_scope_name *found = name ? yx_scope_table_find(entry, name, length) : NULL;
+        if (found) return found;
+        entry = entry->parent;
+    }
+    return entry;
+}
+
+/* The innermost entry named name[0..length). */
+static const yx_scope_name *yx_scope_find(const yx_scope_name *scope, const char *name, size_t length)
+{
+    for (const yx_scope_name *at = yx_scope_named(scope, name, length); at;
+         at = yx_scope_named(at->parent, name, length))
+        if (strlen(at->name) == length && !memcmp(at->name, name, length)) return at;
+    return NULL;
+}
+
+static size_t yx_scope_root_length(const char *name)
+{
+    const char *dot = strchr(name, '.');
+    return dot ? (size_t)(dot - name) : strlen(name);
+}
+
+static const yx_global_field *yx_global_object_field_n(
+    const yx_global_object *object, const char *name, size_t length)
+{
+    if (!object || !name) return NULL;
+    for (size_t i = 0; i < object->count; ++i)
+        if (strlen(object->fields[i].name) == length &&
+            memcmp(object->fields[i].name, name, length) == 0)
+            return &object->fields[i];
+    const char *dot = memchr(name, '.', length);
+    if (dot) {
+        size_t prefix = (size_t)(dot - name);
+        for (size_t i = 0; i < object->count; ++i) {
+            const yx_global_field *field = &object->fields[i];
+            if (field->type == YX_GLOBAL_STRUCT && strlen(field->name) == prefix &&
+                !memcmp(field->name, name, prefix))
+                return yx_global_object_field_n(field->value.object, dot + 1, length - prefix - 1);
+        }
+    }
+    return NULL;
+}
+
+static const yx_global_field *yx_global_object_field(
+    const yx_global_object *object, const char *name)
+{
+    return name ? yx_global_object_field_n(object, name, strlen(name)) : NULL;
+}
+
+static const yx_global_field *yx_global_object_field_suffix(
+    const yx_global_object *object, const char *name, const char *suffix)
+{
+    size_t name_length, suffix_length;
+    if (!name || !suffix) return NULL;
+    name_length = strlen(name);
+    suffix_length = strlen(suffix);
+    if (name_length <= suffix_length ||
+        strcmp(name + name_length - suffix_length, suffix) != 0)
+        return NULL;
+    return yx_global_object_field_n(object, name,
+                                    name_length - suffix_length);
+}
+
+static const yx_global_field *yx_global_object_nested_array_field(
+    const yx_global_object *object, const char *path,
+    const char **member)
+{
+    if (!object || !path) return NULL;
+    for (size_t i = 0; i < object->count; ++i) {
+        const yx_global_field *field = &object->fields[i];
+        size_t length = strlen(field->name);
+        if (strncmp(path, field->name, length) != 0 || path[length] != '.') continue;
+        if (field->type == YX_GLOBAL_STRUCT) {
+            const yx_global_field *nested = yx_global_object_nested_array_field(
+                field->value.object, path + length + 1, member);
+            if (nested) return nested;
+        } else if (field->type == YX_GLOBAL_ARRAY && field->value.array &&
+                   field->value.array->element_type == YX_GLOBAL_STRUCT) {
+            *member = path + length + 1;
+            return field;
+        }
+    }
+    return NULL;
+}
+
+static const yx_global_field *yx_global_object_field_path(
+    const yx_global_object *object, const char *root,
+    const char *name, const char *suffix)
+{
+    size_t root_length = strlen(root);
+    size_t name_length = strlen(name);
+    size_t suffix_length = strlen(suffix);
+    if (name_length <= root_length + suffix_length + 1 ||
+        memcmp(name, root, root_length) != 0 ||
+        name[root_length] != '.' ||
+        strcmp(name + name_length - suffix_length, suffix) != 0)
+        return NULL;
+    return yx_global_object_field_n(
+        object, name + root_length + 1,
+        name_length - root_length - suffix_length - 1);
+}
+
+static yx_static_type yx_global_static_type(yx_global_type type)
+{
+    switch (type) {
+    case YX_GLOBAL_BOOL: return YX_STATIC_BOOL;
+    case YX_GLOBAL_INT: return YX_STATIC_INT;
+    case YX_GLOBAL_FLOAT: return YX_STATIC_FLOAT;
+    case YX_GLOBAL_STR: return YX_STATIC_STRING;
+    case YX_GLOBAL_ARRAY: return YX_STATIC_ARRAY;
+    case YX_GLOBAL_STRUCT: return YX_STATIC_STRUCT;
+    }
+    return YX_STATIC_UNKNOWN;
+}
+
+static bool yx_deep_schema_fields(const yx_global_object **object,
+                                   const yx_global_array **array,
+                                   yx_static_type *type, const char *name,
+                                   size_t start, size_t end)
+{
+    while (start < end) {
+        const yx_global_field *field;
+        size_t field_start, field_end;
+        if (name[start] != '.') return false;
+        field_start = ++start;
+        while (start < end && name[start] != '.') ++start;
+        field_end = start;
+        if (field_end == field_start || *type != YX_STATIC_STRUCT ||
+            !*object) return false;
+        field = yx_global_object_field_n(*object, name + field_start,
+                                          field_end - field_start);
+        if (!field) return false;
+        *type = yx_global_static_type(field->type);
+        *object = field->type == YX_GLOBAL_STRUCT ? field->value.object : NULL;
+        *array = field->type == YX_GLOBAL_ARRAY ? field->value.array : NULL;
+    }
+    return true;
+}
+
+static bool yx_deep_schema(const yx_node *node,
+                            const yx_scope_name *scope,
+                            yx_static_type *result,
+                            const yx_global_array **result_array)
+{
+    const yx_scope_name *root = NULL;
+    const yx_global_object *object;
+    const yx_global_array *array;
+    yx_static_type type;
+    size_t name_length, root_length, cursor;
+    const char *dot;
+    if (!node || !node->name || node->deep_index_count < 4)
+        return false;
+    name_length = strlen(node->name);
+    if (node->operation == TK_LPAREN) {
+        if (name_length < 4 ||
+            strcmp(node->name + name_length - 4, ".len") != 0)
+            return false;
+        name_length -= 4;
+    }
+    dot = memchr(node->name, '.', node->deep_index_ends[0]);
+    root_length = dot ? (size_t)(dot - node->name) :
+                        node->deep_index_ends[0];
+    for (const yx_scope_name *at = yx_scope_named(scope, node->name, root_length); at;
+             at = yx_scope_named(at->parent, node->name, root_length))
+        if (strlen(at->name) == root_length &&
+            memcmp(at->name, node->name, root_length) == 0) {
+            root = at;
+            break;
+        }
+    if (!root) return false;
+    type = root->type;
+    object = root->object;
+    array = root->array;
+    cursor = root_length;
+    for (size_t i = 0; i < node->deep_index_count; ++i) {
+        size_t end = node->deep_index_ends[i];
+        if (end < cursor || end > name_length ||
+            !yx_deep_schema_fields(&object, &array, &type, node->name,
+                                    cursor, end) ||
+            type != YX_STATIC_ARRAY || !array)
+            return false;
+        type = yx_global_static_type(array->element_type);
+        object = type == YX_STATIC_STRUCT && array->count ?
+                 array->items[0].object : NULL;
+        array = type == YX_STATIC_ARRAY && array->count ?
+                array->items[0].array : NULL;
+        cursor = end;
+    }
+    if (!yx_deep_schema_fields(&object, &array, &type, node->name,
+                                cursor, name_length))
+        return false;
+    if (node->operation == TK_LPAREN) {
+        if (type != YX_STATIC_ARRAY) return false;
+        type = YX_STATIC_INT;
+        array = NULL;
+    }
+    if (result) *result = type;
+    if (result_array) *result_array = array;
+    return true;
+}
+
+static const yx_global_array *yx_scoped_object_array_path(
+    const yx_scope_name *scope, const char *name, const char **member)
+{
+    for (const yx_scope_name *at = scope; at; at = at->parent) {
+        size_t root_length = strlen(at->name);
+        const char *path;
+        if (strncmp(name, at->name, root_length) != 0 ||
+            name[root_length] != '.') continue;
+        path = name + root_length + 1;
+        if (at->type == YX_STATIC_ARRAY && at->array &&
+            at->array->element_type == YX_GLOBAL_STRUCT) {
+            *member = path;
+            return at->array;
+        }
+        if (at->type != YX_STATIC_STRUCT || !at->object) continue;
+        const yx_global_field *field = yx_global_object_nested_array_field(
+            at->object, path, member);
+        if (field) return field->value.array;
+    }
+    return NULL;
+}
+
+/* Resolve module aliases through their declared path so access grants and
+ * collection keys retain the same meaning inside with expressions. */
+static bool yx_module_alias_node(const yx_node *node, const char *alias,
+                                  const yx_node *base, yx_node *result,
+                                  char **owned_name)
+{
+    size_t root, tail, prefix;
+    unsigned before, after;
+    const char *suffix;
+    const yx_node *old_keys[3], *new_keys[3];
+    if (!node || node->resolved_module_alias || !node->name ||
+        !base || !base->name) return false;
+    root = strlen(alias);
+    if (strncmp(node->name, alias, root) != 0 ||
+        (node->name[root] && node->name[root] != '.')) return false;
+    if (node->kind != N_RULE && node->kind != N_GLOBAL_INDEXED &&
+        node->kind != N_MODULE_FIELD && node->kind != N_CALL &&
+        node->kind != N_MODULE_INDEXED_FIELD &&
+        node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+        node->kind != N_MODULE_TRIPLE_INDEXED_FIELD) return false;
+    suffix = node->name + root;
+    if (node->kind == N_GLOBAL_INDEXED) suffix = ".value";
+    prefix = strlen(base->name);
+    if (base->implicit_value && prefix >= 6 && *suffix &&
+        strcmp(base->name + prefix - 6, ".value") == 0) prefix -= 6;
+    tail = strlen(suffix);
+    if (prefix > SIZE_MAX - tail - 1) return false;
+    *owned_name = malloc(prefix + tail + 1);
+    if (!*owned_name) return false;
+    memcpy(*owned_name, base->name, prefix);
+    memcpy(*owned_name + prefix, suffix, tail + 1);
+    before = yx_module_node_indices(base);
+    after = node->kind == N_GLOBAL_INDEXED ? 1 : yx_module_node_indices(node);
+    if (before + after > 3) { free(*owned_name); *owned_name = NULL; return false; }
+    *result = *node;
+    result->name = *owned_name;
+    result->resolved_module_alias = true;
+    result->module_alias_prefix_length = prefix;
+    if (node->kind == N_CALL) result->operation = TK_LPAREN;
+    result->kind = before + after == 3 ? N_MODULE_TRIPLE_INDEXED_FIELD :
+                   before + after == 2 ? N_MODULE_NESTED_INDEXED_FIELD :
+                   before + after == 1 ? N_MODULE_INDEXED_FIELD :
+                   node->kind == N_CALL ? N_CALL : N_MODULE_FIELD;
+    result->implicit_value = node->kind == N_GLOBAL_INDEXED ||
+                             (node->kind == N_RULE ? base->implicit_value :
+                              node->implicit_value);
+    old_keys[0] = base->a; old_keys[1] = base->b; old_keys[2] = base->c;
+    new_keys[0] = node->a; new_keys[1] = node->b; new_keys[2] = node->c;
+    result->a = result->b = result->c = NULL;
+    yx_node **slots[] = {&result->a, &result->b, &result->c};
+    for (unsigned i = 0; i < before + after; ++i) {
+        *slots[i] = (yx_node *)(i < before ? old_keys[i] : new_keys[i - before]);
+        result->first_three_index_ends[i] = i < before ?
+            base->first_three_index_ends[i] :
+            prefix + node->first_three_index_ends[i - before] - root;
+        result->index_primary_starts[i] = i < before ?
+            base->index_primary_starts[i] : node->index_primary_starts[i - before];
+        result->index_primary_ends[i] = i < before ?
+            base->index_primary_ends[i] : node->index_primary_ends[i - before];
+    }
+    if (yx_signature_member(result->name) &&
+        !strcmp(yx_signature_member(result->name), "valid_on") &&
+        node->kind == N_CALL &&
+        before + after == 1 && node->item_count == 1) {
+        result->b = node->items[0];
+        result->items = NULL;
+        result->item_count = 0;
+    }
+    return true;
+}
+
+static bool yx_scoped_module_alias(const yx_node *node,
+                                    const yx_scope_name *scope,
+                                    yx_node *result, char **owned_name)
+{
+    for (const yx_scope_name *at = scope; at; at = at->parent) {
+        yx_node base;
+        char *base_name = NULL;
+        bool matched;
+        /* An inner binding that is not a module alias (a loop variable)
+         * hides an outer alias of the same name: in `with v = pe.version_info
+         * : (for any k, v in v : (v == "x"))` the body's v is the value. */
+        if (!at->module_binding && !at->table && at->name && node->name) {
+            size_t length = strlen(at->name);
+            if (!strncmp(node->name, at->name, length) &&
+                (!node->name[length] || node->name[length] == '.')) return false;
+        }
+        if (!at->module_binding) continue;
+        const yx_node *original = at->module_binding;
+        if (yx_scoped_module_alias(original, at->parent, &base, &base_name))
+            original = &base;
+        matched = yx_module_alias_node(node, at->name, original,
+                                       result, owned_name);
+        free(base_name);
+        if (matched) return true;
+    }
+    return false;
+}
+
+static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
+                                                   const yx_scope_name *scope);
+/* Validation asks for the type of every operator of a chain, and each
+ * answer walks the operands. Memoize per node and scope. */
+/* Scope objects are freed and reallocated between walks, so the memo is
+ * also keyed by a per-walk generation. */
+static _Thread_local unsigned yx_type_cache_generation;
+static void yx_type_cache_new_walk(void) { if (!++yx_type_cache_generation) ++yx_type_cache_generation; }
+static yx_static_type yx_scoped_node_type(const yx_node *node,
+                                          const yx_scope_name *scope)
+{
+    yx_node *cache = (yx_node *)node;
+    yx_static_type type;
+    if (!node) return YX_STATIC_UNKNOWN;
+    if (node->cache_self == node && node->type_cache_valid && node->type_cache_scope == scope &&
+        node->type_cache_generation == yx_type_cache_generation && yx_type_cache_generation)
+        return (yx_static_type)node->type_cache;
+    type = yx_scoped_node_type_uncached(node, scope);
+    if (node->cache_self != node) { cache->cache_self = node; cache->feature_field_cache = 0; }
+    cache->type_cache_valid = true; cache->type_cache = (int)type; cache->type_cache_scope = scope;
+    cache->type_cache_generation = yx_type_cache_generation;
+    return type;
+}
+static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
+                                                   const yx_scope_name *scope)
+{
+    yx_static_type left, right;
+    if (!node) return YX_STATIC_UNKNOWN;
+    {
+        yx_node alias;
+        char *name = NULL;
+        if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+            yx_static_type type = yx_scoped_node_type(&alias, scope);
+            free(name);
+            return type;
+        }
+    }
+    if (node->kind == N_GLOBAL_DEEP_PATH)
+        return yx_deep_schema(node, scope, &left, NULL) ? left :
+               YX_STATIC_UNKNOWN;
+    if (node->kind == N_RULE) {
+        for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
+             at = yx_scope_named(at->parent, node->name, strlen(node->name)))
+            if (strcmp(at->name, node->name) == 0) return at->type;
+    }
+    if (node->kind == N_GLOBAL_INDEXED) {
+        for (const yx_scope_name *at = scope; at; at = at->parent)
+            if (strcmp(at->name, node->name) == 0 &&
+                at->type == YX_STATIC_ARRAY)
+                return at->element_type;
+    }
+    if (node->kind == N_MODULE_FIELD) {
+        const char *dot = strchr(node->name, '.');
+        if (dot) {
+            size_t root_length = (size_t)(dot - node->name);
+            for (const yx_scope_name *at = scope; at; at = at->parent)
+                if (at->type == YX_STATIC_STRUCT && at->object &&
+                    strlen(at->name) == root_length &&
+                    memcmp(at->name, node->name, root_length) == 0) {
+                    const yx_global_field *field =
+                        yx_global_object_field(at->object, dot + 1);
+                    return field ? yx_global_static_type(field->type) :
+                                   YX_STATIC_UNKNOWN;
+                }
+        }
+    }
+    if (node->kind == N_MODULE_INDEXED_FIELD || node->kind == N_CALL) {
+        const char *suffix = node->kind == N_CALL ? ".len" : ".value";
+        for (const yx_scope_name *at = scope;
+             at && (node->kind == N_CALL || node->implicit_value);
+             at = at->parent) {
+            const yx_global_field *field;
+            if (at->type != YX_STATIC_STRUCT || !at->object) continue;
+            if (node->kind == N_CALL &&
+                yx_signature_scope_method(at->object, at->name, node->name))
+                return YX_STATIC_BOOL;
+            field = yx_global_object_field_path(at->object, at->name,
+                                                 node->name, suffix);
+            if (field && (field->type == YX_GLOBAL_ARRAY ||
+                          (node->kind == N_CALL && field->type == YX_GLOBAL_STR)))
+                return node->kind == N_CALL ? YX_STATIC_INT :
+                       yx_global_static_type(field->value.array->element_type);
+        }
+        if (node->kind == N_MODULE_INDEXED_FIELD) {
+            const char *member = NULL;
+            const yx_global_array *array = yx_scoped_object_array_path(
+                scope, node->name, &member);
+            const yx_global_field *field = array && array->count ?
+                yx_global_object_field(array->items[0].object, member) : NULL;
+            if (field) return yx_global_static_type(field->type);
+            if (array && array->count && node->operation == TK_LPAREN) {
+                field = yx_global_object_field_suffix(
+                    array->items[0].object, member, ".len");
+                if (field && (field->type == YX_GLOBAL_ARRAY ||
+                              field->type == YX_GLOBAL_STR))
+                    return YX_STATIC_INT;
+            }
+        }
+    }
+    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD) {
+        const char *member = NULL;
+        const char *inner_member = NULL;
+        const yx_global_array *array = yx_scoped_object_array_path(
+            scope, node->name, &member);
+        const yx_global_field *field = array && array->count &&
+            node->implicit_value ?
+            yx_global_object_field_suffix(array->items[0].object,
+                                           member, ".value") : NULL;
+        if (field && field->type == YX_GLOBAL_ARRAY)
+            return yx_global_static_type(field->value.array->element_type);
+        field = array && array->count ?
+            yx_global_object_nested_array_field(
+                array->items[0].object, member, &inner_member) : NULL;
+        if (field && field->value.array->count) {
+            const yx_global_field *inner = yx_global_object_field(
+                field->value.array->items[0].object, inner_member);
+            if (inner) return yx_global_static_type(inner->type);
+            if (node->operation == TK_LPAREN) {
+                inner = yx_global_object_field_suffix(
+                    field->value.array->items[0].object,
+                    inner_member, ".len");
+                if (inner && (inner->type == YX_GLOBAL_ARRAY ||
+                              inner->type == YX_GLOBAL_STR))
+                    return YX_STATIC_INT;
+            }
+        }
+    }
+    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) {
+        const char *member = NULL, *second_member = NULL;
+        const char *third_member = NULL;
+        const yx_global_array *outer = yx_scoped_object_array_path(
+            scope, node->name, &member);
+        const yx_global_field *second = outer && outer->count ?
+            yx_global_object_nested_array_field(
+                outer->items[0].object, member, &second_member) : NULL;
+        const yx_global_object *object = second &&
+            second->value.array->count ?
+            second->value.array->items[0].object : NULL;
+        const yx_global_field *third = object && node->implicit_value ?
+            yx_global_object_field_suffix(object, second_member,
+                                           ".value") : NULL;
+        if (third && third->type == YX_GLOBAL_ARRAY)
+            return yx_global_static_type(third->value.array->element_type);
+        third = yx_global_object_nested_array_field(
+            object, second_member, &third_member);
+        if (third && third->value.array->count) {
+            const yx_global_field *field = yx_global_object_field(
+                third->value.array->items[0].object, third_member);
+            if (field) return yx_global_static_type(field->type);
+        }
+    }
+    if (node->kind == N_UNARY && node->operation != TK_NOT &&
+        node->operation != TK_DEFINED && node->operation != TK_TILDE)
+        return yx_scoped_node_type(node->a, scope);
+    if (node->kind == N_BINARY &&
+        (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+         node->operation == TK_STAR || node->operation == TK_DIV)) {
+        left = yx_scoped_node_type(node->a, scope);
+        right = yx_scoped_node_type(node->b, scope);
+        if (left == YX_STATIC_FLOAT || right == YX_STATIC_FLOAT)
+            return YX_STATIC_FLOAT;
+        if (left == YX_STATIC_INT && right == YX_STATIC_INT)
+            return YX_STATIC_INT;
+    }
+    /* `%`, the shifts and the bitwise operators take integers only. */
+    if (node->kind == N_BINARY &&
+        (node->operation == TK_PERCENT || node->operation == TK_AMP ||
+         node->operation == TK_PIPE || node->operation == TK_CARET ||
+         node->operation == TK_SHL || node->operation == TK_SHR) &&
+        yx_scoped_node_type(node->a, scope) == YX_STATIC_INT &&
+        yx_scoped_node_type(node->b, scope) == YX_STATIC_INT)
+        return YX_STATIC_INT;
+    return yx_static_node_type(node);
+}
+
+static bool yx_unsigned_module_field(const char *name)
+{
+    const char *member;
+    if (!name) return false;
+    if (!strcmp(name, "vt.behaviour.payloads_extracted.size") ||
+        !strcmp(name, "vt.behaviour.processes_list.start_time") ||
+        !strcmp(name, "vt.behaviour.processes_list.termination_time") ||
+        !strcmp(name, "test_proto2.file_size") ||
+        !strcmp(name, "test_proto2.requires_foo_and_bar")) return true;
+    if (!yx_test_proto_path(name)) return false;
+    member = strrchr(name, '.');
+    return member && (!strncmp(member + 1, "uint64", 6) ||
+                      !strncmp(member + 1, "fixed64", 7));
+}
+
+static bool yx_scoped_unsigned(const yx_node *node, const yx_scope_name *scope)
+{
+    yx_node alias;
+    char *name = NULL;
+    if (!node) return false;
+    if (node->kind == N_INTEGER) return node->is_unsigned;
+    if (node->kind == N_READ)
+        return !node->floating_read && !node->signed_read && node->width == 8;
+    if (node->kind == N_RULE) {
+        const yx_scope_name *local = yx_scope_find(scope, node->name, strlen(node->name));
+        return local && local->is_unsigned;
+    }
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        bool result = yx_scoped_unsigned(&alias, scope);
+        free(name);
+        return result;
+    }
+    if (node->kind == N_UNARY)
+        return (node->operation == TK_TILDE ||
+                node->operation == TK_PLUS) && yx_scoped_unsigned(node->a, scope);
+    if (node->kind == N_BINARY) {
+        if (node->operation == TK_SHL || node->operation == TK_SHR)
+            return yx_scoped_unsigned(node->a, scope);
+        if (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+            node->operation == TK_STAR || node->operation == TK_DIV ||
+            node->operation == TK_PERCENT || node->operation == TK_AMP ||
+            node->operation == TK_CARET || node->operation == TK_PIPE)
+            return yx_scoped_node_type(node, scope) != YX_STATIC_FLOAT &&
+                (yx_scoped_unsigned(node->a, scope) || yx_scoped_unsigned(node->b, scope));
+    }
+    return yx_unsigned_module_field(node->name);
+}
+
+static const yx_global_array *yx_scoped_array_from_node(
+    const yx_node *node, const yx_scope_name *scope)
+{
+    yx_node alias;
+    char *name = NULL;
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        const yx_global_array *array = yx_scoped_array_from_node(&alias, scope);
+        free(name);
+        return array;
+    }
+    const yx_module_array_desc *module_array =
+        yx_module_array_node(node, false);
+    if (module_array) return module_array->schema;
+    if (!node) return NULL;
+    if (node->kind == N_GLOBAL_DEEP_PATH) {
+        const yx_global_array *array = NULL;
+        yx_static_type type;
+        return yx_deep_schema(node, scope, &type, &array) &&
+               type == YX_STATIC_ARRAY ? array : NULL;
+    }
+    if (node->kind == N_RULE) {
+        for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
+             at = yx_scope_named(at->parent, node->name, strlen(node->name)))
+            if (strcmp(at->name, node->name) == 0)
+                return at->type == YX_STATIC_ARRAY ? at->array : NULL;
+    }
+    if (node->kind == N_MODULE_FIELD) {
+        const char *dot = strchr(node->name, '.');
+        if (!dot) return NULL;
+        for (const yx_scope_name *at = scope; at; at = at->parent) {
+            const yx_global_field *field;
+            size_t root_length = (size_t)(dot - node->name);
+            if (at->type != YX_STATIC_STRUCT || !at->object ||
+                strlen(at->name) != root_length ||
+                memcmp(at->name, node->name, root_length) != 0)
+                continue;
+            field = yx_global_object_field(at->object, dot + 1);
+            return field && field->type == YX_GLOBAL_ARRAY ?
+                   field->value.array : NULL;
+        }
+    }
+    if (node->kind == N_MODULE_INDEXED_FIELD && !node->implicit_value &&
+        node->operation != TK_LPAREN) {
+        const char *member = NULL;
+        const yx_global_array *outer = yx_scoped_object_array_path(
+            scope, node->name, &member);
+        const yx_global_field *field = outer && outer->count ?
+            yx_global_object_field(outer->items[0].object, member) : NULL;
+        return field && field->type == YX_GLOBAL_ARRAY ?
+               field->value.array : NULL;
+    }
+    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD &&
+        !node->implicit_value && node->operation != TK_LPAREN) {
+        const char *member = NULL, *inner_member = NULL;
+        const yx_global_array *outer = yx_scoped_object_array_path(
+            scope, node->name, &member);
+        const yx_global_field *inner = outer && outer->count ?
+            yx_global_object_nested_array_field(
+                outer->items[0].object, member, &inner_member) : NULL;
+        const yx_global_field *field = inner && inner->value.array->count ?
+            yx_global_object_field(
+                inner->value.array->items[0].object, inner_member) : NULL;
+        return field && field->type == YX_GLOBAL_ARRAY ?
+               field->value.array : NULL;
+    }
+    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD &&
+        !node->implicit_value && node->operation != TK_LPAREN) {
+        const char *member = NULL, *second_member = NULL;
+        const char *third_member = NULL;
+        const yx_global_array *outer = yx_scoped_object_array_path(
+            scope, node->name, &member);
+        const yx_global_field *second = outer && outer->count ?
+            yx_global_object_nested_array_field(
+                outer->items[0].object, member, &second_member) : NULL;
+        const yx_global_field *third = second &&
+            second->value.array->count ?
+            yx_global_object_nested_array_field(
+                second->value.array->items[0].object, second_member,
+                &third_member) : NULL;
+        const yx_global_field *field = third && third->value.array->count ?
+            yx_global_object_field(
+                third->value.array->items[0].object, third_member) : NULL;
+        return field && field->type == YX_GLOBAL_ARRAY ?
+               field->value.array : NULL;
+    }
+    return NULL;
+}
+
+static yx_static_type yx_scoped_array_element_type(
+    const yx_node *node, const yx_scope_name *scope)
+{
+    if (node && node->kind == N_MODULE_FIELD) {
+        yx_dotnet_array_kind kind = yx_dotnet_array_from_name(node->name);
+        if (kind != YX_DOTNET_ARRAY_NONE)
+            return kind == YX_DOTNET_ARRAY_STREAMS ||
+                   kind == YX_DOTNET_ARRAY_CLASSES ? YX_STATIC_STRUCT :
+                   kind == YX_DOTNET_ARRAY_FIELD_OFFSETS ? YX_STATIC_INT :
+                   YX_STATIC_STRING;
+    }
+    if (node && node->kind == N_MODULE_INDEXED_FIELD &&
+        strcmp(node->name, "dotnet.classes.methods") == 0)
+        return YX_STATIC_STRUCT;
+    if (node && node->kind == N_MODULE_INDEXED_FIELD &&
+        strcmp(node->name, "dotnet.classes.base_types") == 0)
+        return YX_STATIC_STRING;
+    if (node && node->kind == N_MODULE_INDEXED_FIELD &&
+        strcmp(node->name, "dotnet.classes.generic_parameters") == 0)
+        return YX_STATIC_STRING;
+    if (node && node->kind == N_MODULE_NESTED_INDEXED_FIELD &&
+        strcmp(node->name, "dotnet.classes.methods.parameters") == 0)
+        return YX_STATIC_STRUCT;
+    if (node && node->kind == N_MODULE_NESTED_INDEXED_FIELD &&
+        strcmp(node->name,
+               "dotnet.classes.methods.generic_parameters") == 0)
+        return YX_STATIC_STRING;
+    const yx_global_array *array = yx_scoped_array_from_node(node, scope);
+    return array ? yx_global_static_type(array->element_type) :
+           YX_STATIC_UNKNOWN;
+}
+
+static bool yx_is_numeric_type(yx_static_type type)
+{
+    return type == YX_STATIC_INT || type == YX_STATIC_FLOAT;
+}
+
+static bool yx_validation_error(yx_validation *state, const char *format,
+                                 const char *name)
+{
+    if (state->error && state->error_capacity)
+        snprintf(state->error, state->error_capacity, format, name);
+    return false;
+}
+
+/* E007 for a constant, folded or written (`@a[0-1]`, `-1%`): the detail
+ * carries the constant's span when it has one. */
+static bool yx_range_error_span(yx_validation *state, const char *message,
+                                const yx_node *node)
+{
+    if (!state->error || !state->error_capacity) return false;
+    if (node && node->span_start < node->span_end &&
+        node->span_end != SIZE_MAX)
+        snprintf(state->error, state->error_capacity, "%s span:%zu:%zu",
+                 message, node->span_start, node->span_end);
+    else
+        snprintf(state->error, state->error_capacity, "%s", message);
+    return false;
+}
+
+/* An indexed field path that no array describes: YARA-X reports the first
+ * component it cannot resolve, an unknown identifier for the root or an
+ * unknown field for the member after it. */
+static bool yx_unknown_indexed_field_error(yx_validation *state,
+                                           const yx_node *node,
+                                           const yx_scope_name *scope)
+{
+    const char *name = node->name, *dot = strchr(name, '.');
+    size_t root = dot ? (size_t)(dot - name) : strlen(name);
+    bool imported = false;
+    if (!state->error || !state->error_capacity) return false;
+    for (size_t i = 0; i < state->import_count; ++i)
+        if (strlen(state->imports[i]) == root &&
+            memcmp(state->imports[i], name, root) == 0) imported = true;
+    if (!imported && !yx_scope_find(scope, name, root)) {
+        snprintf(state->error, state->error_capacity,
+                 "unknown identifier '%.*s'", (int)root, name);
+        return false;
+    }
+    if (imported && dot) {
+        size_t prefix = (size_t)(dot + 1 - name) + strcspn(dot + 1, ".");
+        bool known = false;
+        for (size_t i = 0; i < sizeof(yx_module_arrays) /
+                                sizeof(yx_module_arrays[0]); ++i) {
+            const char *path = yx_module_arrays[i].path;
+            if (strncmp(path, name, prefix) == 0 &&
+                (path[prefix] == '\0' || path[prefix] == '.')) known = true;
+        }
+        if (!known) {
+            snprintf(state->error, state->error_capacity,
+                     "unsupported module field '%.*s'", (int)prefix, name);
+            return false;
+        }
+    }
+    /* Walk the members after the root with the schema, reading collections
+     * through their items: E008 on the first member it lacks, E002 on a
+     * field that is not a structure but has a member read from it
+     * (`pe.sections[0].name.x`). */
+    if (imported && dot && node->span_start != SIZE_MAX &&
+        node->span_end != SIZE_MAX && node->span_start < node->span_end) {
+        size_t length = strlen(name), walk = root + 1, ordinal = 1;
+        char *prefix = (char *)malloc(length + 1);
+        bool module_known = false;
+        /* Through a `with` binding the source span starts at the binding:
+         * its members are not counted. */
+        if (node->resolved_module_alias)
+            for (size_t i = 0; i < node->module_alias_prefix_length && name[i]; ++i)
+                if (name[i] == '.') --ordinal;
+        while (prefix && walk < length) {
+            size_t walk_end = walk + strcspn(name + walk, ".");
+            const char *type;
+            memcpy(prefix, name, walk_end);
+            prefix[walk_end] = '\0';
+            type = yx_mo_schema_path_type_name(prefix, true, &module_known);
+            if (!module_known) break;
+            if (!type || (walk_end < length && strcmp(type, "struct") != 0 &&
+                          strcmp(type, "array") != 0 &&
+                          strcmp(type, "map") != 0)) {
+                if (type)
+                    snprintf(state->error, state->error_capacity,
+                             "module member type:%zu:%zu:%zu:%s:%.*s",
+                             node->span_start, node->span_end, ordinal, type,
+                             (int)(walk_end - walk), name + walk);
+                else
+                    snprintf(state->error, state->error_capacity,
+                             "module unknown field:%zu:%zu:%zu:%.*s",
+                             node->span_start, node->span_end, ordinal,
+                             (int)(walk_end - walk), name + walk);
+                free(prefix);
+                return false;
+            }
+            walk = walk_end + 1;
+            ++ordinal;
+        }
+        free(prefix);
+    }
+    {
+        const char *member = strrchr(name, '.');
+        size_t length = member ? strlen(member + 1) : 0;
+        if (imported && member && member > dot && length &&
+            node->span_end != SIZE_MAX && node->span_start < node->span_end &&
+            node->span_end - node->span_start > length) {
+            snprintf(state->error, state->error_capacity,
+                     "test proto unknown field:%zu:%zu:%s",
+                     node->span_end - length, node->span_end, member + 1);
+            return false;
+        }
+    }
+    snprintf(state->error, state->error_capacity,
+             "unsupported indexed module field '%s'", name);
+    return false;
+}
+
+/* A field read through a `with` binding of a module struct (`p.missing`
+ * for `pe.overlay.missing`): YARA-X reports E008 on the first member after
+ * the binding that the module's schema lacks. The detail gives the
+ * member's ordinal in the source span. */
+static bool yx_alias_unknown_member_error(yx_validation *state,
+                                          const yx_node *node)
+{
+    const char *name = node->name;
+    size_t length = strlen(name), prefix = node->module_alias_prefix_length;
+    size_t member_start, ordinal = 0;
+    char *path;
+    if (!state->error || !state->error_capacity || prefix >= length ||
+        name[prefix] != '.' || node->span_start == SIZE_MAX ||
+        node->span_end == SIZE_MAX || node->span_start >= node->span_end)
+        return false;
+    path = (char *)malloc(length + 1);
+    if (!path) return false;
+    for (member_start = prefix + 1; member_start < length;) {
+        size_t member_end = member_start + strcspn(name + member_start, ".");
+        memcpy(path, name, member_end);
+        path[member_end] = '\0';
+        ++ordinal;
+        if (yx_mo_schema_path_type(path) == YX_MO_DATA_UNDEFINED) {
+            snprintf(state->error, state->error_capacity,
+                     "module unknown field:%zu:%zu:%zu:%.*s",
+                     node->span_start, node->span_end, ordinal,
+                     (int)(member_end - member_start), name + member_start);
+            free(path);
+            return true;
+        }
+        member_start = member_end + 1;
+    }
+    free(path);
+    return false;
+}
+
+/* Wrong arguments for a call, with the call's offset so the diagnostic
+ * spans the arguments of that call. */
+static bool yx_wrong_arguments_error(yx_validation *state, const yx_node *call)
+{
+    if (state->error && state->error_capacity)
+        snprintf(state->error, state->error_capacity,
+                 "wrong arguments for '%s' @%zu", call->name, call->span_start);
+    return false;
+}
+
+/* Reject a negative array index only when the entire expression is a
+ * compile-time integer constant. An expression such as -1 + 1 is valid. */
+static bool yx_constant_integer(const yx_node *node, int64_t *result)
+{
+    int64_t left, right;
+    if (!node || !result) return false;
+    if (node->kind == N_INTEGER && !node->is_unsigned &&
+        node->operation != TK_TRUE && node->operation != TK_FALSE) {
+        *result = (int64_t)node->number;
+        return true;
+    }
+    if (node->kind == N_UNARY &&
+        (node->operation == TK_MINUS || node->operation == TK_PLUS) &&
+        yx_constant_integer(node->a, &left)) {
+        if (node->operation == TK_MINUS && left == INT64_MIN) return false;
+        *result = node->operation == TK_MINUS ? -left : left;
+        return true;
+    }
+    if (node->kind != N_BINARY ||
+        (node->operation != TK_PLUS && node->operation != TK_MINUS) ||
+        !yx_constant_integer(node->a, &left) ||
+        !yx_constant_integer(node->b, &right)) return false;
+    if (node->operation == TK_PLUS) {
+        if ((right > 0 && left > INT64_MAX - right) ||
+            (right < 0 && left < INT64_MIN - right)) return false;
+        *result = left + right;
+    } else {
+        if ((right < 0 && left > INT64_MAX + right) ||
+            (right > 0 && left < INT64_MIN + right)) return false;
+        *result = left - right;
+    }
+    return true;
+}
+
+static bool yx_validate_set(const yx_node *node, yx_validation *state)
+{
+    size_t i, j;
+    if (node->set_all) {
+        if (!state->pattern_count)
+            return yx_validation_error(state, "pattern set contains no patterns", "");
+        for (i = 0; i < state->pattern_count; i++) state->used[i] = true;
+        return true;
+    }
+    for (j = 0; j < node->set_count; j++) {
+        bool found = false;
+        for (i = 0; i < state->pattern_count; i++) {
+            if (yx_name_matches(state->pattern_names[i], node->set_names[j])) {
+                state->used[i] = true;
+                found = true;
+            }
+        }
+        if (!found)
+            return yx_validation_error(state, "unknown pattern selector '$%s'",
+                                       node->set_names[j]);
+    }
+    return true;
+}
+
+static bool yx_static_accepts(yx_static_type actual,
+                               yx_static_type expected)
+{
+    return actual == YX_STATIC_UNKNOWN || actual == expected;
+}
+
+static bool yx_node_uses_feature_field_uncached(const yx_node *node);
+/* Validation asks this for every operator of a chain; memoizing the answer
+ * per node keeps long chains linear. */
+static bool yx_node_uses_feature_field(const yx_node *node)
+{
+    yx_node *cache = (yx_node *)node;
+    if (!node) return false;
+    if (node->cache_self != node) {
+        cache->cache_self = node; cache->feature_field_cache = 0; cache->type_cache_valid = false;
+    }
+    if (!node->feature_field_cache)
+        cache->feature_field_cache = yx_node_uses_feature_field_uncached(node) ? 2 : 1;
+    return node->feature_field_cache == 2;
+}
+static bool yx_node_uses_feature_field_uncached(const yx_node *node)
+{
+    if (node->kind == N_RULE && yx_module_root_name(node->name)) return true;
+    if (node->kind == N_MODULE_FIELD || node->kind == N_CALL ||
+        node->kind == N_MODULE_INDEXED_FIELD ||
+        node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+        node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) return true;
+    if (node->kind == N_MODULE_FIELD &&
+        strcmp(node->name, "test_proto2.requires_foo_and_bar") == 0)
+        return true;
+    if (yx_node_uses_feature_field(node->a) ||
+        yx_node_uses_feature_field(node->b) ||
+        yx_node_uses_feature_field(node->c) ||
+        yx_node_uses_feature_field(node->body)) return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_node_uses_feature_field(node->items[i])) return true;
+    return false;
+}
+
+static const char *yx_static_type_name(yx_static_type type)
+{
+    switch (type) {
+    case YX_STATIC_INT: return "integer";
+    case YX_STATIC_FLOAT: return "float";
+    case YX_STATIC_STRING: return "string";
+    case YX_STATIC_BOOL: return "boolean";
+    case YX_STATIC_REGEX: return "regexp";
+    case YX_STATIC_MAP: return "map";
+    case YX_STATIC_ARRAY: return "array";
+    case YX_STATIC_STRUCT: return "struct";
+    case YX_STATIC_FUNCTION: return "function";
+    default: return "unknown";
+    }
+}
+
+/* The type of a module function call's result, for the parser. */
+static const char *yx_call_result_type_name(const yx_node *node)
+{
+    return yx_static_type_name(yx_static_node_type(node));
+}
+
+static bool yx_wrong_type_span(yx_validation *state, const yx_node *node,
+                                const char *expected, const char *actual)
+{
+    if (state->error && state->error_capacity)
+        snprintf(state->error, state->error_capacity,
+                 "wrong type span:%zu:%zu:%s:%s", node->span_start,
+                 node->span_end, expected, actual);
+    return false;
+}
+
+/* A lookup key of the wrong type: E002 on the key, as check_type reports
+ * it for the index of an array or map; without a span the plain detail. */
+static bool yx_wrong_key_type(yx_validation *state, const yx_node *key,
+                              yx_static_type expected,
+                              const yx_scope_name *scope)
+{
+    yx_static_type actual = yx_scoped_node_type(key, scope);
+    if (key && key->span_start != SIZE_MAX && key->span_end != SIZE_MAX &&
+        key->span_start < key->span_end && actual != YX_STATIC_UNKNOWN)
+        return yx_wrong_type_span(state, key,
+                                  expected == YX_STATIC_STRING ? "`string`" : "`integer`",
+                                  yx_static_type_name(actual));
+    return yx_validation_error(state, "wrong indexed module key type%s", "");
+}
+
+/* ast2ir checks integer operands in source order: E002 at the first operand
+ * whose type is known and is not `integer`. An operand without a source span
+ * keeps the legacy detail (a printf format taking one "%s"), which the parser
+ * maps from the tokens. True when both operands are acceptable. */
+static bool yx_integer_operands_check(yx_validation *state,
+                                      const yx_node *first,
+                                      yx_static_type first_type,
+                                      const yx_node *second,
+                                      yx_static_type second_type,
+                                      const char *detail)
+{
+    const yx_node *operand = NULL;
+    yx_static_type type = YX_STATIC_UNKNOWN;
+    if (first && first_type != YX_STATIC_UNKNOWN && first_type != YX_STATIC_INT) {
+        operand = first;
+        type = first_type;
+    } else if (second && second_type != YX_STATIC_UNKNOWN &&
+               second_type != YX_STATIC_INT) {
+        operand = second;
+        type = second_type;
+    }
+    if (!operand) return true;
+    if (operand->span_start < operand->span_end &&
+        operand->span_end != SIZE_MAX)
+        return yx_wrong_type_span(state, operand, "`integer`",
+                                  yx_static_type_name(type));
+    return yx_validation_error(state, detail, "");
+}
+
+/* bool_expr_from_ast (ast2ir.rs): a condition, a loop or `with` body and an
+ * item of an `of` tuple cannot be a map, struct, array or regexp (E002).
+ * Functions keep their own diagnostic with its call help. */
+static bool yx_bool_context_check(yx_validation *state, const yx_node *node,
+                                  const yx_scope_name *scope)
+{
+    const char *actual;
+    if (!node || node->span_start == SIZE_MAX || node->span_end == SIZE_MAX)
+        return true;
+    switch (yx_scoped_node_type(node, scope)) {
+    case YX_STATIC_MAP: actual = "a map"; break;
+    case YX_STATIC_STRUCT: actual = "a struct"; break;
+    case YX_STATIC_ARRAY: actual = "an array"; break;
+    case YX_STATIC_REGEX: actual = "a regexp"; break;
+    default: return true;
+    }
+    return yx_wrong_type_span(state, node, "`bool`", actual);
+}
+
+static bool yx_validate_node(const yx_node *node, yx_validation *state,
+                              bool inside_for_of,
+                              const yx_scope_name *scope);
+
+/* The schema type name of the value at path[0..end): the items of the
+ * collection there when `indexed`, a module itself is a structure, and a
+ * module constant (`pe.MACHINE_I386`) a number. */
+static const char *yx_alias_receiver_type(char *path, size_t end, bool indexed)
+{
+    const char *type;
+    bool floating = false;
+    char saved = path[end];
+    path[end] = '\0';
+    if (indexed) type = yx_mo_schema_element_type_name(path);
+    else if (!strchr(path, '.')) type = "struct";
+    else {
+        type = yx_mo_schema_path_type_name(path, true, NULL);
+        if (!type && yx_wc_module_constant(path, &floating))
+            type = floating ? "float" : "integer";
+    }
+    path[end] = saved;
+    return type;
+}
+
+/* Validation details about a member or lookup the generic checks could
+ * not place exactly; yx_alias_member_walk replaces them. */
+static bool yx_alias_member_detail(const char *detail)
+{
+    return strncmp(detail, "module unknown field:", 21) == 0 ||
+           strncmp(detail, "module member type:", 19) == 0 ||
+           strncmp(detail, "unsupported module field '", 26) == 0 ||
+           strncmp(detail, "unsupported indexed module field '", 34) == 0;
+}
+
+/* Members and lookups after a `with` binding of a module value, in the
+ * order YARA-X compiles them (field accesses left to right, a lookup's
+ * primary before its index): E002 for a member of a value that is no
+ * structure or a lookup in a value that is no array or map, E008 for the
+ * first member the schema lacks. A detail's ordinal counts the members in
+ * the source span (0 is the binding itself). True when nothing is found;
+ * an index the walk cannot type leaves the rest to the generic checks. */
+static bool yx_alias_member_walk(const yx_node *node, yx_validation *state,
+                                 bool inside_for_of,
+                                 const yx_scope_name *scope)
+{
+    const char *name = node->name;
+    const yx_node *indices[] = {node->a, node->b, node->c};
+    unsigned count;
+    size_t length, prefix = node->module_alias_prefix_length, pos, ordinal = 0;
+    size_t receiver = 0;
+    bool indexed = false, valid = true, done = false;
+    char *path;
+    if (!name || !node->resolved_module_alias || !state->error ||
+        !state->error_capacity || node->span_start == SIZE_MAX ||
+        node->span_end == SIZE_MAX || node->span_start >= node->span_end ||
+        (node->kind != N_MODULE_FIELD && node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+         node->kind != N_MODULE_TRIPLE_INDEXED_FIELD) ||
+        yx_test_proto_path(name)) return true;
+    count = yx_module_node_indices(node);
+    length = strlen(name);
+    if (node->implicit_value && length >= prefix + 6 &&
+        strcmp(name + length - 6, ".value") == 0) length -= 6;
+    if (!prefix || prefix > length || (prefix < length && name[prefix] != '.'))
+        return true;
+    path = (char *)malloc(length + 1);
+    if (!path) return true;
+    memcpy(path, name, length);
+    path[length] = '\0';
+    pos = prefix;
+    while (!done) {
+        /* Lookups here: the receiver must be an array or a map. */
+        for (unsigned i = 0; i < count && !done; ++i) {
+            const char *type, *key = NULL, *item = NULL;
+            bool source;
+            yx_static_type index_type;
+            if (node->first_three_index_ends[i] != pos) continue;
+            source = node->index_primary_starts[i] != SIZE_MAX &&
+                     node->index_primary_starts[i] >= node->span_start;
+            type = yx_alias_receiver_type(path, pos, indexed);
+            if (!type) { done = true; break; }
+            if (indexed || (strcmp(type, "array") != 0 && strcmp(type, "map") != 0)) {
+                /* A lookup in the declaration is the declaration's error. */
+                if (source) {
+                    snprintf(state->error, state->error_capacity,
+                             "module lookup type:%zu:%zu:%zu:%s:%.*s",
+                             node->span_start, node->span_end, ordinal, type,
+                             ordinal ? (int)(pos - receiver) : 1,
+                             ordinal ? path + receiver : "-");
+                    valid = false;
+                }
+                done = true;
+                break;
+            }
+            if (source) {
+                char saved = path[pos];
+                path[pos] = '\0';
+                yx_mo_schema_collection_types(path, &key, &item);
+                path[pos] = saved;
+                if (!yx_validate_node(indices[i], state, inside_for_of, scope)) {
+                    valid = false;
+                    done = true;
+                    break;
+                }
+                index_type = yx_scoped_node_type(indices[i], scope);
+                if (key && strcmp(key, "string") == 0 ?
+                    index_type != YX_STATIC_STRING : index_type != YX_STATIC_INT) {
+                    done = true;
+                    break;
+                }
+                /* An array index outside [0, INT64_MAX] fails at the lookup
+                 * (E006, E007): the generic checks report it. */
+                if (!key) {
+                    int64_t constant;
+                    if ((yx_constant_integer(indices[i], &constant) && constant < 0) ||
+                        (indices[i]->kind == N_INTEGER && indices[i]->is_unsigned &&
+                         indices[i]->number > INT64_MAX)) {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            indexed = true;
+        }
+        if (done || pos >= length) break;
+        /* The next member: its receiver must be a structure that has it. */
+        {
+            size_t member_start = pos + 1;
+            size_t member_end = member_start + strcspn(path + member_start, ".");
+            const char *type = yx_alias_receiver_type(path, pos, indexed);
+            if (!type) break;
+            if (strcmp(type, "struct") != 0) {
+                snprintf(state->error, state->error_capacity,
+                         "module member type:%zu:%zu:%zu:%s:%.*s",
+                         node->span_start, node->span_end, ordinal, type,
+                         ordinal ? (int)(pos - receiver) : 1,
+                         ordinal ? path + receiver : "-");
+                valid = false;
+                break;
+            }
+            if (!yx_alias_receiver_type(path, member_end, false)) {
+                size_t root = strcspn(path, ".");
+                char saved = path[root];
+                bool schema;
+                path[root] = '\0';
+                schema = yx_mo_module_index(path) >= 0;
+                path[root] = saved;
+                /* A module without a schema has functions and constants
+                 * only: the generic checks know those. */
+                if (!schema) break;
+                snprintf(state->error, state->error_capacity,
+                         "module unknown field:%zu:%zu:%zu:%.*s",
+                         node->span_start, node->span_end, ordinal + 1,
+                         (int)(member_end - member_start), path + member_start);
+                valid = false;
+                break;
+            }
+            receiver = member_start;
+            pos = member_end;
+            ++ordinal;
+            indexed = false;
+        }
+    }
+    free(path);
+    return valid;
+}
+
+/* A loop body or `of` tuple item: validated, then checked as a Boolean. */
+static bool yx_validate_bool_body(const yx_node *body, yx_validation *state,
+                                  bool inside_for_of,
+                                  const yx_scope_name *scope)
+{
+    return yx_validate_node(body, state, inside_for_of, scope) &&
+           yx_bool_context_check(state, body, scope);
+}
+
+/* Global paths share the source member lookup used for module aliases. The
+ * ordinal keeps diagnostics on the member even when dots have whitespace. */
+static bool yx_unknown_global_member(yx_validation *state,
+                                      const yx_node *node, size_t member)
+{
+    size_t ordinal = 0, end = member + strcspn(node->name + member, ".");
+    for (size_t i = 0; i < member; ++i)
+        if (node->name[i] == '.') ++ordinal;
+    if (state->error && state->error_capacity)
+        snprintf(state->error, state->error_capacity,
+                 "module unknown field:%zu:%zu:%zu:%.*s",
+                 node->span_start, node->span_end, ordinal,
+                 (int)(end - member), node->name + member);
+    return false;
+}
+
+static bool yx_unknown_global_field_error(yx_validation *state,
+                                           const yx_node *node,
+                                           const yx_scope_name *scope)
+{
+    const char *dot = strchr(node->name, '.');
+    size_t root_length = dot ? (size_t)(dot - node->name) : strlen(node->name);
+    const yx_scope_name *root = yx_scope_find(scope, node->name, root_length);
+    const yx_global_object *object = root ? root->object : NULL;
+    const yx_global_array *array = root ? root->array : NULL;
+    yx_static_type type = root ? root->type : YX_STATIC_UNKNOWN;
+    size_t cursor = root_length, key = 0;
+    size_t keys = node->kind == N_GLOBAL_DEEP_PATH ? node->deep_index_count :
+                  yx_module_node_indices(node);
+    while (node->name[cursor]) {
+        while (key < keys && cursor == (node->kind == N_GLOBAL_DEEP_PATH ?
+               node->deep_index_ends[key] : node->first_three_index_ends[key])) {
+            if (!array || type != YX_STATIC_ARRAY) break;
+            type = yx_global_static_type(array->element_type);
+            object = type == YX_STATIC_STRUCT && array->count ? array->items[0].object : NULL;
+            array = type == YX_STATIC_ARRAY && array->count ? array->items[0].array : NULL;
+            ++key;
+        }
+        size_t member = cursor + 1;
+        size_t end = member + strcspn(node->name + member, ".");
+        const yx_global_field *field = type == YX_STATIC_STRUCT && object ?
+            yx_global_object_field_n(object, node->name + member, end - member) : NULL;
+        if (!field) return yx_unknown_global_member(state, node, member);
+        type = yx_global_static_type(field->type);
+        object = field->type == YX_GLOBAL_STRUCT ? field->value.object : NULL;
+        array = field->type == YX_GLOBAL_ARRAY ? field->value.array : NULL;
+        cursor = end;
+    }
+    return yx_unknown_global_member(state, node,
+        dot ? (size_t)(strrchr(node->name, '.') + 1 - node->name) : 0);
+}
+
+/* Resolve ordinary fields and methods against lexical bindings before
+ * considering a module with the same name. Methods belong to arrays and
+ * strings; an unresolved scalar method is an identifier lookup instead. */
+static bool yx_validate_scoped_member(const yx_node *node,
+                                       yx_validation *state,
+                                       const yx_scope_name *scope,
+                                       bool *handled)
+{
+    const char *dot;
+    const yx_scope_name *root;
+    const yx_global_object *object;
+    yx_static_type type;
+    size_t cursor, previous = 0;
+    *handled = false;
+    if (!node->name || (node->kind != N_MODULE_FIELD && node->kind != N_CALL) ||
+        !(dot = strchr(node->name, '.')) ||
+        !(root = yx_scope_find(scope, node->name, (size_t)(dot - node->name))) ||
+        root->module_binding || root->type == YX_STATIC_UNKNOWN)
+        return true;
+    type = root->type;
+    object = root->object;
+    if (type == YX_STATIC_STRUCT && !object) return true;
+    /* Native collection schemas can flatten nested names, such as the
+     * proto.parameters field of a DEX method. Their existing validators
+     * resolve complete paths; only JSON objects use the member walk here. */
+    for (size_t i = 0; object && i < sizeof(yx_module_arrays) /
+                                      sizeof(yx_module_arrays[0]); ++i) {
+        const yx_global_array *schema = yx_module_arrays[i].schema;
+        if (schema->element_type == YX_GLOBAL_STRUCT && schema->count &&
+            schema->items[0].object == object)
+            return true;
+    }
+    if (node->kind == N_CALL && type == YX_STATIC_STRUCT &&
+        yx_signature_scope_method(object, root->name, node->name))
+        return true;
+    *handled = true;
+    cursor = (size_t)(dot - node->name);
+    while (node->name[cursor]) {
+        size_t member = cursor + 1;
+        size_t end = member + strcspn(node->name + member, ".");
+        bool method = node->kind == N_CALL && !node->name[end];
+        if (type != YX_STATIC_STRUCT) {
+            if (method && (type == YX_STATIC_ARRAY || type == YX_STATIC_STRING)) {
+                if (strcmp(node->name + member, "len") != 0)
+                    return yx_unknown_global_member(state, node, member);
+                if (node->item_count) {
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                                 "test proto arguments:%zu:%zu:len",
+                                 node->call_start, node->span_end);
+                    return false;
+                }
+                return true;
+            }
+            if (method) {
+                const yx_scope_name *binding = yx_scope_find(
+                    scope, node->name + member, end - member);
+                if (binding && binding->type != YX_STATIC_FUNCTION) {
+                    yx_node function = *node;
+                    function.span_start = node->call_member_start;
+                    function.span_end = node->call_member_end;
+                    return yx_wrong_type_span(state, &function, "`function`",
+                                              yx_static_type_name(binding->type));
+                }
+                if (state->error && state->error_capacity)
+                    snprintf(state->error, state->error_capacity,
+                             "unknown identifier span:%zu:%zu:%s",
+                             node->call_member_start, node->call_member_end,
+                             node->name + member);
+                return false;
+            }
+            yx_node base = *node;
+            base.span_start += previous;
+            base.span_end = node->span_start + cursor;
+            return yx_wrong_type_span(state, &base, "`struct`",
+                                      yx_static_type_name(type));
+        }
+        const yx_global_field *field = yx_global_object_field_n(
+            object, node->name + member, end - member);
+        if (!field) return yx_unknown_global_member(state, node, member);
+        type = yx_global_static_type(field->type);
+        object = field->type == YX_GLOBAL_STRUCT ? field->value.object : NULL;
+        if (method) {
+            yx_node base = *node;
+            base.span_start += member;
+            base.span_end = node->span_start + end;
+            return yx_wrong_type_span(state, &base, "`function`",
+                                      yx_static_type_name(type));
+        }
+        previous = member;
+        cursor = end;
+    }
+    return true;
+}
+
+static const yx_node *yx_first_negative_index(const yx_node *node)
+{
+    const yx_node *indices[] = {node->a, node->b, node->c};
+    for (size_t i = 0; i < 3; ++i) {
+        int64_t value;
+        if (indices[i] && yx_constant_integer(indices[i], &value) && value < 0)
+            return indices[i];
+    }
+    return node;
+}
+
+static bool yx_negative_number_error(yx_validation *state, const yx_node *node)
+{
+    if (state->error && state->error_capacity)
+        snprintf(state->error, state->error_capacity,
+                 "unexpected negative number span %zu..%zu",
+                 node->span_start, node->span_end);
+    return false;
+}
+
+static bool yx_validate_node(const yx_node *node, yx_validation *state,
+                              bool inside_for_of,
+                              const yx_scope_name *scope);
+
+/* Lookup primaries compile before their indices. Resolve only the prefix
+ * before this lookup, so a missing root or an ACL wins over an invalid index,
+ * while an invalid index still wins over an unknown member after it. */
+static bool yx_validate_index_primary(const yx_node *node, size_t index,
+                                        yx_validation *state, bool inside_for_of,
+                                        const yx_scope_name *scope,
+                                        bool *array_index)
+{
+    yx_node primary = *node;
+    size_t length = node->first_three_index_ends[index];
+    char *name = malloc(length + 1);
+    bool valid;
+    if (!name) return yx_validation_error(state, "out of memory%s", "");
+    memcpy(name, node->name, length);
+    name[length] = '\0';
+    primary.name = name;
+    primary.kind = index == 2 ? N_MODULE_NESTED_INDEXED_FIELD :
+                   index == 1 ? N_MODULE_INDEXED_FIELD :
+                   strchr(name, '.') ? N_MODULE_FIELD : N_RULE;
+    primary.a = index > 0 ? node->a : NULL;
+    primary.b = index > 1 ? node->b : NULL;
+    primary.c = primary.body = NULL;
+    primary.items = NULL;
+    primary.item_count = 0;
+    primary.operation = TK_END;
+    primary.call_start = SIZE_MAX;
+    primary.implicit_value = false;
+    primary.span_end = node->index_primary_ends[index];
+    valid = yx_validate_node(&primary, state, inside_for_of, scope);
+    /* A root that names no imported module and nothing in scope (an unknown
+     * module's import failed) is an unknown identifier. */
+    if (!valid && state->error && state->error_capacity &&
+        !node->resolved_module_alias &&
+        strncmp(state->error, "unsupported module field '", 26) == 0) {
+        size_t root = strcspn(name, ".");
+        bool imported = false;
+        for (size_t i = 0; i < state->import_count; ++i)
+            if (strlen(state->imports[i]) == root &&
+                memcmp(state->imports[i], name, root) == 0) imported = true;
+        if (!imported && !yx_scope_find(scope, name, root)) {
+            snprintf(state->error, state->error_capacity,
+                     "unknown identifier '%.*s'", (int)root, name);
+            free(name);
+            return false;
+        }
+    }
+    /* Resolve the first unknown member, including paths whose canonical name
+     * differs from an alias's source or omits earlier lookup expressions. */
+    if (!valid && state->error && state->error_capacity &&
+        (strncmp(state->error, "unsupported module field '", 26) == 0 ||
+         strncmp(state->error, "test proto unknown field:", 25) == 0)) {
+        size_t source_prefix = node->resolved_module_alias ?
+            node->module_alias_prefix_length : strcspn(name, ".");
+        size_t member_start = index ? node->first_three_index_ends[index - 1] :
+                                      strcspn(name, ".");
+        if (member_start < source_prefix) member_start = source_prefix;
+        if (name[member_start] == '.') ++member_start;
+        while (member_start < length) {
+            size_t member_end = member_start + strcspn(name + member_start, ".");
+            char saved = name[member_end];
+            bool prefix_valid;
+            name[member_end] = '\0';
+            primary.cache_self = NULL;
+            prefix_valid = yx_validate_node(&primary, state, inside_for_of, scope);
+            name[member_end] = saved;
+            if (!prefix_valid) {
+                size_t ordinal = 0;
+                for (size_t at = source_prefix;
+                     at < member_start; ++at)
+                    if (name[at] == '.') ++ordinal;
+                snprintf(state->error, state->error_capacity,
+                         "module unknown field:%zu:%zu:%zu:%.*s",
+                         primary.span_start, primary.span_end, ordinal,
+                         (int)(member_end - member_start), name + member_start);
+                break;
+            }
+            member_start = member_end + 1;
+        }
+    }
+    if (valid) {
+        yx_static_type type = yx_scoped_node_type(&primary, scope);
+        primary.span_start = node->index_primary_starts[index];
+        *array_index = type != YX_STATIC_MAP;
+        if (type != YX_STATIC_ARRAY && type != YX_STATIC_MAP)
+            valid = yx_wrong_type_span(state, &primary, "`array` or `map`",
+                                       yx_static_type_name(type));
+    }
+    free(name);
+    return valid;
+}
+
+/* Validates one node's own constraints. When validation would continue with
+ * the generic children, `*spine` receives the node instead: the caller walks
+ * left operands iteratively so long flat operator chains do not recurse. */
+static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
+                                  bool inside_for_of,
+                                  const yx_scope_name *scope,
+                                  const yx_node **spine)
+{
+    size_t i;
+    bool found;
+    bool feature_operands_checked = false;
+    *spine = NULL;
+    if (!node) return true;
+    {
+        yx_node alias;
+        char *name = NULL;
+        if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+            bool valid = yx_validate_node(&alias, state, inside_for_of, scope);
+            /* A member error found through the binding: report the one
+             * YARA-X meets first, at its place in the source. */
+            if (!valid && state->error && yx_alias_member_detail(state->error))
+                (void)yx_alias_member_walk(&alias, state, inside_for_of, scope);
+            if (!valid && state->error && state->error_capacity &&
+                strncmp(state->error, "vt ", 3) == 0 &&
+                !strstr(state->error, "' alias '")) {
+                size_t used = strlen(state->error);
+                if (used < state->error_capacity)
+                    snprintf(state->error + used, state->error_capacity - used,
+                             " alias '%s'", node->name);
+            }
+            free(name);
+            return valid;
+        }
+    }
+    {
+        const yx_node *bounded[4] = {NULL, NULL, NULL, NULL};
+        bool positive = node->kind == N_OFFSET || node->kind == N_LENGTH;
+        if (positive || node->kind == N_GLOBAL_INDEXED)
+            bounded[0] = node->a;
+        else if (yx_module_node_indices(node)) {
+            bool length_call = false;
+            const yx_vt_field *field = yx_vt_node_field(node, &length_call);
+            const yx_node *indices[] = {node->a, node->b, node->c};
+            for (unsigned index = 0; index < yx_module_node_indices(node); ++index) {
+                /* Map keys preserve their bit patterns. Only array indices
+                 * have the nonnegative signed-i64 domain. */
+                if (field && (field->string_keys & (1u << index))) continue;
+                if (index == 0 && node->name &&
+                    (!strncmp(node->name, "test_proto2.map_int64_", 21) ||
+                     !strcmp(node->name, "pe.version_info.value"))) continue;
+                bounded[index] = indices[index];
+            }
+        }
+        if (node->filter != FILTER_NONE || (node->kind == N_FOR_IN && node->range_loop)) {
+            bounded[1] = node->b;
+            if (node->filter == FILTER_IN || node->range_loop) bounded[2] = node->c;
+        }
+        if ((node->kind == N_OF || node->kind == N_OF_EXPR ||
+             node->kind == N_FOR_OF || node->kind == N_FOR_IN) && node->quantifier == Q_NUMBER)
+            bounded[3] = node->a;
+        for (size_t bound = 0; bound < 4; ++bound) {
+            const yx_node *value = bounded[bound];
+            if (value && value->kind == N_INTEGER &&
+                (value->is_unsigned ? value->number > INT64_MAX :
+                 (int64_t)value->number < 0) &&
+                (node->kind == N_GLOBAL_INDEXED || yx_module_node_indices(node))) {
+                bool array_index = true;
+                if (!yx_validate_index_primary(node, bound, state,
+                                               inside_for_of, scope,
+                                               &array_index)) return false;
+                if (!array_index) continue;
+            }
+            if (value && value->kind == N_INTEGER && !value->is_unsigned &&
+                (int64_t)value->number < 0 && !(positive && bound == 0))
+                return yx_negative_number_error(state, value);
+            if (value && value->kind == N_INTEGER && value->is_unsigned && value->number > INT64_MAX) {
+                if (state->error && state->error_capacity)
+                    snprintf(state->error, state->error_capacity,
+                             "%s number out of range span %zu..%zu",
+                             positive && bound == 0 ? "positive" : "non-negative",
+                             value->span_start, value->span_end);
+                return false;
+            }
+        }
+    }
+    {
+        bool handled;
+        bool valid = yx_validate_scoped_member(node, state, scope, &handled);
+        if (handled) return valid;
+    }
+    if (node->kind == N_MODULE_INDEXED_FIELD && node->first_lookup_end &&
+        node->name && strchr(node->name, '.')) {
+        size_t root_length = (size_t)(strchr(node->name, '.') - node->name);
+        const yx_scope_name *root = yx_scope_find(scope, node->name, root_length);
+        if (root && root->type == YX_STATIC_ARRAY && root->array &&
+            node->first_three_index_ends[0] == root_length &&
+            root->array->element_type != YX_GLOBAL_STRUCT) {
+            yx_node base = *node;
+            if (!yx_validate_node(node->a, state, inside_for_of, scope)) return false;
+            base.span_end = node->first_lookup_end;
+            return yx_wrong_type_span(state, &base, "`struct`",
+                yx_static_type_name(yx_global_static_type(root->array->element_type)));
+        }
+    }
+    if (node->name && !node->resolved_module_alias &&
+        (node->kind == N_MODULE_INDEXED_FIELD ||
+         node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+         node->kind == N_MODULE_TRIPLE_INDEXED_FIELD)) {
+        const char *dot = strchr(node->name, '.');
+        const yx_scope_name *root = dot ?
+            yx_scope_find(scope, node->name, (size_t)(dot - node->name)) : NULL;
+        if (root && yx_module_root_name(root->name) &&
+            root->type != YX_STATIC_STRUCT && root->type != YX_STATIC_UNKNOWN &&
+            !(root->type == YX_STATIC_ARRAY &&
+              node->first_three_index_ends[0] == (size_t)(dot - node->name))) {
+            yx_node base = *node;
+            base.span_end = base.span_start + (size_t)(dot - node->name);
+            return yx_wrong_type_span(state, &base, "`struct`",
+                                      yx_static_type_name(root->type));
+        }
+    }
+    if ((node->kind == N_RULE || node->kind == N_MODULE_FIELD) &&
+        yx_module_root_name(node->name)) {
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], node->name) == 0) return true;
+    }
+    if (node->kind == N_CALL && node->name && yx_test_proto_path(node->name) &&
+        (strcmp(node->name, "test_proto2") == 0 ||
+         strcmp(node->name, "test_proto3") == 0)) {
+        yx_node base = *node;
+        base.span_end = base.span_start + strlen(base.name);
+        return yx_wrong_type_span(state, &base, "`function`", "struct");
+    }
+    if (yx_test_proto_path(node->name) &&
+        strcmp(node->name, "test_proto2.requires_foo_and_bar") != 0 &&
+        (node->kind == N_MODULE_FIELD || node->kind == N_CALL ||
+         node->kind == N_MODULE_INDEXED_FIELD ||
+         node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+         node->kind == N_MODULE_TRIPLE_INDEXED_FIELD)) {
+        bool imported = false, shadowed = false;
+        for (const yx_scope_name *at = yx_scope_named(scope, node->name, 11); at;
+             at = yx_scope_named(at->parent, node->name, 11))
+            if (!node->resolved_module_alias && strlen(at->name) == 11 &&
+                memcmp(at->name, node->name, 11) == 0) shadowed = true;
+        for (i = 0; i < state->import_count; ++i)
+            if (strlen(state->imports[i]) == 11 &&
+                memcmp(state->imports[i], node->name, 11) == 0) imported = true;
+        if (imported && !shadowed) {
+            const yx_tp_function *function = yx_test_proto_function(node->name);
+            if (function) {
+                if (node->kind != N_CALL && node->operation != TK_LPAREN)
+                    return true;
+                if (node->item_count != function->argc) {
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                            "test proto arguments:%zu:%zu:%s", node->call_start,
+                            node->span_end, function->path + 12);
+                    return false;
+                }
+                bool add = strcmp(function->path, "test_proto2.add") == 0;
+                for (i = 0; i < node->item_count; ++i) {
+                    if (!yx_validate_node(node->items[i], state,
+                                          inside_for_of, scope)) return false;
+                    yx_static_type type = yx_scoped_node_type(node->items[i], scope);
+                    if (add ? (type != YX_STATIC_INT && type != YX_STATIC_FLOAT &&
+                               type != YX_STATIC_UNKNOWN) :
+                        !yx_static_accepts(type, yx_vt_static_type(function->args[i])))
+                    {
+                        if (state->error && state->error_capacity)
+                            snprintf(state->error, state->error_capacity,
+                                "test proto arguments:%zu:%zu:%s", node->call_start,
+                                node->span_end, function->path + 12);
+                        return false;
+                    }
+                }
+                if (add && node->item_count == 2 &&
+                    yx_scoped_node_type(node->items[0], scope) !=
+                    yx_scoped_node_type(node->items[1], scope)) {
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                            "test proto arguments:%zu:%zu:%s", node->call_start,
+                            node->span_end, function->path + 12);
+                    return false;
+                }
+                return true;
+            }
+            bool length_call = false;
+            const yx_vt_field *field = yx_vt_node_field(node, &length_call);
+            if (!field) {
+                for (size_t f = 0; f < sizeof(yx_tp_fields) / sizeof(yx_tp_fields[0]); ++f) {
+                    const yx_vt_field *base_field = &yx_tp_fields[f];
+                    size_t length = strlen(base_field->path);
+                    if (base_field->indices == yx_module_node_indices(node) &&
+                        base_field->type != YX_VT_STRUCT && !base_field->element &&
+                        strncmp(node->name, base_field->path, length) == 0 &&
+                        node->name[length] == '.' &&
+                        strcmp(node->name + length, ".value") != 0) {
+                        const char *last = strrchr(base_field->path, '.');
+                        yx_node base = *node;
+                        base.span_start += last ? (size_t)(last + 1 - base_field->path) : 0;
+                        base.span_end = node->span_start + length;
+                        return yx_wrong_type_span(state, &base, "`struct`",
+                            yx_static_type_name(yx_vt_static_type(base_field->type)));
+                    }
+                }
+            }
+            if (!field && node->call_start != SIZE_MAX) {
+                const char *member = strrchr(node->name, '.');
+                if (member && state->error && state->error_capacity) {
+                    size_t length = strlen(member + 1);
+                    snprintf(state->error, state->error_capacity,
+                        "test proto unknown field:%zu:%zu:%s",
+                        node->call_start >= length ? node->call_start - length : 0,
+                        node->call_start, member + 1);
+                    return false;
+                }
+            }
+            if (!field && yx_module_node_indices(node)) {
+                size_t base_length = node->first_three_index_ends[0];
+                for (size_t f = 0; f < sizeof(yx_tp_fields) / sizeof(yx_tp_fields[0]); ++f) {
+                    const yx_vt_field *base_field = &yx_tp_fields[f];
+                    if (!base_field->indices && strlen(base_field->path) == base_length &&
+                        memcmp(base_field->path, node->name, base_length) == 0 &&
+                        base_field->type != YX_VT_MAP && base_field->type != YX_VT_ARRAY) {
+                        yx_node base = *node;
+                        base.span_end = base.span_start + base_length;
+                        return yx_wrong_type_span(state, &base, "`array` or `map`",
+                            yx_static_type_name(yx_vt_static_type(base_field->type)));
+                    }
+                }
+            }
+            if (field) {
+                if ((node->kind == N_CALL || node->operation == TK_LPAREN) &&
+                    !length_call) {
+                    yx_node base = *node;
+                    if (base.call_start != SIZE_MAX) {
+                        base.span_end = base.call_start;
+                        const char *member = strrchr(base.name, '.');
+                        if (member && strlen(member + 1) <= base.span_end)
+                            base.span_start = base.span_end - strlen(member + 1);
+                    }
+                    return yx_wrong_type_span(state, &base, "`function`",
+                        yx_static_type_name(yx_vt_static_type(field->type)));
+                }
+                if (node->item_count)
+                    return yx_validation_error(state,
+                        "wrong argument count for '%s'", node->name);
+                const yx_node *indices[] = {node->a, node->b, node->c};
+                for (unsigned index = 0; index < field->indices; ++index) {
+                    int64_t constant;
+                    yx_static_type key = field->string_keys & (1u << index) ?
+                                         YX_STATIC_STRING : YX_STATIC_INT;
+                    if (!yx_validate_node(indices[index], state,
+                                          inside_for_of, scope)) return false;
+                    if (!yx_static_accepts(yx_scoped_node_type(indices[index], scope), key))
+                        return yx_wrong_type_span(state, indices[index],
+                            key == YX_STATIC_STRING ? "`string`" : "`integer`",
+                            yx_static_type_name(yx_scoped_node_type(indices[index], scope)));
+                    if (key == YX_STATIC_INT &&
+                        !(index == 0 && strncmp(field->path, "test_proto2.map_int64_", 21) == 0) &&
+                        yx_constant_integer(indices[index], &constant) && constant < 0)
+                        return yx_negative_number_error(state, indices[index]);
+                }
+                return true;
+            }
+        }
+    }
+    if (node->name && strncmp(node->name, "vt.", 3) == 0 &&
+        (node->kind == N_MODULE_FIELD || node->kind == N_CALL ||
+         node->kind == N_MODULE_INDEXED_FIELD ||
+         node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+         node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) &&
+        !(strncmp(node->name, "vt.Domain", 9) == 0 &&
+          (!node->name[9] || node->name[9] == '.'))) {
+        bool imported = false, shadowed = false;
+        for (const yx_scope_name *at = yx_scope_named(scope, "vt", 2); at;
+             at = yx_scope_named(at->parent, "vt", 2))
+            if (!node->resolved_module_alias && strcmp(at->name, "vt") == 0)
+                shadowed = true;
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], "vt") == 0) imported = true;
+        if (imported && !shadowed) {
+            for (i = 0; i < sizeof(yx_vt_acls) / sizeof(yx_vt_acls[0]); ++i) {
+                const yx_vt_acl *acl = &yx_vt_acls[i];
+                size_t length = strlen(acl->path);
+                bool allowed = acl->accept[0] == NULL;
+                if (strncmp(node->name, acl->path, length) != 0 ||
+                    (node->name[length] && node->name[length] != '.'))
+                    continue;
+                for (size_t a = 0; a < 4 && acl->accept[a]; ++a)
+                    if (yx_validation_has_feature(state, acl->accept[a]))
+                        allowed = true;
+                if (acl->reject && yx_validation_has_feature(state, acl->reject))
+                    allowed = false;
+                if (!allowed) {
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                                 "vt access %zu '%s'", i, node->name);
+                    return false;
+                }
+            }
+            int method = node->kind == N_CALL ? yx_vt_method(node->name, NULL) : 0;
+            if (method) {
+                /* in_range(string); permutation_of(string[, integer]). */
+                bool accepted = node->item_count >= 1 &&
+                                node->item_count <= (method == 2 ? 2u : 1u);
+                for (i = 0; i < node->item_count; ++i)
+                    if (!yx_validate_node(node->items[i], state,
+                                          inside_for_of, scope)) return false;
+                for (i = 0; accepted && i < node->item_count; ++i)
+                    accepted = yx_static_accepts(
+                        yx_scoped_node_type(node->items[i], scope),
+                        i ? YX_STATIC_INT : YX_STATIC_STRING);
+                return accepted ? true : yx_wrong_arguments_error(state, node);
+            }
+            bool length_call = false;
+            const yx_vt_field *field = yx_vt_node_field(node, &length_call);
+            if (!field)
+                return yx_validation_error(state, "vt unknown '%s'", node->name);
+            if ((node->kind == N_CALL || node->operation == TK_LPAREN) &&
+                !length_call)
+                return yx_validation_error(state, "vt function '%s'", node->name);
+            if (node->item_count)
+                return yx_validation_error(state, "wrong argument count for '%s'",
+                                           node->name);
+            const yx_node *indices[] = {node->a, node->b, node->c};
+            for (unsigned index = 0; index < field->indices; ++index) {
+                int64_t constant;
+                yx_static_type key = field->string_keys & (1u << index) ?
+                                     YX_STATIC_STRING : YX_STATIC_INT;
+                if (!yx_validate_node(indices[index], state,
+                                      inside_for_of, scope)) return false;
+                if (!yx_static_accepts(yx_scoped_node_type(indices[index], scope),
+                                       key))
+                    return yx_wrong_key_type(state, indices[index], key, scope);
+                if (key == YX_STATIC_INT &&
+                    yx_constant_integer(indices[index], &constant) && constant < 0)
+                    return yx_negative_number_error(state, indices[index]);
+            }
+            return true;
+        }
+    }
+    {
+        const yx_module_array_desc *array =
+            yx_module_array_node(node, false);
+        if (!array) array = yx_module_array_node(node, true);
+        if (!array) array = yx_module_scalar_node(node, NULL);
+        if (array) {
+            const char *dot = strchr(array->path, '.');
+            size_t length = (size_t)(dot - array->path);
+            bool imported = false;
+            const yx_node *indices[] = {node->a, node->b, node->c};
+            for (i = 0; i < state->import_count; ++i)
+                if (strlen(state->imports[i]) == length &&
+                    memcmp(state->imports[i], array->path, length) == 0)
+                    imported = true;
+            if (!imported)
+                return yx_validation_error(state,
+                                           "module is not imported: '%s'",
+                                           array->path);
+            if (node->item_count)
+                return yx_validation_error(state,
+                                           "wrong argument count for '%s'",
+                                           node->name);
+            for (unsigned index = 0; index < yx_module_node_indices(node); ++index) {
+                int64_t constant;
+                if (!yx_validate_node(indices[index], state,
+                                      inside_for_of, scope)) return false;
+                if (!yx_static_accepts(yx_scoped_node_type(indices[index],
+                                                          scope),
+                                       YX_STATIC_INT))
+                    return yx_wrong_key_type(state, indices[index],
+                                             YX_STATIC_INT, scope);
+                if (yx_constant_integer(indices[index], &constant) && constant < 0)
+                    return yx_negative_number_error(state, indices[index]);
+            }
+            return true;
+        }
+    }
+    if (node->kind == N_READ && node->name) {
+        yx_static_type offset = node->a ? yx_scoped_node_type(node->a, scope) :
+                                YX_STATIC_UNKNOWN;
+        if (node->read_arity_error ||
+            (offset != YX_STATIC_INT && offset != YX_STATIC_UNKNOWN))
+            return yx_wrong_arguments_error(state, node);
+        for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
+             at = yx_scope_named(at->parent, node->name, strlen(node->name)))
+            if (strcmp(at->name, node->name) == 0)
+                return yx_validation_error(state,
+                                           "read function shadowed by global '%s'",
+                                           node->name);
+    }
+    if (node->kind == N_FOR_IN) {
+        yx_static_type item_type = node->range_loop ? YX_STATIC_INT :
+                                   YX_STATIC_UNKNOWN;
+        yx_scope_name binding = {
+            .name = node->name, .type = YX_STATIC_UNKNOWN, .parent = scope
+        };
+        if (node->map_loop) {
+            yx_scope_name value_binding = {0};
+            if (node->set_count != 1 || !node->b ||
+                !yx_validate_node(node->a, state, inside_for_of, scope) ||
+                !yx_validate_node(node->b, state, inside_for_of, scope))
+                return false;
+            if (node->a && !yx_static_accepts(
+                    yx_scoped_node_type(node->a, scope), YX_STATIC_INT))
+                return yx_validation_error(state,
+                                           "wrong quantifier type%s", "");
+            if (yx_scoped_node_type(node->b, scope) != YX_STATIC_MAP) {
+                if (yx_scoped_node_type(node->b, scope) == YX_STATIC_ARRAY &&
+                    state->error && state->error_capacity) {
+                    snprintf(state->error, state->error_capacity,
+                        "assignment mismatch:2:1:%zu:%zu:%zu:%zu", node->span_start,
+                        node->span_end, node->b->span_start, node->b->span_end);
+                    return false;
+                }
+                return yx_validation_error(state,
+                                           "map iterable has wrong type%s", "");
+            }
+            const yx_node *map_node = node->b;
+            yx_node map_alias;
+            char *map_name = NULL;
+            if (yx_scoped_module_alias(map_node, scope, &map_alias, &map_name))
+                map_node = &map_alias;
+            const yx_tp_native_map *map = map_node->name ?
+                yx_test_proto_map(map_node->name, strlen(map_node->name)) : NULL;
+            binding.type = map ? yx_vt_static_type(map->key_type) : YX_STATIC_STRING;
+            value_binding.name = node->set_names[0];
+            value_binding.type = map ? yx_vt_static_type(map->value_type) : YX_STATIC_STRING;
+            value_binding.object = map && map->record_schema ?
+                map->record_schema->items[0].object : NULL;
+            free(map_name);
+            value_binding.parent = &binding;
+            return yx_validate_bool_body(node->body, state, inside_for_of,
+                                    &value_binding);
+        }
+        if (node->array_loop) {
+            if (!node->b ||
+                !yx_validate_node(node->a, state, inside_for_of, scope) ||
+                !yx_validate_node(node->b, state, inside_for_of, scope))
+                return false;
+            if (node->a &&
+                !yx_static_accepts(yx_scoped_node_type(node->a, scope),
+                                   YX_STATIC_INT))
+                return yx_validation_error(state,
+                                           "wrong quantifier type%s", "");
+            if (node->quantifier == Q_PERCENT && node->a &&
+                node->a->kind == N_INTEGER && node->a->number > 100)
+                return yx_range_error_span(state, "percent out of range",
+                                           node->a);
+            if (yx_scoped_node_type(node->b, scope) != YX_STATIC_ARRAY) {
+                if (yx_scoped_node_type(node->b, scope) == YX_STATIC_MAP &&
+                    state->error && state->error_capacity) {
+                    snprintf(state->error, state->error_capacity,
+                        "assignment mismatch:1:2:%zu:%zu:%zu:%zu", node->span_start,
+                        node->span_end, node->b->span_start, node->b->span_end);
+                    return false;
+                }
+                return yx_wrong_type_span(state, node->b, "`array` or `map`",
+                    yx_static_type_name(yx_scoped_node_type(node->b, scope)));
+            }
+            binding.type = yx_scoped_array_element_type(node->b, scope);
+            if (binding.type == YX_STATIC_UNKNOWN)
+                return yx_validation_error(state,
+                                           "unsupported array iterable%s", "");
+            if (binding.type == YX_STATIC_STRUCT) {
+                const yx_global_array *array = yx_scoped_array_from_node(
+                    node->b, scope);
+                binding.object = node->b->kind == N_MODULE_INDEXED_FIELD &&
+                    strcmp(node->b->name, "dotnet.classes.methods") == 0 ?
+                    &yx_dotnet_method_schema :
+                    node->b->kind == N_MODULE_NESTED_INDEXED_FIELD &&
+                    strcmp(node->b->name,
+                           "dotnet.classes.methods.parameters") == 0 ?
+                    &yx_dotnet_parameter_schema :
+                    node->b->kind == N_MODULE_FIELD &&
+                    yx_dotnet_array_from_name(node->b->name) ==
+                    YX_DOTNET_ARRAY_STREAMS ? &yx_dotnet_stream_schema :
+                    node->b->kind == N_MODULE_FIELD &&
+                    yx_dotnet_array_from_name(node->b->name) ==
+                    YX_DOTNET_ARRAY_CLASSES ? &yx_dotnet_class_schema :
+                    array && array->count ? array->items[0].object : NULL;
+            }
+            if (binding.type == YX_STATIC_STRUCT) {
+                yx_node base, element, zero = {.kind = N_INTEGER};
+                const yx_node *source = node->b;
+                char *base_name = NULL, *element_name = NULL;
+                if (yx_scoped_module_alias(source, scope, &base, &base_name))
+                    source = &base;
+                const yx_module_array_desc *desc = yx_module_array_node(source, false);
+                if (desc && (strncmp(desc->path, "vt.", 3) == 0 ||
+                             yx_test_proto_path(desc->path)) &&
+                    desc->parent_indices < 3) {
+                    yx_node index = {.kind = N_GLOBAL_INDEXED,
+                                      .name = "item", .a = &zero};
+                    if (yx_module_alias_node(&index, "item", source,
+                                             &element, &element_name)) {
+                        binding.module_binding = &element;
+                        bool valid = yx_validate_bool_body(node->body, state,
+                                                       inside_for_of, &binding);
+                        free(element_name);
+                        free(base_name);
+                        return valid;
+                    }
+                }
+                free(base_name);
+            }
+            return yx_validate_bool_body(node->body, state, inside_for_of,
+                                    &binding);
+        }
+        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+            !yx_validate_node(node->b, state, inside_for_of, scope) ||
+            !yx_validate_node(node->c, state, inside_for_of, scope)) return false;
+        if (node->a &&
+            !yx_integer_operands_check(state, node->a,
+                                       yx_scoped_node_type(node->a, scope),
+                                       NULL, YX_STATIC_UNKNOWN,
+                                       "wrong quantifier type%s"))
+            return false;
+        if (node->quantifier == Q_PERCENT && node->a &&
+            node->a->kind == N_INTEGER && node->a->number > 100)
+            return yx_range_error_span(state, "percent out of range",
+                                       node->a);
+        if (node->range_loop) {
+            yx_static_type low = yx_scoped_node_type(node->b, scope);
+            yx_static_type high = yx_scoped_node_type(node->c, scope);
+            if (!yx_integer_operands_check(state, node->b, low, node->c, high,
+                                           "wrong range type%s"))
+                return false;
+            const yx_node *bounds[] = {node->b, node->c};
+            for (size_t bound = 0; bound < 2; ++bound)
+                if (bounds[bound]->kind == N_INTEGER && bounds[bound]->is_unsigned &&
+                    bounds[bound]->number > INT64_MAX) {
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                                 "non-negative number out of range span %zu..%zu",
+                                 bounds[bound]->span_start, bounds[bound]->span_end);
+                    return false;
+                }
+            if (node->b->kind == N_INTEGER && node->c->kind == N_INTEGER &&
+                (int64_t)node->b->number > (int64_t)node->c->number)
+                return yx_validation_error(state, "invalid range%s", "");
+        }
+        const yx_node *typed_item = NULL;
+        for (i = 0; i < node->item_count; ++i) {
+            if (!yx_validate_node(node->items[i], state, inside_for_of, scope))
+                return false;
+            yx_static_type current = yx_scoped_node_type(node->items[i], scope);
+            if (current != YX_STATIC_UNKNOWN) {
+                if (current == YX_STATIC_STRUCT ||
+                    current == YX_STATIC_ARRAY ||
+                    current == YX_STATIC_MAP)
+                    return yx_validation_error(state,
+                                               "collection tuple item has wrong type%s", "");
+                if (item_type != YX_STATIC_UNKNOWN && current != item_type) {
+                    /* E003 labels the item and the one before it. */
+                    const yx_node *item = node->items[i];
+                    if (typed_item && state->error && state->error_capacity &&
+                        typed_item->span_start < typed_item->span_end &&
+                        typed_item->span_end <= item->span_start &&
+                        item->span_start < item->span_end &&
+                        item->span_end != SIZE_MAX) {
+                        snprintf(state->error, state->error_capacity,
+                            "mismatching types:%zu:%zu:%s:%zu:%zu:%s",
+                            typed_item->span_start, typed_item->span_end,
+                            yx_static_type_name(item_type),
+                            item->span_start, item->span_end,
+                            yx_static_type_name(current));
+                        return false;
+                    }
+                    return yx_validation_error(state,
+                                               "mismatching tuple types%s", "");
+                }
+                item_type = current;
+                typed_item = node->items[i];
+            }
+        }
+        binding.type = item_type;
+        if (!node->range_loop) {
+            for (i = 0; i < node->item_count; ++i)
+                binding.is_unsigned |= yx_scoped_unsigned(node->items[i], scope);
+            ((yx_node *)node)->is_unsigned = binding.is_unsigned;
+        }
+        return yx_validate_bool_body(node->body, state, inside_for_of, &binding);
+    }
+    if (node->kind == N_WITH) {
+        yx_scope_name *locals;
+        const yx_scope_name *current = scope;
+        bool valid = true;
+        locals = calloc(node->item_count ? node->item_count : 1, sizeof(*locals));
+        if (!locals) return yx_validation_error(state, "out of memory%s", "");
+        for (i = 0; i < node->item_count; ++i) {
+            /* Regexp constants are values in declarations. Their parser has
+             * already compiled and validated the literal; other positions
+             * still pass through the ordinary operand type checks. */
+            if (node->items[i]->kind != N_REGEX &&
+                !yx_validate_node(node->items[i], state, inside_for_of, current)) {
+                valid = false;
+                break;
+            }
+            yx_node method_alias;
+            char *method_name = NULL;
+            const yx_node *method_node = node->items[i];
+            if (yx_scoped_module_alias(method_node, current, &method_alias, &method_name))
+                method_node = &method_alias;
+            const yx_tp_function *method = yx_test_proto_function(method_node->name);
+            free(method_name);
+            if (method && *method->receiver &&
+                node->items[i]->kind != N_CALL &&
+                node->items[i]->operation != TK_LPAREN) {
+                if (state->error && state->error_capacity)
+                    snprintf(state->error, state->error_capacity,
+                        "test proto method span:%zu:%zu", node->items[i]->span_start,
+                        node->items[i]->span_end);
+                valid = false;
+                break;
+            }
+            locals[i].name = node->set_names[i];
+            locals[i].type = yx_scoped_node_type(node->items[i], current);
+            if (locals[i].type == YX_STATIC_REGEX) {
+                const yx_node *value = node->items[i];
+                if (value->kind == N_RULE) {
+                    const yx_scope_name *binding = yx_scope_find(
+                        current, value->name, strlen(value->name));
+                    value = binding ? binding->regexp_binding : NULL;
+                }
+                locals[i].regexp_binding = value;
+            }
+            locals[i].is_unsigned = yx_scoped_unsigned(node->items[i], current);
+            locals[i].array = yx_scoped_array_from_node(node->items[i], current);
+            if (locals[i].array)
+                locals[i].element_type = yx_global_static_type(
+                    locals[i].array->element_type);
+            if (node->items[i]->name &&
+                (locals[i].type == YX_STATIC_STRUCT || locals[i].type == YX_STATIC_ARRAY ||
+                 locals[i].type == YX_STATIC_MAP || locals[i].type == YX_STATIC_FUNCTION)) {
+                if (strncmp(node->items[i]->name, "vt.", 3) == 0 ||
+#ifdef XXYARA_ENABLE_VBA
+                    strcmp(node->items[i]->name, "vba.project_info") == 0 ||
+#endif
+                    yx_module_root_name(node->items[i]->name) ||
+                    yx_test_proto_path(node->items[i]->name) ||
+                    (node->items[i]->kind == N_MODULE_FIELD &&
+                     (yx_module_struct_path(node->items[i]->name) ||
+                      yx_mo_schema_path_type(node->items[i]->name) ==
+                          YX_MO_DATA_MAP)) ||
+                    yx_module_scalar_node(node->items[i], NULL) ||
+                    yx_module_array_node(node->items[i], false))
+                    locals[i].module_binding = node->items[i];
+                else for (const yx_scope_name *at = yx_scope_named(current, node->items[i]->name,
+                                                                   yx_scope_root_length(node->items[i]->name));
+                          at; at = yx_scope_named(at->parent, node->items[i]->name,
+                                                  yx_scope_root_length(node->items[i]->name))) {
+                    size_t length = strlen(at->name);
+                    if (strncmp(node->items[i]->name, at->name, length) == 0 &&
+                        (!node->items[i]->name[length] ||
+                         node->items[i]->name[length] == '.')) {
+                        locals[i].module_binding = at->module_binding ?
+                            node->items[i] : NULL;
+                        locals[i].object = at->object;
+                        if (at->object && node->items[i]->name[length] == '.') {
+                            const yx_global_field *field = yx_global_object_field(
+                                at->object, node->items[i]->name + length + 1);
+                            locals[i].object = field && field->type == YX_GLOBAL_STRUCT ?
+                                field->value.object : NULL;
+                        }
+                        break;
+                    }
+                }
+            }
+            locals[i].parent = current;
+            current = &locals[i];
+        }
+        if (valid) valid = yx_validate_node(node->body, state, inside_for_of,
+                                            current);
+        if (valid) valid = yx_bool_context_check(state, node->body, current);
+        free(locals);
+        return valid;
+    }
+    if (node->kind == N_GLOBAL_DEEP_PATH) {
+        if (!yx_deep_schema(node, scope, NULL, NULL))
+            return yx_unknown_global_field_error(state, node, scope);
+        for (size_t j = 0; j < node->deep_index_count; ++j) {
+            const yx_node *key = j == 0 ? node->a :
+                                 j == 1 ? node->b :
+                                 j == 2 ? node->c : node->items[j - 3];
+            int64_t constant_index;
+            if (!yx_validate_node(key, state, inside_for_of, scope))
+                return false;
+            if (!yx_static_accepts(yx_scoped_node_type(key, scope),
+                                   YX_STATIC_INT))
+                return yx_validation_error(state,
+                                           "global array index has wrong type%s",
+                                           "");
+            if (yx_constant_integer(key, &constant_index) &&
+                constant_index < 0)
+                return yx_negative_number_error(state, key);
+        }
+        return true;
+    }
+    if (node->kind == N_GLOBAL_INDEXED) {
+        yx_static_type index_type = yx_scoped_node_type(node->a, scope);
+        int64_t constant_index;
+        const yx_scope_name *global;
+        global = yx_scope_find(scope, node->name, strlen(node->name));
+        if (!global || global->type != YX_STATIC_ARRAY)
+            return yx_validation_error(state,
+                                       "global value is not an array: '%s'",
+                                       node->name);
+        if (!yx_static_accepts(index_type, YX_STATIC_INT))
+            return yx_validation_error(state,
+                                       "global array index has wrong type%s", "");
+        if (yx_constant_integer(node->a, &constant_index) &&
+            constant_index < 0)
+            return yx_negative_number_error(state, node->a);
+    }
+    if (node->kind == N_MODULE_INDEXED_FIELD) {
+        yx_static_type index_type;
+        int64_t constant_index;
+        bool imported = false;
+        const char *member;
+        const char *module_name;
+        size_t field_length = strlen(node->name);
+        if (field_length >= 4 &&
+            strcmp(node->name + field_length - 4, ".len") == 0 &&
+            node->operation != TK_LPAREN)
+            return yx_validation_error(state,
+                                       "indexed module length requires a call: '%s'",
+                                       node->name);
+        for (const yx_scope_name *at = scope; at && node->implicit_value;
+             at = at->parent) {
+            const yx_global_field *field;
+            if (at->type != YX_STATIC_STRUCT || !at->object) continue;
+            field = yx_global_object_field_path(at->object, at->name,
+                                                 node->name, ".value");
+            if (!field) continue;
+            if (field->type != YX_GLOBAL_ARRAY)
+                return yx_validation_error(state,
+                                           "global value is not an array: '%s'",
+                                           node->name);
+            if (!yx_validate_node(node->a, state, inside_for_of, scope))
+                return false;
+            index_type = yx_scoped_node_type(node->a, scope);
+            if (!yx_static_accepts(index_type, YX_STATIC_INT))
+                return yx_validation_error(state,
+                                           "global array index has wrong type%s",
+                                           "");
+            if (yx_constant_integer(node->a, &constant_index) &&
+                constant_index < 0)
+                return yx_negative_number_error(state, node->a);
+            return true;
+        }
+        {
+            const char *array_member = NULL;
+            const yx_global_array *array = yx_scoped_object_array_path(
+                scope, node->name, &array_member);
+            if (array) {
+                const yx_global_field *item_field = array->count ?
+                    yx_global_object_field(array->items[0].object,
+                                           array_member) : NULL;
+                if (!item_field && array->count &&
+                    node->operation == TK_LPAREN)
+                    item_field = yx_global_object_field_suffix(
+                        array->items[0].object, array_member, ".len");
+                if (!item_field)
+                    return yx_unknown_global_field_error(state, node, scope);
+                if (node->operation == TK_LPAREN &&
+                    item_field->type != YX_GLOBAL_ARRAY &&
+                    item_field->type != YX_GLOBAL_STR)
+                    return yx_validation_error(state,
+                                               "global value has no array length%s",
+                                               "");
+                if (!yx_validate_node(node->a, state, inside_for_of, scope))
+                    return false;
+                index_type = yx_scoped_node_type(node->a, scope);
+                if (!yx_static_accepts(index_type, YX_STATIC_INT))
+                    return yx_validation_error(state,
+                                               "global array index has wrong type%s",
+                                               "");
+                if (yx_constant_integer(node->a, &constant_index) &&
+                    constant_index < 0)
+                    return yx_negative_number_error(state, node->a);
+                return true;
+            }
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (strcmp(node->name, "vba.project_info.references.value") == 0 ||
+            strcmp(node->name, "vba.modules.name") == 0 ||
+            strcmp(node->name, "vba.modules.type") == 0 ||
+            strcmp(node->name, "vba.modules.code") == 0) {
+            module_name = "vba";
+        } else
+#endif
+        if (strncmp(node->name, "dotnet.streams.", 15) == 0) {
+            member = node->name + 15;
+            if (strcmp(member, "name") != 0 &&
+                strcmp(member, "offset") != 0 &&
+                strcmp(member, "size") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dotnet";
+        } else if (strcmp(node->name, "dotnet.guids.value") == 0 ||
+                   strcmp(node->name, "dotnet.user_strings.value") == 0 ||
+                   strcmp(node->name, "dotnet.constants.value") == 0 ||
+                   strcmp(node->name, "dotnet.field_offsets.value") == 0 ||
+                   strcmp(node->name, "dotnet.modulerefs.value") == 0) {
+            module_name = "dotnet";
+        } else if (strncmp(node->name, "dotnet.resources.", 17) == 0) {
+            member = node->name + 17;
+            if (strcmp(member, "name") != 0 &&
+                strcmp(member, "offset") != 0 &&
+                strcmp(member, "length") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dotnet";
+        } else if (strncmp(node->name, "dotnet.assembly_refs.", 21) == 0) {
+            member = node->name + 21;
+            if (strcmp(member, "name") != 0 &&
+                strcmp(member, "public_key_or_token") != 0 &&
+                !(strncmp(member, "version.", 8) == 0 &&
+                  yx_dotnet_version_member(member + 8, NULL, NULL)))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dotnet";
+        } else if (strncmp(node->name, "dotnet.classes.", 15) == 0) {
+            member = node->name + 15;
+            if (yx_dotnet_class_member_type(member) == YX_STATIC_UNKNOWN)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dotnet";
+        } else if (strncmp(node->name, "zip.entries.", 12) == 0) {
+            member = node->name + 12;
+            if (strcmp(member, "file_path") != 0 &&
+                strcmp(member, "compression") != 0 &&
+                strcmp(member, "uncompressed_size") != 0 &&
+                strcmp(member, "compressed_size") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "zip";
+        } else if (yx_signature_member(node->name)) {
+            member = yx_signature_member(node->name);
+            if (yx_pe_signature_type(member) == YX_STATIC_UNKNOWN ||
+                (strcmp(member, "valid_on") == 0 &&
+                 node->operation != TK_LPAREN))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = node->name[0] == 'm' ? "msi" : "pe";
+        } else if (strncmp(node->name, "pe.sections.", 12) == 0) {
+            member = node->name + 12;
+            if (!yx_pe_section_field_supported(member) &&
+                !yx_pe_section_string_field_supported(member))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "pe";
+        } else if (strcmp(node->name, "pe.version_info.value") == 0) {
+            module_name = "pe";
+        } else if (strncmp(node->name, "pe.version_info_list.", 21) == 0) {
+            member = node->name + 21;
+            if (strcmp(member, "key") != 0 && strcmp(member, "value") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "pe";
+        } else if (strncmp(node->name, "pe.resources.", 13) == 0) {
+            member = node->name + 13;
+            if (strcmp(member, "length") != 0 &&
+                strcmp(member, "rva") != 0 &&
+                strcmp(member, "offset") != 0 &&
+                strcmp(member, "type") != 0 &&
+                strcmp(member, "id") != 0 &&
+                strcmp(member, "language") != 0 &&
+                strcmp(member, "type_string") != 0 &&
+                strcmp(member, "name_string") != 0 &&
+                strcmp(member, "language_string") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "pe";
+        } else if (strncmp(node->name, "pe.export_details.", 18) == 0) {
+            member = node->name + 18;
+            if (strcmp(member, "name") != 0 &&
+                strcmp(member, "ordinal") != 0 &&
+                strcmp(member, "rva") != 0 &&
+                strcmp(member, "offset") != 0 &&
+                strcmp(member, "forward_name") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "pe";
+        } else if (strncmp(node->name, "dex.", 4) == 0) {
+            char collection[32];
+            const char *nested;
+            if (!yx_dex_indexed_path(node->name, collection, &member) ||
+                (!yx_dex_indexed_numeric_field_supported(collection, member) &&
+                 !yx_dex_indexed_string_field_supported(collection, member) &&
+                 !yx_dex_nested_length_name(collection, member, &nested)))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dex";
+#ifdef XXYARA_ENABLE_OLECF
+        } else if (strncmp(node->name, "olecf.streams.", 14) == 0) {
+            member = node->name + 14;
+            if (strcmp(member, "name") != 0 &&
+                strcmp(member, "type") != 0 &&
+                strcmp(member, "size") != 0)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "olecf";
+#endif
+        } else if (strncmp(node->name, "lnk.target_id_list.", 19) == 0) {
+            member = node->name + 19;
+            if (!yx_lnk_field_info(member, true))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "lnk";
+        } else if (strncmp(node->name, "crx.", 4) == 0) {
+            if (yx_crx_indexed_type(node->name) == YX_STATIC_UNKNOWN)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "crx";
+        } else if (strncmp(node->name, "elf.", 4) == 0) {
+            char collection[32];
+            if (!yx_elf_indexed_path(node->name, collection, &member) ||
+                (!yx_elf_indexed_field_supported(collection, member) &&
+                 !yx_elf_indexed_string_field_supported(collection, member)))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "elf";
+        } else if (strncmp(node->name, "macho.", 6) == 0) {
+            char collection[32];
+            bool supported = false;
+            if (yx_macho_indexed_path(node->name, collection, &member)) {
+                supported = yx_macho_indexed_field_supported(collection,
+                                                              member) ||
+                    yx_macho_indexed_string_field_supported(collection,
+                                                              member) ||
+                    yx_macho_indexed_text_field_supported(collection,
+                                                          member);
+                if (!supported && strcmp(collection, "file") == 0) {
+                    size_t member_length = strlen(member);
+                    if (member_length > 4 &&
+                        strcmp(member + member_length - 4, ".len") == 0) {
+                        char nested[32];
+                        size_t nested_length = member_length - 4;
+                        if (nested_length < sizeof(nested)) {
+                            memcpy(nested, member, nested_length);
+                            nested[nested_length] = '\0';
+                            supported = yx_macho_collection_supported(nested);
+                        }
+                    }
+                }
+            }
+            if (!supported)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "macho";
+        } else
+            return yx_unknown_indexed_field_error(state, node, scope);
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], module_name) == 0) imported = true;
+        if (!imported)
+            return yx_validation_error(state, "module is not imported: '%s'",
+                                       module_name);
+        if (!yx_validate_node(node->a, state, inside_for_of, scope))
+            return false;
+        if (node->b &&
+            (!yx_validate_node(node->b, state, inside_for_of, scope) ||
+             !yx_static_accepts(yx_scoped_node_type(node->b, scope),
+                                YX_STATIC_INT)))
+            return yx_validation_error(state,
+                                       "wrong signature timestamp type%s", "");
+        index_type = yx_scoped_node_type(node->a, scope);
+        if (!yx_static_accepts(index_type,
+                               strcmp(node->name, "pe.version_info.value") == 0 ?
+                               YX_STATIC_STRING : YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->a,
+                                     strcmp(node->name, "pe.version_info.value") == 0 ?
+                                     YX_STATIC_STRING : YX_STATIC_INT, scope);
+        if (strcmp(node->name, "pe.version_info.value") != 0 &&
+            yx_constant_integer(node->a, &constant_index) &&
+            constant_index < 0)
+            return yx_negative_number_error(state, node->a);
+        return true;
+    }
+    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD) {
+        const char *member;
+        const char *module_name = "macho";
+        bool imported = false;
+        int64_t constant_index;
+        size_t field_length = strlen(node->name);
+        if (field_length >= 4 &&
+            strcmp(node->name + field_length - 4, ".len") == 0 &&
+            node->operation != TK_LPAREN)
+            return yx_validation_error(state,
+                                       "nested module length requires a call: '%s'",
+                                       node->name);
+        {
+            const char *array_member = NULL;
+            const char *inner_member = NULL;
+            const yx_global_array *array = yx_scoped_object_array_path(
+                scope, node->name, &array_member);
+            const yx_global_field *field = array && array->count &&
+                node->implicit_value ?
+                yx_global_object_field_suffix(
+                    array->items[0].object, array_member, ".value") : NULL;
+            if (array) {
+                const yx_global_field *inner_field = NULL;
+                if (!field && array->count)
+                    field = yx_global_object_nested_array_field(
+                        array->items[0].object, array_member,
+                        &inner_member);
+                if (field && inner_member && field->value.array->count) {
+                    const yx_global_object *item =
+                        field->value.array->items[0].object;
+                    inner_field = yx_global_object_field(item, inner_member);
+                    if (!inner_field && node->operation == TK_LPAREN)
+                        inner_field = yx_global_object_field_suffix(
+                            item, inner_member, ".len");
+                }
+                if (!field || field->type != YX_GLOBAL_ARRAY ||
+                    (inner_member && !inner_field))
+                    return yx_unknown_global_field_error(state, node, scope);
+                if (node->operation == TK_LPAREN && inner_member &&
+                    inner_field->type != YX_GLOBAL_ARRAY &&
+                    inner_field->type != YX_GLOBAL_STR)
+                    return yx_validation_error(state,
+                                               "global value has no array length%s",
+                                               "");
+                if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+                    !yx_validate_node(node->b, state, inside_for_of, scope))
+                    return false;
+                if (!yx_static_accepts(yx_scoped_node_type(node->a, scope),
+                                       YX_STATIC_INT) ||
+                    !yx_static_accepts(yx_scoped_node_type(node->b, scope),
+                                       YX_STATIC_INT))
+                    return yx_validation_error(state,
+                                               "global array index has wrong type%s",
+                                               "");
+                if ((yx_constant_integer(node->a, &constant_index) &&
+                     constant_index < 0) ||
+                    (yx_constant_integer(node->b, &constant_index) &&
+                     constant_index < 0))
+                    return yx_negative_number_error(state, yx_first_negative_index(node));
+                return true;
+            }
+        }
+        if (strncmp(node->name, "dotnet.classes.", 15) == 0) {
+            if (yx_dotnet_class_nested_type(node->name + 15) ==
+                YX_STATIC_UNKNOWN)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dotnet";
+        } else if (yx_signature_member(node->name)) {
+            if (yx_pe_signature_nested_type(node->name) == YX_STATIC_UNKNOWN)
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = node->name[0] == 'm' ? "msi" : "pe";
+        } else if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *collection, *nested;
+            if (!yx_dex_nested_name(node->name, &collection, &nested))
+                return yx_unknown_indexed_field_error(state, node, scope);
+            module_name = "dex";
+        } else if (strncmp(node->name, "macho.segments.sections.", 24) != 0 &&
+                   strncmp(node->name, "macho.file.dylibs.", 18) != 0 &&
+                   strncmp(node->name,
+                           "macho.file.build_version.tools.", 31) != 0)
+            return yx_unknown_indexed_field_error(state, node, scope);
+        if (strcmp(module_name, "macho") == 0) {
+            bool dylib = strncmp(node->name, "macho.file.dylibs.", 18) == 0;
+            bool tool = strncmp(node->name,
+                                "macho.file.build_version.tools.", 31) == 0;
+            member = node->name + (dylib ? 18 : (tool ? 31 : 24));
+            if (dylib ?
+                !yx_macho_indexed_text_field_supported("dylibs", member) :
+                (tool ?
+                 strcmp(member, "tool") != 0 &&
+                     strcmp(member, "version") != 0 :
+                 !yx_macho_section_field_supported(member) &&
+                     !yx_macho_section_string_field_supported(member)))
+                return yx_unknown_indexed_field_error(state, node, scope);
+        }
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], module_name) == 0) imported = true;
+        if (!imported)
+            return yx_validation_error(state, "module is not imported: '%s'",
+                                       module_name);
+        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+            !yx_validate_node(node->b, state, inside_for_of, scope))
+            return false;
+        if (!yx_static_accepts(yx_scoped_node_type(node->a, scope),
+                               YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->a, YX_STATIC_INT, scope);
+        if (!yx_static_accepts(yx_scoped_node_type(node->b, scope),
+                               YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->b, YX_STATIC_INT, scope);
+        if ((yx_constant_integer(node->a, &constant_index) &&
+             constant_index < 0) ||
+            (yx_constant_integer(node->b, &constant_index) &&
+             constant_index < 0))
+            return yx_negative_number_error(state, yx_first_negative_index(node));
+        return true;
+    }
+    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) {
+        int64_t constant_index;
+        bool imported = false;
+        {
+            const char *member = NULL, *second_member = NULL;
+            const char *third_member = NULL;
+            const yx_global_array *outer = yx_scoped_object_array_path(
+                scope, node->name, &member);
+            const yx_global_field *second = outer && outer->count ?
+                yx_global_object_nested_array_field(
+                    outer->items[0].object, member, &second_member) : NULL;
+            const yx_global_object *object = second &&
+                second->value.array->count ?
+                second->value.array->items[0].object : NULL;
+            const yx_global_field *third = object && node->implicit_value ?
+                yx_global_object_field_suffix(object, second_member,
+                                               ".value") : NULL;
+            if (outer) {
+                if (!third)
+                    third = yx_global_object_nested_array_field(
+                        object, second_member, &third_member);
+                if (!second || !third ||
+                    third->type != YX_GLOBAL_ARRAY ||
+                    (third_member &&
+                     (!third->value.array->count ||
+                      !yx_global_object_field(
+                          third->value.array->items[0].object,
+                          third_member))))
+                    return yx_unknown_global_field_error(state, node, scope);
+                if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+                    !yx_validate_node(node->b, state, inside_for_of, scope) ||
+                    !yx_validate_node(node->c, state, inside_for_of, scope))
+                    return false;
+                if (!yx_static_accepts(yx_scoped_node_type(node->a, scope),
+                                       YX_STATIC_INT) ||
+                    !yx_static_accepts(yx_scoped_node_type(node->b, scope),
+                                       YX_STATIC_INT) ||
+                    !yx_static_accepts(yx_scoped_node_type(node->c, scope),
+                                       YX_STATIC_INT))
+                    return yx_validation_error(state,
+                                               "global array index has wrong type%s",
+                                               "");
+                if ((yx_constant_integer(node->a, &constant_index) &&
+                     constant_index < 0) ||
+                    (yx_constant_integer(node->b, &constant_index) &&
+                     constant_index < 0) ||
+                    (yx_constant_integer(node->c, &constant_index) &&
+                     constant_index < 0))
+                    return yx_negative_number_error(state, yx_first_negative_index(node));
+                return true;
+            }
+        }
+        if (strncmp(node->name, "dotnet.classes.", 15) != 0 ||
+            yx_dotnet_class_triple_type(node->name + 15) ==
+                YX_STATIC_UNKNOWN)
+            return yx_validation_error(state,
+                                       "unsupported triple module field '%s'",
+                                       node->name);
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], "dotnet") == 0) imported = true;
+        if (!imported)
+            return yx_validation_error(state,
+                                       "module is not imported: '%s'",
+                                       "dotnet");
+        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+            !yx_validate_node(node->b, state, inside_for_of, scope) ||
+            !yx_validate_node(node->c, state, inside_for_of, scope))
+            return false;
+        if (!yx_static_accepts(yx_scoped_node_type(node->a, scope),
+                               YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->a, YX_STATIC_INT, scope);
+        if (!yx_static_accepts(yx_scoped_node_type(node->b, scope),
+                               YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->b, YX_STATIC_INT, scope);
+        if (!yx_static_accepts(yx_scoped_node_type(node->c, scope),
+                               YX_STATIC_INT))
+            return yx_wrong_key_type(state, node->c, YX_STATIC_INT, scope);
+        if ((yx_constant_integer(node->a, &constant_index) &&
+             constant_index < 0) ||
+            (yx_constant_integer(node->b, &constant_index) &&
+             constant_index < 0) ||
+            (yx_constant_integer(node->c, &constant_index) &&
+             constant_index < 0))
+            return yx_negative_number_error(state, yx_first_negative_index(node));
+        return true;
+    }
+    if (node->kind == N_MODULE_FIELD) {
+        const char *module_name;
+        const char *dot = strchr(node->name, '.');
+        if (dot) {
+            size_t root_length = (size_t)(dot - node->name);
+            for (const yx_scope_name *at = scope; at; at = at->parent)
+                if (at->type == YX_STATIC_STRUCT && at->object &&
+                    strlen(at->name) == root_length &&
+                    memcmp(at->name, node->name, root_length) == 0)
+                    return yx_global_object_field(at->object, dot + 1) ?
+                           true :
+                           yx_unknown_global_field_error(state, node, scope);
+        }
+        if (strcmp(node->name, "test_proto2.requires_foo_and_bar") == 0) {
+            bool imported = false;
+            for (i = 0; i < state->import_count; ++i)
+                if (strcmp(state->imports[i], "test_proto2") == 0)
+                    imported = true;
+            if (!imported)
+                return yx_validation_error(state,
+                                           "unsupported module field '%s'",
+                                           node->name);
+            if (!yx_validation_has_feature(state, "foo") &&
+                !yx_validation_has_feature(state, "FOO"))
+                return yx_validation_error(state, "test proto ACL %s", "foo");
+            if (!yx_validation_has_feature(state, "bar"))
+                return yx_validation_error(state, "test proto ACL %s", "bar");
+            if (yx_validation_has_feature(state, "baz"))
+                return yx_validation_error(state, "test proto ACL %s", "baz");
+            return true;
+        }
+        if (strncmp(node->name, "vt.", 3) == 0) {
+            bool imported = false;
+            for (i = 0; i < state->import_count; ++i)
+                if (strcmp(state->imports[i], "vt") == 0) imported = true;
+            if (!imported)
+                return yx_validation_error(state,
+                                           "unsupported module field '%s'",
+                                           node->name);
+            if (yx_vt_permutation_constant(node->name, NULL)) return true;
+            {
+                size_t primitive_length =
+                    yx_vt_permutation_constant_prefix_length(node->name);
+                if (primitive_length && node->name[primitive_length] == '.')
+                    return yx_validation_error(
+                        state, "vt enum struct '%s'", node->name);
+            }
+            if (strncmp(node->name, "vt.net", 6) == 0 &&
+                (node->name[6] == '\0' || node->name[6] == '.'))
+                return yx_validation_error(state,
+                                           "vt ACL net '%s'", node->name);
+            if (strncmp(node->name, "vt.metadata", 11) == 0 &&
+                (node->name[11] == '\0' || node->name[11] == '.'))
+                return yx_validation_error(state,
+                                           "vt ACL metadata '%s'",
+                                           node->name);
+            if (strncmp(node->name, "vt.behaviour", 12) == 0 &&
+                (node->name[12] == '\0' || node->name[12] == '.'))
+                return yx_validation_error(state,
+                                           "vt ACL behaviour '%s'",
+                                           node->name);
+            return yx_validation_error(state, "unknown vt field '%s'",
+                                       node->name);
+        }
+        if (yx_dotnet_array_from_name(node->name) != YX_DOTNET_ARRAY_NONE ||
+            strcmp(node->name, "dotnet.is_dotnet") == 0 ||
+            strcmp(node->name, "dotnet.version") == 0 ||
+            strcmp(node->name, "dotnet.module_name") == 0 ||
+            strcmp(node->name, "dotnet.typelib") == 0 ||
+            strcmp(node->name, "dotnet.assembly.name") == 0 ||
+            strcmp(node->name, "dotnet.assembly.culture") == 0 ||
+            (strncmp(node->name, "dotnet.assembly.version.", 24) == 0 &&
+             yx_dotnet_version_member(node->name + 24, NULL, NULL)) ||
+            (strncmp(node->name, "dotnet.", 7) == 0 &&
+             yx_dotnet_count_member(node->name + 7, false, NULL, NULL)))
+            module_name = "dotnet";
+#ifdef XXYARA_ENABLE_VBA
+        else if (strcmp(node->name, "vba.has_macros") == 0 ||
+                 strcmp(node->name, "vba.project_info") == 0 ||
+                 strcmp(node->name, "vba.project_info.name") == 0 ||
+                 strcmp(node->name, "vba.project_info.version") == 0 ||
+                 strcmp(node->name,
+                        "vba.project_info.module_count") == 0 ||
+                 (strncmp(node->name, "vba.", 4) == 0 &&
+                  yx_vba_constant(node->name + 4, NULL)))
+            module_name = "vba";
+#endif
+        else if (strncmp(node->name, "zip.", 4) == 0 &&
+            (strcmp(node->name + 4, "is_zip") == 0 ||
+             (!strchr(node->name + 4, '.') &&
+              yx_zip_constant(node->name + 4, &(uint64_t){0}))))
+            module_name = "zip";
+        else if (strncmp(node->name, "pe.", 3) == 0 &&
+            (yx_pe_field_supported(node->name + 3) ||
+             yx_pe_string_field_supported(node->name + 3) ||
+             strcmp(node->name, "pe.rich_signature.clear_data") == 0 ||
+             strcmp(node->name, "pe.is_signed") == 0 ||
+             strcmp(node->name, "pe.number_of_signatures") == 0 ||
+             strcmp(node->name, "pe.version_info") == 0 ||
+             yx_pe_constant(node->name + 3, NULL)))
+            module_name = "pe";
+        else if (strncmp(node->name, "elf.", 4) == 0 &&
+                 (yx_elf_field_supported(node->name + 4) ||
+                  yx_elf_constant(node->name + 4, &(uint64_t){0})))
+            module_name = "elf";
+        else if (strncmp(node->name, "macho.", 6) == 0 &&
+                 (yx_macho_field_supported(node->name + 6) ||
+                  yx_macho_string_field_supported(node->name + 6) ||
+                  yx_macho_text_field_supported(node->name + 6) ||
+                  yx_macho_constant(node->name + 6, &(uint64_t){0})))
+            module_name = "macho";
+        else if (strncmp(node->name, "dex.", 4) == 0 &&
+                 (yx_dex_numeric_field_supported(node->name + 4) ||
+                  yx_dex_string_field_supported(node->name + 4) ||
+                  yx_dex_constant(node->name + 4, &(uint64_t){0})))
+            module_name = "dex";
+#ifdef XXYARA_ENABLE_OLECF
+        else if (strcmp(node->name, "olecf.is_olecf") == 0 ||
+                 (strncmp(node->name, "olecf.", 6) == 0 &&
+                  yx_olecf_constant(node->name + 6, &(uint64_t){0})))
+            module_name = "olecf";
+#endif
+#ifdef XXYARA_ENABLE_MSI
+        else if (strcmp(node->name, "msi.is_signed") == 0)
+            module_name = "msi";
+#endif
+        else if (strncmp(node->name, "lnk.", 4) == 0 &&
+                 (yx_lnk_field_info(node->name + 4, false) ||
+                  yx_lnk_constant(node->name + 4, &(uint64_t){0})))
+            module_name = "lnk";
+        else if (strncmp(node->name, "crx.", 4) == 0 &&
+                 (strcmp(node->name + 4, "is_crx") == 0 ||
+                  strcmp(node->name + 4, "crx_version") == 0 ||
+                  strcmp(node->name + 4, "header_size") == 0 ||
+                  yx_crx_text_info(node->name + 4)))
+            module_name = "crx";
+        else if (strcmp(node->name, "math.MEAN_BYTES") == 0)
+            module_name = "math";
+        else if (node->resolved_module_alias &&
+                 yx_alias_unknown_member_error(state, node))
+            return false;
+        else if (yx_module_struct_path(node->name)) {
+            /* A struct field (`pe.overlay`): a value for `with`. */
+            char root[32];
+            size_t root_length = (size_t)(strchr(node->name, '.') - node->name);
+            if (root_length >= sizeof(root)) root_length = sizeof(root) - 1;
+            memcpy(root, node->name, root_length);
+            root[root_length] = '\0';
+            for (i = 0; i < state->import_count; ++i)
+                if (strcmp(state->imports[i], root) == 0) return true;
+            return yx_validation_error(state, "module is not imported: '%s'",
+                                       root);
+        }
+        else
+            return yx_validation_error(state, "unsupported module field '%s'",
+                                       node->name);
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], module_name) == 0) return true;
+        return yx_validation_error(state, "module is not imported: '%s'",
+                                   module_name);
+    }
+    if (node->kind == N_CALL) {
+        char *global_name = yx_global_len_base(node->name);
+        if (global_name) {
+            const yx_scope_name *global;
+            global = yx_scope_find(scope, global_name, strlen(global_name));
+            free(global_name);
+            if (global) {
+                if (global->type != YX_STATIC_ARRAY &&
+                    global->type != YX_STATIC_STRING)
+                    return yx_validation_error(state,
+                                               "global value has no array length%s", "");
+                if (node->item_count)
+                    return yx_validation_error(state,
+                                               "global array length takes no arguments%s", "");
+                return true;
+            }
+        }
+        for (const yx_scope_name *at = scope; at; at = at->parent) {
+            const yx_global_field *field;
+            if (at->type != YX_STATIC_STRUCT || !at->object) continue;
+            if (yx_signature_scope_method(at->object, at->name, node->name)) {
+                if (node->item_count != 1)
+                    return yx_wrong_arguments_error(state, node);
+                if (!yx_validate_node(node->items[0], state, inside_for_of,
+                                      scope)) return false;
+                return yx_static_accepts(
+                           yx_scoped_node_type(node->items[0], scope),
+                           YX_STATIC_INT) ||
+                       yx_wrong_arguments_error(state, node);
+            }
+            field = yx_global_object_field_path(at->object, at->name,
+                                                 node->name, ".len");
+            if (!field) continue;
+            if (field->type != YX_GLOBAL_ARRAY && field->type != YX_GLOBAL_STR)
+                return yx_validation_error(state,
+                                           "global value has no array length%s",
+                                           "");
+            if (node->item_count)
+                return yx_validation_error(state,
+                                           "global array length takes no arguments%s",
+                                           "");
+            return true;
+        }
+        bool imported = false;
+        bool is_math = strncmp(node->name, "math.", 5) == 0;
+        bool is_hash = strncmp(node->name, "hash.", 5) == 0;
+        bool is_string = strncmp(node->name, "string.", 7) == 0;
+        bool is_time = strncmp(node->name, "time.", 5) == 0;
+        bool is_console = strncmp(node->name, "console.", 8) == 0;
+        bool is_pe = strncmp(node->name, "pe.", 3) == 0;
+        bool is_elf = strncmp(node->name, "elf.", 4) == 0;
+        bool is_macho = strncmp(node->name, "macho.", 6) == 0;
+        bool is_dex = strncmp(node->name, "dex.", 4) == 0;
+#ifdef XXYARA_ENABLE_OLECF
+        bool is_olecf = strncmp(node->name, "olecf.", 6) == 0;
+#endif
+#ifdef XXYARA_ENABLE_MSI
+        bool is_msi = strncmp(node->name, "msi.", 4) == 0;
+#endif
+        bool is_lnk = strncmp(node->name, "lnk.", 4) == 0;
+        bool is_crx = strncmp(node->name, "crx.", 4) == 0;
+        bool is_zip = strncmp(node->name, "zip.", 4) == 0;
+        bool is_dotnet = strncmp(node->name, "dotnet.", 7) == 0;
+#ifdef XXYARA_ENABLE_VBA
+        bool is_vba = strncmp(node->name, "vba.", 4) == 0;
+#endif
+        bool is_cuckoo = strncmp(node->name, "cuckoo.", 7) == 0;
+        bool is_vt = strncmp(node->name, "vt.", 3) == 0;
+#ifdef XXYARA_ENABLE_MAGIC
+        bool is_magic = strncmp(node->name, "magic.", 6) == 0;
+#endif
+        const char *module_name = is_math ? "math" : is_hash ? "hash" :
+                                  is_string ? "string" : is_time ? "time" :
+                                  is_console ? "console" :
+                                  is_pe ? "pe" : is_elf ? "elf" :
+                                  is_macho ? "macho" : is_dex ? "dex" :
+                                  is_lnk ? "lnk" :
+#ifdef XXYARA_ENABLE_OLECF
+                                  is_olecf ? "olecf" :
+#endif
+#ifdef XXYARA_ENABLE_MSI
+                                  is_msi ? "msi" :
+#endif
+                                  is_crx ? "crx" : is_zip ? "zip" :
+                                  is_dotnet ? "dotnet" :
+#ifdef XXYARA_ENABLE_VBA
+                                  is_vba ? "vba" :
+#endif
+                                  is_cuckoo ? "cuckoo" :
+#ifdef XXYARA_ENABLE_MAGIC
+                                  is_magic ? "magic" :
+#endif
+                                  NULL;
+        const char *function;
+        size_t expected;
+        yx_static_type expected_type = YX_STATIC_INT;
+        yx_static_type argument_types[3] = {
+            YX_STATIC_INT, YX_STATIC_INT, YX_STATIC_INT
+        };
+        if (is_vt) {
+            bool vt_imported = false;
+            for (i = 0; i < state->import_count; ++i)
+                if (strcmp(state->imports[i], "vt") == 0)
+                    vt_imported = true;
+            if (!vt_imported)
+                return yx_validation_error(
+                    state, "unsupported module function '%s'", node->name);
+            {
+                size_t primitive_length =
+                    yx_vt_permutation_constant_prefix_length(node->name);
+                if (primitive_length)
+                    return yx_validation_error(
+                        state,
+                        node->name[primitive_length] == '.' ?
+                        "vt enum struct '%s'" : "vt enum function '%s'",
+                        node->name);
+            }
+            if (strncmp(node->name, "vt.net.", 7) == 0)
+                return yx_validation_error(state,
+                                           "vt ACL net '%s'", node->name);
+            if (strncmp(node->name, "vt.metadata.", 12) == 0)
+                return yx_validation_error(state,
+                                           "vt ACL metadata '%s'",
+                                           node->name);
+            if (strncmp(node->name, "vt.behaviour.", 13) == 0)
+                return yx_validation_error(state,
+                                           "vt ACL behaviour '%s'",
+                                           node->name);
+            return yx_validation_error(state, "unknown vt field '%s'",
+                                       node->name);
+        }
+        if (!module_name)
+            return yx_validation_error(state, "unsupported module function '%s'",
+                                       node->name);
+        for (i = 0; i < state->import_count; ++i)
+            if (strcmp(state->imports[i], module_name) == 0) {
+                imported = true;
+                break;
+            }
+        if (!imported)
+            return yx_validation_error(state, "module is not imported: '%s'",
+                                       module_name);
+        if (is_cuckoo) {
+            const char *function = node->name + 7;
+            bool port = strcmp(function, "network.tcp") == 0 ||
+                        strcmp(function, "network.udp") == 0;
+            bool regex_only =
+                strcmp(function, "network.dns_lookup") == 0 ||
+                strcmp(function, "network.host") == 0 ||
+                strcmp(function, "network.http_request") == 0 ||
+                strcmp(function, "network.http_get") == 0 ||
+                strcmp(function, "network.http_post") == 0 ||
+                strcmp(function, "network.http_user_agent") == 0 ||
+                strcmp(function, "sync.mutex") == 0 ||
+                strcmp(function, "filesystem.file_access") == 0 ||
+                strcmp(function, "registry.key_access") == 0;
+            if (!port && !regex_only)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != (port ? 2u : 1u))
+                return yx_wrong_arguments_error(state, node);
+            /* Regex literals are valid as module arguments; the generic
+             * validator rejects them as standalone condition values. */
+            for (i = 1; i < node->item_count; ++i)
+                if (!yx_validate_node(node->items[i], state,
+                                      inside_for_of, scope)) return false;
+            if (yx_scoped_node_type(node->items[0], scope) != YX_STATIC_REGEX ||
+                (port && !yx_static_accepts(
+                    yx_scoped_node_type(node->items[1], scope),
+                    YX_STATIC_INT)))
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+#ifdef XXYARA_ENABLE_MAGIC
+        if (is_magic) {
+            if (strcmp(node->name, "magic.type") != 0 &&
+                strcmp(node->name, "magic.mime_type") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+#endif
+        if (is_dotnet) {
+            if (yx_dotnet_count_member(node->name + 7, true, NULL, NULL) &&
+                node->item_count == 0) return true;
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (is_vba) {
+            if ((strcmp(node->name, "vba.modules.len") == 0 ||
+                 strcmp(node->name,
+                        "vba.project_info.references.len") == 0) &&
+                node->item_count == 0) return true;
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+#endif
+        if (is_zip) {
+            if (strcmp(node->name, "zip.entries.len") == 0 &&
+                node->item_count == 0) return true;
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+        if (is_dex) {
+            const char *member = node->name + 4;
+            bool predicate = strcmp(member, "contains_string") == 0 ||
+                             strcmp(member, "contains_method") == 0 ||
+                             strcmp(member, "contains_class") == 0;
+            if (predicate) {
+                if (node->item_count != 1 ||
+                    !yx_validate_node(node->items[0], state,
+                                      inside_for_of, scope) ||
+                    !yx_static_accepts(
+                        yx_scoped_node_type(node->items[0], scope),
+                        YX_STATIC_STRING))
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            if (strcmp(member, "checksum") == 0 ||
+                strcmp(member, "signature") == 0) {
+                if (node->item_count == 0) return true;
+                return yx_wrong_arguments_error(state, node);
+            }
+            size_t length = strlen(member);
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t collection_length = length - 4;
+                if (collection_length < sizeof(collection)) {
+                    memcpy(collection, member, collection_length);
+                    collection[collection_length] = '\0';
+                    if (yx_dex_collection_supported(collection) &&
+                        node->item_count == 0) return true;
+                }
+            }
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (is_olecf) {
+            if (strcmp(node->name, "olecf.streams.len") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+#endif
+#ifdef XXYARA_ENABLE_MSI
+        if (is_msi) {
+            /* The msi module has no functions; only the array length. */
+            if (strcmp(node->name, "msi.signatures.len") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+#endif
+        if (is_crx) {
+            const char *member = node->name + 4;
+            if (strcmp(member, "permhash") == 0) {
+                if (node->item_count != 0)
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            if (strlen(member) > 4 &&
+                strcmp(member + strlen(member) - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = strlen(member) - 4;
+                if (name_length < sizeof(collection)) {
+                    memcpy(collection, member, name_length);
+                    collection[name_length] = '\0';
+                    if ((yx_crx_list_info(NULL, collection, NULL) ||
+                         strcmp(collection, "signatures") == 0) &&
+                        node->item_count == 0) return true;
+                }
+            }
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+        if (is_console) {
+            bool is_log = strcmp(node->name, "console.log") == 0;
+            bool is_hex = strcmp(node->name, "console.hex") == 0;
+            yx_static_type types[3] = {YX_STATIC_UNKNOWN};
+            bool valid = false;
+            if ((!is_log && !is_hex) || node->item_count < 1 ||
+                node->item_count > (is_log ? 3u : 2u))
+                return yx_wrong_arguments_error(state, node);
+            for (i = 0; i < node->item_count; ++i) {
+                if (!yx_validate_node(node->items[i], state,
+                                      inside_for_of, scope)) return false;
+                types[i] = yx_scoped_node_type(node->items[i], scope);
+            }
+            if (is_hex)
+                valid = node->item_count == 1 ?
+                    yx_static_accepts(types[0], YX_STATIC_INT) :
+                    yx_static_accepts(types[0], YX_STATIC_STRING) &&
+                    yx_static_accepts(types[1], YX_STATIC_INT);
+            else if (node->item_count == 1)
+                valid = types[0] != YX_STATIC_REGEX;
+            else if (node->item_count == 2)
+                valid = (yx_static_accepts(types[0], YX_STATIC_STRING) &&
+                         types[1] != YX_STATIC_REGEX) ||
+                        (yx_static_accepts(types[0], YX_STATIC_INT) &&
+                         yx_static_accepts(types[1], YX_STATIC_INT));
+            else
+                valid = yx_static_accepts(types[0], YX_STATIC_STRING) &&
+                        yx_static_accepts(types[1], YX_STATIC_INT) &&
+                        yx_static_accepts(types[2], YX_STATIC_INT);
+            if (!valid)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+        if (is_lnk) {
+            if (strcmp(node->name, "lnk.target_id_list.len") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+        if (is_macho) {
+            const char *member = node->name + 6;
+            size_t length = strlen(member);
+            if (strcmp(member, "dylib_hash") == 0 ||
+                strcmp(member, "entitlement_hash") == 0 ||
+                strcmp(member, "import_hash") == 0 ||
+                strcmp(member, "export_hash") == 0 ||
+                strcmp(member, "symhash") == 0) {
+                if (node->item_count != 0)
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            if (strcmp(member, "has_dylib") == 0 ||
+                strcmp(member, "has_rpath") == 0 ||
+                strcmp(member, "has_entitlement") == 0 ||
+                strcmp(member, "has_import") == 0 ||
+                strcmp(member, "has_export") == 0) {
+                if (node->item_count != 1)
+                    return yx_wrong_arguments_error(state, node);
+                if (!yx_validate_node(node->items[0], state,
+                                      inside_for_of, scope)) return false;
+                if (!yx_static_accepts(
+                        yx_scoped_node_type(node->items[0], scope),
+                        YX_STATIC_STRING))
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            if (strcmp(member, "file_index_for_arch") == 0 ||
+                strcmp(member, "entry_point_for_arch") == 0) {
+                if (node->item_count != 1 && node->item_count != 2)
+                    return yx_wrong_arguments_error(state, node);
+                for (i = 0; i < node->item_count; ++i) {
+                    yx_static_type actual;
+                    if (!yx_validate_node(node->items[i], state,
+                                          inside_for_of, scope)) return false;
+                    actual = yx_scoped_node_type(node->items[i], scope);
+                    if (!yx_static_accepts(actual, YX_STATIC_INT))
+                        return yx_wrong_arguments_error(state, node);
+                }
+                return true;
+            }
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = length - 4;
+                if (name_length < sizeof(collection)) {
+                    memcpy(collection, member, name_length);
+                    collection[name_length] = '\0';
+                    if (yx_macho_collection_supported(collection) &&
+                        node->item_count == 0) return true;
+                }
+            }
+            return yx_validation_error(state,
+                                       "unsupported module function '%s'",
+                                       node->name);
+        }
+        if (is_elf) {
+            const char *member = node->name + 4;
+            size_t length = strlen(member);
+            bool supported = strcmp(member, "import_md5") == 0 ||
+                             strcmp(member, "telfhash") == 0;
+            if (!supported && length > 4 &&
+                strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = length - 4;
+                if (name_length < sizeof(collection)) {
+                    memcpy(collection, member, name_length);
+                    collection[name_length] = '\0';
+                    supported = yx_elf_collection_count(NULL, 0, collection,
+                                                        &(uint64_t){0});
+                }
+            }
+            if (!supported)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+        if (is_pe) {
+            if (strcmp(node->name, "pe.sections.len") == 0 ||
+                strcmp(node->name, "pe.signatures.len") == 0 ||
+                strcmp(node->name, "pe.resources.len") == 0 ||
+                strcmp(node->name, "pe.export_details.len") == 0 ||
+                strcmp(node->name, "pe.version_info_list.len") == 0 ||
+                strcmp(node->name, "pe.version_info.len") == 0) {
+                if (node->item_count != 0)
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            bool is_section_index = strcmp(node->name, "pe.section_index") == 0;
+            bool is_export = strcmp(node->name, "pe.exports") == 0 ||
+                             strcmp(node->name, "pe.exports_index") == 0;
+            bool is_imports = strcmp(node->name, "pe.imports") == 0;
+            bool is_import_rva = strcmp(node->name, "pe.import_rva") == 0 ||
+                                 strcmp(node->name, "pe.delayed_import_rva") == 0;
+            bool is_imphash = strcmp(node->name, "pe.imphash") == 0;
+            bool is_locale = strcmp(node->name, "pe.locale") == 0 ||
+                             strcmp(node->name, "pe.language") == 0;
+            size_t pe_args = strcmp(node->name, "pe.rva_to_offset") == 0 ||
+                             strcmp(node->name, "pe.offset_to_rva") == 0 ||
+                             is_section_index || is_export || is_locale ? 1 : 0;
+            if (!is_locale && !yx_pe_function_supported(node->name + 3))
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (strcmp(node->name, "pe.rich_signature.toolid") == 0 ||
+                strcmp(node->name, "pe.rich_signature.version") == 0) {
+                if (node->item_count < 1 || node->item_count > 2)
+                    return yx_wrong_arguments_error(state, node);
+                for (i = 0; i < node->item_count; ++i) {
+                    if (!yx_validate_node(node->items[i], state, inside_for_of, scope))
+                        return false;
+                    if (!yx_static_accepts(yx_scoped_node_type(node->items[i], scope),
+                                           YX_STATIC_INT))
+                        return yx_wrong_arguments_error(state, node);
+                }
+                return true;
+            }
+            if (is_imports || is_import_rva || is_imphash) {
+                yx_static_type t[3] = {YX_STATIC_UNKNOWN,
+                                       YX_STATIC_UNKNOWN,
+                                       YX_STATIC_UNKNOWN};
+                bool valid = false;
+                if (node->item_count > 3)
+                    return yx_wrong_arguments_error(state, node);
+                for (i = 0; i < node->item_count; ++i) {
+                    /* Regex values are supported only by pe.imports. */
+                    if (node->items[i]->kind != N_REGEX &&
+                        !yx_validate_node(node->items[i], state,
+                                          inside_for_of, scope)) return false;
+                    t[i] = yx_static_node_type(node->items[i]);
+                }
+                if (is_imphash) valid = node->item_count == 0;
+                else if (is_import_rva)
+                    valid = node->item_count == 2 &&
+                            yx_static_accepts(t[0], YX_STATIC_STRING) &&
+                            (yx_static_accepts(t[1], YX_STATIC_STRING) ||
+                             yx_static_accepts(t[1], YX_STATIC_INT));
+                else if (node->item_count == 1)
+                    valid = yx_static_accepts(t[0], YX_STATIC_STRING);
+                else if (node->item_count == 2)
+                    valid = (yx_static_accepts(t[0], YX_STATIC_INT) &&
+                             yx_static_accepts(t[1], YX_STATIC_STRING)) ||
+                            (yx_static_accepts(t[0], YX_STATIC_STRING) &&
+                             (yx_static_accepts(t[1], YX_STATIC_STRING) ||
+                              yx_static_accepts(t[1], YX_STATIC_INT))) ||
+                            (yx_static_accepts(t[0], YX_STATIC_REGEX) &&
+                             yx_static_accepts(t[1], YX_STATIC_REGEX));
+                else if (node->item_count == 3)
+                    valid = yx_static_accepts(t[0], YX_STATIC_INT) &&
+                            ((yx_static_accepts(t[1], YX_STATIC_STRING) &&
+                              (yx_static_accepts(t[2], YX_STATIC_STRING) ||
+                               yx_static_accepts(t[2], YX_STATIC_INT))) ||
+                             (yx_static_accepts(t[1], YX_STATIC_REGEX) &&
+                              yx_static_accepts(t[2], YX_STATIC_REGEX)));
+                if (!valid)
+                    return yx_wrong_arguments_error(state, node);
+                return true;
+            }
+            if (node->item_count != pe_args)
+                return yx_wrong_arguments_error(state, node);
+            if (pe_args) {
+                yx_static_type actual;
+                if (!(is_export && node->items[0]->kind == N_REGEX) &&
+                    !yx_validate_node(node->items[0], state, inside_for_of, scope))
+                    return false;
+                actual = yx_scoped_node_type(node->items[0], scope);
+                if (actual != YX_STATIC_UNKNOWN && actual != YX_STATIC_INT &&
+                    !(is_export && actual == YX_STATIC_REGEX) &&
+                    !((is_section_index || is_export) &&
+                      actual == YX_STATIC_STRING))
+                    return yx_wrong_arguments_error(state, node);
+            }
+            return true;
+        }
+        if (is_hash) {
+            function = node->name + 5;
+            if (strcmp(function, "md5") != 0 &&
+                strcmp(function, "sha1") != 0 &&
+                strcmp(function, "sha256") != 0 &&
+                strcmp(function, "crc32") != 0 &&
+                strcmp(function, "checksum32") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 1 && node->item_count != 2)
+                return yx_wrong_arguments_error(state, node);
+            expected_type = node->item_count == 1 ?
+                            YX_STATIC_STRING : YX_STATIC_INT;
+            for (i = 0; i < node->item_count; ++i) {
+                yx_static_type actual;
+                if (!yx_validate_node(node->items[i], state, inside_for_of, scope))
+                    return false;
+                actual = yx_static_node_type(node->items[i]);
+                if (actual != YX_STATIC_UNKNOWN && actual != expected_type)
+                    return yx_wrong_arguments_error(state, node);
+            }
+            return true;
+        }
+        if (is_string) {
+            bool to_int = strcmp(node->name, "string.to_int") == 0;
+            if (!to_int && strcmp(node->name, "string.length") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 1 && (!to_int || node->item_count != 2))
+                return yx_wrong_arguments_error(state, node);
+            for (i = 0; i < node->item_count; ++i) {
+                yx_static_type actual;
+                if (!yx_validate_node(node->items[i], state, inside_for_of,
+                                      scope)) return false;
+                actual = yx_scoped_node_type(node->items[i], scope);
+                if (!yx_static_accepts(actual, i == 0 ? YX_STATIC_STRING :
+                                                   YX_STATIC_INT))
+                    return yx_wrong_arguments_error(state, node);
+            }
+            return true;
+        }
+        if (is_time) {
+            if (strcmp(node->name, "time.now") != 0)
+                return yx_validation_error(state,
+                                           "unsupported module function '%s'",
+                                           node->name);
+            if (node->item_count != 0)
+                return yx_wrong_arguments_error(state, node);
+            return true;
+        }
+        function = node->name + 5;
+        if (strcmp(function, "min") == 0 || strcmp(function, "max") == 0)
+            expected = 2;
+        else if (strcmp(function, "abs") == 0) expected = 1;
+        else if (strcmp(function, "in_range") == 0) expected = 3;
+        else if (strcmp(function, "entropy") == 0)
+            expected = node->item_count == 2 ? 2 : 1;
+        else if (strcmp(function, "count") == 0 ||
+                 strcmp(function, "percentage") == 0)
+            expected = node->item_count == 3 ? 3 : 1;
+        else if (strcmp(function, "mode") == 0)
+            expected = node->item_count == 2 ? 2 : 0;
+        else if (strcmp(function, "mean") == 0)
+            expected = node->item_count == 2 ? 2 : 1;
+        else if (strcmp(function, "deviation") == 0)
+            expected = node->item_count == 3 ? 3 : 2;
+        else if (strcmp(function, "to_string") == 0 ||
+                 strcmp(function, "serial_correlation") == 0 ||
+                 strcmp(function, "monte_carlo_pi") == 0)
+            expected = node->item_count == 2 ? 2 : 1;
+        else if (strcmp(function, "to_number") == 0)
+            expected = 1;
+        else
+            return yx_validation_error(state, "unsupported module function '%s'",
+                                       node->name);
+        if (node->item_count != expected)
+            return yx_wrong_arguments_error(state, node);
+        for (i = 0; i < node->item_count; ++i)
+            if (!yx_validate_node(node->items[i], state, inside_for_of, scope))
+                return false;
+        if ((strcmp(function, "entropy") == 0 ||
+             strcmp(function, "mean") == 0 ||
+             strcmp(function, "serial_correlation") == 0 ||
+             strcmp(function, "monte_carlo_pi") == 0) &&
+            node->item_count == 1)
+            argument_types[0] = YX_STATIC_STRING;
+        if (strcmp(function, "to_number") == 0)
+            argument_types[0] = YX_STATIC_BOOL;
+        if (strcmp(function, "deviation") == 0) {
+            if (node->item_count == 2) {
+                argument_types[0] = YX_STATIC_STRING;
+                argument_types[1] = YX_STATIC_FLOAT;
+            } else {
+                argument_types[2] = YX_STATIC_FLOAT;
+            }
+        }
+        if (strcmp(function, "in_range") == 0) {
+            expected_type = YX_STATIC_UNKNOWN;
+            for (i = 0; i < node->item_count; ++i) {
+                yx_static_type actual = yx_scoped_node_type(node->items[i], scope);
+                if (actual != YX_STATIC_UNKNOWN &&
+                    actual != YX_STATIC_INT && actual != YX_STATIC_FLOAT)
+                    return yx_wrong_arguments_error(state, node);
+                if (actual != YX_STATIC_UNKNOWN) {
+                    if (expected_type != YX_STATIC_UNKNOWN &&
+                        actual != expected_type)
+                        return yx_wrong_arguments_error(state, node);
+                    expected_type = actual;
+                }
+            }
+        } else {
+            for (i = 0; i < node->item_count; ++i) {
+                yx_static_type actual = yx_scoped_node_type(node->items[i], scope);
+                if (actual != YX_STATIC_UNKNOWN &&
+                    actual != argument_types[i])
+                    return yx_wrong_arguments_error(state, node);
+            }
+        }
+        return true;
+    }
+    if (node->kind == N_REGEX)
+        return yx_validation_error(state,
+                                   "regular expression is not valid here%s",
+                                   "");
+    /* Field access is checked before the enclosing operator's type. This
+     * preserves ordered ACL errors even in an ill-typed expression. */
+    if ((node->kind == N_MATCHES || node->kind == N_UNARY ||
+         node->kind == N_BINARY) && yx_node_uses_feature_field(node)) {
+        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+            !yx_validate_node(node->b, state, inside_for_of, scope))
+            return false;
+        feature_operands_checked = true;
+    }
+    if (node->kind == N_MATCHES ||
+        (node->kind == N_BINARY && node->literal_matches)) {
+        /* Operands compile before the operator's types are checked. */
+        yx_static_type left, right;
+        if (!feature_operands_checked &&
+            (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+             (node->b && !yx_validate_node(node->b, state, inside_for_of, scope))))
+            return false;
+        left = yx_scoped_node_type(node->a, scope);
+        if (left != YX_STATIC_UNKNOWN && left != YX_STATIC_STRING) {
+            if (node->a->span_start < node->a->span_end &&
+                node->a->span_end != SIZE_MAX)
+                return yx_wrong_type_span(state, node->a, "`string`",
+                                          yx_static_type_name(left));
+            return yx_validation_error(state, "wrong regexp operand type%s",
+                                       "");
+        }
+        if (node->b && !node->literal_matches) {
+            right = yx_scoped_node_type(node->b, scope);
+            if (right == YX_STATIC_REGEX && node->b->compiled_regex) {
+                ((yx_node *)node)->compiled_regex = node->b->compiled_regex;
+                ((yx_node *)node)->compiled_regex_shared = true;
+                return true;
+            }
+            if (right != YX_STATIC_UNKNOWN && node->b->span_start < node->b->span_end &&
+                node->b->span_end != SIZE_MAX)
+                return yx_wrong_type_span(state, node->b, "`regexp`",
+                                          yx_static_type_name(right));
+            return yx_validation_error(state,
+                                       "expected regular expression after 'matches'%s",
+                                       "");
+        }
+    }
+    if (node->kind == N_UNARY) {
+        yx_static_type operand = yx_scoped_node_type(node->a, scope);
+        if (operand == YX_STATIC_REGEX && node->operation == TK_DEFINED)
+            return yx_wrong_type_span(state, node->a,
+                "`boolean`, `float`, `integer`, or `string`", "regexp");
+        if (operand == YX_STATIC_REGEX && node->operation == TK_NOT)
+            return yx_wrong_type_span(state, node->a,
+                "`boolean`, `float`, `integer`, or `string`", "regexp");
+        if (operand == YX_STATIC_MAP)
+            return yx_validation_error(state,
+                                       "map value has wrong type%s", "");
+        if (operand == YX_STATIC_ARRAY || operand == YX_STATIC_STRUCT)
+        {
+            if (node->a->span_start != SIZE_MAX && state->error &&
+                state->error_capacity) {
+                snprintf(state->error, state->error_capacity,
+                         "collection operand span %zu..%zu %s",
+                         node->a->span_start, node->a->span_end,
+                         operand == YX_STATIC_STRUCT ? "struct" : "array");
+                return false;
+            }
+            return yx_validation_error(state,
+                                       "global collection has wrong type%s", "");
+        }
+        bool requires_integer = node->operation == TK_TILDE;
+        bool requires_numeric = node->operation == TK_PLUS ||
+                                node->operation == TK_MINUS;
+        if ((requires_integer && operand != YX_STATIC_UNKNOWN &&
+             operand != YX_STATIC_INT) ||
+            (requires_numeric && operand != YX_STATIC_UNKNOWN &&
+             !yx_is_numeric_type(operand))) {
+            const char *actual = yx_static_type_name(operand);
+            if (actual && node->a && node->a->span_start < node->a->span_end &&
+                node->a->span_end != SIZE_MAX)
+                return yx_wrong_type_span(state, node->a,
+                    requires_integer ? "`integer`" : "`float` or `integer`",
+                    actual);
+            return yx_validation_error(state, "wrong unary operand type%s",
+                                       "");
+        }
+    }
+    if (node->kind == N_BINARY) {
+        yx_static_type left = yx_scoped_node_type(node->a, scope);
+        yx_static_type right = yx_scoped_node_type(node->b, scope);
+        if ((node->operation == TK_AND || node->operation == TK_OR) &&
+            (left == YX_STATIC_REGEX || right == YX_STATIC_REGEX))
+            return yx_wrong_type_span(state,
+                left == YX_STATIC_REGEX ? node->a : node->b,
+                "`boolean`, `float`, `integer`, or `string`", "regexp");
+        if ((node->operation == TK_EQ || node->operation == TK_NE ||
+             node->operation == TK_LT || node->operation == TK_LE ||
+             node->operation == TK_GT || node->operation == TK_GE) &&
+            (left == YX_STATIC_REGEX || right == YX_STATIC_REGEX))
+            return yx_wrong_type_span(state,
+                left == YX_STATIC_REGEX ? node->a : node->b,
+                node->operation == TK_EQ ?
+                    "`boolean`, `float`, `integer`, or `string`" :
+                    "`float`, `integer`, or `string`", "regexp");
+        if (left == YX_STATIC_REGEX || right == YX_STATIC_REGEX) {
+            bool numeric = node->operation == TK_PLUS || node->operation == TK_MINUS ||
+                node->operation == TK_STAR || node->operation == TK_DIV;
+            bool integer = node->operation == TK_PERCENT || node->operation == TK_AMP ||
+                node->operation == TK_CARET || node->operation == TK_PIPE ||
+                node->operation == TK_SHL || node->operation == TK_SHR;
+            if (numeric || integer)
+                return yx_wrong_type_span(state,
+                    left == YX_STATIC_REGEX ? node->a : node->b,
+                    numeric ? "`float` or `integer`" : "`integer`", "regexp");
+        }
+        if (left == YX_STATIC_MAP || right == YX_STATIC_MAP)
+            return yx_validation_error(state,
+                                       "map value has wrong type%s", "");
+        if (left == YX_STATIC_ARRAY || right == YX_STATIC_ARRAY ||
+            left == YX_STATIC_STRUCT || right == YX_STATIC_STRUCT)
+        {
+            bool first = left == YX_STATIC_ARRAY || left == YX_STATIC_STRUCT;
+            const yx_node *operand = first ? node->a : node->b;
+            yx_static_type type = first ? left : right;
+            if (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+                node->operation == TK_STAR || node->operation == TK_DIV)
+                return yx_wrong_type_span(state, operand, "`float` or `integer`",
+                    type == YX_STATIC_STRUCT ? "struct" : "array");
+            if (operand->span_start != SIZE_MAX && state->error &&
+                state->error_capacity) {
+                snprintf(state->error, state->error_capacity,
+                         "collection operand span %zu..%zu %s",
+                         operand->span_start, operand->span_end,
+                         type == YX_STATIC_STRUCT ? "struct" : "array");
+                return false;
+            }
+            return yx_validation_error(state,
+                                       "global collection has wrong type%s", "");
+        }
+        if ((node->operation == TK_NE || node->operation == TK_LT ||
+             node->operation == TK_LE || node->operation == TK_GT ||
+             node->operation == TK_GE) &&
+            (left == YX_STATIC_BOOL || right == YX_STATIC_BOOL))
+            return yx_wrong_type_span(state, left == YX_STATIC_BOOL ? node->a : node->b,
+                "`float`, `integer`, or `string`", "boolean");
+        bool compatible = left == YX_STATIC_UNKNOWN ||
+                          right == YX_STATIC_UNKNOWN || left == right ||
+                          (yx_is_numeric_type(left) &&
+                           yx_is_numeric_type(right)) ||
+                          (node->operation == TK_EQ &&
+                           ((left == YX_STATIC_BOOL && right == YX_STATIC_INT) ||
+                            (left == YX_STATIC_INT && right == YX_STATIC_BOOL)));
+        if ((node->operation == TK_EQ || node->operation == TK_NE ||
+             node->operation == TK_LT || node->operation == TK_LE ||
+             node->operation == TK_GT || node->operation == TK_GE) &&
+            !compatible) {
+            if (state->error && state->error_capacity)
+                snprintf(state->error, state->error_capacity,
+                    "mismatching types:%zu:%zu:%s:%zu:%zu:%s",
+                    node->a->span_start, node->a->span_end, yx_static_type_name(left),
+                    node->b->span_start, node->b->span_end, yx_static_type_name(right));
+            return false;
+        }
+        if (node->operation >= TK_CONTAINS &&
+            node->operation <= TK_IEQUALS) {
+            const yx_node *operand = left != YX_STATIC_UNKNOWN &&
+                                     left != YX_STATIC_STRING ? node->a :
+                                     right != YX_STATIC_UNKNOWN &&
+                                     right != YX_STATIC_STRING ? node->b : NULL;
+            if (operand) {
+                /* Operands compile before the operator's types are
+                 * checked, so an unknown pattern is reported first. */
+                if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+                    !yx_validate_node(node->b, state, inside_for_of, scope))
+                    return false;
+                if (operand->span_start < operand->span_end &&
+                    operand->span_end != SIZE_MAX)
+                    return yx_wrong_type_span(state, operand, "`string`",
+                        yx_static_type_name(operand == node->a ? left : right));
+                return yx_validation_error(state, "wrong string operand type%s",
+                                           "");
+            }
+        }
+        if (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+            node->operation == TK_STAR || node->operation == TK_DIV) {
+            if ((left != YX_STATIC_UNKNOWN && !yx_is_numeric_type(left)) ||
+                (right != YX_STATIC_UNKNOWN && !yx_is_numeric_type(right)))
+                return yx_validation_error(state, "wrong arithmetic type%s",
+                                           "");
+        }
+        if (node->operation == TK_PERCENT || node->operation == TK_AMP ||
+            node->operation == TK_CARET || node->operation == TK_PIPE ||
+            node->operation == TK_SHL || node->operation == TK_SHR) {
+            if (!yx_integer_operands_check(state, node->a, left, node->b, right,
+                                           "wrong integer operand type%s"))
+                return false;
+        }
+    }
+    if (feature_operands_checked) return true;
+    if (node->kind == N_OF || node->kind == N_OF_EXPR ||
+        node->kind == N_FOR_OF) {
+        if (node->a) {
+            yx_static_type amount = yx_scoped_node_type(node->a, scope);
+            if (!yx_integer_operands_check(state, node->a, amount, NULL,
+                                           YX_STATIC_UNKNOWN,
+                                           "wrong quantifier type%s"))
+                return false;
+            if (node->quantifier == Q_PERCENT &&
+                node->a->kind == N_INTEGER && node->a->number > 100)
+                return yx_range_error_span(state, "percent out of range",
+                                           node->a);
+        }
+    }
+    if (node->kind == N_PATTERN || node->kind == N_COUNT ||
+        node->kind == N_OFFSET || node->kind == N_LENGTH) {
+        if ((node->kind == N_OFFSET || node->kind == N_LENGTH) && node->a) {
+            yx_static_type index_type = yx_scoped_node_type(node->a, scope);
+            if (!yx_integer_operands_check(state, node->a, index_type, NULL,
+                                           YX_STATIC_UNKNOWN,
+                                           "pattern match index has wrong type%s"))
+                return false;
+            if (node->a->kind == N_INTEGER &&
+                !node->a->is_unsigned && (int64_t)node->a->number <= 0)
+                return yx_range_error_span(state,
+                                           "pattern match index is out of range",
+                                           node->a);
+        }
+        if (node->filter != FILTER_NONE) {
+            yx_static_type low = yx_scoped_node_type(node->b, scope);
+            yx_static_type high = node->filter == FILTER_IN ?
+                                  yx_scoped_node_type(node->c, scope) :
+                                  YX_STATIC_INT;
+            if (!yx_integer_operands_check(state, node->b, low,
+                                           node->filter == FILTER_IN ? node->c : NULL,
+                                           high, "wrong pattern offset type%s"))
+                return false;
+            if ((node->b && node->b->kind == N_INTEGER &&
+                 !node->b->is_unsigned && (int64_t)node->b->number < 0) ||
+                (node->filter == FILTER_IN && node->c &&
+                 node->c->kind == N_INTEGER &&
+                 !node->c->is_unsigned && (int64_t)node->c->number < 0))
+                return yx_validation_error(state,
+                                           "unexpected negative pattern offset%s",
+                                           "");
+            if (node->filter == FILTER_IN && node->b && node->c &&
+                node->b->kind == N_INTEGER &&
+                node->c->kind == N_INTEGER &&
+                node->b->number > node->c->number)
+                return yx_validation_error(state, "invalid range%s", "");
+        }
+        if (!node->name || !node->name[0]) {
+            if (!inside_for_of)
+                return yx_validation_error(state,
+                                           "anonymous pattern reference requires for-of", "");
+        } else {
+            found = false;
+            for (i = 0; i < state->pattern_count; i++) {
+                const char *actual = state->pattern_names[i];
+                if (actual && actual[0] == '$') actual++;
+                if (actual && strcmp(actual, node->name) == 0) {
+                    state->used[i] = true;
+                    found = true;
+                }
+            }
+            if (!found)
+                return yx_validation_error(state, "unknown pattern '$%s'", node->name);
+        }
+    } else if (node->kind == N_RULE) {
+        const yx_scope_name *local;
+        local = yx_scope_find(scope, node->name, strlen(node->name));
+        if (local && local->type == YX_STATIC_REGEX && local->regexp_binding) {
+            ((yx_node *)node)->compiled_regex = local->regexp_binding->compiled_regex;
+            ((yx_node *)node)->compiled_regex_shared = true;
+        }
+        if (!local && (!state->identifier_exists ||
+            !state->identifier_exists(state->user_data, node->name))) {
+            yx_token name = {.begin = node->name,
+                             .length = strlen(node->name)};
+            unsigned width;
+            bool signed_read, floating_read, big_endian;
+            if (strcmp(node->name, "vt") == 0)
+                for (i = 0; i < state->import_count; ++i)
+                    if (strcmp(state->imports[i], "vt") == 0)
+                        return yx_validation_error(
+                            state, "vt module used as value%s", "");
+            if (yx_read_function(&name, &width, &signed_read,
+                                 &floating_read, &big_endian))
+                return yx_validation_error(state,
+                                           "unbound read function '%s'",
+                                           node->name);
+            return yx_validation_error(state, "unknown identifier '%s'", node->name);
+        }
+    } else if (node->kind == N_OF || node->kind == N_FOR_OF) {
+        if (!yx_validate_set(node, state)) return false;
+    }
+    if ((node->kind == N_OF || node->kind == N_FOR_OF) &&
+        node->filter != FILTER_NONE) {
+        yx_static_type low = yx_scoped_node_type(node->b, scope);
+        yx_static_type high = node->filter == FILTER_IN ?
+                              yx_scoped_node_type(node->c, scope) :
+                              YX_STATIC_INT;
+        if ((low != YX_STATIC_UNKNOWN && low != YX_STATIC_INT) ||
+            (high != YX_STATIC_UNKNOWN && high != YX_STATIC_INT))
+            return yx_validation_error(state, "wrong pattern offset type%s",
+                                       "");
+        if ((node->b && node->b->kind == N_INTEGER &&
+             !node->b->is_unsigned && (int64_t)node->b->number < 0) ||
+            (node->filter == FILTER_IN && node->c &&
+             node->c->kind == N_INTEGER &&
+             !node->c->is_unsigned && (int64_t)node->c->number < 0))
+            return yx_validation_error(state,
+                                       "unexpected negative pattern offset%s",
+                                       "");
+        if (node->filter == FILTER_IN && node->b && node->c &&
+            node->b->kind == N_INTEGER && node->c->kind == N_INTEGER &&
+            node->b->number > node->c->number)
+            return yx_validation_error(state, "invalid range%s", "");
+    }
+    if (node->kind == N_OF_EXPR) {
+        for (i = 0; i < node->item_count; ++i)
+            if (!yx_validate_bool_body(node->items[i], state, inside_for_of,
+                                       scope)) return false;
+    }
+    *spine = node;
+    return true;
+}
+
+/* Same order as recursive validation: each left-spine node's own checks run
+ * top-down, then its `b`, `c` and `body` children bottom-up. */
+static bool yx_validate_node(const yx_node *node, yx_validation *state,
+                              bool inside_for_of,
+                              const yx_scope_name *scope)
+{
+    const yx_node *local[64], **pending = local;
+    size_t count = 0, capacity = sizeof(local) / sizeof(local[0]);
+    bool ok = true;
+    while (node) {
+        const yx_node *spine;
+        if (!yx_validate_node_step(node, state, inside_for_of, scope, &spine)) {
+            ok = false;
+            break;
+        }
+        if (!spine) break;
+        if (count == capacity) {
+            size_t grown = capacity * 2;
+            const yx_node **larger = pending == local ? malloc(grown * sizeof(*larger)) :
+                realloc((void *)pending, grown * sizeof(*larger));
+            if (!larger) {
+                /* Without storage, finish this node recursively. */
+                ok = yx_validate_node(spine->a, state, inside_for_of, scope) &&
+                     yx_validate_node(spine->b, state, inside_for_of, scope) &&
+                     yx_validate_node(spine->c, state, inside_for_of, scope) &&
+                     yx_validate_node(spine->body, state,
+                                      inside_for_of || spine->kind == N_FOR_OF,
+                                      scope);
+                if (!ok) break;
+                node = NULL;
+                break;
+            }
+            if (pending == local) memcpy(larger, local, sizeof(local));
+            pending = larger;
+            capacity = grown;
+        }
+        pending[count++] = spine;
+        node = spine->a;
+    }
+    while (ok && count) {
+        const yx_node *spine = pending[--count];
+        ok = yx_validate_node(spine->b, state, inside_for_of, scope) &&
+             yx_validate_node(spine->c, state, inside_for_of, scope) &&
+             yx_validate_node(spine->body, state,
+                              inside_for_of || spine->kind == N_FOR_OF,
+                              scope) &&
+             (spine->kind != N_FOR_OF ||
+              yx_bool_context_check(state, spine->body, scope));
+    }
+    if (pending != local) free((void *)pending);
+    return ok;
+}
+
+static bool yx_validate_variable_stack(const yx_node *node, size_t used,
+                                        yx_validation *state)
+{
+    size_t frame = 0;
+    if (!node) return true;
+    if (node->kind == N_WITH) frame = node->item_count;
+    else if (node->kind == N_OF || node->kind == N_OF_EXPR ||
+             node->kind == N_FOR_OF) frame = 5;
+    else if (node->kind == N_FOR_IN) frame = 7;
+    if (frame > 2048 - used) {
+        /* E047 points at the statement whose frame does not fit. */
+        if (node->frame_start != SIZE_MAX && node->frame_end != SIZE_MAX &&
+            node->frame_end > node->frame_start) {
+            if (state->error && state->error_capacity)
+                snprintf(state->error, state->error_capacity,
+                         "too many variables span %zu..%zu",
+                         node->frame_start, node->frame_end);
+            return false;
+        }
+        return yx_validation_error(state, "too many variables%s", "");
+    }
+    if (node->kind == N_FOR_IN || node->kind == N_FOR_OF ||
+        node->kind == N_OF || node->kind == N_OF_EXPR) {
+        if (!yx_validate_variable_stack(node->a, used, state) ||
+            !yx_validate_variable_stack(node->b, used, state) ||
+            !yx_validate_variable_stack(node->c, used, state)) return false;
+        for (size_t i = 0; i < node->item_count; ++i)
+            if (!yx_validate_variable_stack(node->items[i], used, state))
+                return false;
+        return yx_validate_variable_stack(node->body, used + frame, state);
+    }
+    used += frame;
+    if (!yx_validate_variable_stack(node->a, used, state) ||
+        !yx_validate_variable_stack(node->b, used, state) ||
+        !yx_validate_variable_stack(node->c, used, state) ||
+        !yx_validate_variable_stack(node->body, used, state)) return false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (!yx_validate_variable_stack(node->items[i], used, state))
+            return false;
+    return true;
+}
+
+static bool yx_condition_validate_impl(const yx_condition *condition,
+                           const char *const *pattern_names, size_t pattern_count,
+                           const char *const *imports, size_t import_count,
+                           const char *const *features, size_t feature_count,
+                           const yx_global *globals, size_t global_count,
+                           yx_condition_identifier_resolver identifier_exists,
+                           void *user_data, char *error, size_t error_capacity);
+typedef struct {
+    const yx_condition *condition;
+    const char *const *pattern_names; size_t pattern_count;
+    const char *const *imports; size_t import_count;
+    const char *const *features; size_t feature_count;
+    const yx_global *globals; size_t global_count;
+    yx_condition_identifier_resolver identifier_exists; void *user_data;
+    char *error; size_t error_capacity; bool result;
+} yx_validate_job;
+static void yx_type_cache_new_walk(void);
+static void yx_validate_thunk(void *data)
+{
+    yx_validate_job *j = data;
+    yx_type_cache_new_walk();
+    j->result = yx_condition_validate_impl(j->condition, j->pattern_names, j->pattern_count,
+        j->imports, j->import_count, j->features, j->feature_count, j->globals, j->global_count,
+        j->identifier_exists, j->user_data, j->error, j->error_capacity);
+}
+bool yx_condition_validate(const yx_condition *condition,
+                           const char *const *pattern_names, size_t pattern_count,
+                           const char *const *imports, size_t import_count,
+                           const char *const *features, size_t feature_count,
+                           const yx_global *globals, size_t global_count,
+                           yx_condition_identifier_resolver identifier_exists,
+                           void *user_data, char *error, size_t error_capacity)
+{
+    yx_validate_job job = {condition, pattern_names, pattern_count, imports, import_count,
+        features, feature_count, globals, global_count, identifier_exists, user_data,
+        error, error_capacity, false};
+    yx_run_deep(condition ? condition->depth : 0, yx_validate_thunk, &job);
+    return job.result;
+}
+static bool yx_condition_validate_impl(const yx_condition *condition,
+                           const char *const *pattern_names, size_t pattern_count,
+                           const char *const *imports, size_t import_count,
+                           const char *const *features, size_t feature_count,
+                           const yx_global *globals, size_t global_count,
+                           yx_condition_identifier_resolver identifier_exists,
+                           void *user_data, char *error, size_t error_capacity)
+{
+    yx_validation state = {0};
+    yx_scope_name *global_scopes = NULL;
+    const yx_scope_name *global_scope = NULL;
+    bool valid;
+    size_t i;
+    if (error && error_capacity) error[0] = '\0';
+    if (!condition || !condition->root || (pattern_count && !pattern_names) ||
+        (import_count && !imports) || (feature_count && !features) ||
+        (global_count && !globals)) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "invalid condition symbol table");
+        return false;
+    }
+    state.pattern_names = pattern_names;
+    state.pattern_count = pattern_count;
+    state.imports = imports;
+    state.import_count = import_count;
+    state.features = features;
+    state.feature_count = feature_count;
+    state.identifier_exists = identifier_exists;
+    state.user_data = user_data;
+    state.error = error;
+    state.error_capacity = error_capacity;
+    state.used = (bool *)calloc(pattern_count ? pattern_count : 1, sizeof(bool));
+    if (!state.used) {
+        if (error && error_capacity) snprintf(error, error_capacity, "out of memory");
+        return false;
+    }
+    if (global_count) {
+        global_scopes = (yx_scope_name *) calloc(global_count,
+                                                 sizeof(*global_scopes));
+        if (!global_scopes) {
+            free(state.used);
+            if (error && error_capacity) snprintf(error, error_capacity,
+                                                  "out of memory");
+            return false;
+        }
+        for (i = 0; i < global_count; ++i) {
+            global_scopes[i].name = globals[i].name;
+            global_scopes[i].type = yx_global_static_type(globals[i].type);
+            if (globals[i].type == YX_GLOBAL_ARRAY &&
+                globals[i].value.array) {
+                global_scopes[i].element_type = yx_global_static_type(
+                    globals[i].value.array->element_type);
+                global_scopes[i].array = globals[i].value.array;
+            }
+            if (globals[i].type == YX_GLOBAL_STRUCT)
+                global_scopes[i].object = globals[i].value.object;
+            global_scopes[i].parent = i ? &global_scopes[i - 1] : NULL;
+        }
+        global_scope = &global_scopes[global_count - 1];
+    }
+    valid = yx_validate_node(condition->root, &state, false, global_scope);
+    if (valid)
+        valid = yx_bool_context_check(&state, condition->root, global_scope);
+    if (valid && yx_scoped_node_type(condition->root, global_scope) ==
+                 YX_STATIC_MAP)
+        valid = yx_validation_error(&state,
+                                    "map value has wrong type%s", "");
+    if (valid && yx_scoped_node_type(condition->root, global_scope) ==
+                 YX_STATIC_ARRAY)
+        valid = yx_validation_error(&state,
+                                    "array value has wrong type%s", "");
+    if (valid)
+        valid = yx_validate_variable_stack(condition->root, 0, &state);
+    if (valid) {
+        for (i = 0; i < pattern_count; i++) {
+            /* Leading underscores deliberately exempt a pattern from the
+             * unused-pattern check, while retaining it in explicit sets. */
+            if (pattern_names[i] && pattern_names[i][0] == '$' &&
+                pattern_names[i][1] == '_') continue;
+            if (!state.used[i]) {
+                valid = yx_validation_error(&state, "unused pattern '%s'",
+                                            pattern_names[i]);
+                break;
+            }
+        }
+    }
+    free(state.used);
+    free(global_scopes);
+    return valid;
+}
+
+static bool yx_warning_imported_module(const char *name,
+                                         const yx_scope_name *scope)
+{
+    const char *dot = name ? strchr(name, '.') : NULL;
+    if (!dot) return false;
+    size_t length = (size_t)(dot - name);
+    for (const yx_scope_name *at = yx_scope_named(scope, name, length); at;
+             at = yx_scope_named(at->parent, name, length))
+        if (strlen(at->name) == length && !memcmp(name, at->name, length))
+            return at->imported_module;
+    return false;
+}
+
+/* String constraints of module function results in the pinned schemas, in
+ * mangled order: an exact length (`N`), then a case (`L` -1, `U` 1). The
+ * argument kinds tell overloads apart (`i` integer, `s` string). */
+static const struct {
+    const char *name, *args;
+    size_t length;
+    int letter_case;
+} yx_string_result_constraints[] = {
+    {"test_proto2.uppercase", "s", 0, 1},
+    {"pe.imphash", "", 32, -1},
+    {"elf.import_md5", "", 32, -1},
+    {"elf.telfhash", "", 72, 1},
+    {"hash.md5", "ii", 32, -1}, {"hash.md5", "s", 32, -1},
+    {"hash.sha1", "ii", 40, -1}, {"hash.sha1", "s", 40, -1},
+    {"hash.sha256", "ii", 64, -1}, {"hash.sha256", "s", 64, -1},
+    {"crx.permhash", "", 64, -1},
+    {"dex.signature", "", 40, -1},
+    {"macho.dylib_hash", "", 32, -1},
+    {"macho.entitlement_hash", "", 32, -1},
+    {"macho.export_hash", "", 32, -1},
+    {"macho.import_hash", "", 32, -1},
+    {"macho.symhash", "", 32, -1},
+};
+
+static bool yx_string_result_constraint(const yx_node *node,
+                                        const yx_scope_name *scope,
+                                        size_t *length, int *letter_case)
+{
+    if (node->kind != N_CALL || !node->name ||
+        !yx_warning_imported_module(node->name, scope)) return false;
+    for (size_t i = 0; i < sizeof(yx_string_result_constraints) /
+                           sizeof(yx_string_result_constraints[0]); ++i) {
+        const char *args = yx_string_result_constraints[i].args;
+        bool match;
+        if (strcmp(node->name, yx_string_result_constraints[i].name) ||
+            strlen(args) != node->item_count) continue;
+        match = true;
+        for (size_t a = 0; match && a < node->item_count; ++a)
+            match = yx_scoped_node_type(node->items[a], scope) ==
+                    (args[a] == 'i' ? YX_STATIC_INT : YX_STATIC_STRING);
+        if (!match) continue;
+        *length = yx_string_result_constraints[i].length;
+        *letter_case = yx_string_result_constraints[i].letter_case;
+        return true;
+    }
+    return false;
+}
+
+static int yx_node_string_case(const yx_node *node, const yx_scope_name *scope)
+{
+    if (!node) return 0;
+    yx_node alias;
+    char *name = NULL;
+    size_t length;
+    int letter_case;
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        int result = yx_node_string_case(&alias, scope);
+        free(name);
+        return result;
+    }
+    if (node->name) {
+        if (yx_warning_imported_module(node->name, scope) &&
+            node->kind != N_CALL &&
+            strcmp(node->name, "test_proto2.string_foo") == 0) return -1;
+        if (yx_string_result_constraint(node, scope, &length, &letter_case))
+            return letter_case;
+        if (node->kind == N_RULE)
+            for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
+             at = yx_scope_named(at->parent, node->name, strlen(node->name)))
+                if (strcmp(node->name, at->name) == 0) return at->string_case;
+    }
+    return 0;
+}
+
+static size_t yx_node_string_length(const yx_node *node,
+                                     const yx_scope_name *scope)
+{
+    if (!node) return 0;
+    yx_node alias;
+    char *name = NULL;
+    size_t length;
+    int letter_case;
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        size_t result = yx_node_string_length(&alias, scope);
+        free(name);
+        return result;
+    }
+    if (node->name) {
+        /* Only a call with accepted arguments has a constrained result. */
+        if (yx_string_result_constraint(node, scope, &length, &letter_case))
+            return length;
+        if (node->kind == N_RULE)
+            for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
+             at = yx_scope_named(at->parent, node->name, strlen(node->name)))
+                if (!strcmp(node->name, at->name)) return at->string_length_constraint;
+    }
+    return 0;
+}
+
+static size_t yx_warning_operand_start(const yx_node *node)
+{
+    if (node->kind == N_CALL && node->name && !node->resolved_module_alias) {
+        const char *member = strrchr(node->name, '.');
+        if (member) return node->span_start + (size_t)(member + 1 - node->name);
+    }
+    return node->span_start;
+}
+
+/* The module schema path a value reads: a module field (directly or
+ * through a `with` binding of a structure), a `with` variable bound to
+ * one, a loop variable over a module collection and the members read from
+ * it. *item when the value is an item of the collection at the path. NULL
+ * for anything else (calls, constants, the test modules); the caller frees
+ * the path. */
+static char *yx_warning_module_path(const yx_node *node,
+                                    const yx_scope_name *scope, bool *item,
+                                    unsigned depth)
+{
+    yx_node alias;
+    char *name = NULL, *path = NULL;
+    const yx_scope_name *root;
+    size_t root_length, length;
+    bool implicit;
+    *item = false;
+    if (!node || !node->name || depth > 32) return NULL;
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        path = yx_warning_module_path(&alias, scope, item, depth + 1);
+        free(name);
+        return path;
+    }
+    if (node->operation == TK_LPAREN ||
+        (node->kind != N_RULE && node->kind != N_MODULE_FIELD &&
+         node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+         node->kind != N_MODULE_TRIPLE_INDEXED_FIELD) ||
+        yx_test_proto_path(node->name)) return NULL;
+    root_length = strcspn(node->name, ".");
+    root = yx_scope_find(scope, node->name, root_length);
+    length = strlen(node->name);
+    implicit = node->implicit_value && length > root_length + 6 &&
+               strcmp(node->name + length - 6, ".value") == 0;
+    if (implicit) length -= 6;
+    if (!root) return NULL;
+    if (root->imported_module) {
+        if (length == root_length) return NULL;
+        path = (char *)malloc(length + 1);
+        if (!path) return NULL;
+        memcpy(path, node->name, length);
+        path[length] = '\0';
+        *item = implicit;
+        return path;
+    }
+    if (root->value_binding) {
+        bool base_item;
+        char *base = yx_warning_module_path(root->value_binding, root->parent,
+                                            &base_item, depth + 1);
+        size_t base_length;
+        if (!base) return NULL;
+        if (root->value_item) {
+            /* A loop variable is an item of the collection. */
+            if (base_item) { free(base); return NULL; }
+            base_item = true;
+        }
+        if (length == root_length && !implicit) {
+            *item = base_item;
+            return base;
+        }
+        /* A member of an item reads through the collection. */
+        if (base_item && length == root_length) { free(base); return NULL; }
+        base_length = strlen(base);
+        path = (char *)malloc(base_length + length - root_length + 1);
+        if (path) {
+            memcpy(path, base, base_length);
+            memcpy(path + base_length, node->name + root_length,
+                   length - root_length);
+            path[base_length + length - root_length] = '\0';
+        }
+        free(base);
+        *item = implicit;
+        return path;
+    }
+    return NULL;
+}
+
+/* TypeValue::integer_range of a value that is not constant: an integer
+ * read (uint8() ... int64be()) or a module field of a protobuf integer
+ * type, directly or through `with` and loop variables. */
+static bool yx_warning_integer_range(const yx_node *node,
+                                     const yx_scope_name *scope,
+                                     int64_t *minimum, uint64_t *maximum)
+{
+    static const struct {
+        const char *name;
+        int64_t minimum;
+        uint64_t maximum;
+    } reads[] = {
+        {"uint8", 0, UINT8_MAX}, {"int8", INT8_MIN, INT8_MAX},
+        {"uint16", 0, UINT16_MAX}, {"int16", INT16_MIN, INT16_MAX},
+        {"uint32", 0, UINT32_MAX}, {"int32", INT32_MIN, INT32_MAX},
+        {"uint64", 0, UINT64_MAX}, {"int64", INT64_MIN, INT64_MAX}
+    };
+    char *path;
+    bool item, found;
+    if (!node || node->span_start == SIZE_MAX || node->span_end == SIZE_MAX ||
+        node->span_start >= node->span_end) return false;
+    /* A `with` variable has the type of its value. */
+    if (node->kind == N_RULE && node->name && !strchr(node->name, '.')) {
+        const yx_scope_name *entry = yx_scope_find(scope, node->name,
+                                                   strlen(node->name));
+        if (entry && entry->value_binding && !entry->value_item &&
+            entry->value_binding->kind == N_READ)
+            return yx_warning_integer_range(entry->value_binding, entry->parent,
+                                            minimum, maximum);
+    }
+    if (node->kind == N_READ) {
+        size_t length;
+        if (!node->name || node->floating_read || node->read_arity_error)
+            return false;
+        length = strlen(node->name);
+        if (length > 2 && strcmp(node->name + length - 2, "be") == 0) length -= 2;
+        for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); ++i)
+            if (strlen(reads[i].name) == length &&
+                memcmp(reads[i].name, node->name, length) == 0) {
+                *minimum = reads[i].minimum;
+                *maximum = reads[i].maximum;
+                return true;
+            }
+        return false;
+    }
+    path = yx_warning_module_path(node, scope, &item, 0);
+    if (!path) return false;
+    found = yx_mo_schema_integer_range(path, item, minimum, maximum);
+    free(path);
+    return found;
+}
+
+/* The integer constant a value is (a literal, a folded expression or a
+ * `with` variable bound to one), not a Boolean; NULL otherwise. */
+static const yx_node *yx_warning_integer_constant(const yx_node *node,
+                                                  const yx_scope_name *scope,
+                                                  unsigned depth)
+{
+    const yx_scope_name *entry;
+    if (!node || depth > 32) return NULL;
+    if (node->kind == N_INTEGER)
+        return node->operation == TK_TRUE || node->operation == TK_FALSE ?
+               NULL : node;
+    if (node->kind != N_RULE || !node->name || strchr(node->name, '.'))
+        return NULL;
+    entry = yx_scope_find(scope, node->name, strlen(node->name));
+    if (!entry || !entry->value_binding || entry->value_item) return NULL;
+    return yx_warning_integer_constant(entry->value_binding, entry->parent,
+                                       depth + 1);
+}
+
+/* Whether `node` is an integer constant outside [minimum, maximum]. */
+static bool yx_warning_integer_outside(const yx_node *node,
+                                       const yx_scope_name *scope,
+                                       int64_t minimum, uint64_t maximum)
+{
+    const yx_node *constant = yx_warning_integer_constant(node, scope, 0);
+    if (!constant || node->span_start == SIZE_MAX ||
+        node->span_end == SIZE_MAX || node->span_start >= node->span_end)
+        return false;
+    if (!constant->is_unsigned && (int64_t)constant->number < 0)
+        return (int64_t)constant->number < minimum;
+    return constant->number > maximum;
+}
+
+static bool yx_warning_negative_array_index(const yx_node *node,
+                                             const yx_scope_name *scope)
+{
+    yx_node alias;
+    char *name = NULL;
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        bool result = yx_warning_negative_array_index(&alias, scope);
+        free(name);
+        return result;
+    }
+    if (node->kind != N_GLOBAL_INDEXED && node->kind != N_GLOBAL_DEEP_PATH &&
+        node->kind != N_MODULE_INDEXED_FIELD &&
+        node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+        node->kind != N_MODULE_TRIPLE_INDEXED_FIELD) return false;
+    size_t count = node->kind == N_GLOBAL_DEEP_PATH ? node->deep_index_count :
+                   node->kind == N_GLOBAL_INDEXED ? 1 : yx_module_node_indices(node);
+    for (size_t i = 0; i < count; ++i) {
+        const yx_node *key = i == 0 ? node->a : i == 1 ? node->b :
+                            i == 2 ? node->c : node->items[i - 3];
+        int64_t value;
+        if (i == 0 && node->name &&
+            strncmp(node->name, "test_proto2.map_int64_", 21) == 0) continue;
+        if (key && yx_constant_integer(key, &value) && value < 0) return true;
+    }
+    return false;
+}
+
+static bool yx_warn_sign_conversion(const yx_node *node, bool target_unsigned,
+    yx_condition_type_warning_callback callback, void *user)
+{
+    char kind[96];
+    if (!node || node->kind != N_INTEGER ||
+        node->operation == TK_TRUE || node->operation == TK_FALSE) return true;
+    if (target_unsigned && !node->is_unsigned && (int64_t)node->number < 0)
+        snprintf(kind, sizeof(kind), "sign_conversion:%" PRIu64 ":unsigned", node->number);
+    else if (!target_unsigned && node->is_unsigned && node->number > INT64_MAX)
+        snprintf(kind, sizeof(kind), "sign_conversion:%" PRId64 ":signed", (int64_t)node->number);
+    else return true;
+    return callback(kind, node->span_start, node->span_end, 0, 0, "integer", user);
+}
+
+/* Reuse the function's overload validation without revalidating argument
+ * expressions or evaluating them. Arguments have already emitted their own
+ * warnings; sign conversion happens only after a signature matches. */
+static bool yx_warning_call_signature(const yx_node *node,
+                                        const yx_scope_name *scope)
+{
+    yx_node call = *node;
+    yx_node *arguments;
+    yx_node **items;
+    char module[32], error[128];
+    const char *imports[] = {module};
+    const char *dot = node->name ? strchr(node->name, '.') : NULL;
+    size_t module_length = dot ? (size_t)(dot - node->name) : 0;
+    bool valid = false, conversion = false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        conversion |= node->items[i]->kind == N_INTEGER &&
+            node->items[i]->is_unsigned && node->items[i]->number > INT64_MAX;
+    if (!conversion) return false;
+    if (module_length >= sizeof(module) ||
+        node->item_count > SIZE_MAX / sizeof(*arguments) ||
+        node->item_count > SIZE_MAX / sizeof(*items)) return false;
+    memcpy(module, node->name ? node->name : "", module_length);
+    module[module_length] = '\0';
+    arguments = calloc(node->item_count ? node->item_count : 1, sizeof(*arguments));
+    items = calloc(node->item_count ? node->item_count : 1, sizeof(*items));
+    if (!arguments || !items) goto done;
+    for (size_t i = 0; i < node->item_count; ++i) {
+        yx_static_type type = yx_scoped_node_type(node->items[i], scope);
+        arguments[i].span_start = node->items[i]->span_start;
+        arguments[i].span_end = node->items[i]->span_end;
+        switch (type) {
+        case YX_STATIC_INT: arguments[i].kind = N_INTEGER; break;
+        case YX_STATIC_BOOL:
+            arguments[i].kind = N_INTEGER;
+            arguments[i].operation = TK_TRUE;
+            arguments[i].number = 1;
+            break;
+        case YX_STATIC_FLOAT: arguments[i].kind = N_FLOAT; break;
+        case YX_STATIC_STRING: arguments[i].kind = N_STRING; arguments[i].name = ""; break;
+        case YX_STATIC_REGEX: arguments[i].kind = N_REGEX; break;
+        default: goto done;
+        }
+        items[i] = &arguments[i];
+    }
+    call.items = items;
+    yx_validation state = {
+        .imports = imports,
+        .import_count = module_length && yx_warning_imported_module(node->name, scope) ? 1 : 0,
+        .error = error,
+        .error_capacity = sizeof(error)
+    };
+    valid = yx_validate_node(&call, &state, false, scope);
+done:
+    free(arguments);
+    free(items);
+    return valid;
+}
+
+/* The type of an expression for the warnings below. A `with` statement has
+ * its body's type in its own scope, recorded when the walk visits it. */
+static yx_static_type yx_warning_expr_type(const yx_node *node,
+                                           const yx_scope_name *scope)
+{
+    if (!node) return YX_STATIC_UNKNOWN;
+    if (node->kind == N_WITH) return (yx_static_type)node->with_body_type;
+    return yx_scoped_node_type(node, scope);
+}
+
+/* warn_if_not_bool (ast2ir.rs): an expression used as a Boolean that is
+ * not one. Operands of `and`/`or` warn for every type (a struct, array,
+ * map or regexp then also fails with E002); the condition, `not` operands,
+ * loop and `with` bodies and `of` tuple items fail first for those types,
+ * so only integers, floats and strings warn there (`scalars_only`).
+ * Functions keep their own diagnostics. */
+static bool yx_warn_non_bool_kind(const char *kind, const yx_node *node,
+                                  const yx_scope_name *scope,
+                                  bool scalars_only, size_t point,
+                                  yx_condition_type_warning_callback callback,
+                                  void *user)
+{
+    const char *type_name;
+    size_t start, end;
+    if (!node || node->span_start == SIZE_MAX || node->span_end == SIZE_MAX ||
+        node->span_start >= node->span_end) return true;
+    /* A call's span starts at the called name: `entropy(0, filesize)` in
+     * `math.entropy(0, filesize)`, `len()` in `pe.sections.len()`. */
+    start = node->span_start;
+    if (node->call_start != SIZE_MAX &&
+        node->call_member_end > node->call_member_start &&
+        node->call_member_start > node->span_start &&
+        node->call_member_start < node->span_end)
+        start = node->call_member_start;
+    switch (yx_warning_expr_type(node, scope)) {
+    case YX_STATIC_INT: type_name = "integer"; break;
+    case YX_STATIC_FLOAT: type_name = "float"; break;
+    case YX_STATIC_STRING: type_name = "string"; break;
+    case YX_STATIC_STRUCT: type_name = scalars_only ? NULL : "struct"; break;
+    case YX_STATIC_ARRAY: type_name = scalars_only ? NULL : "array"; break;
+    case YX_STATIC_MAP: type_name = scalars_only ? NULL : "map"; break;
+    case YX_STATIC_REGEX: type_name = scalars_only ? NULL : "regexp"; break;
+    default: type_name = NULL; break;
+    }
+    /* `#a in (range)` spans its range. */
+    end = node->span_end;
+    if (node->kind == N_COUNT && node->filter == FILTER_IN &&
+        node->frame_end != SIZE_MAX && node->frame_end > end)
+        end = node->frame_end;
+    /* `point`: where YARA-X raises it, for ordering other warnings. */
+    if (point == SIZE_MAX || point < end) point = end;
+    return !type_name || callback(kind, start, end, 0, point, type_name, user);
+}
+
+static bool yx_warn_non_bool(const yx_node *node, const yx_scope_name *scope,
+                             bool scalars_only, size_t point,
+                             yx_condition_type_warning_callback callback,
+                             void *user)
+{
+    return yx_warn_non_bool_kind("non_bool_expr", node, scope, scalars_only,
+                                 point, callback, user);
+}
+
+/* is_potentially_large_range (ast2ir.rs): an upper bound reading filesize
+ * or a pattern count, outside the arguments of math.min. */
+static bool yx_reads_file_size_or_count(const yx_node *node)
+{
+    if (!node) return false;
+    if (node->kind == N_FILESIZE ||
+        (node->kind == N_COUNT && node->name && node->name[0])) return true;
+    if (node->kind == N_CALL && node->name && strcmp(node->name, "math.min") == 0)
+        return false;
+    if (yx_reads_file_size_or_count(node->a) ||
+        yx_reads_file_size_or_count(node->b) ||
+        yx_reads_file_size_or_count(node->c) ||
+        yx_reads_file_size_or_count(node->body)) return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_reads_file_size_or_count(node->items[i])) return true;
+    return false;
+}
+
+/* A range with a constant lower bound and an upper bound that can grow with
+ * the file. */
+static bool yx_potentially_large_range(const yx_node *loop)
+{
+    return loop->b && loop->c && loop->b->kind == N_INTEGER &&
+           loop->b->operation != TK_TRUE && loop->b->operation != TK_FALSE &&
+           yx_reads_file_size_or_count(loop->c);
+}
+
+/* A name read in the scope of a `with` declaration marks it used. */
+static void yx_mark_scope_use(const yx_node *node, const yx_scope_name *scope)
+{
+    const yx_scope_name *entry;
+    if (!node->name || !node->name[0] || node->resolved_module_alias) return;
+    switch (node->kind) {
+    case N_RULE: case N_GLOBAL_INDEXED: case N_GLOBAL_DEEP_PATH:
+    case N_MODULE_FIELD: case N_MODULE_INDEXED_FIELD:
+    case N_MODULE_NESTED_INDEXED_FIELD: case N_MODULE_TRIPLE_INDEXED_FIELD:
+    case N_CALL:
+        break;
+    default:
+        return;
+    }
+    entry = yx_scope_find(scope, node->name, strcspn(node->name, "."));
+    if (entry && entry->used) *entry->used = true;
+}
+
+/* The last source position of an expression. A loop's own span is its
+ * variable, so its operands and body are searched too. */
+static size_t yx_node_extent_end(const yx_node *node)
+{
+    const yx_node *children[4];
+    size_t end = 0, child;
+    if (!node) return 0;
+    if (node->span_end != SIZE_MAX) end = node->span_end;
+    children[0] = node->a; children[1] = node->b;
+    children[2] = node->c; children[3] = node->body;
+    for (size_t i = 0; i < 4; ++i)
+        if ((child = yx_node_extent_end(children[i])) > end) end = child;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if ((child = yx_node_extent_end(node->items[i])) > end) end = child;
+    return end;
+}
+
+static bool yx_visit_type_warnings(const yx_node *node, const yx_scope_name *scope,
+    yx_condition_type_warning_callback callback, void *user, bool partial)
+{
+    if (!node || (partial && !node->fold_visited)) return true;
+    yx_node alias;
+    char *name = NULL;
+    yx_mark_scope_use(node, scope);
+    if (yx_scoped_module_alias(node, scope, &alias, &name)) {
+        bool result = yx_visit_type_warnings(&alias, scope, callback, user, partial);
+        free(name);
+        return result;
+    }
+    if (node->kind == N_WITH) {
+        yx_scope_name *locals = calloc(node->item_count ? node->item_count : 1,
+                                        sizeof(*locals));
+        bool *used = calloc(node->item_count ? node->item_count : 1,
+                            sizeof(*used));
+        if (!locals || !used) { free(locals); free(used); return false; }
+        const yx_scope_name *current = scope;
+        bool ok = true;
+        for (size_t i = 0; i < node->item_count && ok; ++i) {
+            ok = yx_visit_type_warnings(node->items[i], current, callback, user, partial);
+            locals[i].name = node->set_names[i];
+            locals[i].type = yx_warning_expr_type(node->items[i], current);
+            locals[i].is_unsigned = yx_scoped_unsigned(node->items[i], current);
+            locals[i].array = yx_scoped_array_from_node(node->items[i], current);
+            locals[i].string_case = yx_node_string_case(node->items[i], current);
+            locals[i].string_length_constraint = yx_node_string_length(node->items[i], current);
+            locals[i].parent = current;
+            locals[i].used = &used[i];
+            locals[i].value_binding = node->items[i];
+            if (locals[i].type == YX_STATIC_STRUCT || locals[i].type == YX_STATIC_ARRAY ||
+                locals[i].type == YX_STATIC_MAP || locals[i].type == YX_STATIC_FUNCTION)
+                locals[i].module_binding = node->items[i];
+            current = &locals[i];
+        }
+        if (ok) ok = yx_visit_type_warnings(node->body, current, callback, user, partial);
+        if (ok) {
+            ((yx_node *)node)->with_body_type =
+                (int)yx_warning_expr_type(node->body, current);
+            if (!partial)
+                ok = yx_warn_non_bool(node->body, current, true, SIZE_MAX,
+                                      callback, user);
+        }
+        /* with_expr_from_ast: a declaration nothing in the body (or a later
+         * declaration) reads is unused. Usage is per name within one `with`:
+         * reading a repeated name counts for each of its declarations. */
+        for (size_t i = 0; ok && !partial && node->set_name_starts &&
+                           i < node->item_count; ++i) {
+            for (size_t j = 0; j < node->item_count && !used[i]; ++j)
+                if (used[j] && strcmp(node->set_names[i], node->set_names[j]) == 0)
+                    used[i] = true;
+        }
+        for (size_t i = 0; ok && !partial && node->set_name_starts &&
+                           i < node->item_count; ++i)
+            if (!used[i])
+                ok = callback("unused_identifier", node->set_name_starts[i],
+                              node->set_name_starts[i] + strlen(node->set_names[i]),
+                              0, node->span_end != SIZE_MAX ? node->span_end :
+                              node->body && node->body->span_end != SIZE_MAX ?
+                              node->body->span_end : 0, "", user);
+        free(used);
+        free(locals);
+        return ok;
+    }
+    if (node->kind == N_BINARY && (node->operation == TK_AND || node->operation == TK_OR)) {
+        /* YARA-X's `and`/`or` are n-ary: every operand is compiled, then
+         * each one that is not a Boolean warns. A parenthesized chain of
+         * the same operator on the left joins the chain (new_n_ary_expr in
+         * cst2ast.rs extends an n-ary left operand); one on the right is a
+         * single operand. */
+        const yx_node **chain = NULL;
+        size_t count = 0, capacity = 0;
+        bool ok = true;
+        for (const yx_node *at = node;; at = at->a) {
+            if (count == capacity) {
+                size_t grown = capacity ? capacity * 2 : 8;
+                const yx_node **larger = (const yx_node **)realloc((void *)chain,
+                    grown * sizeof(*larger));
+                if (!larger) { free((void *)chain); return false; }
+                chain = larger;
+                capacity = grown;
+            }
+            chain[count++] = at;
+            if (!at->a || at->a->kind != N_BINARY ||
+                at->a->operation != node->operation)
+                break;
+        }
+        /* chain[count - 1] is the innermost operator: its `a` comes first,
+         * then each operator's `b` from the inside out. The warnings are
+         * raised once the whole chain is compiled. */
+        size_t chain_end = yx_node_extent_end(node->b);
+        if (node->span_end != SIZE_MAX && node->span_end > chain_end)
+            chain_end = node->span_end;
+        if (!chain_end) chain_end = SIZE_MAX;
+        ok = yx_visit_type_warnings(chain[count - 1]->a, scope, callback, user, partial);
+        for (size_t i = count; ok && i-- > 0;)
+            ok = yx_visit_type_warnings(chain[i]->b, scope, callback, user, partial);
+        if (ok && !partial)
+            ok = yx_warn_non_bool(chain[count - 1]->a, scope, false,
+                                  chain_end, callback, user);
+        for (size_t i = count; ok && !partial && i-- > 0;)
+            ok = yx_warn_non_bool(chain[i]->b, scope, false, chain_end,
+                                  callback, user);
+        free((void *)chain);
+        return ok;
+    }
+    if (node->kind == N_OF_EXPR) {
+        /* Each tuple item is a Boolean expression of its own. */
+        bool ok = yx_visit_type_warnings(node->a, scope, callback, user, partial);
+        for (size_t i = 0; ok && i < node->item_count; ++i) {
+            ok = yx_visit_type_warnings(node->items[i], scope, callback, user, partial);
+            if (ok && !partial)
+                ok = yx_warn_non_bool(node->items[i], scope, true, SIZE_MAX,
+                                      callback, user);
+        }
+        return ok;
+    }
+    if (node->kind == N_FOR_IN) {
+        if (!yx_visit_type_warnings(node->a, scope, callback, user, partial) ||
+            !yx_visit_type_warnings(node->b, scope, callback, user, partial) ||
+            !yx_visit_type_warnings(node->c, scope, callback, user, partial)) return false;
+        for (size_t i = 0; i < node->item_count; ++i)
+            if (!yx_visit_type_warnings(node->items[i], scope, callback, user, partial)) return false;
+        yx_scope_name key = {.name = node->name, .parent = scope,
+                              .type = YX_STATIC_INT};
+        yx_scope_name value = {.parent = &key};
+        const yx_scope_name *body_scope = &key;
+        if (node->map_loop) {
+            const yx_node *source = node->b;
+            yx_node resolved;
+            char *name = NULL;
+            if (yx_scoped_module_alias(source, scope, &resolved, &name)) source = &resolved;
+            const yx_tp_native_map *map = source && source->name ?
+                yx_test_proto_map(source->name, strlen(source->name)) : NULL;
+            key.type = map ? yx_vt_static_type(map->key_type) : YX_STATIC_STRING;
+            value.name = node->set_names[0];
+            value.type = map ? yx_vt_static_type(map->value_type) : YX_STATIC_STRING;
+            value.object = map && map->record_schema ? map->record_schema->items[0].object : NULL;
+            value.value_binding = node->b;
+            value.value_item = true;
+            body_scope = &value;
+            free(name);
+        } else if (node->array_loop) {
+            key.type = yx_scoped_array_element_type(node->b, scope);
+            const yx_global_array *array = yx_scoped_array_from_node(node->b, scope);
+            key.object = key.type == YX_STATIC_STRUCT && array && array->count ?
+                         array->items[0].object : NULL;
+            key.value_binding = node->b;
+            key.value_item = true;
+        } else if (!node->range_loop && node->item_count) {
+            key.type = yx_scoped_node_type(node->items[0], scope);
+            for (size_t i = 0; i < node->item_count; ++i)
+                key.is_unsigned |= yx_scoped_unsigned(node->items[i], scope);
+            bool iterable_complete = true;
+            for (size_t i = 0; i < node->item_count; ++i)
+                iterable_complete &= node->items[i]->fold_completed;
+            if (key.is_unsigned && (!partial || iterable_complete))
+                for (size_t i = 0; i < node->item_count; ++i)
+                    if (!yx_warn_sign_conversion(node->items[i], true, callback, user)) return false;
+        }
+        /* for_in_expr_from_ast raises potentially_slow_loop for the range
+         * before it compiles the body. */
+        if (!partial && node->range_loop && yx_potentially_large_range(node) &&
+            node->iterable_start != SIZE_MAX && node->iterable_end != SIZE_MAX &&
+            !callback("potentially_slow_loop", node->iterable_start,
+                      node->iterable_end, 0, node->iterable_end, "", user))
+            return false;
+        if (!yx_visit_type_warnings(node->body, body_scope, callback, user, partial))
+            return false;
+        return partial || yx_warn_non_bool(node->body, body_scope, true,
+                                           SIZE_MAX, callback, user);
+    }
+    if (node->kind == N_BINARY && (node->operation == TK_EQ || node->operation == TK_NE)) {
+        yx_static_type left = yx_scoped_node_type(node->a, scope);
+        yx_static_type right = yx_scoped_node_type(node->b, scope);
+        const yx_node *boolean = left == YX_STATIC_BOOL ? node->a :
+                                 right == YX_STATIC_BOOL ? node->b : NULL;
+        const yx_node *integer = left == YX_STATIC_INT ? node->a :
+                                 right == YX_STATIC_INT ? node->b : NULL;
+        if (boolean && integer && integer->kind == N_INTEGER && integer->number <= 1 &&
+            node->operation == TK_EQ && !yx_warning_negative_array_index(boolean, scope)) {
+            size_t begin = yx_warning_operand_start(boolean);
+            size_t expression_begin = node->span_start == boolean->span_start ?
+                                        begin : node->span_start;
+            if (!callback("bool_int_comparison", expression_begin, node->span_end,
+                          begin, boolean->span_end,
+                          integer->number ? "1" : "0", user)) return false;
+        }
+        if (node->operation == TK_EQ) {
+            const yx_node *annotated = node->a, *literal = node->b;
+            int annotation = yx_node_string_case(annotated, scope);
+            if (!annotation) {
+                annotated = node->b; literal = node->a;
+                annotation = yx_node_string_case(annotated, scope);
+            }
+            size_t annotated_length = yx_node_string_length(annotated, scope);
+            if (annotation && literal->kind == N_STRING &&
+                (!annotated_length || annotated_length == literal->string_length)) {
+                size_t begin = yx_warning_operand_start(annotated);
+                if (!callback("string_case", begin, annotated->span_end,
+                              literal->span_start, literal->span_end,
+                              annotation < 0 ? "lowercase" : "uppercase", user)) return false;
+            }
+            annotated = node->a; literal = node->b;
+            size_t length = yx_node_string_length(annotated, scope);
+            if (!length) {
+                annotated = node->b; literal = node->a;
+                length = yx_node_string_length(annotated, scope);
+            }
+            if (length && literal->kind == N_STRING) {
+                char constraint[32];
+                snprintf(constraint, sizeof(constraint), "%zu", length);
+                if (!callback("string_length", yx_warning_operand_start(annotated),
+                              annotated->span_end, literal->span_start,
+                              literal->span_end, constraint, user)) return false;
+            }
+            /* eq_check (ast2ir.rs): an integer constant compared with a
+             * value whose type cannot hold it (a constant on the left is
+             * checked first). */
+            {
+                const yx_node *ranged = node->b, *constant = node->a;
+                int64_t minimum = 0;
+                uint64_t maximum = 0;
+                bool outside = yx_warning_integer_range(ranged, scope, &minimum, &maximum) &&
+                               yx_warning_integer_outside(constant, scope, minimum, maximum);
+                if (!outside) {
+                    ranged = node->a;
+                    constant = node->b;
+                    outside = yx_warning_integer_range(ranged, scope, &minimum, &maximum) &&
+                              yx_warning_integer_outside(constant, scope, minimum, maximum);
+                }
+                if (outside) {
+                    char range[64];
+                    snprintf(range, sizeof(range), "%" PRId64 ",%" PRIu64,
+                             minimum, maximum);
+                    if (!callback("integer_range", yx_warning_operand_start(ranged),
+                                  ranged->span_end, constant->span_start,
+                                  constant->span_end, range, user)) return false;
+                }
+            }
+        }
+    }
+    if (node->name && yx_test_proto_path(node->name) &&
+        strcmp(node->name, "test_proto2.deprecated") == 0 &&
+        !callback("deprecated", node->span_end - strlen("deprecated"), node->span_end,
+                  0, 0, "deprecated", user)) return false;
+    if (!yx_visit_type_warnings(node->a, scope, callback, user, partial) ||
+        !yx_visit_type_warnings(node->b, scope, callback, user, partial) ||
+        !yx_visit_type_warnings(node->c, scope, callback, user, partial) ||
+        (node->kind != N_FOR_IN &&
+         !yx_visit_type_warnings(node->body, scope, callback, user, partial))) return false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (!yx_visit_type_warnings(node->items[i], scope, callback, user, partial)) return false;
+    if (!partial && node->kind == N_UNARY && node->operation == TK_NOT &&
+        !yx_warn_non_bool(node->a, scope, true, node->span_end,
+                          callback, user)) return false;
+    if (!partial && node->kind == N_FOR_OF &&
+        !yx_warn_non_bool(node->body, scope, true, SIZE_MAX,
+                          callback, user)) return false;
+    if ((!partial || node->fold_completed) && (node->unsigned_unary || (node->kind == N_UNARY &&
+         yx_scoped_unsigned(node->a, scope))) &&
+        (node->operation == TK_MINUS || node->operation == TK_TILDE)) {
+        if (!callback(node->operation == TK_MINUS ? "unsigned_unary_op:-" :
+                      "unsigned_unary_op:~", node->a->span_start, node->a->span_end,
+                      0, 0, "integer", user)) return false;
+    }
+    if ((!partial || node->fold_completed) && (node->operation == TK_DIV || node->operation == TK_PERCENT) && node->a && node->b &&
+        yx_scoped_node_type(node->a, scope) != YX_STATIC_FLOAT &&
+        yx_scoped_node_type(node->b, scope) != YX_STATIC_FLOAT &&
+        (yx_scoped_unsigned(node->a, scope) || yx_scoped_unsigned(node->b, scope))) {
+        if ((node->a->operation != node->operation || !node->a->a || !node->a->b) &&
+            !yx_warn_sign_conversion(node->a, true, callback, user)) return false;
+        if (!yx_warn_sign_conversion(node->b, true, callback, user)) return false;
+    }
+    if ((!partial || node->fold_completed) && node->kind == N_READ &&
+        !node->read_arity_error && !yx_warn_sign_conversion(node->a, false, callback, user)) return false;
+    if ((!partial || node->fold_completed) && node->kind == N_CALL &&
+        yx_warning_call_signature(node, scope)) {
+        for (size_t i = 0; i < node->item_count; ++i) {
+            bool float_parameter = node->name && (!strcmp(node->name, "math.deviation") && i == 2);
+            if (!float_parameter && !yx_warn_sign_conversion(node->items[i], false, callback, user))
+                return false;
+        }
+    }
+    return true;
+}
+
+typedef struct { const yx_node *root; const yx_scope_name *scope;
+                 yx_condition_type_warning_callback callback; void *user; bool result; bool partial; } yx_type_warning_job;
+static void yx_type_cache_new_walk(void);
+static void yx_type_warning_thunk(void *data)
+{
+    yx_type_warning_job *job = data;
+    yx_type_cache_new_walk();
+    job->result = yx_visit_type_warnings(job->root, job->scope, job->callback, job->user, job->partial);
+    /* The rule's condition is a Boolean expression too. YARA-X raises this
+     * warning once the whole condition compiled, so the caller keeps it
+     * until the condition validates ("non_bool_root"). */
+    if (job->result && !job->partial)
+        job->result = yx_warn_non_bool_kind("non_bool_root", job->root,
+                                            job->scope, true, SIZE_MAX,
+                                            job->callback, job->user);
+}
+
+/* The earlier rule names of one namespace, extended as rules are added.
+ * Entries lead to tail, whose parent is set to the imports of each visit,
+ * so a visit costs O(1) for the table. */
+struct yx_rule_name_cache {
+    const YRX_RULES *rules;
+    size_t namespace_index, scanned;
+    const char *last;
+    yx_scope_name *entries;
+    size_t count, capacity;
+    uint32_t *slots;
+    size_t slot_count;
+    yx_scope_name tail;
+};
+
+void yx_rule_name_cache_free(yx_rule_name_cache *cache)
+{
+    if (!cache) return;
+    free(cache->entries); free(cache->slots); free(cache);
+}
+
+static bool yx_rule_name_cache_rehash(yx_rule_name_cache *cache, size_t slot_count)
+{
+    uint32_t *slots = calloc(slot_count, sizeof(*slots));
+    if (!slots) return false;
+    for (size_t i = 0; i < cache->count; ++i) {
+        const char *name = cache->entries[i].name;
+        size_t at = (size_t)yx_scope_hash(name, strlen(name)) & (slot_count - 1);
+        while (slots[at]) at = (at + 1) & (slot_count - 1);
+        slots[at] = (uint32_t)(i + 1);
+    }
+    free(cache->slots); cache->slots = slots; cache->slot_count = slot_count;
+    return true;
+}
+
+static bool yx_rule_name_cache_add(yx_rule_name_cache *cache, const char *name)
+{
+    yx_scope_name head = {.table = cache->entries, .table_count = cache->count,
+                          .table_slots = cache->slots, .table_slot_count = cache->slot_count};
+    if (yx_scope_table_find(&head, name, strlen(name))) return true;
+    if (cache->count >= UINT32_MAX - 1) return false;
+    if (cache->count == cache->capacity) {
+        size_t capacity = cache->capacity ? cache->capacity * 2 : 64;
+        yx_scope_name *entries = realloc(cache->entries, capacity * sizeof(*entries));
+        if (!entries) return false;
+        cache->entries = entries; cache->capacity = capacity;
+    }
+    cache->entries[cache->count++] = (yx_scope_name){.name = name, .type = YX_STATIC_BOOL, .parent = &cache->tail};
+    if (cache->count * 2 > cache->slot_count)
+        return yx_rule_name_cache_rehash(cache, cache->slot_count ? cache->slot_count * 2 : 128);
+    size_t at = (size_t)yx_scope_hash(name, strlen(name)) & (cache->slot_count - 1);
+    while (cache->slots[at]) at = (at + 1) & (cache->slot_count - 1);
+    cache->slots[at] = (uint32_t)cache->count;
+    return true;
+}
+
+/* Brings the cache up to the rules of namespace_index in rules, starting
+ * over when the rule list no longer extends what was scanned. */
+static bool yx_rule_name_cache_update(yx_rule_name_cache *cache, const YRX_RULES *rules, size_t namespace_index)
+{
+    if (cache->rules != rules || cache->namespace_index != namespace_index || rules->rule_count < cache->scanned ||
+        (cache->scanned && rules->rules[cache->scanned - 1].identifier != cache->last)) {
+        cache->rules = rules; cache->namespace_index = namespace_index;
+        cache->scanned = 0; cache->last = NULL; cache->count = 0;
+        if (cache->slots) memset(cache->slots, 0, cache->slot_count * sizeof(*cache->slots));
+    }
+    for (; cache->scanned < rules->rule_count; ++cache->scanned) {
+        const YRX_RULE *rule = &rules->rules[cache->scanned];
+        if (rule->namespace_index == namespace_index && rule->identifier &&
+            !yx_rule_name_cache_add(cache, rule->identifier)) return false;
+        cache->last = rule->identifier;
+    }
+    return true;
+}
+
+bool yx_rule_name_cache_contains(yx_rule_name_cache **cache, const YRX_RULES *rules,
+                                 size_t namespace_index, const char *name, bool *found)
+{
+    if (!*cache && !(*cache = calloc(1, sizeof(**cache)))) return false;
+    if (!yx_rule_name_cache_update(*cache, rules, namespace_index)) return false;
+    yx_scope_name head = {.table = (*cache)->entries, .table_count = (*cache)->count,
+                          .table_slots = (*cache)->slots, .table_slot_count = (*cache)->slot_count};
+    *found = yx_scope_table_find(&head, name, strlen(name)) != NULL;
+    return true;
+}
+
+bool yx_condition_visit_type_warnings(const yx_condition *condition,
+    const char *const *imports, size_t import_count,
+    const YRX_RULES *rules, size_t namespace_index, yx_rule_name_cache **cache,
+    yx_condition_type_warning_callback callback, void *user)
+{
+    if (!condition || !callback) return true;
+    if (!*cache && !(*cache = calloc(1, sizeof(**cache)))) return false;
+    if (!yx_rule_name_cache_update(*cache, rules, namespace_index)) return false;
+    yx_scope_name *modules = calloc(import_count ? import_count : 1, sizeof(*modules));
+    if (!modules) return false;
+    yx_scope_name *globals = calloc(rules->global_count ? rules->global_count : 1, sizeof(*globals));
+    if (!globals) { free(modules); return false; }
+    const yx_scope_name *scope = NULL;
+    for (size_t i = 0; i < rules->global_count; ++i) {
+        globals[i].name = rules->globals[i].name;
+        globals[i].type = yx_global_static_type(rules->globals[i].type);
+        if (rules->globals[i].type == YX_GLOBAL_ARRAY && rules->globals[i].value.array) {
+            globals[i].array = rules->globals[i].value.array;
+            globals[i].element_type = yx_global_static_type(globals[i].array->element_type);
+        }
+        if (rules->globals[i].type == YX_GLOBAL_STRUCT)
+            globals[i].object = rules->globals[i].value.object;
+        globals[i].parent = scope;
+        scope = &globals[i];
+    }
+    for (size_t i = 0; i < import_count; ++i) {
+        if (yx_scope_find(scope, imports[i], strlen(imports[i]))) continue;
+        modules[i].name = imports[i];
+        modules[i].type = YX_STATIC_STRUCT;
+        modules[i].imported_module = true;
+        modules[i].parent = scope;
+        scope = &modules[i];
+    }
+    /* Earlier rule names form one hashed table entry rather than a chain
+     * walked by every lookup. */
+    yx_rule_name_cache *names = *cache;
+    names->tail = (yx_scope_name){.name = "", .parent = scope};
+    yx_scope_name head = {.name = "", .parent = &names->tail, .table = names->entries,
+                          .table_count = names->count, .table_slots = names->slots,
+                          .table_slot_count = names->slot_count};
+    if (names->count) scope = &head;
+    yx_type_warning_job job = {condition->root, scope, callback, user, false, condition->fold_failed};
+    yx_run_deep(condition->depth, yx_type_warning_thunk, &job);
+    bool result = job.result;
+    free(modules);
+    free(globals);
+    return result;
+}
+
+/* The source end of an expression. An `of` expression with a numeric
+ * quantifier has no span of its own; its frame ends at its last item or
+ * anchor, and an operator ends with its last operand. */
+static size_t yx_expression_source_end(const yx_node *node)
+{
+    while (node && node->span_end == SIZE_MAX) {
+        if (node->kind == N_OF_EXPR && node->frame_end == SIZE_MAX &&
+            node->item_count)
+            node = node->items[node->item_count - 1];
+        else if (node->kind == N_OF || node->kind == N_OF_EXPR)
+            return node->frame_end;
+        else if (node->kind == N_BINARY && node->b) node = node->b;
+        else if (node->kind == N_UNARY && node->a) node = node->a;
+        else return SIZE_MAX;
+    }
+    return node ? node->span_end : SIZE_MAX;
+}
+
+/* YARA-X's ambiguous_expr (`0 of ...`, ast2ir.rs of_expr_from_ast): an `of`
+ * expression whose quantifier folds to the integer 0. `for ... of` loops do
+ * not warn. Children are visited first: the IR builds them before the
+ * warning is raised. */
+static bool yx_visit_zero_quantifiers(const yx_node *node,
+                                      yx_condition_zero_quantifier_callback callback,
+                                      void *user)
+{
+    size_t end;
+    if (!node) return true;
+    if (!yx_visit_zero_quantifiers(node->a, callback, user) ||
+        !yx_visit_zero_quantifiers(node->b, callback, user) ||
+        !yx_visit_zero_quantifiers(node->c, callback, user)) return false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (!yx_visit_zero_quantifiers(node->items[i], callback, user))
+            return false;
+    if (!yx_visit_zero_quantifiers(node->body, callback, user)) return false;
+    if ((node->kind != N_OF && node->kind != N_OF_EXPR) ||
+        node->quantifier != Q_NUMBER || !node->a ||
+        node->a->kind != N_INTEGER || node->a->number != 0 ||
+        node->a->operation == TK_TRUE || node->a->operation == TK_FALSE ||
+        node->a->span_start == SIZE_MAX || node->a->span_end == SIZE_MAX)
+        return true;
+    end = node->frame_end;
+    if (end == SIZE_MAX && node->kind == N_OF_EXPR && node->item_count)
+        end = yx_expression_source_end(node->items[node->item_count - 1]);
+    if (end == SIZE_MAX || end < node->a->span_end) return true;
+    return callback(node->a->span_start, node->a->span_end, end, user);
+}
+
+typedef struct { const yx_node *root; yx_condition_zero_quantifier_callback callback;
+                 void *user; bool result; } yx_zero_quantifier_job;
+static void yx_zero_quantifier_thunk(void *data)
+{
+    yx_zero_quantifier_job *job = data;
+    job->result = yx_visit_zero_quantifiers(job->root, job->callback, job->user);
+}
+
+bool yx_condition_visit_zero_quantifiers(const yx_condition *condition,
+    yx_condition_zero_quantifier_callback callback, void *user)
+{
+    yx_zero_quantifier_job job = {NULL, callback, user, true};
+    if (!condition || !condition->root || !callback) return true;
+    job.root = condition->root;
+    yx_run_deep(condition->depth, yx_zero_quantifier_thunk, &job);
+    return job.result;
+}
+
+/* check_unintended_patterns_in_sets (ast2ir.rs): the condition in
+ * disjunctive normal form, every `or` forking the branches it is part of
+ * (ConjunctiveBranches, at most 256 branches). A branch keeps the pattern
+ * reads and the `of`/`for ... of` pattern sets that must hold together. */
+typedef struct {
+    const yx_node **items;
+    size_t count, capacity;
+} yx_dnf_branch;
+
+typedef struct {
+    yx_dnf_branch *branches;
+    size_t count, capacity;
+} yx_dnf_set;
+
+enum { YX_DNF_MAX_BRANCHES = 256 };
+
+static void yx_dnf_free(yx_dnf_set *set)
+{
+    for (size_t i = 0; i < set->count; ++i) free((void *)set->branches[i].items);
+    free(set->branches);
+    set->branches = NULL;
+    set->count = set->capacity = 0;
+}
+
+static bool yx_dnf_branch_add(yx_dnf_branch *branch, const yx_node *node)
+{
+    if (branch->count == branch->capacity) {
+        size_t grown = branch->capacity ? branch->capacity * 2 : 4;
+        const yx_node **items = (const yx_node **)realloc(
+            (void *)branch->items, grown * sizeof(*items));
+        if (!items) return false;
+        branch->items = items;
+        branch->capacity = grown;
+    }
+    branch->items[branch->count++] = node;
+    return true;
+}
+
+static bool yx_dnf_set_push(yx_dnf_set *set, const yx_dnf_branch *branch)
+{
+    yx_dnf_branch copy = {NULL, 0, 0};
+    if (set->count == set->capacity) {
+        size_t grown = set->capacity ? set->capacity * 2 : 4;
+        yx_dnf_branch *branches = (yx_dnf_branch *)realloc(
+            set->branches, grown * sizeof(*branches));
+        if (!branches) return false;
+        set->branches = branches;
+        set->capacity = grown;
+    }
+    if (branch->count) {
+        copy.items = (const yx_node **)malloc(branch->count * sizeof(*copy.items));
+        if (!copy.items) return false;
+        memcpy((void *)copy.items, branch->items, branch->count * sizeof(*copy.items));
+        copy.count = copy.capacity = branch->count;
+    }
+    set->branches[set->count++] = copy;
+    return true;
+}
+
+/* 1: done, 0: out of memory, -1: more than 256 branches (no warnings). */
+static int yx_dnf_extend(const yx_node *node, yx_dnf_set *set)
+{
+    if (!node) return 1;
+    if (node->kind == N_BINARY && node->operation == TK_OR) {
+        /* Each operand starts from the branches before the `or`. */
+        yx_dnf_set results = {NULL, 0, 0};
+        const yx_node *operands[2] = {node->a, node->b};
+        for (size_t i = 0; i < 2; ++i) {
+            yx_dnf_set copy = {NULL, 0, 0};
+            int status;
+            for (size_t j = 0; j < set->count; ++j)
+                if (!yx_dnf_set_push(&copy, &set->branches[j])) {
+                    yx_dnf_free(&copy); yx_dnf_free(&results); return 0;
+                }
+            status = yx_dnf_extend(operands[i], &copy);
+            if (status <= 0) { yx_dnf_free(&copy); yx_dnf_free(&results); return status; }
+            for (size_t j = 0; j < copy.count; ++j)
+                if (!yx_dnf_set_push(&results, &copy.branches[j])) {
+                    yx_dnf_free(&copy); yx_dnf_free(&results); return 0;
+                }
+            yx_dnf_free(&copy);
+            if (results.count > YX_DNF_MAX_BRANCHES) {
+                yx_dnf_free(&results);
+                return -1;
+            }
+        }
+        yx_dnf_free(set);
+        *set = results;
+        return 1;
+    }
+    /* Any other expression is a conjunction of its operands. */
+    if ((node->kind == N_PATTERN && node->name && node->name[0]) ||
+        ((node->kind == N_OF || node->kind == N_FOR_OF) && !node->set_all &&
+         node->set_name_starts && node->set_name_ends))
+        for (size_t i = 0; i < set->count; ++i)
+            if (!yx_dnf_branch_add(&set->branches[i], node)) return 0;
+    /* The operands of ast::Expr::children: none for `of`, pattern reads and
+     * literals; only the body of loops and `with`. */
+    switch (node->kind) {
+    case N_OF: case N_OF_EXPR: case N_PATTERN: case N_COUNT: case N_OFFSET:
+    case N_LENGTH: case N_INTEGER: case N_FLOAT: case N_STRING: case N_REGEX:
+    case N_FILESIZE: case N_RULE:
+        return 1;
+    case N_FOR_OF: case N_FOR_IN: case N_WITH:
+        return yx_dnf_extend(node->body, set);
+    default: {
+        const yx_node *children[3] = {node->a, node->b, node->c};
+        int status;
+        for (size_t i = 0; i < 3; ++i)
+            if ((status = yx_dnf_extend(children[i], set)) <= 0) return status;
+        for (size_t i = 0; i < node->item_count; ++i)
+            if ((status = yx_dnf_extend(node->items[i], set)) <= 0) return status;
+        return yx_dnf_extend(node->body, set);
+    }
+    }
+}
+
+typedef struct { const char *name; size_t start, end; bool wildcard; } yx_set_use;
+
+static bool yx_set_uses_add(yx_set_use **uses, size_t *count, size_t *capacity,
+                            yx_set_use use)
+{
+    if (*count == *capacity) {
+        size_t grown = *capacity ? *capacity * 2 : 8;
+        yx_set_use *larger = (yx_set_use *)realloc(*uses, grown * sizeof(*larger));
+        if (!larger) return false;
+        *uses = larger;
+        *capacity = grown;
+    }
+    (*uses)[(*count)++] = use;
+    return true;
+}
+
+/* A pattern name ("$ab") against a use's name, which omits the `$` and, for
+ * a wildcard set item, ends with `*`. */
+static bool yx_set_use_is(const yx_set_use *use, const char *pattern,
+                          bool prefix)
+{
+    size_t length = strlen(use->name) - (use->wildcard ? 1 : 0);
+    if (pattern[0] != '$' || strncmp(pattern + 1, use->name, length) != 0)
+        return false;
+    return prefix || pattern[1 + length] == '\0';
+}
+
+typedef struct {
+    const yx_node *root;
+    const char *const *patterns;
+    size_t pattern_count;
+    yx_condition_pattern_set_callback callback;
+    void *user;
+    bool result;
+} yx_pattern_set_job;
+
+static void yx_pattern_set_thunk(void *data)
+{
+    yx_pattern_set_job *job = data;
+    yx_dnf_set set = {NULL, 0, 0};
+    yx_dnf_branch empty = {NULL, 0, 0};
+    yx_set_use *uses = NULL, *reported = NULL;
+    size_t use_count = 0, use_capacity = 0;
+    size_t reported_count = 0, reported_capacity = 0;
+    int status;
+    job->result = false;
+    if (!yx_dnf_set_push(&set, &empty)) return;
+    status = yx_dnf_extend(job->root, &set);
+    if (status == 0) { yx_dnf_free(&set); return; }
+    job->result = true;
+    for (size_t b = 0; status > 0 && job->result && b < set.count; ++b) {
+        const yx_dnf_branch *branch = &set.branches[b];
+        use_count = 0;
+        for (size_t i = 0; i < branch->count && job->result; ++i) {
+            const yx_node *node = branch->items[i];
+            if (node->kind == N_PATTERN) {
+                if (node->span_start == SIZE_MAX) continue;
+                job->result = yx_set_uses_add(&uses, &use_count, &use_capacity,
+                    (yx_set_use){node->name, node->span_start,
+                                 node->span_start + 1 + strlen(node->name), false});
+                continue;
+            }
+            for (size_t j = 0; j < node->set_count && job->result; ++j) {
+                size_t length = strlen(node->set_names[j]);
+                job->result = yx_set_uses_add(&uses, &use_count, &use_capacity,
+                    (yx_set_use){node->set_names[j], node->set_name_starts[j],
+                                 node->set_name_ends[j],
+                                 length && node->set_names[j][length - 1] == '*'});
+            }
+        }
+        /* Each wildcard set, each rule pattern it includes: an explicit use
+         * of that pattern in the branch, else a more specific set. */
+        for (size_t s = 0; s < use_count && job->result; ++s) {
+            const yx_set_use *set_use = &uses[s];
+            if (!set_use->wildcard) continue;
+            for (size_t p = 0; p < job->pattern_count && job->result; ++p) {
+                const char *pattern = job->patterns[p];
+                const yx_set_use *other = NULL;
+                const yx_set_use *first, *second;
+                bool seen = false;
+                if (!pattern || !yx_set_use_is(set_use, pattern, true)) continue;
+                for (size_t o = 0; o < use_count && !other; ++o)
+                    if (!uses[o].wildcard && yx_set_use_is(&uses[o], pattern, false))
+                        other = &uses[o];
+                for (size_t o = 0; o < use_count && !other; ++o)
+                    if (uses[o].wildcard &&
+                        strlen(uses[o].name) > strlen(set_use->name) &&
+                        yx_set_use_is(&uses[o], pattern, true))
+                        other = &uses[o];
+                if (!other) continue;
+                first = set_use->start < other->start ? set_use : other;
+                second = first == set_use ? other : set_use;
+                for (size_t r = 0; r < reported_count && !seen; ++r)
+                    if (reported[r].start == first->start &&
+                        strcmp(reported[r].name, pattern) == 0) seen = true;
+                if (seen) continue;
+                job->result = yx_set_uses_add(&reported, &reported_count,
+                    &reported_capacity,
+                    (yx_set_use){pattern, first->start, first->end, false}) &&
+                    job->callback(pattern, set_use->start, set_use->end,
+                                  first->start, first->end, first->wildcard,
+                                  second->start, second->end, second->wildcard,
+                                  job->user);
+            }
+        }
+    }
+    free(uses);
+    free(reported);
+    yx_dnf_free(&set);
+}
+
+bool yx_condition_visit_pattern_sets(const yx_condition *condition,
+    const char *const *pattern_names, size_t pattern_count,
+    yx_condition_pattern_set_callback callback, void *user)
+{
+    yx_pattern_set_job job = {NULL, pattern_names, pattern_count, callback,
+                              user, true};
+    if (!condition || !condition->root || !callback) return true;
+    job.root = condition->root;
+    yx_run_deep(condition->depth, yx_pattern_set_thunk, &job);
+    return job.result;
+}
+
+static size_t yx_find_pattern(const yx_eval_context *ctx, const char *name,
+                              size_t current_pattern)
+{
+    size_t i;
+    if (!name || !ctx || !ctx->pattern_names) return SIZE_MAX;
+    if (name[0] == '\0') return current_pattern < ctx->pattern_count ? current_pattern : SIZE_MAX;
+    for (i = 0; i < ctx->pattern_count; i++)
+        if (yx_name_matches(ctx->pattern_names[i], name)) return i;
+    return SIZE_MAX;
+}
+
+#include "condition_names.inc"
+
+static const yx_eval_match_list *yx_matches(const yx_eval_context *ctx, size_t index)
+{
+    if (!ctx || !ctx->patterns || index >= ctx->pattern_count) return NULL;
+    return &ctx->patterns[index];
+}
+
+static bool yx_offset_in_range(size_t offset, yx_filter filter,
+                                yx_value low, yx_value high)
+{
+    if (filter == FILTER_NONE) return true;
+    if (!low.defined || low.type != V_INTEGER) return false;
+    if (filter == FILTER_AT)
+        return (low.is_unsigned || (int64_t)low.value >= 0) && low.value <= SIZE_MAX &&
+               offset == (size_t)low.value;
+    if (!high.defined || high.type != V_INTEGER ||
+        (int64_t)high.value < 0 || high.value > SIZE_MAX) return false;
+    /* A computed negative lower bound still includes nonnegative offsets. */
+    return ((!low.is_unsigned && (int64_t)low.value < 0) ||
+            (low.value <= SIZE_MAX && offset >= (size_t)low.value)) &&
+           offset <= (size_t)high.value;
+}
+
+static bool yx_macho_extra_name_matches(char *const *names,
+                                         size_t count, const uint8_t *name,
+                                         size_t name_length)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const uint8_t *candidate = (const uint8_t *)names[i];
+        if (strlen(names[i]) != name_length) continue;
+        size_t j = 0;
+        for (; j < name_length; ++j) {
+            uint8_t left = name[j], right = candidate[j];
+            if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
+            if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
+            if (left != right) break;
+        }
+        if (j == name_length) return true;
+    }
+    return false;
+}
+
+static bool yx_macho_has_extra_name(const uint8_t *data, size_t size,
+                                     unsigned which, const uint8_t *name,
+                                     size_t name_length)
+{
+    yx_macho_extras extras = {0};
+    uint64_t files = 0;
+    bool found = false;
+    if (yx_macho_extras_parse(data, size, &extras)) {
+        char **names = which == 2 ? extras.exports :
+                       which == 1 ? extras.imports : extras.entitlements;
+        size_t count = which == 2 ? extras.export_count :
+                       which == 1 ? extras.import_count :
+                                    extras.entitlement_count;
+        found = yx_macho_extra_name_matches(names, count,
+                                             name, name_length);
+        yx_macho_extras_free(&extras);
+    }
+    if (found || !yx_macho_collection_count(data, size, "file", &files))
+        return found;
+    for (uint64_t i = 0; i < files; ++i) {
+        if (!yx_macho_file_extras_parse(data, size, i, &extras)) continue;
+        char **names = which == 2 ? extras.exports :
+                       which == 1 ? extras.imports : extras.entitlements;
+        size_t count = which == 2 ? extras.export_count :
+                       which == 1 ? extras.import_count :
+                                    extras.entitlement_count;
+        found = yx_macho_extra_name_matches(names, count,
+                                             name, name_length);
+        yx_macho_extras_free(&extras);
+        if (found) break;
+    }
+    return found;
+}
+
+static int yx_macho_hash_name_compare(const void *left, const void *right)
+{
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+static yx_value yx_macho_hash_string_list(const yx_eval_context *ctx,
+                                           char *const *source, size_t count,
+                                           bool allow_empty,
+                                           bool contextual_sigma)
+{
+    char **names = NULL, *joined = NULL, *owned;
+    size_t total = 0, used = 0;
+    yx_hash_value hash;
+    yx_value result = yx_undefined();
+    if (count == 0) {
+        if (!allow_empty ||
+            !yx_hash_bytes(YX_HASH_MD5, (const uint8_t *)"", 0, &hash))
+            return result;
+        owned = yx_eval_alloc_string(ctx, hash.text_length);
+        if (!owned) return result;
+        memcpy(owned, hash.text, hash.text_length);
+        return yx_defined_string(owned, hash.text_length);
+    }
+    names = calloc(count, sizeof(*names));
+    if (!names) goto done;
+    for (size_t i = 0; i < count; ++i) {
+        size_t length;
+        if (!xx_string_trim_lower_alloc((const uint8_t *)source[i],
+                                        strlen(source[i]), contextual_sigma,
+                                        &names[i], &length)) goto done;
+    }
+    qsort(names, count, sizeof(*names), yx_macho_hash_name_compare);
+    for (size_t i = 0; i < count; ++i) {
+        size_t length;
+        if (i && strcmp(names[i], names[i - 1]) == 0) continue;
+        length = strlen(names[i]);
+        if (used && total == SIZE_MAX) goto done;
+        if (length > SIZE_MAX - total - (used != 0)) goto done;
+        total += length + (used != 0);
+        ++used;
+    }
+    joined = malloc(total ? total : 1);
+    if (!joined) goto done;
+    used = 0;
+    for (size_t i = 0; i < count; ++i) {
+        size_t length;
+        if (i && strcmp(names[i], names[i - 1]) == 0) continue;
+        if (used) joined[used++] = ',';
+        length = strlen(names[i]);
+        memcpy(joined + used, names[i], length);
+        used += length;
+    }
+    if (!yx_hash_bytes(YX_HASH_MD5, (const uint8_t *)joined, used, &hash))
+        goto done;
+    owned = yx_eval_alloc_string(ctx, hash.text_length);
+    if (!owned) goto done;
+    memcpy(owned, hash.text, hash.text_length);
+    result = yx_defined_string(owned, hash.text_length);
+done:
+    if (names) {
+        for (size_t i = 0; i < count; ++i) free(names[i]);
+    }
+    free(names);
+    free(joined);
+    return result;
+}
+
+static yx_value yx_macho_extra_hash(const yx_eval_context *ctx,
+                                     unsigned which)
+{
+    yx_macho_extras extras = {0};
+    uint64_t files = 0;
+    size_t count;
+    yx_value result = yx_undefined();
+    if (!yx_macho_extras_parse(ctx->data, ctx->size, &extras))
+        return result;
+    count = which == 2 ? extras.export_count :
+            which == 1 ? extras.import_count : extras.entitlement_count;
+    if (count == 0 &&
+        yx_macho_collection_count(ctx->data, ctx->size, "file", &files) &&
+        files != 0) {
+        yx_macho_extras_free(&extras);
+        if (!yx_macho_file_extras_parse(ctx->data, ctx->size, 0, &extras))
+            return result;
+        count = which == 2 ? extras.export_count :
+                which == 1 ? extras.import_count : extras.entitlement_count;
+    }
+    if (count)
+        result = yx_macho_hash_string_list(
+            ctx, which == 2 ? extras.exports :
+                 which == 1 ? extras.imports : extras.entitlements,
+            count, false, true);
+    yx_macho_extras_free(&extras);
+    return result;
+}
+
+static yx_value yx_macho_dylib_hash(const yx_eval_context *ctx)
+{
+    uint64_t count = 0, files = 0;
+    bool nested = false;
+    char **names;
+    size_t named = 0;
+    yx_value result = yx_undefined();
+    if (!yx_macho_collection_count(ctx->data, ctx->size, "dylibs", &count))
+        return result;
+    if (count == 0 &&
+        yx_macho_collection_count(ctx->data, ctx->size, "file", &files) &&
+        files != 0) {
+        nested = true;
+        if (!yx_macho_nested_collection_count(ctx->data, ctx->size,
+                                                "file", 0, "dylibs", &count))
+            return result;
+    }
+    if (count == 0 || count > SIZE_MAX / sizeof(*names)) return result;
+    names = calloc((size_t)count, sizeof(*names));
+    if (!names) return result;
+    for (uint64_t i = 0; i < count; ++i) {
+        const uint8_t *bytes;
+        size_t length;
+        bool present = nested ?
+            yx_macho_file_dylib_name(ctx->data, ctx->size, 0, i,
+                                      &bytes, &length) :
+            yx_macho_indexed_string_field(ctx->data, ctx->size, "dylibs", i,
+                                           "name", &bytes, &length);
+        if (!present || length == SIZE_MAX) continue;
+        names[named] = malloc(length + 1);
+        if (!names[named]) goto done;
+        memcpy(names[named], bytes, length);
+        names[named][length] = '\0';
+        ++named;
+    }
+    result = yx_macho_hash_string_list(ctx, names, named, true, false);
+done:
+    for (size_t i = 0; i < named; ++i) free(names[i]);
+    free(names);
+    return result;
+}
+
+static yx_value yx_macho_symhash(const yx_eval_context *ctx)
+{
+    uint8_t *bytes = NULL;
+    size_t length = 0;
+    yx_hash_value hash;
+    char *owned;
+    if (!yx_macho_symhash_input(ctx->data, ctx->size, &bytes, &length))
+        return yx_undefined();
+    bool ok = yx_hash_bytes(YX_HASH_MD5, bytes, length, &hash);
+    free(bytes);
+    if (!ok) return yx_undefined();
+    owned = yx_eval_alloc_string(ctx, hash.text_length);
+    if (!owned) return yx_undefined();
+    memcpy(owned, hash.text, hash.text_length);
+    return yx_defined_string(owned, hash.text_length);
+}
+
+static yx_value yx_eval_output_data(const yx_node *node, const yx_mo_data *data,
+                                     const yx_vt_key *keys, unsigned count);
+static const yx_mo_record *yx_eval_module_output(const yx_eval_context *ctx,
+                                                 const char *path);
+
+static yx_value yx_eval(const yx_node *node, const yx_eval_context *ctx,
+                        size_t current_pattern, const yx_binding *bindings);
+
+static size_t yx_match_lower_bound(const YRX_MATCH *matches,
+                                     size_t count, size_t offset)
+{
+    size_t low = 0, high = count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (matches[middle].offset < offset) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+static size_t yx_match_range_start(const yx_eval_match_list *list, yx_value low)
+{
+    if (!low.defined || low.type != V_INTEGER) return list->count;
+    if (!low.is_unsigned && (int64_t)low.value < 0) return 0;
+    if (low.value > SIZE_MAX) return list->count;
+    return yx_match_lower_bound(list->matches, list->count, (size_t)low.value);
+}
+
+static bool yx_pattern_has_match(const yx_eval_context *ctx, size_t index,
+                                  yx_filter filter, yx_value low, yx_value high)
+{
+    const yx_eval_match_list *list = yx_matches(ctx, index);
+    size_t i;
+    if (!list || (!list->matches && list->count)) return false;
+    if (filter == FILTER_NONE) return list->present;
+    i = yx_match_range_start(list, low);
+    return i < list->count &&
+           yx_offset_in_range(list->matches[i].offset, filter, low, high);
+}
+
+/* Constant-size memcpy loads are unaligned and alias-safe. Other hosts use
+ * explicit byte assembly, independent of the host's byte order. */
+static uint64_t yx_load_integer_bits(const uint8_t *data, unsigned width,
+                                     bool big_endian)
+{
+#if defined(_WIN32) || defined(__i386__) || defined(__x86_64__) || \
+    (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    if (!big_endian) {
+        switch (width) {
+        case 1: return data[0];
+        case 2: { uint16_t value; memcpy(&value, data, 2); return value; }
+        case 4: { uint32_t value; memcpy(&value, data, 4); return value; }
+        case 8: { uint64_t value; memcpy(&value, data, 8); return value; }
+        default: break;
+        }
+    }
+#endif
+    if (big_endian) {
+        switch (width) {
+        case 1: return data[0];
+        case 2: return ((uint64_t)data[0] << 8) | data[1];
+        case 4: return ((uint64_t)data[0] << 24) | ((uint64_t)data[1] << 16) |
+                       ((uint64_t)data[2] << 8) | data[3];
+        case 8: return ((uint64_t)data[0] << 56) | ((uint64_t)data[1] << 48) |
+                       ((uint64_t)data[2] << 40) | ((uint64_t)data[3] << 32) |
+                       ((uint64_t)data[4] << 24) | ((uint64_t)data[5] << 16) |
+                       ((uint64_t)data[6] << 8) | data[7];
+        default: break;
+        }
+    }
+    uint64_t value = 0;
+    for (unsigned i = 0; i < width; ++i) {
+        unsigned position = big_endian ? i : width - 1 - i;
+        value = (value << 8) | data[position];
+    }
+    return value;
+}
+
+static yx_value yx_read_integer(const yx_node *node, const yx_eval_context *ctx,
+                                size_t current_pattern, const yx_binding *bindings)
+{
+    if (ctx->block_mode) return yx_undefined();
+    yx_value offset = yx_eval(node->a, ctx, current_pattern, bindings);
+    uint64_t result = 0;
+    size_t position;
+    unsigned bits = node->width * 8;
+    if (!offset.defined || offset.type != V_INTEGER ||
+        (int64_t)offset.value < 0 || offset.value > SIZE_MAX ||
+        !ctx->data || node->width > ctx->size) return yx_undefined();
+    position = (size_t)offset.value;
+    if (position > ctx->size - node->width) return yx_undefined();
+    result = yx_load_integer_bits(ctx->data + position, node->width, node->big_endian);
+    if (node->floating_read) {
+        if (node->width == 4) {
+            uint32_t bits32 = (uint32_t)result;
+            float number;
+            memcpy(&number, &bits32, sizeof(number));
+            return yx_defined_float(number);
+        }
+        if (node->width == 8) {
+            double number;
+            memcpy(&number, &result, sizeof(number));
+            return yx_defined_float(number);
+        }
+        return yx_undefined();
+    }
+    if (node->signed_read && bits < 64 && (result & (UINT64_C(1) << (bits - 1))))
+        result |= UINT64_MAX << bits;
+    return yx_defined_integer(result, !node->signed_read && node->width == 8);
+}
+
+static bool yx_string_equal_at(const char *a, const char *b, size_t length)
+{
+    return memcmp(a, b, length) == 0;
+}
+
+static yx_value yx_eval_string_binary(yx_token_kind operation,
+                                       yx_value left, yx_value right)
+{
+    size_t i;
+    bool found = false;
+    if (left.type != V_STRING || right.type != V_STRING) return yx_undefined();
+    if (operation == TK_ICONTAINS)
+        return yx_defined(xx_string_unicode_icontains(
+            (const uint8_t *)left.string, left.string_length,
+            (const uint8_t *)right.string, right.string_length));
+    if (operation == TK_ISTARTSWITH)
+        return yx_defined(xx_string_unicode_istarts_with(
+            (const uint8_t *)left.string, left.string_length,
+            (const uint8_t *)right.string, right.string_length));
+    if (operation == TK_IENDSWITH)
+        return yx_defined(xx_string_unicode_iends_with(
+            (const uint8_t *)left.string, left.string_length,
+            (const uint8_t *)right.string, right.string_length));
+    if (operation == TK_IEQUALS)
+        return yx_defined(xx_string_unicode_iequals(
+            (const uint8_t *)left.string, left.string_length,
+            (const uint8_t *)right.string, right.string_length));
+    if (operation == TK_EQ || operation == TK_NE) {
+        found = left.string_length == right.string_length &&
+                yx_string_equal_at(left.string, right.string, left.string_length);
+        return yx_defined(operation == TK_NE ? !found : found);
+    }
+    if (operation == TK_LT || operation == TK_LE ||
+        operation == TK_GT || operation == TK_GE) {
+        size_t common = left.string_length < right.string_length ?
+                        left.string_length : right.string_length;
+        int order = memcmp(left.string, right.string, common);
+        if (order == 0)
+            order = (left.string_length > right.string_length) -
+                    (left.string_length < right.string_length);
+        if (operation == TK_LT) return yx_defined(order < 0);
+        if (operation == TK_LE) return yx_defined(order <= 0);
+        if (operation == TK_GT) return yx_defined(order > 0);
+        return yx_defined(order >= 0);
+    }
+    if (left.string_length < right.string_length) return yx_defined(0);
+    if (operation == TK_STARTSWITH)
+        return yx_defined(yx_string_equal_at(left.string, right.string,
+                                             right.string_length));
+    if (operation == TK_ENDSWITH)
+        return yx_defined(yx_string_equal_at(left.string + left.string_length - right.string_length,
+                                             right.string, right.string_length));
+    for (i = 0; i <= left.string_length - right.string_length; i++) {
+        if (yx_string_equal_at(left.string + i, right.string,
+                               right.string_length)) {
+            found = true;
+            break;
+        }
+    }
+    return yx_defined(found);
+}
+
+static double yx_as_double(yx_value value)
+{
+    return value.type == V_FLOAT ? value.floating : value.is_unsigned ?
+           (double)value.value : (double)(int64_t)value.value;
+}
+
+static yx_value yx_eval_binary_values(yx_token_kind operation,
+                                       yx_value left, yx_value right)
+{
+    uint64_t a, b;
+    bool is_unsigned = left.is_unsigned || right.is_unsigned;
+    int order;
+    if (operation == TK_AND) return yx_defined(yx_truth(right));
+    if (operation == TK_OR) return yx_defined(yx_truth(right));
+    if (!left.defined || !right.defined) return yx_undefined();
+    if (operation == TK_CONTAINS || operation == TK_ICONTAINS ||
+        operation == TK_STARTSWITH || operation == TK_ISTARTSWITH ||
+        operation == TK_ENDSWITH || operation == TK_IENDSWITH ||
+        operation == TK_IEQUALS || left.type == V_STRING || right.type == V_STRING)
+        return yx_eval_string_binary(operation, left, right);
+    if (left.type == V_FLOAT || right.type == V_FLOAT) {
+        double x = yx_as_double(left), y = yx_as_double(right);
+        switch (operation) {
+        case TK_PLUS: return yx_defined_float(x + y);
+        case TK_MINUS: return yx_defined_float(x - y);
+        case TK_STAR: return yx_defined_float(x * y);
+        case TK_DIV: return yx_defined_float(x / y);
+        case TK_EQ: return yx_defined(x == y);
+        case TK_NE: return yx_defined(x != y);
+        case TK_LT: return yx_defined(x < y);
+        case TK_LE: return yx_defined(x <= y);
+        case TK_GT: return yx_defined(x > y);
+        case TK_GE: return yx_defined(x >= y);
+        default: return yx_undefined();
+        }
+    }
+    a = left.value; b = right.value;
+    if (!left.is_unsigned && (int64_t)a < 0 && right.is_unsigned) order = -1;
+    else if (left.is_unsigned && !right.is_unsigned && (int64_t)b < 0) order = 1;
+    else if (is_unsigned) order = (a > b) - (a < b);
+    else order = ((int64_t)a > (int64_t)b) - ((int64_t)a < (int64_t)b);
+    switch (operation) {
+    case TK_PLUS: return yx_defined_integer(a + b, is_unsigned);
+    case TK_MINUS: return yx_defined_integer(a - b, is_unsigned);
+    case TK_STAR: return yx_defined_integer(a * b, is_unsigned);
+    case TK_DIV:
+        if (b == 0) return yx_undefined();
+        if (is_unsigned) return yx_defined_integer(a / b, true);
+        if (a == (uint64_t)INT64_MIN && b == UINT64_MAX) return yx_undefined();
+        return yx_defined((uint64_t)((int64_t)a / (int64_t)b));
+    case TK_PERCENT:
+        if (b == 0) return yx_undefined();
+        if (is_unsigned) return yx_defined_integer(a % b, true);
+        /* Signed remainder is defined as zero for MIN % -1 (unlike signed
+           division, which overflows). Avoid the host CPU's divide trap. */
+        if (a == (uint64_t)INT64_MIN && b == UINT64_MAX)
+            return yx_defined(0);
+        return yx_defined((uint64_t)((int64_t)a % (int64_t)b));
+    case TK_SHL:
+        return yx_defined_integer((right.is_unsigned ? b >= 64 : (int64_t)b >= 64) ?
+                                  0 : a << (b & 63), left.is_unsigned);
+    case TK_SHR:
+        if (right.is_unsigned ? b >= 64 : (int64_t)b >= 64)
+            return yx_defined_integer(0, left.is_unsigned);
+        b &= 63; /* WebAssembly masks dynamic negative shift counts. */
+        if (b == 0) return yx_defined_integer(a, left.is_unsigned);
+        return yx_defined_integer((a >> b) | (!left.is_unsigned && (int64_t)a < 0 ?
+                                 UINT64_MAX << (64 - b) : 0), left.is_unsigned);
+    case TK_AMP: return yx_defined_integer(a & b, is_unsigned);
+    case TK_CARET: return yx_defined_integer(a ^ b, is_unsigned);
+    case TK_PIPE: return yx_defined_integer(a | b, is_unsigned);
+    case TK_EQ: return yx_defined(order == 0);
+    case TK_NE: return yx_defined(order != 0);
+    case TK_LT: return yx_defined(order < 0);
+    case TK_LE: return yx_defined(order <= 0);
+    case TK_GT: return yx_defined(order > 0);
+    case TK_GE: return yx_defined(order >= 0);
+    default: return yx_undefined();
+    }
+}
+
+static yx_value yx_eval_binary(const yx_node *node, const yx_eval_context *ctx,
+                                size_t current_pattern, const yx_binding *bindings)
+{
+    yx_value left = yx_eval(node->a, ctx, current_pattern, bindings);
+    if (node->operation == TK_AND && !yx_truth(left)) return yx_defined(0);
+    if (node->operation == TK_OR && yx_truth(left)) return yx_defined(1);
+    yx_value right = yx_eval(node->b, ctx, current_pattern, bindings);
+    return yx_eval_binary_values(node->operation, left, right);
+}
+
+static bool yx_arithmetic_chain(const yx_node *node)
+{
+    return node && node->kind == N_BINARY &&
+        (node->operation == TK_PLUS || node->operation == TK_MINUS ||
+         node->operation == TK_STAR);
+}
+
+/* Addition, subtraction and multiplication are n-ary upstream. If any
+ * operand is floating point, each operand is converted before arithmetic,
+ * including integer operands preceding the float. Keep a parallel floating
+ * accumulator so each operand is evaluated exactly once. */
+static yx_value yx_eval_arithmetic_chain(const yx_node *node,
+    const yx_eval_context *ctx, size_t current_pattern, const yx_binding *bindings)
+{
+    const yx_node *local[16], **items = local;
+    size_t used = 0, capacity = sizeof(local) / sizeof(local[0]);
+    yx_token_kind operation = node->operation;
+    while (node->kind == N_BINARY && node->operation == operation) {
+        if (used == capacity) {
+            size_t next = capacity * 2;
+            const yx_node **grown;
+            if (next < capacity || next > SIZE_MAX / sizeof(*grown)) {
+                if (items != local) free(items);
+                return yx_undefined();
+            }
+            grown = items == local ? malloc(next * sizeof(*grown)) :
+                    realloc((void *)items, next * sizeof(*grown));
+            if (!grown) {
+                if (items != local) free(items);
+                return yx_undefined();
+            }
+            if (items == local) memcpy(grown, local, used * sizeof(*grown));
+            items = grown;
+            capacity = next;
+        }
+        items[used++] = node->b;
+        node = node->a;
+    }
+    yx_value result = yx_eval(node, ctx, current_pattern, bindings);
+    bool numeric = result.defined && (result.type == V_INTEGER || result.type == V_FLOAT);
+    bool floating = result.type == V_FLOAT;
+    double shadow = numeric ? yx_as_double(result) : 0.0;
+    while (used) {
+        yx_value right = yx_eval(items[--used], ctx, current_pattern, bindings);
+        numeric &= right.defined && (right.type == V_INTEGER || right.type == V_FLOAT);
+        floating |= right.type == V_FLOAT;
+        if (numeric) {
+            double value = yx_as_double(right);
+            if (operation == TK_PLUS) shadow += value;
+            else if (operation == TK_MINUS) shadow -= value;
+            else shadow *= value;
+        }
+        result = yx_eval_binary_values(operation, result, right);
+    }
+    if (items != local) free(items);
+    return floating && numeric ? yx_defined_float(shadow) : result;
+}
+
+/* Flatten homogeneous Boolean trees in evaluation order. Most conditions fit
+ * on the local pointer stack; unusually deep trees retain a heap fallback.
+ * Only Boolean truth is retained, so undefined and short circuiting follow
+ * yx_eval_binary_values without copying a full value for each operand. */
+static yx_value yx_eval_boolean_chain(const yx_node *node,
+    const yx_eval_context *ctx, size_t current_pattern, const yx_binding *bindings)
+{
+    const yx_node *local[64], **stack = local;
+    size_t used = 0, capacity = sizeof(local) / sizeof(local[0]);
+    yx_token_kind operation = node->operation;
+    yx_value result = yx_undefined();
+    for (;;) {
+        while (node && node->kind == N_BINARY && node->operation == operation) {
+            if (yx_scan_deadline_poll(ctx->deadline)) goto failed;
+            if (used == capacity) {
+                size_t next = capacity * 2;
+                const yx_node **grown;
+                if (next < capacity || next > SIZE_MAX / sizeof(*grown)) goto failed;
+                grown = stack == local ? malloc(next * sizeof(*grown)) :
+                        realloc((void *)stack, next * sizeof(*grown));
+                if (!grown) goto failed;
+                if (stack == local) memcpy(grown, local, used * sizeof(*grown));
+                stack = grown;
+                capacity = next;
+            }
+            stack[used++] = node->b;
+            node = node->a;
+        }
+        result = yx_eval(node, ctx, current_pattern, bindings);
+        if ((operation == TK_AND && !yx_truth(result)) ||
+            (operation == TK_OR && yx_truth(result)) || !used) {
+            result = yx_defined(yx_truth(result));
+            break;
+        }
+        node = stack[--used];
+    }
+    if (stack != local) free((void *)stack);
+    return result;
+failed:
+    if (stack != local) free((void *)stack);
+    return yx_undefined();
+}
+
+#ifdef _WIN32
+/* MSVC reserves the large module-dispatch frame in yx_eval_uncached even for
+ * an ordinary binary node. Walk binary operands here so long left- or
+ * right-nested expressions use heap storage instead of one such frame per
+ * operand. Preserve left-to-right evaluation and Boolean short circuiting. */
+static yx_value yx_eval_binary_iterative(const yx_node *node,
+                                          const yx_eval_context *ctx,
+                                          size_t current_pattern,
+                                          const yx_binding *bindings)
+{
+    typedef struct {
+        const yx_node *node;
+        yx_value left;
+        bool have_left;
+    } yx_binary_frame;
+    yx_binary_frame local[16], *stack = local;
+    size_t used = 0, capacity = sizeof(local) / sizeof(local[0]);
+    yx_value result = yx_undefined();
+    for (;;) {
+        if (yx_scan_deadline_poll(ctx->deadline)) break;
+        if (node && node->kind == N_BINARY && !yx_arithmetic_chain(node)) {
+            if (used == capacity) {
+                size_t next = capacity * 2;
+                if (next < capacity || next > SIZE_MAX / sizeof(*stack)) break;
+                yx_binary_frame *grown = stack == local ? malloc(next * sizeof(*stack)) :
+                                         realloc(stack, next * sizeof(*stack));
+                if (!grown) break;
+                if (stack == local) memcpy(grown, local, used * sizeof(*stack));
+                stack = grown;
+                capacity = next;
+            }
+            stack[used].node = node;
+            stack[used++].have_left = false;
+            node = node->a;
+            continue;
+        }
+        result = yx_eval(node, ctx, current_pattern, bindings);
+        while (used) {
+            yx_binary_frame *frame = &stack[used - 1];
+            yx_token_kind operation = frame->node->operation;
+            if (!frame->have_left) {
+                if ((operation == TK_AND && !yx_truth(result)) ||
+                    (operation == TK_OR && yx_truth(result))) {
+                    result = yx_defined(operation == TK_OR);
+                    --used;
+                    continue;
+                }
+                frame->left = result;
+                frame->have_left = true;
+                node = frame->node->b;
+                break;
+            }
+            result = yx_eval_binary_values(operation, frame->left, result);
+            --used;
+        }
+        if (!used) {
+            if (stack != local) free(stack);
+            return result;
+        }
+    }
+    if (stack != local) free(stack);
+    return yx_undefined();
+}
+#endif
+
+static bool yx_in_set(const yx_node *node, const char *pattern_name)
+{
+    size_t i;
+    if (node->set_all) return true;
+    for (i = 0; i < node->set_count; i++)
+        if (yx_name_matches(pattern_name, node->set_names[i])) return true;
+    return false;
+}
+
+static bool yx_node_requires_all_matches(const yx_node *node,
+                                          const char *pattern_name,
+                                          bool current_pattern_matches);
+static bool yx_node_requires_all_matches_impl(const yx_node *node,
+    const char *pattern_name, bool current_pattern_matches,
+    const size_t *allowed_fixed_at);
+
+static bool yx_node_pattern_nonanchorable(const yx_node *node,
+                                           const char *pattern_name,
+                                           bool fixed_at);
+
+/* A fixed `at` term in a conjunction is required for the rule to match.
+ * Other terms may ask whether the pattern exists, but counting or inspecting
+ * its other offsets still requires an unrestricted scan. */
+static bool yx_required_pattern_fixed_at_impl(const yx_node *node,
+                                         const char *pattern_name,
+                                         size_t *offset, bool allow_not,
+                                         bool allow_shared_at)
+{
+    const size_t *allowed_fixed_at = allow_shared_at ? offset : NULL;
+    if (!node) return false;
+    if (node->kind == N_UNARY && node->operation == TK_NOT)
+        return allow_not && yx_required_pattern_fixed_at_impl(
+            node->a, pattern_name, offset, true, allow_shared_at);
+    if (node->kind == N_BINARY && node->operation == TK_OR) {
+        if (yx_required_pattern_fixed_at_impl(node->a, pattern_name, offset, allow_not, allow_shared_at) &&
+            !yx_node_requires_all_matches_impl(node->b, pattern_name, false, allowed_fixed_at) &&
+            !yx_node_pattern_nonanchorable(node->b, pattern_name, false))return true;
+        if (yx_required_pattern_fixed_at_impl(node->b, pattern_name, offset, allow_not, allow_shared_at) &&
+            !yx_node_requires_all_matches_impl(node->a, pattern_name, false, allowed_fixed_at) &&
+            !yx_node_pattern_nonanchorable(node->a, pattern_name, false))return true;
+        return false;
+    }
+    if (node->kind == N_BINARY && node->operation == TK_AND) {
+        if (yx_required_pattern_fixed_at_impl(node->a, pattern_name, offset, allow_not, allow_shared_at) &&
+            !yx_node_requires_all_matches_impl(node->b, pattern_name, false, allowed_fixed_at))
+            return true;
+        if (yx_required_pattern_fixed_at_impl(node->b, pattern_name, offset, allow_not, allow_shared_at) &&
+            !yx_node_requires_all_matches_impl(node->a, pattern_name, false, allowed_fixed_at))
+            return true;
+        return false;
+    }
+    if (node->filter != FILTER_AT || !node->b ||
+        node->b->kind != N_INTEGER || node->b->number > INT64_MAX ||
+        node->b->number > SIZE_MAX)
+        return false;
+    if (node->kind == N_PATTERN) {
+        if (!yx_name_matches(pattern_name, node->name)) return false;
+    } else if (node->kind == N_OF) {
+        if (!yx_in_set(node, pattern_name)) return false;
+    } else {
+        return false;
+    }
+    *offset = (size_t)node->b->number;
+    return !yx_node_requires_all_matches_impl(node, pattern_name, false, offset);
+}
+
+static bool yx_required_pattern_fixed_at(const yx_node *node,
+                                         const char *pattern_name,
+                                         size_t *offset)
+{
+    if (yx_required_pattern_fixed_at_impl(node, pattern_name, offset, false, false))
+        return true;
+    /* Negated and repeated anchors are safe when no other use needs the
+     * unrestricted match list. Keep the original positive-anchor policy. */
+    return !yx_node_pattern_nonanchorable(node, pattern_name, false) &&
+           yx_required_pattern_fixed_at_impl(node, pattern_name, offset, true, true);
+}
+
+static bool yx_fast_count_analyze_node(const yx_node *node,
+                                       const char *pattern_name,
+                                       size_t *threshold, bool *found,
+                                       bool current_pattern_matches,
+                                       bool boolean_context);
+typedef struct { const yx_node *root; const char *pattern_name; int kind; bool flag;
+                 size_t *threshold; bool *found; size_t *offset; bool result; } yx_pattern_query_job;
+static void yx_fast_count_thunk(void *data)
+{
+    yx_pattern_query_job *job = data;
+    /* The rule condition itself is evaluated as a Boolean. */
+    job->result = yx_fast_count_analyze_node(job->root, job->pattern_name, job->threshold, job->found, false, true);
+}
+static void yx_pattern_query_thunk(void *data)
+{
+    yx_pattern_query_job *job = data;
+    if (job->kind == 0) job->result = yx_node_requires_all_matches(job->root, job->pattern_name, false);
+    else if (job->kind == 1) job->result = yx_node_pattern_nonanchorable(job->root, job->pattern_name, job->flag);
+    else job->result = yx_required_pattern_fixed_at(job->root, job->pattern_name, job->offset);
+}
+
+bool yx_condition_pattern_fixed_at(const yx_condition *condition,
+                                   const char *pattern_name, size_t *offset)
+{
+    if (!condition || !condition->root || !pattern_name || !offset)
+        return false;
+    yx_pattern_query_job job = {condition->root, pattern_name, 2, false, NULL, NULL, offset, false};
+    yx_run_deep(condition->depth, yx_pattern_query_thunk, &job);
+    return job.result;
+}
+
+static bool yx_fast_count_comparison(const yx_node *node,
+                                     const char *pattern_name,
+                                     size_t *threshold,
+                                     bool current_pattern_matches)
+{
+    const yx_node *count, *bound;
+    yx_token_kind operation;
+    bool increment;
+    int64_t limit;
+    if (node->kind != N_BINARY || !node->a || !node->b) return false;
+    if (node->a->kind == N_COUNT && node->b->kind == N_INTEGER) {
+        count = node->a;
+        bound = node->b;
+        operation = node->operation;
+    } else if (node->b->kind == N_COUNT &&
+               node->a->kind == N_INTEGER) {
+        count = node->b;
+        bound = node->a;
+        operation = node->operation;
+        if (operation == TK_LT) operation = TK_GT;
+        else if (operation == TK_LE) operation = TK_GE;
+        else if (operation == TK_GT) operation = TK_LT;
+        else if (operation == TK_GE) operation = TK_LE;
+    } else {
+        return false;
+    }
+    /* The bound must be an i64 constant (try_as_const_integer). */
+    if (count->filter != FILTER_NONE ||
+        !(count->name && count->name[0] ?
+          yx_name_matches(pattern_name, count->name) :
+          current_pattern_matches) ||
+        (bound->is_unsigned && bound->number > INT64_MAX))
+        return false;
+    switch (operation) {
+    case TK_EQ: case TK_NE: case TK_GT: case TK_LE:
+        increment = true;
+        break;
+    case TK_GE: case TK_LT:
+        increment = false;
+        break;
+    default:
+        return false;
+    }
+    /* K or K + 1 (saturating), at least 1; above u32::MAX every match is
+     * tracked. */
+    limit = (int64_t)bound->number;
+    if (increment && limit < INT64_MAX) ++limit;
+    if (limit < 1) limit = 1;
+    if ((uint64_t)limit > UINT32_MAX) return false;
+    *threshold = (size_t)limit;
+    return true;
+}
+
+/* Fast scan can stop counting once every count comparison is decided.  A
+ * count used in arithmetic, or an indexed/filtered match access, still needs
+ * the full match list.  Inspect the whole expression before enabling a cap.
+ * `boolean_context` tells that the parent evaluates the node as a Boolean
+ * (the condition itself, `and`/`or`/`not` operands, loop and `with` bodies,
+ * items of an `of` tuple): a count there needs one match only, as in YARA-X
+ * (`required_matches_for_count`, lib/src/compiler/ir/mod.rs). */
+static bool yx_fast_count_analyze_node(const yx_node *node,
+                                       const char *pattern_name,
+                                       size_t *threshold, bool *found,
+                                       bool current_pattern_matches,
+                                       bool boolean_context)
+{
+    size_t comparison_threshold;
+    bool refers_to_pattern, boolean_operands;
+    if (!node) return true;
+    if (yx_fast_count_comparison(node, pattern_name,
+                                 &comparison_threshold,
+                                 current_pattern_matches)) {
+        if (comparison_threshold > *threshold)
+            *threshold = comparison_threshold;
+        *found = true;
+        return true;
+    }
+    refers_to_pattern = node->name && node->name[0] ?
+        yx_name_matches(pattern_name, node->name) : current_pattern_matches;
+    if (node->kind == N_COUNT && node->filter == FILTER_NONE &&
+        refers_to_pattern && boolean_context) {
+        if (*threshold < 1) *threshold = 1;
+        *found = true;
+        return true;
+    }
+    if (((node->kind == N_COUNT || node->kind == N_OFFSET ||
+          node->kind == N_LENGTH) && refers_to_pattern) ||
+        (node->kind == N_PATTERN && node->filter != FILTER_NONE &&
+         refers_to_pattern) ||
+        (node->kind == N_OF && node->filter != FILTER_NONE &&
+         yx_in_set(node, pattern_name)))
+        return false;
+    boolean_operands =
+        (node->kind == N_BINARY &&
+         (node->operation == TK_AND || node->operation == TK_OR)) ||
+        (node->kind == N_UNARY && node->operation == TK_NOT);
+    if (!yx_fast_count_analyze_node(node->a, pattern_name, threshold, found,
+                                    current_pattern_matches,
+                                    boolean_operands) ||
+        !yx_fast_count_analyze_node(node->b, pattern_name, threshold, found,
+                                    current_pattern_matches,
+                                    boolean_operands) ||
+        !yx_fast_count_analyze_node(node->c, pattern_name, threshold, found,
+                                    current_pattern_matches, false))
+        return false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (!yx_fast_count_analyze_node(node->items[i], pattern_name,
+                                        threshold, found,
+                                        current_pattern_matches,
+                                        node->kind == N_OF_EXPR)) return false;
+    /* Only `for` loops and `with` statements have a body: a Boolean. */
+    return yx_fast_count_analyze_node(node->body, pattern_name,
+                                      threshold, found,
+                                      node->kind == N_FOR_OF ?
+                                      yx_in_set(node, pattern_name) :
+                                      current_pattern_matches, true);
+}
+
+bool yx_condition_pattern_fast_count(const yx_condition *condition,
+                                     const char *pattern_name,
+                                     size_t *minimum_count)
+{
+    size_t threshold = 0;
+    bool found = false;
+    if (!condition || !condition->root || !pattern_name || !minimum_count)
+        return false;
+    yx_pattern_query_job job = {condition->root, pattern_name, 0, false, &threshold, &found, NULL, false};
+    yx_run_deep(condition->depth, yx_fast_count_thunk, &job);
+    if (!job.result || !found)
+        return false;
+    *minimum_count = threshold;
+    return true;
+}
+
+static bool yx_node_requires_all_matches_impl(const yx_node *node,
+    const char *pattern_name, bool current_pattern_matches,
+    const size_t *allowed_fixed_at)
+{
+    bool refers_to_pattern, allowed_at;
+    if (!node) return false;
+    refers_to_pattern = node->name && node->name[0] ?
+        yx_name_matches(pattern_name, node->name) : current_pattern_matches;
+    allowed_at = allowed_fixed_at && node->filter == FILTER_AT && node->b &&
+        node->b->kind == N_INTEGER && node->b->number <= INT64_MAX &&
+        node->b->number <= SIZE_MAX &&
+        (size_t)node->b->number == *allowed_fixed_at;
+    if (((node->kind == N_COUNT || node->kind == N_OFFSET ||
+          node->kind == N_LENGTH) && refers_to_pattern) ||
+        (node->kind == N_PATTERN && node->filter != FILTER_NONE && !allowed_at &&
+         refers_to_pattern) ||
+        (node->kind == N_OF && node->filter != FILTER_NONE && !allowed_at &&
+         yx_in_set(node, pattern_name))) return true;
+    /* An allowed self-AT still has children: an OF quantifier or its offset
+     * may inspect match counts, lengths, or offsets and must retain them. */
+    if (yx_node_requires_all_matches_impl(node->a, pattern_name,
+            current_pattern_matches, allowed_fixed_at) ||
+        yx_node_requires_all_matches_impl(node->b, pattern_name,
+            current_pattern_matches, allowed_fixed_at) ||
+        yx_node_requires_all_matches_impl(node->c, pattern_name,
+            current_pattern_matches, allowed_fixed_at))
+        return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_node_requires_all_matches_impl(node->items[i], pattern_name,
+                current_pattern_matches, allowed_fixed_at)) return true;
+    return yx_node_requires_all_matches_impl(node->body, pattern_name,
+        node->kind == N_FOR_OF ? yx_in_set(node, pattern_name) :
+        current_pattern_matches, allowed_fixed_at);
+}
+
+static bool yx_node_requires_all_matches(const yx_node *node,
+                                          const char *pattern_name,
+                                          bool current_pattern_matches)
+{
+    return yx_node_requires_all_matches_impl(node, pattern_name,
+                                              current_pattern_matches, NULL);
+}
+
+bool yx_condition_pattern_requires_all_matches(const yx_condition *condition,
+                                                const char *pattern_name)
+{
+    if (!condition || !condition->root || !pattern_name) return true;
+    yx_pattern_query_job job = {condition->root, pattern_name, 0, false, NULL, NULL, NULL, false};
+    yx_run_deep(condition->depth, yx_pattern_query_thunk, &job);
+    return job.result;
+}
+
+static bool yx_literal_boolean(const yx_node *node, bool *value)
+{
+    if (!node) return false;
+    if (node->kind == N_INTEGER) {
+        *value = node->number != 0;
+        return true;
+    }
+    if (node->kind == N_UNARY && node->operation == TK_NOT &&
+        yx_literal_boolean(node->a, value)) {
+        *value = !*value;
+        return true;
+    }
+    return false;
+}
+
+static bool yx_node_pattern_nonanchorable(const yx_node *node,
+                                           const char *pattern_name,
+                                           bool fixed_at)
+{
+    bool constant;
+    if (!node) return false;
+    /* The compiler removes an expression behind a constant true OR or
+     * constant false AND before it determines pattern identity. */
+    if (node->kind == N_BINARY && node->operation == TK_OR &&
+        ((yx_literal_boolean(node->a, &constant) && constant) ||
+         (yx_literal_boolean(node->b, &constant) && constant)))
+        return false;
+    if (node->kind == N_BINARY && node->operation == TK_AND &&
+        ((yx_literal_boolean(node->a, &constant) && !constant) ||
+         (yx_literal_boolean(node->b, &constant) && !constant)))
+        return false;
+    if ((node->kind == N_PATTERN || node->kind == N_COUNT ||
+         node->kind == N_OFFSET || node->kind == N_LENGTH) &&
+        node->name && yx_name_matches(pattern_name, node->name)) {
+        if (node->kind != N_PATTERN || node->filter == FILTER_IN ||
+            (node->filter == FILTER_NONE && !fixed_at))
+            return true;
+    }
+    if ((node->kind == N_OF || node->kind == N_FOR_OF) &&
+        yx_in_set(node, pattern_name) &&
+        (node->kind == N_FOR_OF || node->filter != FILTER_AT) &&
+        !fixed_at)
+        return true;
+    if (yx_node_pattern_nonanchorable(node->a, pattern_name, fixed_at) ||
+        yx_node_pattern_nonanchorable(node->b, pattern_name, fixed_at) ||
+        yx_node_pattern_nonanchorable(node->c, pattern_name, fixed_at) ||
+        yx_node_pattern_nonanchorable(node->body, pattern_name, fixed_at))
+        return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_node_pattern_nonanchorable(node->items[i], pattern_name,
+                                           fixed_at))
+            return true;
+    return false;
+}
+
+bool yx_condition_pattern_nonanchorable(const yx_condition *condition,
+                                        const char *pattern_name,
+                                        bool fixed_at)
+{
+    if (!condition || !condition->root || !pattern_name) return false;
+    yx_pattern_query_job job = {condition->root, pattern_name, 1, fixed_at, NULL, NULL, NULL, false};
+    yx_run_deep(condition->depth, yx_pattern_query_thunk, &job);
+    return job.result;
+}
+
+bool yx_condition_uses_only_module_field(const yx_condition *condition,
+                                         const char *module,
+                                         const char *field)
+{
+    size_t module_length;
+    if (!condition || !condition->root || !module || !field) return false;
+    module_length = strlen(module);
+    for (const yx_node *node = condition->allocated; node;
+         node = node->next_allocated) {
+        if (!node->name || node->kind == N_STRING || node->kind == N_REGEX)
+            continue;
+        if (strncmp(node->name, module, module_length) != 0 ||
+            node->name[module_length] != '.')
+            continue;
+        if (node->kind != N_MODULE_FIELD ||
+            strcmp(node->name + module_length + 1, field) != 0)
+            return false;
+    }
+    return true;
+}
+
+bool yx_condition_uses_module(const yx_condition *condition,
+                              const char *module)
+{
+    size_t module_length;
+    if (!condition || !condition->root || !module) return true;
+    module_length = strlen(module);
+    for (const yx_node *node = condition->allocated; node;
+         node = node->next_allocated) {
+        if (!node->name || node->kind == N_STRING || node->kind == N_REGEX)
+            continue;
+        if (strncmp(node->name, module, module_length) == 0 &&
+            node->name[module_length] == '.')
+            return true;
+    }
+    return false;
+}
+
+/* The Boolean constant an expression folds to while YARA-X builds its IR:
+ * ir.and and ir.or cast constant operands to Boolean and fold when one
+ * decides the result (false for `and`, true for `or`) or all operands are
+ * constant; ir.not folds a Boolean constant. 1 or 0, -1 when it is not a
+ * constant. Comparisons, calls and module constants are not folded here,
+ * so this never reports a constant YARA-X would not fold. */
+static int yx_absorbed_value(const yx_node *node, bool boolean)
+{
+    int left, right, decider;
+    if (!node) return -1;
+    switch (node->kind) {
+    case N_INTEGER:
+        if (node->operation == TK_TRUE) return 1;
+        if (node->operation == TK_FALSE) return 0;
+        return boolean ? -1 : node->number != 0;
+    case N_FLOAT:
+        return boolean ? -1 : node->floating != 0.0;
+    case N_STRING:
+        return boolean ? -1 : node->string_length != 0;
+    case N_UNARY:
+        if (node->operation != TK_NOT) return -1;
+        left = yx_absorbed_value(node->a, true);
+        return left < 0 ? -1 : !left;
+    case N_BINARY:
+        if (node->operation != TK_AND && node->operation != TK_OR) return -1;
+        decider = node->operation == TK_OR;
+        left = yx_absorbed_value(node->a, false);
+        right = yx_absorbed_value(node->b, false);
+        if (left == decider || right == decider) return decider;
+        return left >= 0 && right >= 0 ? !decider : -1;
+    default:
+        return -1;
+    }
+}
+
+static bool yx_absorbed_reads_pattern(const yx_node *node)
+{
+    if (!node) return false;
+    if (node->kind == N_PATTERN || node->kind == N_COUNT ||
+        node->kind == N_OFFSET || node->kind == N_LENGTH ||
+        node->kind == N_OF || node->kind == N_FOR_OF) return true;
+    if (yx_absorbed_reads_pattern(node->a) || yx_absorbed_reads_pattern(node->b) ||
+        yx_absorbed_reads_pattern(node->c) || yx_absorbed_reads_pattern(node->body))
+        return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_absorbed_reads_pattern(node->items[i])) return true;
+    return false;
+}
+
+/* The console calls in an expression whose code YARA-X never emits print
+ * nothing: each becomes the constant true it returns. A call reading a
+ * pattern stays, for the walkers that look at its arguments. */
+static void yx_absorbed_drop_console(yx_node *node)
+{
+    if (!node) return;
+    if (node->kind == N_CALL && node->name &&
+        strncmp(node->name, "console.", 8) == 0 &&
+        !yx_absorbed_reads_pattern(node)) {
+        node->kind = N_INTEGER;
+        node->operation = TK_TRUE;
+        node->number = 1;
+        node->is_unsigned = false;
+        return;
+    }
+    yx_absorbed_drop_console(node->a);
+    yx_absorbed_drop_console(node->b);
+    yx_absorbed_drop_console(node->c);
+    yx_absorbed_drop_console(node->body);
+    for (size_t i = 0; i < node->item_count; ++i)
+        yx_absorbed_drop_console(node->items[i]);
+}
+
+static void yx_absorbed_walk(yx_node *node)
+{
+    if (!node) return;
+    if ((node->kind == N_BINARY &&
+         (node->operation == TK_AND || node->operation == TK_OR)) ||
+        (node->kind == N_UNARY && node->operation == TK_NOT)) {
+        if (yx_absorbed_value(node, false) >= 0) {
+            yx_absorbed_drop_console(node);
+            return;
+        }
+        if (node->kind == N_UNARY) {
+            yx_absorbed_walk(node->a);
+            return;
+        }
+        /* Not constant: the operands of the flattened chain. */
+        for (yx_node *at = node;; at = at->a) {
+            yx_absorbed_walk(at->b);
+            if (!at->a || at->a->kind != N_BINARY ||
+                at->a->operation != node->operation) {
+                yx_absorbed_walk(at->a);
+                break;
+            }
+        }
+        return;
+    }
+    yx_absorbed_walk(node->a);
+    yx_absorbed_walk(node->b);
+    yx_absorbed_walk(node->c);
+    yx_absorbed_walk(node->body);
+    for (size_t i = 0; i < node->item_count; ++i)
+        yx_absorbed_walk(node->items[i]);
+}
+
+static void yx_absorbed_thunk(void *data)
+{
+    yx_absorbed_walk((yx_node *)data);
+}
+
+void yx_condition_drop_absorbed_console_calls(yx_condition *condition)
+{
+    if (!condition || !condition->root) return;
+    yx_run_deep(condition->depth, yx_absorbed_thunk, condition->root);
+}
+
+bool yx_condition_module_constant(const char *path, bool *floating)
+{
+    bool is_float = false;
+    bool constant = yx_wc_module_constant(path, &is_float);
+    if (floating) *floating = is_float;
+    return constant;
+}
+
+bool yx_condition_uses_only_pe_locale_fields(const yx_condition *condition)
+{
+    if (!condition || !condition->root) return false;
+    for (const yx_node *node = condition->allocated; node;
+         node = node->next_allocated) {
+        if (!node->name || node->kind == N_STRING || node->kind == N_REGEX ||
+            strncmp(node->name, "pe.", 3) != 0)
+            continue;
+        if (node->kind == N_MODULE_FIELD &&
+            strcmp(node->name, "pe.is_pe") == 0)
+            continue;
+        if (node->kind == N_CALL &&
+            (strcmp(node->name, "pe.locale") == 0 ||
+             strcmp(node->name, "pe.language") == 0))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static unsigned yx_dex_output_header_number(const char *member)
+{
+    static const struct {
+        const char *name;
+        unsigned number;
+    } fields[] = {
+        {"header.magic", 1}, {"header.version", 2},
+        {"header.checksum", 3}, {"header.file_size", 5},
+        {"header.header_size", 6}, {"header.endian_tag", 7},
+        {"header.link_size", 8}, {"header.link_off", 9},
+        {"header.data_size", 23}, {"header.data_off", 24},
+        {"header.container_size", 25}, {"header.header_offset", 26}
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+        if (strcmp(member, fields[i].name) == 0)
+            return fields[i].number;
+    return 0;
+}
+
+static unsigned yx_dex_output_collection_number(const char *member)
+{
+    static const char *const names[10] = {
+        NULL, NULL, NULL, "strings.len", "types.len", "protos.len",
+        "fields.len", "methods.len", "class_defs.len",
+        "map_list.items.len"
+    };
+    for (unsigned i = 3; i < 10; ++i)
+        if (strcmp(member, names[i]) == 0) return i;
+    return 0;
+}
+
+static bool yx_dex_output_indexed_string_numbers(const char *collection,
+                                                  const char *member,
+                                                  unsigned *root_field,
+                                                  unsigned *record_field)
+{
+    static const struct {
+        const char *collection;
+        const char *member;
+        unsigned root_field;
+        unsigned record_field;
+    } fields[] = {
+        {"strings", "value", 3, 0}, {"types", "value", 4, 0},
+        {"protos", "shorty", 5, 1},
+        {"protos", "return_type", 5, 2},
+        {"fields", "class", 6, 1}, {"fields", "type", 6, 2},
+        {"fields", "name", 6, 3},
+        {"methods", "class", 7, 1}, {"methods", "name", 7, 3},
+        {"class_defs", "class", 8, 1},
+        {"class_defs", "superclass", 8, 3},
+        {"class_defs", "source_file", 8, 4}
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+        if (strcmp(collection, fields[i].collection) == 0 &&
+            strcmp(member, fields[i].member) == 0) {
+            *root_field = fields[i].root_field;
+            *record_field = fields[i].record_field;
+            return true;
+        }
+    return false;
+}
+
+static bool yx_dex_output_indexed_numeric_numbers(const char *collection,
+                                                   const char *member,
+                                                   unsigned *root_field,
+                                                   unsigned *record_field)
+{
+    if (strcmp(collection, "protos") == 0 &&
+        strcmp(member, "parameters_count") == 0) {
+        *root_field = 5;
+        *record_field = 3;
+        return true;
+    }
+    if (strcmp(collection, "class_defs") == 0 &&
+        strcmp(member, "access_flags") == 0) {
+        *root_field = 8;
+        *record_field = 2;
+        return true;
+    }
+    if (strcmp(collection, "map_list.items") == 0) {
+        *root_field = 9;
+        if (strcmp(member, "type") == 0) *record_field = 1;
+        else if (strcmp(member, "unused") == 0) *record_field = 2;
+        else if (strcmp(member, "size") == 0) *record_field = 3;
+        else if (strcmp(member, "offset") == 0) *record_field = 4;
+        else return false;
+        return true;
+    }
+    return false;
+}
+
+static bool yx_dex_output_method_proto_field(const char *collection,
+                                             const char *member,
+                                             unsigned *field,
+                                             bool *string_field)
+{
+    if (strcmp(collection, "methods") != 0) return false;
+    if (strcmp(member, "proto.shorty") == 0) {
+        *field = 1;
+        *string_field = true;
+    } else if (strcmp(member, "proto.return_type") == 0) {
+        *field = 2;
+        *string_field = true;
+    } else if (strcmp(member, "proto.parameters_count") == 0) {
+        *field = 3;
+        *string_field = false;
+    } else return false;
+    return true;
+}
+
+bool yx_condition_uses_only_dex_scalar_fields(const yx_condition *condition)
+{
+    if (!condition || !condition->root) return false;
+    for (const yx_node *node = condition->allocated; node;
+         node = node->next_allocated) {
+        uint64_t constant;
+        const char *member;
+        if (!node->name || node->kind == N_STRING ||
+            node->kind == N_REGEX || strncmp(node->name, "dex.", 4) != 0)
+            continue;
+        member = node->name + 4;
+        if (node->kind == N_MODULE_INDEXED_FIELD) {
+            char collection[32];
+            const char *indexed_member;
+            unsigned root_field, record_field;
+            bool string_field;
+            if (yx_dex_indexed_path(node->name, collection,
+                                    &indexed_member) &&
+                yx_dex_output_indexed_string_numbers(
+                    collection, indexed_member, &root_field,
+                    &record_field))
+                continue;
+            if (yx_dex_indexed_path(node->name, collection,
+                                    &indexed_member) &&
+                yx_dex_output_indexed_numeric_numbers(
+                    collection, indexed_member, &root_field,
+                    &record_field))
+                continue;
+            if (yx_dex_indexed_path(node->name, collection,
+                                    &indexed_member) &&
+                yx_dex_output_method_proto_field(
+                    collection, indexed_member, &record_field,
+                    &string_field))
+                continue;
+        }
+        if (node->kind == N_CALL &&
+            yx_dex_output_collection_number(member) != 0)
+            continue;
+        if (node->kind != N_MODULE_FIELD ||
+            (strcmp(member, "is_dex") != 0 &&
+             strcmp(member, "map_list.size") != 0 &&
+             strcmp(member, "header.signature") != 0 &&
+             yx_dex_output_header_number(member) == 0 &&
+             !yx_dex_constant(member, &constant)))
+            return false;
+    }
+    return true;
+}
+
+/* YARA-X emits the range helper for a numeric `of` without an anchor when
+ * the selected PatternIds make exactly one consecutive range. This matters
+ * for zero: that helper accepts 0 unconditionally, while the loop treats 0
+ * as `none`. PatternIds can be shared by equal patterns in other rules. */
+static bool yx_pattern_set_has_one_id_range(const yx_node *node,
+                                             const yx_eval_context *ctx)
+{
+    size_t minimum = SIZE_MAX, maximum = 0, selected = 0;
+    if (!ctx->pattern_ids) return true;
+    for (size_t i = 0; i < ctx->pattern_count; ++i) {
+        size_t id;
+        if (!ctx->pattern_names ||
+            !yx_in_set(node, ctx->pattern_names[i])) continue;
+        id = ctx->pattern_ids[i];
+        for (size_t j = 0; j < i; ++j)
+            if (yx_in_set(node, ctx->pattern_names[j]) &&
+                ctx->pattern_ids[j] == id)
+                return false;
+        if (id < minimum) minimum = id;
+        if (id > maximum) maximum = id;
+        ++selected;
+    }
+    return selected != 0 && maximum - minimum == selected - 1;
+}
+
+static yx_value yx_quantify(const yx_node *node, const yx_eval_context *ctx,
+                             size_t matched, size_t total, size_t current_pattern,
+                             const yx_binding *bindings)
+{
+    yx_value quantity;
+    uint64_t minimum;
+    if (total == 0 && node->quantifier != Q_NONE) return yx_defined(0);
+    switch (node->quantifier) {
+    case Q_ANY: return yx_defined(matched >= 1);
+    case Q_ALL: return yx_defined(matched == total);
+    case Q_NONE: return yx_defined(matched == 0);
+    case Q_NUMBER: case Q_PERCENT:
+        quantity = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!quantity.defined || quantity.type != V_INTEGER ||
+            (!quantity.is_unsigned && (int64_t)quantity.value < 0)) return yx_defined(0);
+        if (node->quantifier == Q_PERCENT) {
+            if (quantity.value > 100) return yx_defined(0);
+            minimum = quantity.value * (total / 100) +
+                      (quantity.value * (total % 100) + 99) / 100;
+        } else minimum = quantity.value;
+        if (minimum == 0)
+            return yx_defined((node->kind == N_OF &&
+                               node->quantifier == Q_NUMBER &&
+                               node->filter == FILTER_NONE &&
+                               yx_pattern_set_has_one_id_range(node, ctx)) ||
+                              matched == 0);
+        return yx_defined(matched >= minimum);
+    }
+    return yx_undefined();
+}
+
+static yx_value yx_eval_set(const yx_node *node, const yx_eval_context *ctx,
+                             size_t current_pattern, const yx_binding *bindings)
+{
+    yx_value low = yx_defined(0), high = yx_defined(0);
+    size_t i, total = 0, matched = 0;
+    if (node->filter != FILTER_NONE) {
+        low = yx_eval(node->b, ctx, current_pattern, bindings);
+        if (node->filter == FILTER_IN)
+            high = yx_eval(node->c, ctx, current_pattern, bindings);
+    }
+    /* emit_of_pattern_set_with_loop evaluates the anchor per item inside the
+     * loop's catch_undef: an undefined anchor makes each item unmatched,
+     * and the quantifier still applies. */
+    bool anchor_undefined = node->filter != FILTER_NONE &&
+        (!low.defined || (node->filter == FILTER_IN && !high.defined));
+    for (i = 0; i < ctx->pattern_count; i++) {
+        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+        if (!ctx->pattern_names || !yx_in_set(node, ctx->pattern_names[i])) continue;
+        total++;
+        if (node->kind == N_FOR_OF) {
+            if (yx_truth(yx_eval(node->body, ctx, i, bindings))) matched++;
+        } else if (!anchor_undefined && yx_pattern_has_match(ctx, i, node->filter, low, high)) matched++;
+    }
+    return yx_quantify(node, ctx, matched, total, current_pattern, bindings);
+}
+
+/* emit_of_expr_tuple evaluates each item before the loop body's
+ * catch_undef, so an undefined item reached before the loop exits makes the
+ * whole expression undefined. The quantifier is evaluated first and the
+ * loop exits early exactly as emit_for does: none and any on the first true
+ * item, all on the first false one, and N or N% once the count reaches the
+ * threshold (a zero threshold then makes the expression false). */
+static yx_value yx_eval_expr_tuple(const yx_node *node,
+                                   const yx_eval_context *ctx,
+                                   size_t current_pattern,
+                                   const yx_binding *bindings)
+{
+    int64_t threshold = 0, count = 0;
+    if (node->quantifier == Q_NUMBER || node->quantifier == Q_PERCENT) {
+        yx_value quantity = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!quantity.defined || quantity.type != V_INTEGER) return yx_undefined();
+        if ((!quantity.is_unsigned && (int64_t)quantity.value < 0) ||
+            quantity.value > (node->quantifier == Q_PERCENT ? 100 : node->item_count))
+            return yx_defined(0);
+        if (node->quantifier == Q_PERCENT)
+            threshold = (int64_t)(quantity.value * (node->item_count / 100) +
+                (quantity.value * (node->item_count % 100) + 99) / 100);
+        else threshold = (int64_t)quantity.value;
+    }
+    for (size_t i = 0; i < node->item_count; ++i) {
+        yx_value item = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        bool truth;
+        if (!item.defined) return yx_undefined();
+        truth = yx_truth(item);
+        switch (node->quantifier) {
+        case Q_NONE: if (truth) return yx_defined(0); break;
+        case Q_ALL: if (!truth) return yx_defined(0); break;
+        case Q_ANY: if (truth) return yx_defined(1); break;
+        default:
+            if (truth && ++count >= threshold) return yx_defined(threshold != 0);
+            break;
+        }
+    }
+    switch (node->quantifier) {
+    case Q_NONE: case Q_ALL: return yx_defined(1);
+    case Q_ANY: return yx_defined(0);
+    default: return yx_defined(threshold == 0);
+    }
+}
+
+static void *yx_eval_alloc_items(const yx_eval_context *ctx, size_t count,
+                                 size_t item_size)
+{
+    void *items;
+    size_t bytes;
+    if (!count || !item_size || count > SIZE_MAX / item_size) return NULL;
+    bytes = count * item_size;
+    items = yx_eval_alloc_string(ctx, bytes);
+    if (items) memset(items, 0, bytes);
+    return items;
+}
+
+static bool yx_dotnet_parameter_fields_at(
+    const yx_eval_context *ctx, const yx_dotnet_result *dotnet,
+    const yx_dotnet_method *method, size_t parameter_index,
+    yx_global_field fields[2])
+{
+    yx_dotnet_method_parameter parameter;
+    char *type = NULL;
+    const char *name;
+    size_t name_length;
+    if (!yx_dotnet_method_parameter_at(dotnet, method, parameter_index,
+                                         NULL, 0, &parameter)) return false;
+    if (parameter.name) {
+        name = (const char *)parameter.name;
+        name_length = parameter.name_length;
+    } else {
+        char *generated = yx_eval_alloc_string(ctx, 32);
+        int written;
+        if (!generated) return false;
+        written = snprintf(generated, 33, "P_%zu",
+                           parameter.generated_name_index);
+        if (written < 0 || written > 32) return false;
+        name = generated;
+        name_length = (size_t)written;
+    }
+    if (parameter.type_length) {
+        type = yx_eval_alloc_string(ctx, parameter.type_length);
+        if (!type || !yx_dotnet_method_parameter_at(
+                dotnet, method, parameter_index, type,
+                parameter.type_length + 1, &parameter)) return false;
+    }
+    fields[0] = (yx_global_field){
+        .name = "name", .type = YX_GLOBAL_STR,
+        .value.string = {(char *)name, name_length}
+    };
+    fields[1] = (yx_global_field){
+        .name = "type", .type = YX_GLOBAL_STR,
+        .value.string = {type, parameter.type_length}
+    };
+    return true;
+}
+
+static bool yx_dotnet_method_fields_at(const yx_eval_context *ctx,
+                                        const yx_dotnet_result *dotnet,
+                                        size_t class_index,
+                                        size_t method_index,
+                                        yx_global_field fields[12])
+{
+    yx_dotnet_method method;
+    yx_global_array *generic_parameters =
+        &yx_dotnet_generic_parameter_schema_array;
+    yx_global_array *parameters = &yx_dotnet_parameter_schema_array;
+    char *return_type = NULL;
+    if (!yx_dotnet_class_method_at(dotnet, class_index, method_index,
+                                    NULL, 0, &method)) return false;
+    if (method.has_return_type) {
+        return_type = yx_eval_alloc_string(ctx, method.return_type_length);
+        if (!return_type || !yx_dotnet_class_method_at(
+                dotnet, class_index, method_index, return_type,
+                method.return_type_length + 1, &method)) return false;
+    }
+    fields[0] = (yx_global_field){
+        .name = "name", .type = YX_GLOBAL_STR,
+        .value.string = {(char *)method.name, method.name_length}
+    };
+    fields[1] = (yx_global_field){
+        .name = "visibility", .type = YX_GLOBAL_STR,
+        .value.string = {(char *)method.visibility,
+                         method.visibility ? strlen(method.visibility) : 0}
+    };
+    fields[2] = (yx_global_field){
+        .name = "return_type", .type = YX_GLOBAL_STR,
+        .value.string = {return_type, method.return_type_length}
+    };
+    fields[3] = (yx_global_field){
+        .name = "abstract", .type = YX_GLOBAL_BOOL,
+        .value.boolean = method.is_abstract
+    };
+    fields[4] = (yx_global_field){
+        .name = "static", .type = YX_GLOBAL_BOOL,
+        .value.boolean = method.is_static
+    };
+    fields[5] = (yx_global_field){
+        .name = "virtual", .type = YX_GLOBAL_BOOL,
+        .value.boolean = method.is_virtual
+    };
+    fields[6] = (yx_global_field){
+        .name = "final", .type = YX_GLOBAL_BOOL,
+        .value.boolean = method.is_final
+    };
+    fields[7] = (yx_global_field){
+        .name = "number_of_generic_parameters", .type = YX_GLOBAL_INT,
+        .value.integer = (int64_t)method.number_of_generic_parameters
+    };
+    fields[8] = (yx_global_field){
+        .name = "number_of_parameters", .type = YX_GLOBAL_INT,
+        .value.integer = (int64_t)method.number_of_parameters
+    };
+    if (method.number_of_generic_parameters) {
+        generic_parameters = yx_eval_alloc_items(
+            ctx, 1, sizeof(*generic_parameters));
+        if (!generic_parameters) return false;
+        *generic_parameters = (yx_global_array){
+            YX_GLOBAL_STR, NULL, method.number_of_generic_parameters
+        };
+        generic_parameters->items = yx_eval_alloc_items(
+            ctx, generic_parameters->count,
+            sizeof(*generic_parameters->items));
+        if (!generic_parameters->items) return false;
+        for (size_t i = 0; i < generic_parameters->count; ++i) {
+            const uint8_t *name;
+            size_t length;
+            if (!yx_dotnet_method_generic_parameter_at(
+                    dotnet, &method, i, &name, &length)) return false;
+            generic_parameters->items[i].string =
+                (yx_global_string){(char *)name, length};
+        }
+    }
+    if (method.number_of_parameters) {
+        yx_global_object *objects;
+        yx_global_field *parameter_fields;
+        parameters = yx_eval_alloc_items(ctx, 1, sizeof(*parameters));
+        if (!parameters) return false;
+        *parameters = (yx_global_array){
+            YX_GLOBAL_STRUCT, NULL, method.number_of_parameters
+        };
+        parameters->items = yx_eval_alloc_items(
+            ctx, parameters->count, sizeof(*parameters->items));
+        objects = yx_eval_alloc_items(ctx, parameters->count,
+                                      sizeof(*objects));
+        if (parameters->count > SIZE_MAX / 2) return false;
+        parameter_fields = yx_eval_alloc_items(
+            ctx, parameters->count * 2, sizeof(*parameter_fields));
+        if (!parameters->items || !objects || !parameter_fields)
+            return false;
+        for (size_t i = 0; i < parameters->count; ++i) {
+            objects[i] = (yx_global_object){parameter_fields + i * 2, 2};
+            if (!yx_dotnet_parameter_fields_at(
+                    ctx, dotnet, &method, i, parameter_fields + i * 2))
+                return false;
+            parameters->items[i].object = &objects[i];
+        }
+    }
+    fields[9] = (yx_global_field){
+        .name = "generic_parameters", .type = YX_GLOBAL_ARRAY,
+        .value.array = generic_parameters
+    };
+    fields[10] = (yx_global_field){
+        .name = "parameters", .type = YX_GLOBAL_ARRAY,
+        .value.array = parameters
+    };
+    fields[11] = (yx_global_field){
+        .name = "__dotnet_method_index", .type = YX_GLOBAL_INT,
+        .value.integer = (int64_t)method_index
+    };
+    return true;
+}
+
+static yx_value yx_dotnet_base_type_value_at(
+    const yx_eval_context *ctx, const yx_dotnet_result *dotnet,
+    size_t class_index, size_t base_index)
+{
+    size_t required = 0, length = 0;
+    char *text;
+    if (!yx_dotnet_class_base_type_at(dotnet, class_index, base_index,
+                                       NULL, 0, &required, &length) ||
+        !required) return yx_undefined();
+    text = yx_eval_alloc_string(ctx, length);
+    if (!text || !yx_dotnet_class_base_type_at(dotnet, class_index,
+                                                 base_index, text, required,
+                                                 &required, &length))
+        return yx_undefined();
+    return yx_defined_string(text, length);
+}
+
+static bool yx_node_uses_class_array(const yx_node *node,
+                                      const char *iterator,
+                                      const char *member)
+{
+    size_t root_length, member_length;
+    if (!node) return false;
+    root_length = strlen(iterator);
+    member_length = strlen(member);
+    if (node->name &&
+        strncmp(node->name, iterator, root_length) == 0 &&
+        node->name[root_length] == '.' &&
+        strncmp(node->name + root_length + 1, member,
+                member_length) == 0 &&
+        (node->name[root_length + member_length + 1] == '\0' ||
+         node->name[root_length + member_length + 1] == '.'))
+        return true;
+    if (yx_node_uses_class_array(node->a, iterator, member) ||
+        yx_node_uses_class_array(node->b, iterator, member) ||
+        yx_node_uses_class_array(node->c, iterator, member) ||
+        yx_node_uses_class_array(node->body, iterator, member))
+        return true;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (yx_node_uses_class_array(node->items[i], iterator, member))
+            return true;
+    return false;
+}
+
+static yx_value yx_eval_global_array_item(yx_global_type element_type,
+                                           const yx_global_scalar_value *items,
+                                           size_t count, uint64_t index);
+
+typedef struct yx_eval_array_view {
+    yx_global_type element_type;
+    const yx_global_scalar_value *items;
+    size_t count;
+    bool module_origin;
+} yx_eval_array_view;
+
+/* Module records use the same scalar accessors as indexed expressions. This
+ * keeps loop values, optional-field presence and injected module outputs in
+ * agreement, without a separate native parser for each iterable shape. */
+static yx_value yx_module_access(const char *path, const char *member,
+                                  const uint64_t indices[3], unsigned count,
+                                  bool length_call,
+                                  const yx_eval_context *ctx)
+{
+    char name[256];
+    yx_node index_nodes[3] = {{0}}, field = {0};
+    int written = snprintf(name, sizeof(name), "%s.%s", path, member);
+    if (written < 0 || (size_t)written >= sizeof(name) || count > 3)
+        return yx_undefined();
+    field.name = name;
+    field.kind = count == 3 ? N_MODULE_TRIPLE_INDEXED_FIELD :
+                 count == 2 ? N_MODULE_NESTED_INDEXED_FIELD :
+                 count == 1 ? N_MODULE_INDEXED_FIELD : N_CALL;
+    field.operation = length_call ? TK_LPAREN : 0;
+    field.implicit_value = !length_call && strcmp(member, "value") == 0;
+    if (field.implicit_value && strncmp(path, "vt.", 3) == 0 && count) {
+        const yx_module_array_desc *array =
+            yx_module_array_lookup(path, strlen(path), count - 1);
+        if (array && array->schema->element_type == YX_GLOBAL_STRUCT)
+            field.implicit_value = false;
+    }
+    for (unsigned i = 0; i < count; ++i) {
+        index_nodes[i].kind = N_INTEGER;
+        index_nodes[i].number = indices[i];
+    }
+    field.a = count > 0 ? &index_nodes[0] : NULL;
+    field.b = count > 1 ? &index_nodes[1] : NULL;
+    field.c = count > 2 ? &index_nodes[2] : NULL;
+    return yx_eval(&field, ctx, SIZE_MAX, NULL);
+}
+
+static bool yx_module_array_materialize(const yx_module_array_desc *desc,
+                                         const uint64_t indices[3],
+                                         const yx_eval_context *ctx,
+                                         yx_global_array *array);
+
+static yx_value yx_module_array_item(const yx_module_array_desc *desc,
+                                      const uint64_t parent_indices[3],
+                                      uint64_t index,
+                                      const yx_eval_context *ctx)
+{
+    uint64_t indices[3] = {0};
+    unsigned count = desc->parent_indices + 1;
+    const yx_global_array *schema = desc->schema;
+    yx_global_object *object;
+    const yx_global_object *shape;
+    if (count > 3) return yx_undefined();
+    memcpy(indices, parent_indices, desc->parent_indices * sizeof(*indices));
+    indices[desc->parent_indices] = index;
+    if (schema->element_type != YX_GLOBAL_STRUCT)
+        return yx_module_access(desc->path, "value", indices, count, false, ctx);
+    if (strncmp(desc->path, "vt.", 3) == 0 || yx_test_proto_path(desc->path)) {
+        yx_node field = {0}, keys[3] = {{0}};
+        size_t length = strlen(desc->path);
+        field.name = yx_eval_alloc_items(ctx, length + 7, 1);
+        if (!field.name) return yx_undefined();
+        memcpy(field.name, desc->path, length);
+        memcpy(field.name + length, ".value", 7);
+        field.kind = count == 3 ? N_MODULE_TRIPLE_INDEXED_FIELD :
+                     count == 2 ? N_MODULE_NESTED_INDEXED_FIELD :
+                     N_MODULE_INDEXED_FIELD;
+        field.implicit_value = true;
+        for (unsigned i = 0; i < count; ++i) {
+            keys[i].kind = N_INTEGER;
+            keys[i].number = indices[i];
+        }
+        field.a = &keys[0]; field.b = &keys[1]; field.c = &keys[2];
+        return yx_eval(&field, ctx, SIZE_MAX, NULL);
+    }
+    shape = schema->items[0].object;
+    object = yx_eval_alloc_items(ctx, 1, sizeof(*object));
+    if (!object) return yx_undefined();
+    object->fields = yx_eval_alloc_items(ctx, shape->count,
+                                         sizeof(*object->fields));
+    if (shape->count && !object->fields) return yx_undefined();
+    for (size_t i = 0; i < shape->count; ++i) {
+        const yx_global_field *field = &shape->fields[i];
+        yx_global_field result = {.name = field->name, .type = field->type};
+        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+        if (field->type == YX_GLOBAL_ARRAY) {
+            char path[256];
+            const yx_module_array_desc *child;
+            int written = snprintf(path, sizeof(path), "%s.%s", desc->path,
+                                     field->name);
+            if (written < 0 || (size_t)written >= sizeof(path)) continue;
+            child = yx_module_array_lookup(path, (size_t)written, count);
+            if (!child) continue;
+            result.value.array = yx_eval_alloc_items(ctx, 1,
+                                                      sizeof(yx_global_array));
+            if (!result.value.array ||
+                !yx_module_array_materialize(child, indices, ctx,
+                                               result.value.array)) continue;
+        } else {
+            yx_value value = yx_module_access(desc->path, field->name, indices,
+                                               count, false, ctx);
+            if (!value.defined) continue;
+            switch (field->type) {
+            case YX_GLOBAL_BOOL: result.value.boolean = value.value != 0; break;
+            case YX_GLOBAL_INT: result.value.integer = (int64_t)value.value; break;
+            case YX_GLOBAL_FLOAT: result.value.floating = value.floating; break;
+            case YX_GLOBAL_STR:
+                result.value.string.data = (char *)value.string;
+                result.value.string.length = value.string_length;
+                break;
+            default: continue;
+            }
+        }
+        object->fields[object->count++] = result;
+    }
+    yx_value result = yx_defined_struct(object);
+    result.module_origin = true;
+    return result;
+}
+
+static bool yx_module_array_materialize(const yx_module_array_desc *desc,
+                                         const uint64_t indices[3],
+                                         const yx_eval_context *ctx,
+                                         yx_global_array *array)
+{
+    yx_value length = yx_module_access(desc->path, "len", indices,
+                                       desc->parent_indices, true, ctx);
+    if (!length.defined || length.type != V_INTEGER ||
+        length.value > SIZE_MAX / sizeof(*array->items)) return false;
+    array->element_type = desc->schema->element_type;
+    array->count = (size_t)length.value;
+    if (!array->count) return true;
+    array->items = yx_eval_alloc_items(ctx, array->count, sizeof(*array->items));
+    if (!array->items) return false;
+    for (size_t i = 0; i < array->count; ++i) {
+        yx_value value = yx_module_array_item(desc, indices, i, ctx);
+        if (yx_scan_deadline_poll(ctx->deadline)) return false;
+        switch (array->element_type) {
+        case YX_GLOBAL_STRUCT: array->items[i].object = (yx_global_object *)value.object; break;
+        case YX_GLOBAL_STR:
+            array->items[i].string.data = (char *)value.string;
+            array->items[i].string.length = value.string_length;
+            break;
+        case YX_GLOBAL_BOOL: array->items[i].boolean = value.value != 0; break;
+        case YX_GLOBAL_INT: array->items[i].integer = (int64_t)value.value; break;
+        case YX_GLOBAL_FLOAT: array->items[i].floating = value.floating; break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+typedef struct yx_deep_eval_value {
+    yx_global_type type;
+    yx_global_scalar_value value;
+    yx_eval_array_view array;
+} yx_deep_eval_value;
+
+static bool yx_deep_eval_fields(yx_deep_eval_value *value,
+                                 const char *name, size_t start, size_t end)
+{
+    while (start < end) {
+        const yx_global_field *field;
+        size_t field_start, field_end;
+        if (name[start] != '.') return false;
+        field_start = ++start;
+        while (start < end && name[start] != '.') ++start;
+        field_end = start;
+        if (field_end == field_start || value->type != YX_GLOBAL_STRUCT ||
+            !value->value.object) return false;
+        field = yx_global_object_field_n(value->value.object,
+                                          name + field_start,
+                                          field_end - field_start);
+        if (!field) return false;
+        value->type = field->type;
+        value->value = field->value;
+        if (field->type == YX_GLOBAL_ARRAY) {
+            if (!field->value.array) return false;
+            value->array.element_type = field->value.array->element_type;
+            value->array.items = field->value.array->items;
+            value->array.count = field->value.array->count;
+        }
+    }
+    return true;
+}
+
+static bool yx_deep_eval_path(const yx_node *node,
+                               const yx_eval_context *ctx,
+                               size_t current_pattern,
+                               const yx_binding *bindings,
+                               yx_deep_eval_value *result)
+{
+    const char *dot;
+    size_t name_length, root_length, cursor;
+    bool found = false;
+    if (!node || !node->name || !ctx || !result ||
+        node->deep_index_count < 4) return false;
+    memset(result, 0, sizeof(*result));
+    name_length = strlen(node->name);
+    if (node->operation == TK_LPAREN) {
+        if (name_length < 4 ||
+            strcmp(node->name + name_length - 4, ".len") != 0)
+            return false;
+        name_length -= 4;
+    }
+    dot = memchr(node->name, '.', node->deep_index_ends[0]);
+    root_length = dot ? (size_t)(dot - node->name) :
+                        node->deep_index_ends[0];
+    for (const yx_binding *at = bindings; at; at = at->parent) {
+        if (strlen(at->name) != root_length ||
+            memcmp(at->name, node->name, root_length) != 0)
+            continue;
+        if (at->value.type != V_STRUCT || !at->value.object)
+            return false;
+        result->type = YX_GLOBAL_STRUCT;
+        result->value.object = (yx_global_object *)at->value.object;
+        found = true;
+        break;
+    }
+    if (!found) {
+        for (size_t i = 0; i < ctx->global_count; ++i) {
+            const yx_eval_global *global = &ctx->globals[i];
+            if (!global->name || strlen(global->name) != root_length ||
+                memcmp(global->name, node->name, root_length) != 0)
+                continue;
+            if (global->type == YX_EVAL_GLOBAL_STRUCT) {
+                result->type = YX_GLOBAL_STRUCT;
+                result->value.object =
+                    (yx_global_object *)global->value.object;
+            } else if (global->type == YX_EVAL_GLOBAL_ARRAY) {
+                result->type = YX_GLOBAL_ARRAY;
+                result->array.element_type =
+                    (yx_global_type)global->value.array.element_type;
+                result->array.items =
+                    (const yx_global_scalar_value *)
+                        global->value.array.items;
+                result->array.count = global->value.array.count;
+            } else return false;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return false;
+    cursor = root_length;
+    for (size_t i = 0; i < node->deep_index_count; ++i) {
+        size_t end = node->deep_index_ends[i];
+        const yx_node *key = i == 0 ? node->a :
+                             i == 1 ? node->b :
+                             i == 2 ? node->c : node->items[i - 3];
+        yx_value index;
+        if (end < cursor || end > name_length ||
+            !yx_deep_eval_fields(result, node->name, cursor, end) ||
+            result->type != YX_GLOBAL_ARRAY)
+            return false;
+        index = yx_eval(key, ctx, current_pattern, bindings);
+        if (!index.defined || index.type != V_INTEGER ||
+            (int64_t)index.value < 0 || index.value >= result->array.count)
+            return false;
+        result->type = result->array.element_type;
+        result->value = result->array.items[index.value];
+        if (result->type == YX_GLOBAL_ARRAY) {
+            if (!result->value.array) return false;
+            result->array.element_type = result->value.array->element_type;
+            result->array.items = result->value.array->items;
+            result->array.count = result->value.array->count;
+        }
+        cursor = end;
+    }
+    return yx_deep_eval_fields(result, node->name, cursor, name_length);
+}
+
+static bool yx_eval_object_array_path(
+    const yx_eval_context *ctx, const yx_binding *bindings,
+    const char *name, const char **member,
+    const yx_global_scalar_value **items, size_t *count);
+
+static bool yx_eval_module_alias(const yx_node *node,
+                                   const yx_eval_context *ctx,
+                                   const yx_binding *bindings,
+                                   yx_node *result, yx_node keys[3])
+{
+    for (const yx_binding *at = bindings; at; at = at->parent) {
+        yx_node base = {0};
+        char *name = NULL;
+        if (!at->value.vt_path) continue;
+        base.name = (char *)at->value.vt_path;
+        base.kind = at->value.vt_key_count == 3 ? N_MODULE_TRIPLE_INDEXED_FIELD :
+                    at->value.vt_key_count == 2 ? N_MODULE_NESTED_INDEXED_FIELD :
+                    at->value.vt_key_count == 1 ? N_MODULE_INDEXED_FIELD :
+                    N_MODULE_FIELD;
+        base.implicit_value = at->value.vt_element;
+        for (unsigned i = 0; i < at->value.vt_key_count; ++i) {
+            keys[i].kind = at->value.vt_keys[i].is_string ? N_STRING : N_INTEGER;
+            keys[i].number = at->value.vt_keys[i].number;
+            keys[i].name = (char *)at->value.vt_keys[i].string;
+            keys[i].string_length = at->value.vt_keys[i].length;
+        }
+        base.a = &keys[0]; base.b = &keys[1]; base.c = &keys[2];
+        if (!yx_module_alias_node(node, at->name, &base, result, &name)) continue;
+        size_t size = strlen(name) + 1;
+        result->name = yx_eval_alloc_items(ctx, size, 1);
+        if (result->name) memcpy(result->name, name, size);
+        free(name);
+        return result->name != NULL;
+    }
+    return false;
+}
+
+static bool yx_eval_array_view_from_global(const yx_node *node,
+                                            const yx_eval_context *ctx,
+                                            size_t current_pattern,
+                                            const yx_binding *bindings,
+                                            yx_eval_array_view *view)
+{
+    if (!node || !ctx || !view) return false;
+    {
+        yx_node alias, keys[3] = {{0}};
+        if (yx_eval_module_alias(node, ctx, bindings, &alias, keys)) {
+            const yx_module_array_desc *desc = yx_module_array_node(&alias, false);
+            if (desc) {
+                uint64_t indices[3] = {0};
+                const yx_node *nodes[] = {alias.a, alias.b, alias.c};
+                yx_global_array array = {0};
+                for (unsigned i = 0; i < desc->parent_indices; ++i) {
+                    yx_value key = yx_eval(nodes[i], ctx, current_pattern, bindings);
+                    if (!key.defined || key.type != V_INTEGER) return false;
+                    indices[i] = key.value;
+                }
+                if (!yx_module_array_materialize(desc, indices, ctx, &array))
+                    return false;
+                view->element_type = array.element_type;
+                view->items = array.items;
+                view->count = array.count;
+                view->module_origin = true;
+                return true;
+            }
+        }
+    }
+    if (node->kind == N_GLOBAL_DEEP_PATH) {
+        yx_deep_eval_value result;
+        if (node->operation == TK_LPAREN ||
+            !yx_deep_eval_path(node, ctx, current_pattern, bindings,
+                               &result) || result.type != YX_GLOBAL_ARRAY)
+            return false;
+        *view = result.array;
+        return true;
+    }
+    if (node->kind == N_MODULE_FIELD) {
+        const char *dot = strchr(node->name, '.');
+        for (const yx_binding *local = bindings; local && dot;
+             local = local->parent) {
+            const yx_global_field *field;
+            if (local->value.type != V_STRUCT || !local->value.object ||
+                strlen(local->name) != (size_t)(dot - node->name) ||
+                memcmp(local->name, node->name,
+                       (size_t)(dot - node->name)) != 0)
+                continue;
+            field = yx_global_object_field(local->value.object, dot + 1);
+            if (!field || field->type != YX_GLOBAL_ARRAY) return false;
+            view->element_type = field->value.array->element_type;
+            view->items = field->value.array->items;
+            view->count = field->value.array->count;
+            view->module_origin = local->value.module_origin;
+            return true;
+        }
+    }
+    if (node->kind == N_MODULE_INDEXED_FIELD && !node->implicit_value &&
+        node->operation != TK_LPAREN) {
+        const char *member = NULL;
+        const yx_global_scalar_value *items = NULL;
+        const yx_global_field *field;
+        size_t count = 0;
+        yx_value index;
+        if (!yx_eval_object_array_path(ctx, bindings, node->name, &member,
+                                       &items, &count)) return false;
+        index = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!index.defined || index.type != V_INTEGER ||
+            (int64_t)index.value < 0 || index.value >= count)
+            return false;
+        field = yx_global_object_field(items[index.value].object, member);
+        if (!field || field->type != YX_GLOBAL_ARRAY) return false;
+        view->element_type = field->value.array->element_type;
+        view->items = field->value.array->items;
+        view->count = field->value.array->count;
+        return true;
+    }
+    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD &&
+        !node->implicit_value && node->operation != TK_LPAREN) {
+        const char *member = NULL, *inner_member = NULL;
+        const yx_global_scalar_value *items = NULL;
+        const yx_global_field *inner, *field;
+        size_t count = 0;
+        yx_value first, second;
+        if (!yx_eval_object_array_path(ctx, bindings, node->name, &member,
+                                       &items, &count)) return false;
+        first = yx_eval(node->a, ctx, current_pattern, bindings);
+        second = yx_eval(node->b, ctx, current_pattern, bindings);
+        if (!first.defined || !second.defined ||
+            first.type != V_INTEGER || second.type != V_INTEGER ||
+            (int64_t)first.value < 0 || (int64_t)second.value < 0 ||
+            first.value >= count) return false;
+        inner = yx_global_object_nested_array_field(
+            items[first.value].object, member, &inner_member);
+        if (!inner || second.value >= inner->value.array->count)
+            return false;
+        field = yx_global_object_field(
+            inner->value.array->items[second.value].object, inner_member);
+        if (!field || field->type != YX_GLOBAL_ARRAY) return false;
+        view->element_type = field->value.array->element_type;
+        view->items = field->value.array->items;
+        view->count = field->value.array->count;
+        return true;
+    }
+    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD &&
+        !node->implicit_value && node->operation != TK_LPAREN) {
+        const char *member = NULL, *second_member = NULL;
+        const char *third_member = NULL;
+        const yx_global_scalar_value *items = NULL;
+        const yx_global_field *second, *third, *field;
+        size_t count = 0;
+        yx_value first, middle, last;
+        if (!yx_eval_object_array_path(ctx, bindings, node->name, &member,
+                                       &items, &count)) return false;
+        first = yx_eval(node->a, ctx, current_pattern, bindings);
+        middle = yx_eval(node->b, ctx, current_pattern, bindings);
+        last = yx_eval(node->c, ctx, current_pattern, bindings);
+        if (!first.defined || !middle.defined || !last.defined ||
+            first.type != V_INTEGER || middle.type != V_INTEGER ||
+            last.type != V_INTEGER || (int64_t)first.value < 0 ||
+            (int64_t)middle.value < 0 || (int64_t)last.value < 0 ||
+            first.value >= count) return false;
+        second = yx_global_object_nested_array_field(
+            items[first.value].object, member, &second_member);
+        if (!second || middle.value >= second->value.array->count)
+            return false;
+        third = yx_global_object_nested_array_field(
+            second->value.array->items[middle.value].object,
+            second_member, &third_member);
+        if (!third || last.value >= third->value.array->count)
+            return false;
+        field = yx_global_object_field(
+            third->value.array->items[last.value].object, third_member);
+        if (!field || field->type != YX_GLOBAL_ARRAY) return false;
+        view->element_type = field->value.array->element_type;
+        view->items = field->value.array->items;
+        view->count = field->value.array->count;
+        return true;
+    }
+    for (size_t i = 0; i < ctx->global_count; ++i) {
+        const yx_eval_global *global = &ctx->globals[i];
+        if (!global->name) continue;
+        if (node->kind == N_RULE &&
+            global->type == YX_EVAL_GLOBAL_ARRAY &&
+            strcmp(global->name, node->name) == 0) {
+            view->element_type =
+                (yx_global_type)global->value.array.element_type;
+            view->items =
+                (const yx_global_scalar_value *)global->value.array.items;
+            view->count = global->value.array.count;
+            return true;
+        }
+        if (node->kind == N_MODULE_FIELD &&
+            global->type == YX_EVAL_GLOBAL_STRUCT) {
+            const yx_global_field *field = yx_global_object_field_path(
+                global->value.object, global->name, node->name, "");
+            if (field && field->type == YX_GLOBAL_ARRAY) {
+                view->element_type = field->value.array->element_type;
+                view->items = field->value.array->items;
+                view->count = field->value.array->count;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static yx_value yx_test_proto_native_value(yx_vt_type type,
+                                           yx_global_scalar_value value);
+
+#include "condition_loop.inc"
+
+/* Prove a range body's truth invariant once; the execution helper below
+ * still visits every iteration required by the original quantifier and
+ * retains its loop/body deadline polls. No condition/program is modified. */
+static bool yx_loop_interval_truth(yx_token_kind operation,
+    yx_loop_value low, yx_loop_value high, yx_loop_value constant,
+    bool constant_left, bool *truth)
+{
+    bool first, last;
+    if (!yx_loop_compare_operation(operation)) return false;
+    if (operation == TK_EQ || operation == TK_NE) {
+        bool inside = yx_loop_truth(yx_loop_binary(TK_LE, low, constant)) &&
+                      yx_loop_truth(yx_loop_binary(TK_LE, constant, high));
+        /* Equal endpoint results do not prove EQ/NE when the constant
+         * occurs strictly inside the interval. */
+        if (inside && low.value != high.value) return false;
+        if (!inside) {
+            *truth = operation == TK_NE;
+            return true;
+        }
+    }
+    first = yx_loop_truth(constant_left ?
+        yx_loop_binary(operation, constant, low) :
+        yx_loop_binary(operation, low, constant));
+    last = yx_loop_truth(constant_left ?
+        yx_loop_binary(operation, constant, high) :
+        yx_loop_binary(operation, high, constant));
+    if (first != last) return false;
+    *truth = first;
+    return true;
+}
+
+static bool yx_loop_range_constant(const yx_node *loop,
+    const yx_loop_program *program, const yx_eval_context *ctx,
+    uint64_t first, uint64_t total, bool *truth, unsigned *body_polls)
+{
+    int64_t lower, upper;
+    if (!program || !total) return false;
+    lower = (int64_t)first;
+    upper = (int64_t)(first + total - 1);
+    if (lower > upper) return false;
+    if (program->hot == 1) {
+        *truth = yx_loop_truth(program->hot_constant);
+        *body_polls = program->hot_polls;
+        return true;
+    }
+    if (program->hot == 2) {
+        if (!yx_loop_interval_truth(program->hot_operation,
+                yx_loop_integer(first, false),
+                yx_loop_integer(first + total - 1, false),
+                program->hot_constant, program->hot_constant_left, truth))
+            return false;
+        *body_polls = program->hot_polls;
+        return true;
+    }
+    if (program->hot == 3 && !program->hot_outer_binding) {
+        const yx_node *read = program->hot_read;
+        uint64_t minimum, maximum;
+        unsigned bits;
+        if (!read || read->floating_read ||
+            (read->width != 1 && read->width != 2 && read->width != 4) ||
+            ctx->block_mode || !ctx->data || lower < 0 ||
+            read->width > ctx->size ||
+            (uint64_t)upper > (uint64_t)(ctx->size - read->width)) return false;
+        bits = read->width * 8;
+        if (read->signed_read) {
+            uint64_t magnitude = UINT64_C(1) << (bits - 1);
+            minimum = UINT64_C(0) - magnitude;
+            maximum = magnitude - 1;
+        } else {
+            minimum = 0;
+            maximum = (UINT64_C(1) << bits) - 1;
+        }
+        if (!yx_loop_interval_truth(program->hot_operation,
+                yx_loop_integer(minimum, false),
+                yx_loop_integer(maximum, false), program->hot_constant,
+                program->hot_constant_left, truth)) return false;
+        *body_polls = program->hot_polls;
+        return true;
+    }
+    /* A signed, wrapping sum followed by positive signed remainder always
+     * lies in [-(divisor-1), divisor-1]. Reject every other arithmetic shape
+     * so float promotion, unsigned division and undefined operands stay on
+     * the ordinary program path. */
+    {
+        const yx_node *body = loop->body, *remainder, *sum, *divisor, *constant;
+        uint64_t extent;
+        if (body->kind != N_BINARY ||
+            !yx_loop_compare_operation(body->operation)) return false;
+        remainder = body->a;
+        constant = body->b;
+        if (!remainder || remainder->kind != N_BINARY ||
+            remainder->operation != TK_PERCENT || !constant ||
+            constant->kind != N_INTEGER || constant->is_unsigned) return false;
+        sum = remainder->a;
+        divisor = remainder->b;
+        if (!sum || sum->kind != N_BINARY || sum->operation != TK_PLUS ||
+            !sum->a || sum->a->kind != N_RULE || !sum->a->name ||
+            strcmp(sum->a->name, loop->name) || !sum->b ||
+            sum->b->kind != N_INTEGER || sum->b->is_unsigned ||
+            !divisor || divisor->kind != N_INTEGER || divisor->is_unsigned ||
+            (int64_t)divisor->number <= 0) return false;
+        extent = divisor->number - 1;
+        if (!yx_loop_interval_truth(body->operation,
+                yx_loop_integer(UINT64_C(0) - extent, false),
+                yx_loop_integer(extent, false),
+                yx_loop_integer(constant->number, false), false, truth)) return false;
+        *body_polls = 10;
+        return true;
+    }
+}
+
+static yx_value yx_eval_constant_range(const yx_eval_context *ctx,
+    uint64_t total, uint64_t minimum, bool truth, unsigned body_polls)
+{
+    uint64_t steps = truth ? (minimum ? minimum : 1) :
+                            (minimum ? total - minimum + 1 : total);
+    for (uint64_t done = 0; done < steps; ++done) {
+        if (yx_scan_deadline_poll(ctx->deadline) ||
+            yx_loop_hot_poll(ctx, body_polls)) return yx_undefined();
+    }
+    return yx_defined(truth ? minimum != 0 : minimum == 0);
+}
+
+/* Keep the range hot loop out of the module-array frame. A fallback body
+ * sees the same binding, initialized once; only its integer payload changes. */
+/* `for any|none v in (a..b) : (read(v) == integer)` (or `integer == read(v)`):
+ * the body is true exactly at the in-bounds offsets whose bytes encode the
+ * constant; reads outside the data are undefined, hence false. The loop is
+ * then one byte search over [max(a,0), min(b, size - width)]. Returns 1 or 0
+ * for found / not found, -1 when the shape or a value does not qualify. */
+static int yx_eval_range_search(const yx_node *node, const yx_eval_context *ctx,
+                                uint64_t first, uint64_t total)
+{
+    const yx_node *body = node->body, *read, *constant;
+    uint8_t pattern[4];
+    int64_t value, low, high, end;
+    uint64_t encoded;
+    unsigned width, bits, i;
+    if (!body || body->kind != N_BINARY || body->operation != TK_EQ || !node->name ||
+        ctx->block_mode || !ctx->data || total == 0 || total >= (uint64_t)INT64_MAX) return -1;
+    read = body->a; constant = body->b;
+    if (read && read->kind != N_READ) { read = body->b; constant = body->a; }
+    if (!read || !constant || read->kind != N_READ || read->floating_read ||
+        !read->a || read->a->kind != N_RULE || !read->a->name ||
+        strcmp(read->a->name, node->name) != 0 ||
+        constant->kind != N_INTEGER || constant->operation == TK_TRUE ||
+        constant->operation == TK_FALSE) return -1;
+    width = read->width;
+    if (width != 1 && width != 2 && width != 4) return -1;
+    if (constant->is_unsigned && constant->number > (uint64_t)INT64_MAX) return -1;
+    value = (int64_t)constant->number;
+    bits = width * 8;
+    if (read->signed_read) {
+        int64_t limit = (int64_t)1 << (bits - 1);
+        if (value < -limit || value >= limit) return 0;
+    } else if (value < 0 || (uint64_t)value >= ((uint64_t)1 << bits)) return 0;
+    encoded = (uint64_t)value;
+    for (i = 0; i < width; ++i) {
+        uint8_t byte = (uint8_t)(encoded >> (8 * i));
+        if (read->big_endian) pattern[width - 1 - i] = byte; else pattern[i] = byte;
+    }
+    if (yx_scan_deadline_reached(ctx->deadline)) return -1;
+    low = (int64_t)first;
+    if (total - 1 > (uint64_t)INT64_MAX - (uint64_t)(low < 0 ? 0 : low)) return -1;
+    high = low + (int64_t)(total - 1);
+    if (ctx->size < width) return 0;
+    if (low < 0) low = 0;
+    end = (int64_t)(ctx->size - width);
+    if (high > end) high = end;
+    if (low > high) return 0;
+    return xx_data_find_bytes_buffer_optimize(ctx->data, (size_t)high + width, (size_t)low,
+                                              pattern, width, NULL) >= 0;
+}
+
+static yx_value yx_eval_range_core(const yx_node *node, const yx_eval_context *ctx,
+    size_t current_pattern, const yx_binding *bindings, uint64_t first,
+    uint64_t total, uint64_t minimum, const yx_loop_program *program)
+{
+    bool constant_truth;
+    unsigned body_polls;
+    if (yx_loop_prove_range(node, program, ctx, bindings, first, total, &constant_truth))
+        return yx_eval_constant_range(ctx, total, minimum, constant_truth, 0);
+    if (yx_loop_range_constant(node, program, ctx, first, total,
+                               &constant_truth, &body_polls))
+        return yx_eval_constant_range(ctx, total, minimum, constant_truth, body_polls);
+    if (minimum <= 1) {
+        int found = yx_eval_range_search(node, ctx, first, total);
+        if (found >= 0) return yx_defined(minimum == 0 ? !found : found);
+    }
+    yx_binding binding = {node->name, {0}, bindings};
+    uint64_t matched = 0;
+    binding.value = yx_defined(0);
+    binding.range_integer = true;
+    for (uint64_t done = 0; done < total; ++done) {
+        bool truth;
+        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+        if (program) truth = yx_loop_program_truth(program, ctx, first + done, bindings, current_pattern);
+        else {
+            binding.value.value = first + done;
+            truth = yx_truth(yx_eval(node->body, ctx, current_pattern, &binding));
+        }
+        if (truth) ++matched;
+        if (minimum == 0 && matched != 0) return yx_defined(0);
+        if (minimum != 0 && matched >= minimum) return yx_defined(1);
+        if (minimum != 0 && matched + (total - done - 1) < minimum)
+            return yx_defined(0);
+    }
+    return yx_defined(minimum == 0 ? matched == 0 : matched >= minimum);
+}
+
+/* Range setup belongs outside the large module-array evaluator frame too.
+ * Dispatch here directly from yx_eval for N_FOR_IN && range_loop, so this
+ * entry poll replaces the ordinary yx_eval_uncached node poll. */
+static yx_value yx_eval_range(const yx_node *node, const yx_eval_context *ctx,
+    size_t current_pattern, const yx_binding *bindings)
+{
+    yx_value low, high, quantity;
+    int64_t first, last;
+    uint64_t total, minimum;
+    const yx_loop_program *program;
+    if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+    /* The iterator is not in scope in its own bounds or quantifier. */
+    low = yx_eval(node->b, ctx, current_pattern, bindings);
+    high = yx_eval(node->c, ctx, current_pattern, bindings);
+    if (!low.defined || !high.defined ||
+        low.type != V_INTEGER || high.type != V_INTEGER) return yx_defined(0);
+    first = (int64_t)low.value;
+    last = (int64_t)high.value;
+    if (first > last || (low.is_unsigned && low.value > INT64_MAX) ||
+        (high.is_unsigned && high.value > INT64_MAX)) return yx_defined(0);
+    total = (uint64_t)last - (uint64_t)first;
+    total = total >= (uint64_t)INT64_MAX ? INT64_MAX : total + 1;
+    switch (node->quantifier) {
+    case Q_ANY: minimum = 1; break;
+    case Q_ALL: minimum = total; break;
+    case Q_NONE: minimum = 0; break;
+    case Q_NUMBER: case Q_PERCENT:
+        quantity = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!quantity.defined || quantity.type != V_INTEGER ||
+            (!quantity.is_unsigned && (int64_t)quantity.value < 0))
+            return yx_defined(0);
+        if (node->quantifier == Q_PERCENT) {
+            if (quantity.value > 100) return yx_defined(0);
+            minimum = quantity.value * (total / 100) +
+                      (quantity.value * (total % 100) + 99) / 100;
+        } else minimum = quantity.value;
+        break;
+    default: return yx_undefined();
+    }
+    if (minimum > total) return yx_defined(0);
+    program = yx_loop_program_get(node, ctx, current_pattern, bindings);
+    return yx_eval_range_core(node, ctx, current_pattern, bindings,
+                              (uint64_t)first, total, minimum, program);
+}
+
+static yx_value yx_eval_for_in(const yx_node *node, const yx_eval_context *ctx,
+                               size_t current_pattern,
+                               const yx_binding *bindings)
+{
+    yx_node resolved_loop, resolved_array, resolved_keys[3] = {{0}};
+    if (node->array_loop && node->b &&
+        yx_eval_module_alias(node->b, ctx, bindings, &resolved_array,
+                             resolved_keys)) {
+        resolved_loop = *node;
+        resolved_loop.b = &resolved_array;
+        node = &resolved_loop;
+    }
+    yx_binding binding = {node->name, {0}, bindings};
+    if (node->array_loop && node->b && yx_eval_module_output(ctx, node->b->name)) {
+        yx_value collection = yx_eval(node->b, ctx, current_pattern, bindings);
+        if (!collection.defined || !collection.vt_path || collection.vt_key_count >= 3)
+            return yx_undefined();
+        if (!collection.value) return yx_defined(0);
+        yx_node item = {0}, indices[3] = {{0}};
+        size_t length = strlen(collection.vt_path);
+        item.name = yx_eval_alloc_items(ctx, length + 7, 1);
+        if (!item.name) return yx_undefined();
+        memcpy(item.name, collection.vt_path, length);
+        memcpy(item.name + length, ".value", 7);
+        unsigned count = collection.vt_key_count + 1;
+        item.kind = count == 3 ? N_MODULE_TRIPLE_INDEXED_FIELD :
+                    count == 2 ? N_MODULE_NESTED_INDEXED_FIELD : N_MODULE_INDEXED_FIELD;
+        item.implicit_value = true;
+        for (unsigned i = 0; i < count; ++i) {
+            indices[i].kind = N_INTEGER;
+            indices[i].number = collection.vt_keys[i].number;
+            if (i < collection.vt_key_count && collection.vt_keys[i].is_string) {
+                indices[i].kind = N_STRING;
+                indices[i].name = (char *)collection.vt_keys[i].string;
+                indices[i].string_length = collection.vt_keys[i].length;
+            }
+        }
+        item.a = &indices[0]; item.b = &indices[1]; item.c = &indices[2];
+        uint64_t matched = 0;
+        for (uint64_t i = 0; i < collection.value; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+            indices[count - 1].number = i;
+            binding.value = yx_eval(&item, ctx, current_pattern, bindings);
+            if (yx_truth(yx_eval(node->body, ctx, current_pattern, &binding))) ++matched;
+        }
+        return yx_quantify(node, ctx, matched, collection.value, current_pattern, bindings);
+    }
+    yx_eval_array_view array = {0};
+    yx_dotnet_array_kind dotnet_array = YX_DOTNET_ARRAY_NONE;
+    const yx_module_array_desc *module_array =
+        node->array_loop ? yx_module_array_node(node->b, false) : NULL;
+    uint64_t module_indices[3] = {0};
+    bool dotnet_nested_array = false;
+    const yx_dotnet_result *dotnet = NULL;
+    size_t dotnet_class_index = 0;
+    yx_dotnet_method dotnet_method_info;
+    bool need_class_methods = false, need_class_bases = false;
+    bool need_class_generics = false;
+    uint64_t total, matched = 0, minimum;
+    yx_value quantity;
+    int64_t first = 0, last = 0;
+    if (node->array_loop && node->b) {
+        if (node->b->kind == N_MODULE_FIELD)
+            dotnet_array = yx_dotnet_array_from_name(node->b->name);
+        else if (node->b->kind == N_MODULE_INDEXED_FIELD) {
+            if (strcmp(node->b->name, "dotnet.classes.methods") == 0)
+                dotnet_array = YX_DOTNET_ARRAY_CLASS_METHODS;
+            else if (strcmp(node->b->name, "dotnet.classes.base_types") == 0)
+                dotnet_array = YX_DOTNET_ARRAY_CLASS_BASE_TYPES;
+            else if (strcmp(node->b->name,
+                            "dotnet.classes.generic_parameters") == 0)
+                dotnet_array = YX_DOTNET_ARRAY_CLASS_GENERIC_PARAMETERS;
+        } else if (node->b->kind == N_MODULE_NESTED_INDEXED_FIELD) {
+            if (strcmp(node->b->name,
+                       "dotnet.classes.methods.generic_parameters") == 0)
+                dotnet_array = YX_DOTNET_ARRAY_METHOD_GENERIC_PARAMETERS;
+            else if (strcmp(node->b->name,
+                            "dotnet.classes.methods.parameters") == 0)
+                dotnet_array = YX_DOTNET_ARRAY_METHOD_PARAMETERS;
+        }
+        if (node->b->kind == N_MODULE_FIELD &&
+            dotnet_array == YX_DOTNET_ARRAY_NONE) {
+            const char *dot = strchr(node->b->name, '.');
+            if (dot && (strcmp(dot + 1, "methods") == 0 ||
+                        strcmp(dot + 1, "base_types") == 0 ||
+                        strcmp(dot + 1, "generic_parameters") == 0)) {
+                size_t root_length = (size_t)(dot - node->b->name);
+                for (const yx_binding *at = bindings; at; at = at->parent) {
+                    if (strlen(at->name) == root_length &&
+                        memcmp(at->name, node->b->name, root_length) == 0 &&
+                        at->value.type == V_STRUCT && at->value.object &&
+                        yx_global_object_field(at->value.object,
+                                                "__dotnet_class_index")) {
+                        dotnet_nested_array = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (node->b->kind == N_MODULE_FIELD &&
+            dotnet_array == YX_DOTNET_ARRAY_NONE) {
+            const char *dot = strchr(node->b->name, '.');
+            if (dot && (strcmp(dot + 1, "parameters") == 0 ||
+                        strcmp(dot + 1, "generic_parameters") == 0)) {
+                size_t root_length = (size_t)(dot - node->b->name);
+                for (const yx_binding *at = bindings; at; at = at->parent) {
+                    if (strlen(at->name) == root_length &&
+                        memcmp(at->name, node->b->name, root_length) == 0 &&
+                        at->value.type == V_STRUCT && at->value.object &&
+                        yx_global_object_field(at->value.object,
+                                                "__dotnet_method_index")) {
+                        dotnet_nested_array = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (dotnet_array == YX_DOTNET_ARRAY_CLASSES) {
+        need_class_methods = yx_node_uses_class_array(
+            node->body, node->name, "methods");
+        need_class_bases = yx_node_uses_class_array(
+            node->body, node->name, "base_types");
+        need_class_generics = yx_node_uses_class_array(
+            node->body, node->name, "generic_parameters");
+    }
+    if (node->map_loop) {
+        yx_pe_version_key_set set = {0};
+        yx_value map = yx_eval(node->b, ctx, current_pattern, bindings);
+        yx_binding value_binding = {node->set_names[0], {0}, &binding};
+        yx_value result;
+        if (!map.defined || map.type != V_MAP) return yx_undefined();
+        if (map.test_proto_map) {
+            const yx_tp_native_map *native = map.test_proto_map;
+            binding.value = native->key_type == YX_VT_STRING ?
+                yx_defined_string(native->string_key, strlen(native->string_key)) :
+                yx_defined((uint64_t)native->integer_key);
+            value_binding.value = yx_test_proto_native_value(native->value_type,
+                                                             native->value);
+            matched = yx_truth(yx_eval(node->body, ctx, current_pattern,
+                                       &value_binding)) ? 1 : 0;
+            return yx_quantify(node, ctx, matched, 1, current_pattern, bindings);
+        }
+        if (map.module_map_origin) {
+            if (!map.value) return yx_defined(0);
+            if (map.vt_key_count >= 3) return yx_undefined();
+            yx_node source = {0};
+            size_t path_length = strlen(map.vt_path);
+            source.name = yx_eval_alloc_items(ctx, path_length + 7, 1);
+            if (!source.name) return yx_undefined();
+            memcpy(source.name, map.vt_path, path_length);
+            memcpy(source.name + path_length, ".value", 7);
+            source.implicit_value = true;
+            for (size_t i = 0; i < map.value; ++i) {
+                yx_mo_data key, value;
+                yx_vt_key keys[3] = {{0}};
+                if (yx_scan_deadline_poll(ctx->deadline) ||
+                    !yx_mo_map_item(map.module_map, i, &key, &value))
+                    return yx_undefined();
+                memcpy(keys, map.vt_keys, map.vt_key_count * sizeof(*keys));
+                keys[map.vt_key_count] = (yx_vt_key){key.string, key.length,
+                    key.number, key.type == YX_MO_DATA_STRING};
+                binding.value = yx_eval_output_data(&source, &key, NULL, 0);
+                value_binding.value = yx_eval_output_data(&source, &value, keys,
+                                                          map.vt_key_count + 1);
+                if (yx_truth(yx_eval(node->body, ctx, current_pattern,
+                                     &value_binding))) ++matched;
+            }
+            return yx_quantify(node, ctx, matched, (size_t)map.value,
+                               current_pattern, bindings);
+        }
+        if (map.vt_map_origin) {
+            if (!map.value) return yx_defined(0);
+            for (size_t i = 0; i < map.value; ++i) {
+                const char *key, *value;
+                size_t key_length, value_length;
+                if (yx_scan_deadline_poll(ctx->deadline) ||
+                    !yx_vt_map_item(map.vt_map, i, &key, &key_length,
+                                    &value, &value_length)) return yx_undefined();
+                binding.value = yx_defined_string(key, key_length);
+                value_binding.value = yx_defined_string(value, value_length);
+                if (yx_truth(yx_eval(node->body, ctx, current_pattern,
+                                     &value_binding))) ++matched;
+            }
+            return yx_quantify(node, ctx, matched, (size_t)map.value,
+                               current_pattern, bindings);
+        }
+        (void)yx_eval_pe_visit_versions(ctx,
+                                        yx_pe_version_key_count_visit, &set);
+        if (set.failed) {
+            yx_pe_version_key_set_free(&set);
+            return yx_undefined();
+        }
+        if (set.count == 0) {
+            yx_pe_version_key_set_free(&set);
+            return yx_defined(0);
+        }
+        for (size_t i = 0; i < set.count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) {
+                yx_pe_version_key_set_free(&set);
+                return yx_undefined();
+            }
+            binding.value = yx_defined_string(set.keys[i], set.lengths[i]);
+            value_binding.value = yx_eval_pe_version(
+                ctx, 0, set.keys[i], set.lengths[i], "value");
+            if (yx_truth(yx_eval(node->body, ctx, current_pattern,
+                                 &value_binding)))
+                ++matched;
+        }
+        result = yx_quantify(node, ctx, matched, set.count,
+                             current_pattern, bindings);
+        yx_pe_version_key_set_free(&set);
+        return result;
+    }
+    if (node->array_loop) {
+        if (dotnet_array != YX_DOTNET_ARRAY_NONE) {
+            dotnet = yx_eval_dotnet_result(ctx);
+            if (!dotnet || !dotnet->is_dotnet) return yx_undefined();
+            if (dotnet_array == YX_DOTNET_ARRAY_CLASS_METHODS ||
+                dotnet_array == YX_DOTNET_ARRAY_CLASS_BASE_TYPES ||
+                dotnet_array == YX_DOTNET_ARRAY_CLASS_GENERIC_PARAMETERS) {
+                yx_dotnet_class class_info;
+                yx_value index = yx_eval(node->b->a, ctx,
+                                          current_pattern, bindings);
+                if (!index.defined || index.type != V_INTEGER ||
+                    (int64_t)index.value < 0 ||
+                    !yx_dotnet_class_at(dotnet, (size_t)index.value,
+                                         NULL, 0, &class_info))
+                    return yx_undefined();
+                dotnet_class_index = (size_t)index.value;
+                total = dotnet_array == YX_DOTNET_ARRAY_CLASS_METHODS ?
+                    yx_dotnet_class_method_count(dotnet, dotnet_class_index) :
+                    dotnet_array == YX_DOTNET_ARRAY_CLASS_BASE_TYPES ?
+                    class_info.number_of_base_types :
+                    class_info.number_of_generic_parameters;
+            } else if (dotnet_array ==
+                           YX_DOTNET_ARRAY_METHOD_GENERIC_PARAMETERS ||
+                       dotnet_array == YX_DOTNET_ARRAY_METHOD_PARAMETERS) {
+                yx_value class_index = yx_eval(node->b->a, ctx,
+                                                current_pattern, bindings);
+                yx_value method_index = yx_eval(node->b->b, ctx,
+                                                 current_pattern, bindings);
+                if (!class_index.defined || !method_index.defined ||
+                    class_index.type != V_INTEGER ||
+                    method_index.type != V_INTEGER ||
+                    (int64_t)class_index.value < 0 ||
+                    (int64_t)method_index.value < 0 ||
+                    !yx_dotnet_class_method_at(
+                        dotnet, (size_t)class_index.value,
+                        (size_t)method_index.value, NULL, 0,
+                        &dotnet_method_info))
+                    return yx_undefined();
+                total = dotnet_array ==
+                    YX_DOTNET_ARRAY_METHOD_GENERIC_PARAMETERS ?
+                    dotnet_method_info.number_of_generic_parameters :
+                    dotnet_method_info.number_of_parameters;
+            } else switch (dotnet_array) {
+            case YX_DOTNET_ARRAY_GUIDS: total = dotnet->guid_count; break;
+            case YX_DOTNET_ARRAY_USER_STRINGS:
+                total = dotnet->user_string_count; break;
+            case YX_DOTNET_ARRAY_CONSTANTS:
+                total = dotnet->constant_count; break;
+            case YX_DOTNET_ARRAY_MODULEREFS:
+                total = dotnet->module_ref_count; break;
+            case YX_DOTNET_ARRAY_FIELD_OFFSETS:
+                total = dotnet->field_offset_count; break;
+            case YX_DOTNET_ARRAY_STREAMS:
+                total = dotnet->stream_count; break;
+            case YX_DOTNET_ARRAY_CLASSES:
+                total = dotnet->class_count; break;
+            default: return yx_undefined();
+            }
+        } else if (module_array) {
+            const yx_node *indices[] = {node->b->a, node->b->b, node->b->c};
+            for (unsigned i = 0; i < module_array->parent_indices; ++i) {
+                yx_value index = yx_eval(indices[i], ctx, current_pattern,
+                                          bindings);
+                if (!index.defined || index.type != V_INTEGER ||
+                    (int64_t)index.value < 0) return yx_undefined();
+                module_indices[i] = index.value;
+            }
+            yx_value length = yx_module_access(module_array->path, "len",
+                                                module_indices,
+                                                module_array->parent_indices,
+                                                true, ctx);
+            if (!length.defined || length.type != V_INTEGER)
+                return yx_undefined();
+            total = length.value;
+        } else {
+            if (!yx_eval_array_view_from_global(node->b, ctx,
+                                                current_pattern,
+                                                bindings, &array))
+                return yx_undefined();
+            total = array.count;
+        }
+    } else if (node->range_loop) {
+        yx_value low = yx_eval(node->b, ctx, current_pattern, bindings);
+        yx_value high = yx_eval(node->c, ctx, current_pattern, bindings);
+        if (!low.defined || !high.defined ||
+            low.type != V_INTEGER || high.type != V_INTEGER)
+            return yx_defined(0);
+        first = (int64_t)low.value;
+        last = (int64_t)high.value;
+        /* Upstream evaluates a reversed runtime range as false even for
+           `all` and `none`, rather than applying an empty-set quantifier. */
+        if (first > last || (low.is_unsigned && low.value > INT64_MAX) ||
+            (high.is_unsigned && high.value > INT64_MAX)) return yx_defined(0);
+        total = (uint64_t)last - (uint64_t)first;
+        total = total >= (uint64_t)INT64_MAX ? INT64_MAX : total + 1;
+    } else total = (uint64_t)node->item_count;
+    if (total == 0)
+        return yx_defined(dotnet_array == YX_DOTNET_ARRAY_NONE &&
+                          !module_array && !array.module_origin &&
+                          !dotnet_nested_array &&
+                          node->quantifier == Q_NONE);
+
+    switch (node->quantifier) {
+    case Q_ANY: minimum = 1; break;
+    case Q_ALL: minimum = total; break;
+    case Q_NONE: minimum = 0; break;
+    case Q_NUMBER: case Q_PERCENT:
+        quantity = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!quantity.defined || quantity.type != V_INTEGER ||
+            (!quantity.is_unsigned && (int64_t)quantity.value < 0)) return yx_defined(0);
+        if (node->quantifier == Q_PERCENT) {
+            if (quantity.value > 100) return yx_defined(0);
+            minimum = quantity.value * (total / 100) +
+                      (quantity.value * (total % 100) + 99) / 100;
+        } else minimum = quantity.value;
+        break;
+    default: return yx_undefined();
+    }
+    if (minimum > total) return yx_defined(0);
+    for (uint64_t done = 0; done < total; ++done) {
+        yx_global_field stream_fields[3];
+        yx_global_object stream_object = {stream_fields, 3};
+        yx_global_field class_fields[14];
+        yx_global_object class_object = {class_fields, 14};
+        yx_global_array base_types_array = {YX_GLOBAL_STR, NULL, 0};
+        yx_global_array generic_parameters_array = {YX_GLOBAL_STR, NULL, 0};
+        yx_global_array methods_array = {YX_GLOBAL_STRUCT, NULL, 0};
+        yx_global_field method_fields[12];
+        yx_global_object method_object = {method_fields, 12};
+        yx_global_field parameter_fields[2];
+        yx_global_object parameter_object = {parameter_fields, 2};
+        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+        if (node->array_loop) {
+            if (dotnet_array == YX_DOTNET_ARRAY_NONE) {
+                if (module_array)
+                    binding.value = yx_module_array_item(module_array,
+                                                          module_indices,
+                                                          done, ctx);
+                else {
+                    binding.value = yx_eval_global_array_item(
+                        array.element_type, array.items, array.count, done);
+                    binding.value.module_origin = array.module_origin;
+                }
+            } else if (dotnet_array == YX_DOTNET_ARRAY_GUIDS) {
+                char *guid = yx_eval_alloc_string(ctx, 36);
+                binding.value = guid && yx_dotnet_guid_at(
+                    ctx->data, ctx->size, dotnet, (size_t)done, guid) ?
+                    yx_defined_string(guid, 36) : yx_undefined();
+            } else if (dotnet_array == YX_DOTNET_ARRAY_STREAMS) {
+                const yx_dotnet_stream *stream = &dotnet->streams[done];
+                stream_fields[0] = (yx_global_field){
+                    .name = "name", .type = YX_GLOBAL_STR,
+                    .value.string = {(char *)stream->name,
+                                     stream->name_length}
+                };
+                stream_fields[1] = (yx_global_field){
+                    .name = "offset", .type = YX_GLOBAL_INT,
+                    .value.integer = stream->offset
+                };
+                stream_fields[2] = (yx_global_field){
+                    .name = "size", .type = YX_GLOBAL_INT,
+                    .value.integer = stream->size
+                };
+                binding.value = yx_defined_struct(&stream_object);
+            } else if (dotnet_array == YX_DOTNET_ARRAY_CLASS_BASE_TYPES) {
+                binding.value = yx_dotnet_base_type_value_at(
+                    ctx, dotnet, dotnet_class_index, (size_t)done);
+            } else if (dotnet_array ==
+                       YX_DOTNET_ARRAY_CLASS_GENERIC_PARAMETERS) {
+                const uint8_t *name;
+                size_t length;
+                binding.value = yx_dotnet_class_generic_parameter_at(
+                    dotnet, dotnet_class_index, (size_t)done,
+                    &name, &length) ?
+                    yx_defined_string((const char *)name, length) :
+                    yx_undefined();
+            } else if (dotnet_array == YX_DOTNET_ARRAY_CLASS_METHODS) {
+                binding.value = yx_dotnet_method_fields_at(
+                    ctx, dotnet, dotnet_class_index, (size_t)done,
+                    method_fields) ? yx_defined_struct(&method_object) :
+                                     yx_undefined();
+            } else if (dotnet_array ==
+                       YX_DOTNET_ARRAY_METHOD_GENERIC_PARAMETERS) {
+                const uint8_t *name;
+                size_t length;
+                binding.value = yx_dotnet_method_generic_parameter_at(
+                    dotnet, &dotnet_method_info, (size_t)done,
+                    &name, &length) ?
+                    yx_defined_string((const char *)name, length) :
+                    yx_undefined();
+            } else if (dotnet_array == YX_DOTNET_ARRAY_METHOD_PARAMETERS) {
+                binding.value = yx_dotnet_parameter_fields_at(
+                    ctx, dotnet, &dotnet_method_info, (size_t)done,
+                    parameter_fields) ?
+                    yx_defined_struct(&parameter_object) :
+                    yx_undefined();
+            } else if (dotnet_array == YX_DOTNET_ARRAY_CLASSES) {
+                yx_dotnet_class info;
+                char *fullname = NULL;
+                if (!yx_dotnet_class_at(dotnet, (size_t)done, NULL, 0,
+                                         &info)) {
+                    binding.value = yx_undefined();
+                } else {
+                    if (info.required_fullname_capacity) {
+                        fullname = yx_eval_alloc_string(
+                            ctx, info.required_fullname_capacity - 1);
+                        if (!fullname || !yx_dotnet_class_at(
+                                dotnet, (size_t)done, fullname,
+                                info.required_fullname_capacity, &info))
+                            return yx_undefined();
+                    }
+                    class_fields[0] = (yx_global_field){
+                        .name = "fullname", .type = YX_GLOBAL_STR,
+                        .value.string = {(char *)info.fullname,
+                                         info.fullname_length}
+                    };
+                    class_fields[1] = (yx_global_field){
+                        .name = "name", .type = YX_GLOBAL_STR,
+                        .value.string = {(char *)info.name, info.name_length}
+                    };
+                    class_fields[2] = (yx_global_field){
+                        .name = "namespace", .type = YX_GLOBAL_STR,
+                        .value.string = {(char *)info.namespace_name,
+                                         info.namespace_length}
+                    };
+                    class_fields[3] = (yx_global_field){
+                        .name = "visibility", .type = YX_GLOBAL_STR,
+                        .value.string = {(char *)info.visibility,
+                                         strlen(info.visibility)}
+                    };
+                    class_fields[4] = (yx_global_field){
+                        .name = "type", .type = YX_GLOBAL_STR,
+                        .value.string = {(char *)info.type,
+                                         strlen(info.type)}
+                    };
+                    class_fields[5] = (yx_global_field){
+                        .name = "abstract", .type = YX_GLOBAL_BOOL,
+                        .value.boolean = info.is_abstract
+                    };
+                    class_fields[6] = (yx_global_field){
+                        .name = "sealed", .type = YX_GLOBAL_BOOL,
+                        .value.boolean = info.is_sealed
+                    };
+                    class_fields[7] = (yx_global_field){
+                        .name = "number_of_base_types", .type = YX_GLOBAL_INT,
+                        .value.integer = (int64_t)info.number_of_base_types
+                    };
+                    class_fields[8] = (yx_global_field){
+                        .name = "number_of_generic_parameters",
+                        .type = YX_GLOBAL_INT,
+                        .value.integer =
+                            (int64_t)info.number_of_generic_parameters
+                    };
+                    class_fields[9] = (yx_global_field){
+                        .name = "number_of_methods", .type = YX_GLOBAL_INT,
+                        .value.integer = (int64_t)yx_dotnet_class_method_count(
+                            dotnet, (size_t)done)
+                    };
+                    base_types_array.count = info.number_of_base_types;
+                    if (need_class_bases && base_types_array.count) {
+                        base_types_array.items = yx_eval_alloc_items(
+                            ctx, base_types_array.count,
+                            sizeof(*base_types_array.items));
+                        if (!base_types_array.items) return yx_undefined();
+                        for (size_t i = 0; i < base_types_array.count; ++i) {
+                            yx_value base = yx_dotnet_base_type_value_at(
+                                ctx, dotnet, (size_t)done, i);
+                            if (!base.defined) return yx_undefined();
+                            base_types_array.items[i].string =
+                                (yx_global_string){(char *)base.string,
+                                                   base.string_length};
+                        }
+                    }
+                    generic_parameters_array.count =
+                        info.number_of_generic_parameters;
+                    if (need_class_generics &&
+                        generic_parameters_array.count) {
+                        generic_parameters_array.items = yx_eval_alloc_items(
+                            ctx, generic_parameters_array.count,
+                            sizeof(*generic_parameters_array.items));
+                        if (!generic_parameters_array.items)
+                            return yx_undefined();
+                        for (size_t i = 0;
+                             i < generic_parameters_array.count; ++i) {
+                            const uint8_t *name;
+                            size_t length;
+                            if (!yx_dotnet_class_generic_parameter_at(
+                                    dotnet, (size_t)done, i,
+                                    &name, &length))
+                                return yx_undefined();
+                            generic_parameters_array.items[i].string =
+                                (yx_global_string){(char *)name, length};
+                        }
+                    }
+                    methods_array.count = (size_t)class_fields[9].value.integer;
+                    if (need_class_methods && methods_array.count) {
+                        yx_global_object *objects;
+                        yx_global_field *fields;
+                        methods_array.items = yx_eval_alloc_items(
+                            ctx, methods_array.count,
+                            sizeof(*methods_array.items));
+                        objects = yx_eval_alloc_items(ctx,
+                            methods_array.count, sizeof(*objects));
+                        if (methods_array.count > SIZE_MAX / 12)
+                            return yx_undefined();
+                        fields = yx_eval_alloc_items(ctx,
+                            methods_array.count * 12, sizeof(*fields));
+                        if (!methods_array.items || !objects || !fields)
+                            return yx_undefined();
+                        for (size_t i = 0; i < methods_array.count; ++i) {
+                            objects[i] = (yx_global_object){fields + i * 12, 12};
+                            if (!yx_dotnet_method_fields_at(
+                                    ctx, dotnet, (size_t)done, i,
+                                    fields + i * 12))
+                                return yx_undefined();
+                            methods_array.items[i].object = &objects[i];
+                        }
+                    }
+                    class_fields[10] = (yx_global_field){
+                        .name = "methods", .type = YX_GLOBAL_ARRAY,
+                        .value.array = &methods_array
+                    };
+                    class_fields[11] = (yx_global_field){
+                        .name = "base_types", .type = YX_GLOBAL_ARRAY,
+                        .value.array = &base_types_array
+                    };
+                    class_fields[12] = (yx_global_field){
+                        .name = "generic_parameters", .type = YX_GLOBAL_ARRAY,
+                        .value.array = &generic_parameters_array
+                    };
+                    class_fields[13] = (yx_global_field){
+                        .name = "__dotnet_class_index", .type = YX_GLOBAL_INT,
+                        .value.integer = (int64_t)done
+                    };
+                    binding.value = yx_defined_struct(&class_object);
+                }
+            } else if (dotnet_array == YX_DOTNET_ARRAY_FIELD_OFFSETS) {
+                uint32_t offset;
+                binding.value = yx_dotnet_field_offset_at(
+                    ctx->data, ctx->size, dotnet, (size_t)done, &offset) ?
+                    yx_defined(offset) : yx_undefined();
+            } else {
+                const uint8_t *bytes = NULL;
+                size_t length = 0;
+                bool ok = dotnet_array == YX_DOTNET_ARRAY_USER_STRINGS ?
+                    yx_dotnet_user_string_at(ctx->data, ctx->size, dotnet,
+                                             (size_t)done, &bytes, &length) :
+                    dotnet_array == YX_DOTNET_ARRAY_CONSTANTS ?
+                    yx_dotnet_constant_at(dotnet, (size_t)done,
+                                          &bytes, &length) :
+                    yx_dotnet_module_ref_at(dotnet, (size_t)done,
+                                            &bytes, &length);
+                binding.value = ok ?
+                    yx_defined_string((const char *)bytes, length) :
+                    yx_undefined();
+            }
+        } else
+            binding.value = yx_eval(node->items[done], ctx, current_pattern,
+                                    bindings);
+        if (!node->range_loop && !node->array_loop && binding.value.type == V_INTEGER)
+            binding.value.is_unsigned = node->is_unsigned;
+        if (yx_truth(yx_eval(node->body, ctx, current_pattern, &binding)))
+            ++matched;
+        if (minimum == 0 && matched != 0) return yx_defined(0);
+        if (minimum != 0 && matched >= minimum) return yx_defined(1);
+        if (minimum != 0 && matched + (total - done - 1) < minimum)
+            return yx_defined(0);
+    }
+    return yx_defined(minimum == 0 ? matched == 0 : matched >= minimum);
+}
+
+static yx_value yx_eval_with(const yx_node *node, const yx_eval_context *ctx,
+                             size_t current_pattern, const yx_binding *bindings)
+{
+    yx_binding *locals;
+    const yx_binding *current = bindings;
+    yx_value result;
+    locals = calloc(node->item_count ? node->item_count : 1, sizeof(*locals));
+    if (!locals) return yx_undefined();
+    for (size_t i = 0; i < node->item_count; ++i) {
+        locals[i].name = node->set_names[i];
+        locals[i].value = yx_eval(node->items[i], ctx, current_pattern, current);
+        locals[i].parent = current;
+        current = &locals[i];
+    }
+    result = yx_eval(node->body, ctx, current_pattern, current);
+    free(locals);
+    return result;
+}
+
+#ifndef XXYARA_NATIVE_REGEX
+static int yx_condition_deadline_callout(pcre2_callout_block *block, void *data)
+{
+    (void)block;
+    return yx_scan_deadline_poll((yx_scan_deadline *)data) ?
+           PCRE2_ERROR_CALLOUT : 0;
+}
+#endif
+
+static int yx_condition_regex_scan(pcre2_code *code, PCRE2_SPTR subject,
+                                    size_t length, pcre2_match_data *matches,
+                                    yx_scan_deadline *deadline)
+{
+#ifdef XXYARA_NATIVE_REGEX
+    /* All callers need only a Boolean result: matches, PE and cuckoo queries.
+     * The immutable program was compiled with the node, never per item. */
+    (void)matches;
+    int found = yx_re_code_search(code, subject, length, deadline);
+    return found == 1 ? 1 : found == 0 ? PCRE2_ERROR_NOMATCH :
+        deadline && deadline->expired ? PCRE2_ERROR_CALLOUT : PCRE2_ERROR_NOMEMORY;
+#else
+    pcre2_match_context *context = NULL;
+    if (deadline && deadline->enabled) {
+        if (yx_scan_deadline_reached(deadline)) return PCRE2_ERROR_CALLOUT;
+        context = pcre2_match_context_create(NULL);
+        if (!context) return PCRE2_ERROR_NOMEMORY;
+        pcre2_set_callout(context, yx_condition_deadline_callout, deadline);
+    }
+    int status = pcre2_match(code, subject, length, 0, 0, matches, context);
+    /* YARA-X's regex engine does not backtrack, so nested quantifiers never
+     * exhaust a limit there. `matches` only needs whether some match
+     * exists, which the DFA matcher answers without backtracking. */
+    for (size_t words = 4096; (status == PCRE2_ERROR_MATCHLIMIT || status == PCRE2_ERROR_DEPTHLIMIT ||
+                               status == PCRE2_ERROR_HEAPLIMIT || status == PCRE2_ERROR_DFA_WSSIZE) &&
+                              words <= ((size_t)1 << 24); words *= 4) {
+        int *workspace = malloc(words * sizeof(*workspace));
+        if (!workspace) { status = PCRE2_ERROR_NOMEMORY; break; }
+        status = pcre2_dfa_match(code, subject, length, 0, 0, matches, context, workspace, words);
+        free(workspace);
+        if (status == 0) status = 1;
+    }
+    pcre2_match_context_free(context);
+    return status;
+#endif
+}
+
+static yx_value yx_eval_matches(const yx_node *node, const yx_eval_context *ctx,
+                                size_t current_pattern,
+                                const yx_binding *bindings)
+{
+    yx_value input = yx_eval(node->a, ctx, current_pattern, bindings);
+    if (!input.defined || input.type != V_STRING || !node->compiled_regex)
+        return yx_undefined();
+#ifdef XXYARA_NATIVE_REGEX
+    int status = yx_condition_regex_scan((pcre2_code *)node->compiled_regex,
+        (PCRE2_SPTR)input.string, input.string_length, NULL, ctx->deadline);
+#else
+    pcre2_match_data *matches = pcre2_match_data_create_from_pattern(
+        (pcre2_code *)node->compiled_regex, NULL);
+    int status;
+    if (!matches) return yx_undefined();
+    status = yx_condition_regex_scan((pcre2_code *)node->compiled_regex,
+        (PCRE2_SPTR)input.string, input.string_length, matches, ctx->deadline);
+    pcre2_match_data_free(matches);
+#endif
+    if (status == PCRE2_ERROR_NOMATCH) return yx_defined(0);
+    return status < 0 ? yx_undefined() : yx_defined(1);
+}
+
+/* The entropy formulas live in xxfclib (xx_entropy_log2_counts, the
+ * YARA-X -p*log2(p) form summed in byte order); the range functions below
+ * only resolve arguments and cache distributions. */
+static bool yx_math_range(const yx_eval_context *ctx, yx_value offset,
+                          yx_value length, const uint8_t **data,
+                          size_t *data_length)
+{
+    size_t start, size;
+    if (ctx->block_mode || offset.type != V_INTEGER || length.type != V_INTEGER ||
+        (int64_t)offset.value < 0 || (int64_t)length.value < 0 ||
+        offset.value > ctx->size)
+        return false;
+    start = (size_t)offset.value;
+    size = (size_t)length.value;
+    if (size > ctx->size - start) size = ctx->size - start;
+    *data = size ? ctx->data + start : NULL;
+    *data_length = size;
+    return true;
+}
+
+static uint64_t yx_math_count_byte(const uint8_t *data, size_t length,
+                                   uint8_t byte)
+{
+    return xx_bytestats_count(data, length, byte);
+}
+
+static void yx_math_byte_distribution(const uint8_t *data, size_t length,
+                                       uint64_t distribution[256])
+{
+    xx_bytestats_histogram(data, length, distribution);
+}
+
+typedef struct {
+    size_t start, end;
+    uint64_t distribution[256];
+} yx_math_distribution_cache_entry;
+static _Thread_local yx_math_distribution_cache_entry yx_math_distribution_cache[8];
+static _Thread_local size_t yx_math_distribution_cache_count;
+
+/* The upstream cache is keyed by the clamped range, retains its first eight
+ * large ranges, and is reset by native module execution. */
+static void yx_math_distribution_for_range(const uint8_t *data, size_t start,
+                                            size_t length, uint64_t distribution[256])
+{
+    if (length >= 4096) {
+        for (size_t i = 0; i < yx_math_distribution_cache_count; ++i) {
+            const yx_math_distribution_cache_entry *entry = &yx_math_distribution_cache[i];
+            if (entry->start == start && entry->end == start + length) {
+                memcpy(distribution, entry->distribution, sizeof(entry->distribution));
+                return;
+            }
+        }
+    }
+    yx_math_byte_distribution(data, length, distribution);
+    if (length >= 4096 && yx_math_distribution_cache_count < 8) {
+        yx_math_distribution_cache_entry *entry =
+            &yx_math_distribution_cache[yx_math_distribution_cache_count++];
+        entry->start = start;
+        entry->end = start + length;
+        memcpy(entry->distribution, distribution, sizeof(entry->distribution));
+    }
+}
+
+void yx_condition_module_cache_reset(const char *module)
+{
+    if (!strcmp(module, "hash")) yx_hash_cache_reset();
+    else if (!strcmp(module, "math")) yx_math_distribution_cache_count = 0;
+#ifdef XXYARA_ENABLE_MAGIC
+    else if (!strcmp(module, "magic")) yx_magic_thread_cache_reset();
+#endif
+}
+
+static bool yx_console_valid_utf8(const uint8_t *data, size_t length)
+{
+    size_t i = 0;
+    while (i < length) {
+        unsigned lead = data[i];
+        size_t remain;
+        if (lead < 0x80) { ++i; continue; }
+        if (lead >= 0xc2 && lead <= 0xdf) remain = 1;
+        else if (lead >= 0xe0 && lead <= 0xef) remain = 2;
+        else if (lead >= 0xf0 && lead <= 0xf4) remain = 3;
+        else return false;
+        if (remain >= length - i) return false;
+        for (size_t j = 1; j <= remain; ++j)
+            if ((data[i + j] & 0xc0) != 0x80) return false;
+        if ((lead == 0xe0 && data[i + 1] < 0xa0) ||
+            (lead == 0xed && data[i + 1] >= 0xa0) ||
+            (lead == 0xf0 && data[i + 1] < 0x90) ||
+            (lead == 0xf4 && data[i + 1] >= 0x90)) return false;
+        i += remain + 1;
+    }
+    return true;
+}
+
+static char *yx_console_escape_data(const uint8_t *data, size_t length,
+                                    size_t *output_length)
+{
+    static const char hex[] = "0123456789abcdef";
+    bool escape = !yx_console_valid_utf8(data, length);
+    char *output;
+    size_t used = 0;
+    for (size_t i = 0; i < length && !escape; ++i)
+        if (data[i] == '\n' || data[i] == '\r' || data[i] == '\t' ||
+            data[i] == '\\' || data[i] == '"' || data[i] < 0x20 ||
+            data[i] == 0x7f ||
+            (data[i] == 0xc2 && i + 1 < length &&
+             data[i + 1] >= 0x80 && data[i + 1] <= 0x9f))
+            escape = true;
+    if (length > (SIZE_MAX - 1) / 4) return NULL;
+    output = malloc((escape ? length * 4 : length) + 1);
+    if (!output) return NULL;
+    for (size_t i = 0; i < length; ++i) {
+        uint8_t byte = data[i];
+        if (!escape || (byte >= 0x20 && byte < 0x7f &&
+                        byte != '\\' && byte != '"' && byte != '\'')) {
+            output[used++] = (char)byte;
+        } else {
+            char short_escape = byte == '\n' ? 'n' :
+                                byte == '\r' ? 'r' :
+                                byte == '\t' ? 't' :
+                                byte == '\\' ? '\\' :
+                                byte == '"' ? '"' :
+                                byte == '\'' ? '\'' : 0;
+            output[used++] = '\\';
+            if (short_escape) output[used++] = short_escape;
+            else {
+                output[used++] = 'x';
+                output[used++] = hex[byte >> 4];
+                output[used++] = hex[byte & 15];
+            }
+        }
+    }
+    output[used] = '\0';
+    *output_length = used;
+    return output;
+}
+
+static char *yx_console_lossy_display(const char *data, size_t length,
+                                      size_t *output_length)
+{
+    size_t required;
+    char *output;
+    if (!yx_elf_utf8_lossy((const uint8_t *)data, length, NULL, 0,
+                           &required) || required == SIZE_MAX)
+        return NULL;
+    output = malloc(required + 1);
+    if (!output) return NULL;
+    if (!yx_elf_utf8_lossy((const uint8_t *)data, length, output, required,
+                           &required)) {
+        free(output);
+        return NULL;
+    }
+    output[required] = '\0';
+    *output_length = required;
+    return output;
+}
+
+static bool yx_console_decimal_parts(const char *text, uint64_t *mantissa,
+                                     int *exponent)
+{
+    uint64_t digits = 0;
+    int fractional = 0, scientific = 0;
+    bool after_dot = false, saw_digit = false;
+    if (*text == '-' || *text == '+') ++text;
+    for (; *text && *text != 'e' && *text != 'E'; ++text) {
+        if (*text == '.') {
+            if (after_dot) return false;
+            after_dot = true;
+            continue;
+        }
+        if (*text < '0' || *text > '9' ||
+            digits > (UINT64_MAX - (unsigned)(*text - '0')) / 10)
+            return false;
+        digits = digits * 10 + (unsigned)(*text - '0');
+        saw_digit = true;
+        if (after_dot) ++fractional;
+    }
+    if (!saw_digit || !digits) return false;
+    if (*text) {
+        char *end;
+        long parsed = strtol(text + 1, &end, 10);
+        if (*end || parsed < -400 || parsed > 400) return false;
+        scientific = (int)parsed;
+    }
+    *mantissa = digits;
+    *exponent = scientific - fractional;
+    return true;
+}
+
+/* Compare the midpoint between two decimal spellings with the exact binary
+ * value of an f64. The shortest %g spellings have at most 17 significant
+ * digits, and powers of five too large for uint64_t cannot equal its 53-bit
+ * significand. */
+static bool yx_console_exact_decimal_midpoint(double value,
+                                               const char *lower_text,
+                                               const char *upper_text)
+{
+    uint64_t lower, upper, sum, bits, binary_mantissa, five = 1;
+    uint64_t odd_sum, odd_binary;
+    int lower_exp, upper_exp, decimal_exp, binary_exp;
+    int sum_twos = 0, binary_twos = 0;
+    unsigned biased;
+    if (DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024 ||
+        sizeof(value) != sizeof(bits)) return false;
+    if (!yx_console_decimal_parts(lower_text, &lower, &lower_exp) ||
+        !yx_console_decimal_parts(upper_text, &upper, &upper_exp))
+        return false;
+    decimal_exp = lower_exp < upper_exp ? lower_exp : upper_exp;
+    while (lower_exp-- > decimal_exp) {
+        if (lower > UINT64_MAX / 10) return false;
+        lower *= 10;
+    }
+    while (upper_exp-- > decimal_exp) {
+        if (upper > UINT64_MAX / 10) return false;
+        upper *= 10;
+    }
+    if (upper <= lower || lower > UINT64_MAX - upper) return false;
+    sum = lower + upper;
+    memcpy(&bits, &value, sizeof(bits));
+    biased = (unsigned)((bits >> 52) & 0x7ff);
+    binary_mantissa = bits & ((UINT64_C(1) << 52) - 1);
+    if (biased) {
+        binary_mantissa |= UINT64_C(1) << 52;
+        binary_exp = (int)biased - 1023 - 52;
+    } else {
+        binary_exp = -1074;
+    }
+    if (!binary_mantissa) return false;
+    odd_sum = sum;
+    while ((odd_sum & 1) == 0) { odd_sum >>= 1; ++sum_twos; }
+    odd_binary = binary_mantissa;
+    while ((odd_binary & 1) == 0) {
+        odd_binary >>= 1;
+        ++binary_twos;
+    }
+    if (decimal_exp >= 0) {
+        if (odd_sum > odd_binary) return false;
+        for (int i = 0; i < decimal_exp; ++i) {
+            if (five > odd_binary / odd_sum / 5) return false;
+            five *= 5;
+        }
+        return odd_sum * five == odd_binary &&
+               decimal_exp - 1 + sum_twos == binary_exp + binary_twos;
+    }
+    if (odd_binary > odd_sum) return false;
+    for (int i = 0; i < -decimal_exp; ++i) {
+        if (five > odd_sum / odd_binary / 5) return false;
+        five *= 5;
+    }
+    return odd_binary * five == odd_sum &&
+           sum_twos == binary_exp - decimal_exp + 1 + binary_twos;
+}
+
+/* Rust's Display for f64 uses the shortest round-tripping decimal and writes
+ * ordinary decimal notation. C's %g picks scientific notation for small and
+ * large values, so expand its shortest round-tripping form here. */
+static int yx_console_float_display(double value, char output[400])
+{
+    char compact[64];
+    char alternative[64];
+    const char *cursor, *exponent_mark;
+    char digits[24];
+    size_t digit_count = 0, before_dot = 0, used = 0;
+    long exponent = 0, decimal_at;
+    bool negative, dot = false;
+    /* Rust's Display for f64. */
+    if (isnan(value)) return snprintf(output, 400, "NaN");
+    if (isinf(value)) return snprintf(output, 400, value < 0 ? "-inf" : "inf");
+    for (int precision = 1; precision <= 17; ++precision) {
+        char *end;
+        int written = snprintf(compact, sizeof(compact), "%.*g",
+                               precision, value);
+        if (written < 0 || (size_t)written >= sizeof(compact)) return -1;
+        if (strtod(compact, &end) == value && *end == '\0') {
+#if LDBL_MANT_DIG > DBL_MANT_DIG
+            /* At an exact decimal midpoint printf rounds the last digit to
+             * even, while Rust's f64 Display rounds away from zero. A single
+             * long-double step reveals the other shortest decimal. */
+            if (value != 0.0) {
+                long double nudged = nextafterl((long double)value,
+                                                value < 0 ? -INFINITY :
+                                                            INFINITY);
+                int n = snprintf(alternative, sizeof(alternative), "%.*Lg",
+                                 precision, nudged);
+                if (n > 0 && (size_t)n < sizeof(alternative) &&
+                    strcmp(compact, alternative) != 0 &&
+                    strtod(alternative, &end) == value && *end == '\0') {
+                    if (yx_console_exact_decimal_midpoint(
+                            value, compact, alternative))
+                        memcpy(compact, alternative, (size_t)n + 1);
+                }
+            }
+#elif defined(_WIN32)
+            /* MSVC's long double has no extra precision. Form the adjacent
+             * decimal explicitly so the same exact midpoint check applies. */
+            if (value != 0.0) {
+                uint64_t mantissa;
+                int decimal_exponent;
+                if (yx_console_decimal_parts(compact, &mantissa,
+                                             &decimal_exponent) &&
+                    mantissa < UINT64_MAX) {
+                    int n = snprintf(alternative, sizeof(alternative),
+                                     "%s%" PRIu64 "e%d",
+                                     value < 0 ? "-" : "", mantissa + 1,
+                                     decimal_exponent);
+                    if (n > 0 && (size_t)n < sizeof(alternative) &&
+                        strtod(alternative, &end) == value && *end == '\0' &&
+                        yx_console_exact_decimal_midpoint(
+                            value, compact, alternative))
+                        memcpy(compact, alternative, (size_t)n + 1);
+                }
+            }
+#endif
+            break;
+        }
+    }
+    cursor = compact;
+    negative = *cursor == '-';
+    if (negative) ++cursor;
+    exponent_mark = strchr(cursor, 'e');
+    if (exponent_mark) exponent = strtol(exponent_mark + 1, NULL, 10);
+    for (const char *at = cursor;
+         *at && at != exponent_mark; ++at) {
+        if (*at == '.') { dot = true; continue; }
+        if (digit_count >= sizeof(digits)) return -1;
+        digits[digit_count++] = *at;
+        if (!dot) ++before_dot;
+    }
+    decimal_at = (long)before_dot + exponent;
+    if (negative) output[used++] = '-';
+    if (decimal_at <= 0) {
+        if (-decimal_at > 330) return -1;
+        output[used++] = '0';
+        output[used++] = '.';
+        while (decimal_at++ < 0) output[used++] = '0';
+        memcpy(output + used, digits, digit_count);
+        used += digit_count;
+    } else if ((size_t)decimal_at >= digit_count) {
+        if (decimal_at > 330) return -1;
+        memcpy(output + used, digits, digit_count);
+        used += digit_count;
+        while (used < (size_t)decimal_at + (negative ? 1u : 0u))
+            output[used++] = '0';
+    } else {
+        memcpy(output + used, digits, (size_t)decimal_at);
+        used += (size_t)decimal_at;
+        output[used++] = '.';
+        memcpy(output + used, digits + decimal_at,
+               digit_count - (size_t)decimal_at);
+        used += digit_count - (size_t)decimal_at;
+    }
+    if (used >= 400) return -1;
+    output[used] = '\0';
+    return (int)used;
+}
+
+static yx_value yx_eval_console_call(const yx_node *node,
+                                      const yx_eval_context *ctx,
+                                      size_t current_pattern,
+                                      const yx_binding *bindings)
+{
+    yx_value args[3] = {{0}};
+    const char *message = "";
+    size_t message_length = 0;
+    char number[400];
+    char *escaped = NULL, *output;
+    char *display_message = NULL, *display_body = NULL;
+    const char *body = "";
+    size_t body_length = 0;
+    bool hex = strcmp(node->name, "console.hex") == 0;
+    bool bytes = false;
+    bool body_is_string = false;
+    size_t value_index = 0;
+    for (size_t i = 0; i < node->item_count; ++i) {
+        args[i] = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        if (!args[i].defined) return yx_undefined();
+    }
+    if (node->item_count > 1 && args[0].type == V_STRING) {
+        message = args[0].string;
+        message_length = args[0].string_length;
+        value_index = 1;
+    }
+    if (!hex && node->item_count - value_index == 2) {
+        uint64_t offset = args[value_index].value;
+        uint64_t length = args[value_index + 1].value;
+        bytes = true;
+        if (ctx->block_mode || args[value_index].type != V_INTEGER ||
+            args[value_index + 1].type != V_INTEGER ||
+            (int64_t)offset < 0 || (int64_t)length < 0 ||
+            offset > ctx->size || length > ctx->size - (size_t)offset)
+            return yx_defined(1);
+        escaped = yx_console_escape_data(ctx->data ? ctx->data + offset : NULL,
+                                         (size_t)length, &body_length);
+        if (!escaped) return yx_undefined();
+        body = escaped;
+    }
+    if (!bytes) {
+        yx_value item = args[value_index];
+        const yx_node *argument = node->items[value_index];
+        yx_static_type type = yx_static_node_type(argument);
+        if (type == YX_STATIC_UNKNOWN && argument->kind == N_RULE) {
+            for (size_t i = 0; i < ctx->global_count; ++i)
+                if (strcmp(argument->name, ctx->globals[i].name) == 0 &&
+                    ctx->globals[i].type == YX_EVAL_GLOBAL_BOOL) {
+                    type = YX_STATIC_BOOL;
+                    break;
+                }
+        }
+        if (item.type == V_STRING) {
+            body = item.string;
+            body_length = item.string_length;
+            body_is_string = true;
+        } else if (item.type == V_FLOAT) {
+            int written = yx_console_float_display(item.floating, number);
+            if (written < 0) return yx_undefined();
+            body = number;
+            body_length = (size_t)written;
+        } else {
+            int written;
+            if (type == YX_STATIC_BOOL)
+                written = snprintf(number, sizeof(number), "%s",
+                                   item.value ? "true" : "false");
+            else if (hex)
+                written = snprintf(number, sizeof(number), "0x%" PRIx64,
+                                   item.value);
+            else
+                written = snprintf(number, sizeof(number), "%" PRId64,
+                                   (int64_t)item.value);
+            if (written < 0 || (size_t)written >= sizeof(number))
+                return yx_undefined();
+            body = number;
+            body_length = (size_t)written;
+        }
+    }
+    if (!ctx->console_callback) { free(escaped); return yx_defined(1); }
+    if (message_length) {
+        display_message = yx_console_lossy_display(message, message_length,
+                                                    &message_length);
+        if (!display_message) { free(escaped); return yx_undefined(); }
+        message = display_message;
+    }
+    if (body_is_string && body_length) {
+        display_body = yx_console_lossy_display(body, body_length,
+                                                 &body_length);
+        if (!display_body) {
+            free(display_message);
+            free(escaped);
+            return yx_undefined();
+        }
+        body = display_body;
+    }
+    if (message_length > SIZE_MAX - body_length - 1) {
+        free(display_message);
+        free(display_body);
+        free(escaped);
+        return yx_undefined();
+    }
+    output = malloc(message_length + body_length + 1);
+    if (!output) {
+        free(display_message);
+        free(display_body);
+        free(escaped);
+        return yx_undefined();
+    }
+    if (message_length) memcpy(output, message, message_length);
+    if (body_length) memcpy(output + message_length, body, body_length);
+    /* The public console callback receives a C string. YARA-X removes
+     * embedded NUL bytes before constructing that string. */
+    size_t output_length = message_length + body_length;
+    if (ctx->console_c_string) {
+        output_length = 0;
+        for (size_t i = 0; i < message_length + body_length; ++i)
+            if (output[i]) output[output_length++] = output[i];
+    }
+    output[output_length] = '\0';
+    size_t previous_log_length = yx_console_log_length;
+    yx_console_log_length = output_length;
+    ctx->console_callback(output);
+    yx_console_log_length = previous_log_length;
+    free(output);
+    free(display_message);
+    free(display_body);
+    free(escaped);
+    return yx_defined(1);
+}
+
+static yx_value yx_eval_hash_call(const yx_node *node,
+                                  const yx_eval_context *ctx,
+                                  size_t current_pattern,
+                                  const yx_binding *bindings)
+{
+    const char *function = node->name + 5;
+    yx_hash_algorithm algorithm;
+    yx_hash_value output;
+    yx_value first, second;
+    bool success;
+    char *owned;
+    if (strcmp(function, "md5") == 0) algorithm = YX_HASH_MD5;
+    else if (strcmp(function, "sha1") == 0) algorithm = YX_HASH_SHA1;
+    else if (strcmp(function, "sha256") == 0) algorithm = YX_HASH_SHA256;
+    else if (strcmp(function, "crc32") == 0) algorithm = YX_HASH_CRC32;
+    else if (strcmp(function, "checksum32") == 0)
+        algorithm = YX_HASH_CHECKSUM32;
+    else return yx_undefined();
+    if (node->item_count != 1 && node->item_count != 2)
+        return yx_undefined();
+    first = yx_eval(node->items[0], ctx, current_pattern, bindings);
+    if (!first.defined) return yx_undefined();
+    if (node->item_count == 1) {
+        if (first.type != V_STRING) return yx_undefined();
+        success = yx_hash_bytes(algorithm, (const uint8_t *)first.string,
+                                first.string_length, &output);
+    } else {
+        second = yx_eval(node->items[1], ctx, current_pattern, bindings);
+        if (!second.defined || first.type != V_INTEGER ||
+            second.type != V_INTEGER)
+            return yx_undefined();
+        success = yx_hash_cache_get(algorithm, (int64_t)first.value,
+                                     (int64_t)second.value, &output);
+        if (!success) {
+            if (ctx->block_mode) return yx_undefined();
+            success = yx_hash_range(algorithm, ctx->data, ctx->size,
+                                    (int64_t)first.value, (int64_t)second.value,
+                                    &output);
+            if (success) yx_hash_cache_put(algorithm, (int64_t)first.value,
+                                           (int64_t)second.value, &output);
+        }
+    }
+    if (!success) return yx_undefined();
+    if (algorithm == YX_HASH_CRC32 || algorithm == YX_HASH_CHECKSUM32)
+        return yx_defined((uint64_t)output.number);
+    owned = yx_eval_alloc_string(ctx, output.text_length);
+    if (!owned) return yx_undefined();
+    memcpy(owned, output.text, output.text_length);
+    return yx_defined_string(owned, output.text_length);
+}
+
+static yx_value yx_eval_string_call(const yx_node *node,
+                                    const yx_eval_context *ctx,
+                                    size_t current_pattern,
+                                    const yx_binding *bindings)
+{
+    yx_value input, base;
+    int64_t result;
+    bool success;
+    if (node->item_count < 1 || node->item_count > 2)
+        return yx_undefined();
+    input = yx_eval(node->items[0], ctx, current_pattern, bindings);
+    if (!input.defined || input.type != V_STRING)
+        return yx_undefined();
+    if (strcmp(node->name, "string.length") == 0) {
+        if (node->item_count != 1) return yx_undefined();
+        success = yx_string_length((const uint8_t *)input.string,
+                                   input.string_length, &result);
+    } else if (strcmp(node->name, "string.to_int") == 0) {
+        if (node->item_count == 1) {
+            success = yx_string_to_int((const uint8_t *)input.string,
+                                       input.string_length, &result);
+        } else {
+            base = yx_eval(node->items[1], ctx, current_pattern, bindings);
+            if (!base.defined || base.type != V_INTEGER)
+                return yx_undefined();
+            success = yx_string_to_int_base((const uint8_t *)input.string,
+                                            input.string_length,
+                                            (int64_t)base.value, &result);
+        }
+    } else {
+        return yx_undefined();
+    }
+    return success ? yx_defined((uint64_t)result) : yx_undefined();
+}
+
+static yx_value yx_eval_math_call(const yx_node *node,
+                                  const yx_eval_context *ctx,
+                                  size_t current_pattern,
+                                  const yx_binding *bindings)
+{
+    yx_value args[3] = {{0}};
+    const yx_resolved_name *resolved = yx_eval_resolved_name(ctx, node);
+    yx_math_function function = resolved ? resolved->math :
+        yx_resolve_math_function(node->name);
+    const uint8_t *data = NULL;
+    size_t length = 0;
+    for (size_t i = 0; i < node->item_count; ++i) {
+        if (i >= 3) return yx_undefined();
+        args[i] = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        if (!args[i].defined) return yx_undefined();
+    }
+    if (function == YX_MATH_ENTROPY) {
+        if (node->item_count == 1) {
+            if (args[0].type != V_STRING) return yx_undefined();
+            return yx_defined_float(xx_entropy_log2(args[0].string,
+                                                     args[0].string_length));
+        }
+        if (node->item_count == 2) {
+            size_t offset, length;
+            if (ctx->block_mode || args[0].type != V_INTEGER ||
+                args[1].type != V_INTEGER ||
+                (int64_t)args[0].value < 0 || (int64_t)args[1].value < 0 ||
+                args[0].value > ctx->size)
+                return yx_undefined();
+            offset = (size_t)args[0].value;
+            length = (size_t)args[1].value;
+            if (length > ctx->size - offset) length = ctx->size - offset;
+            uint64_t distribution[256];
+            yx_math_distribution_for_range(length ? ctx->data + offset : NULL,
+                                             offset, length, distribution);
+            return yx_defined_float(xx_entropy_log2_counts(distribution, length));
+        }
+        return yx_undefined();
+    }
+    if (function == YX_MATH_COUNT ||
+        function == YX_MATH_PERCENTAGE) {
+        uint64_t count;
+        bool percentage = function == YX_MATH_PERCENTAGE;
+        if ((node->item_count != 1 && node->item_count != 3) ||
+            args[0].type != V_INTEGER || args[0].value > UINT8_MAX)
+            return yx_undefined();
+        if (node->item_count == 3) {
+            if (!yx_math_range(ctx, args[1], args[2], &data, &length))
+                return yx_undefined();
+        } else {
+            if (ctx->block_mode) return yx_undefined();
+            data = ctx->data;
+            length = ctx->size;
+        }
+        if (percentage && length == 0) return yx_undefined();
+        count = yx_math_count_byte(data, length, (uint8_t)args[0].value);
+        return percentage ?
+               yx_defined_float((double)count / (double)length) :
+               yx_defined(count);
+    }
+    if (function == YX_MATH_TO_STRING) {
+        char buffer[72];
+        int written;
+        char *owned;
+        int64_t value;
+        int64_t base = 10;
+        if ((node->item_count != 1 && node->item_count != 2) ||
+            args[0].type != V_INTEGER ||
+            (node->item_count == 2 && args[1].type != V_INTEGER))
+            return yx_undefined();
+        value = (int64_t)args[0].value;
+        if (node->item_count == 2) base = (int64_t)args[1].value;
+        if (base == 8)
+            written = snprintf(buffer, sizeof(buffer), "%" PRIo64,
+                               (uint64_t)value);
+        else if (base == 16)
+            written = snprintf(buffer, sizeof(buffer), "%" PRIx64,
+                               (uint64_t)value);
+        else if (base == 10)
+            written = snprintf(buffer, sizeof(buffer), "%" PRId64, value);
+        else return yx_undefined();
+        if (written < 0 || (size_t)written >= sizeof(buffer))
+            return yx_undefined();
+        owned = yx_eval_alloc_string(ctx, (size_t)written);
+        if (!owned) return yx_undefined();
+        memcpy(owned, buffer, (size_t)written);
+        return yx_defined_string(owned, (size_t)written);
+    }
+    if (function == YX_MATH_TO_NUMBER) {
+        if (node->item_count != 1 || args[0].type != V_INTEGER)
+            return yx_undefined();
+        return yx_defined(args[0].value != 0);
+    }
+    if (function == YX_MATH_SERIAL_CORRELATION ||
+        function == YX_MATH_MONTE_CARLO_PI) {
+        if (node->item_count == 1) {
+            if (args[0].type != V_STRING) return yx_undefined();
+            data = (const uint8_t *)args[0].string;
+            length = args[0].string_length;
+        } else if (node->item_count == 2) {
+            if (!yx_math_range(ctx, args[0], args[1], &data, &length))
+                return yx_undefined();
+        } else return yx_undefined();
+        if (function == YX_MATH_SERIAL_CORRELATION)
+            return yx_defined_float(xx_bytestats_serial_correlation(data,
+                                                                     length));
+        {
+            double estimate;
+            return xx_bytestats_monte_carlo_pi(data, length, &estimate) ?
+                   yx_defined_float(estimate) : yx_undefined();
+        }
+    }
+    if (function == YX_MATH_MODE ||
+        function == YX_MATH_MEAN ||
+        function == YX_MATH_DEVIATION) {
+        uint64_t distribution[256];
+        bool is_mode = function == YX_MATH_MODE;
+        bool is_deviation = function == YX_MATH_DEVIATION;
+        bool native_range = false;
+        size_t range_start = 0;
+        if (is_mode && node->item_count == 0) {
+            if (ctx->block_mode) return yx_undefined();
+            data = ctx->data;
+            length = ctx->size;
+            native_range = true;
+        } else if (!is_mode &&
+                   node->item_count == (is_deviation ? 2u : 1u)) {
+            if (args[0].type != V_STRING ||
+                (is_deviation && args[1].type != V_FLOAT))
+                return yx_undefined();
+            data = (const uint8_t *)args[0].string;
+            length = args[0].string_length;
+        } else if (node->item_count == (is_deviation ? 3u : 2u)) {
+            if (!yx_math_range(ctx, args[0], args[1], &data, &length) ||
+                (is_deviation && args[2].type != V_FLOAT))
+                return yx_undefined();
+            native_range = true;
+            range_start = (size_t)args[0].value;
+        } else {
+            return yx_undefined();
+        }
+        if (length == 0) return yx_undefined();
+        if (native_range)
+            yx_math_distribution_for_range(data, range_start, length, distribution);
+        else
+            yx_math_byte_distribution(data, length, distribution);
+        if (is_mode)
+            return yx_defined(xx_bytestats_mode_counts(distribution));
+        if (!is_deviation)
+            return yx_defined_float(xx_bytestats_mean_counts(distribution,
+                                                              length));
+        return yx_defined_float(xx_bytestats_deviation_counts(
+            distribution, length, args[node->item_count - 1].floating));
+    }
+    if (function == YX_MATH_IN_RANGE) {
+        if (node->item_count != 3 ||
+            args[0].type != args[1].type ||
+            args[0].type != args[2].type)
+            return yx_undefined();
+        if (args[0].type == V_FLOAT)
+            return yx_defined(args[1].floating <= args[0].floating &&
+                              args[0].floating <= args[2].floating);
+        if (args[0].type == V_INTEGER)
+            return yx_defined((int64_t)args[1].value <= (int64_t)args[0].value &&
+                              (int64_t)args[0].value <= (int64_t)args[2].value);
+        return yx_undefined();
+    }
+    if (function == YX_MATH_ABS) {
+        int64_t value;
+        if (node->item_count != 1 || args[0].type != V_INTEGER)
+            return yx_undefined();
+        value = (int64_t)args[0].value;
+        if (value == INT64_MIN) return yx_undefined();
+        return yx_defined(value < 0 ?
+                          (uint64_t)(0 - (uint64_t)value) : (uint64_t)value);
+    }
+    if (node->item_count != 2 || args[0].type != V_INTEGER ||
+        args[1].type != V_INTEGER)
+        return yx_undefined();
+    if (function == YX_MATH_MIN)
+        return yx_defined((int64_t)args[0].value < (int64_t)args[1].value ?
+                          args[0].value : args[1].value);
+    if (function == YX_MATH_MAX)
+        return yx_defined((int64_t)args[0].value > (int64_t)args[1].value ?
+                          args[0].value : args[1].value);
+    return yx_undefined();
+}
+
+typedef struct {
+    const yx_node *dll_regex;
+    const yx_node *function_regex;
+    yx_scan_deadline *deadline;
+    uint64_t count;
+    pcre2_match_data *dll_matches;
+    pcre2_match_data *function_matches;
+} yx_pe_regex_query;
+
+static bool yx_pe_regex_matches(const yx_node *regex,
+                                 const uint8_t *data, size_t length,
+                                 yx_scan_deadline *deadline
+                                 , pcre2_match_data *matches
+                                 )
+{
+    return yx_condition_regex_scan((pcre2_code *)regex->compiled_regex,
+        (PCRE2_SPTR)data, length, matches, deadline) >= 0;
+}
+
+typedef struct {
+    const yx_node *regex;
+    yx_scan_deadline *deadline;
+    pcre2_match_data *matches;
+} yx_cuckoo_regex_query;
+
+static bool yx_cuckoo_regex_matches(const uint8_t *data, size_t length,
+                                     void *opaque)
+{
+    yx_cuckoo_regex_query *query = (yx_cuckoo_regex_query *)opaque;
+    return yx_pe_regex_matches(query->regex, data, length, query->deadline
+                                , query->matches
+                                );
+}
+
+static yx_value yx_eval_cuckoo_call(const yx_node *node,
+                                     const yx_eval_context *ctx,
+                                     size_t current_pattern,
+                                     const yx_binding *bindings)
+{
+    yx_cuckoo_regex_query query = {0};
+    yx_value port = yx_defined(0);
+    uint64_t count;
+    bool has_port = node->item_count == 2;
+    bool success;
+    if (!ctx->cuckoo_report || !node->item_count ||
+        node->items[0]->kind != N_REGEX ||
+        !node->items[0]->compiled_regex)
+        return yx_undefined();
+    if (has_port) {
+        port = yx_eval(node->items[1], ctx, current_pattern, bindings);
+        if (!port.defined || port.type != V_INTEGER) return yx_undefined();
+    }
+    query.regex = node->items[0];
+    query.deadline = ctx->deadline;
+    query.matches = pcre2_match_data_create_from_pattern(
+        (pcre2_code *)query.regex->compiled_regex, NULL);
+    if (!query.matches) return yx_undefined();
+    success = yx_cuckoo_query(ctx->cuckoo_report, node->name + 7,
+                               yx_cuckoo_regex_matches, &query, has_port,
+                               (int64_t)port.value, &count);
+    pcre2_match_data_free(query.matches);
+    return success ? yx_defined(count) : yx_undefined();
+}
+
+static void yx_pe_regex_import_visit(void *opaque,
+                                      const uint8_t *dll, size_t dll_length,
+                                      const uint8_t *function,
+                                      size_t function_length,
+                                      bool by_ordinal, uint16_t ordinal,
+                                      uint32_t rva)
+{
+    yx_pe_regex_query *query = opaque;
+    (void)by_ordinal;
+    (void)ordinal;
+    (void)rva;
+    if (yx_pe_regex_matches(query->dll_regex, dll, dll_length, query->deadline
+                            , query->dll_matches
+                            ) &&
+        yx_pe_regex_matches(query->function_regex, function, function_length,
+                            query->deadline
+                            , query->function_matches
+                            ))
+        ++query->count;
+}
+
+/* Module functions consume the injected protobuf tree, just as field access
+ * does. Unknown function names still use their native implementation. */
+static yx_mo_data yx_output_field(const yx_mo_record *output, const char *path,
+                                   uint64_t first, uint64_t second, size_t keys)
+{
+    yx_mo_key indexes[2] = {{.number = first}, {.number = second}};
+    yx_mo_data value = {0};
+    (void)yx_mo_output_get(output, path, indexes, keys, false, &value);
+    return value;
+}
+
+static bool yx_output_name_equal(const yx_mo_data *actual, const char *expected,
+                                   size_t length, bool insensitive)
+{
+    if (actual->type != YX_MO_DATA_STRING || actual->length != length) return false;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char a = (unsigned char)actual->string[i];
+        unsigned char b = (unsigned char)expected[i];
+        if (insensitive) {
+            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        }
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static bool yx_output_regex_match(const yx_node *regex, const yx_mo_data *text,
+                                    const yx_eval_context *ctx)
+{
+    bool result;
+    if (text->type != YX_MO_DATA_STRING) return false;
+    pcre2_match_data *matches = pcre2_match_data_create_from_pattern(
+        (pcre2_code *)regex->compiled_regex, NULL);
+    if (!matches) return false;
+    result = yx_pe_regex_matches(regex, (const uint8_t *)text->string, text->length,
+                                 ctx->deadline
+                                 , matches
+                                 );
+    pcre2_match_data_free(matches);
+    return result;
+}
+
+typedef struct {
+    const yx_node *regex;
+    const yx_eval_context *ctx;
+    uint64_t count, index;
+    bool found;
+} yx_output_export_regex_query;
+
+static void yx_output_export_regex_visit(void *opaque, const yx_pe_export *entry)
+{
+    yx_output_export_regex_query *query = opaque;
+    yx_mo_data name = {.type = entry->name ? YX_MO_DATA_STRING : YX_MO_DATA_UNDEFINED,
+                        .string = (const char *)entry->name, .length = entry->name_length};
+    if (!query->found && yx_output_regex_match(query->regex, &name, query->ctx)) {
+        query->found = true;
+        query->index = query->count;
+    }
+    ++query->count;
+}
+
+static yx_value yx_output_pe_imports(const yx_mo_record *output, const yx_node *node,
+                                      const yx_eval_context *ctx,
+                                      size_t current_pattern, const yx_binding *bindings)
+{
+    yx_value args[3] = {{0}};
+    size_t offset = 0;
+    unsigned flags = 1;
+    uint64_t count = 0;
+    bool rva = strcmp(node->name, "pe.imports") != 0;
+    if (!node->item_count || node->item_count > 3) return yx_undefined();
+    for (size_t i = 0; i < node->item_count; ++i) {
+        if (node->items[i]->kind == N_REGEX) continue;
+        args[i] = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        if (!args[i].defined) return yx_undefined();
+    }
+    if (rva) flags = strcmp(node->name, "pe.delayed_import_rva") == 0 ? 2 : 1;
+    else if (args[0].defined && args[0].type == V_INTEGER) {
+        flags = (unsigned)args[0].value;
+        offset = 1;
+    }
+    if (offset >= node->item_count ||
+        (node->items[offset]->kind != N_REGEX && args[offset].type != V_STRING) ||
+        (node->item_count > offset + 1 && node->items[offset + 1]->kind != N_REGEX &&
+         args[offset + 1].type != V_STRING && args[offset + 1].type != V_INTEGER))
+        return yx_undefined();
+    for (unsigned list = 0; list < 2; ++list) {
+        char path[96];
+        const char *base = list ? "pe.delayed_import_details" : "pe.import_details";
+        if (!(flags & (1u << list))) continue;
+        snprintf(path, sizeof(path), "%s.len", base);
+        uint64_t dll_count = yx_output_field(output, path, 0, 0, 0).number;
+        for (uint64_t i = 0; i < dll_count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+            snprintf(path, sizeof(path), "%s.library_name", base);
+            yx_mo_data name = yx_output_field(output, path, i, 0, 1);
+            bool matches = node->items[offset]->kind == N_REGEX ?
+                yx_output_regex_match(node->items[offset], &name, ctx) :
+                yx_output_name_equal(&name, args[offset].string, args[offset].string_length, true);
+            if (!matches) continue;
+            snprintf(path, sizeof(path), "%s.functions.len", base);
+            uint64_t functions = yx_output_field(output, path, i, 0, 1).number;
+            for (uint64_t j = 0; j < functions; ++j) {
+                if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+                matches = true;
+                if (node->item_count > offset + 1) {
+                    const yx_node *argument = node->items[offset + 1];
+                    const yx_value *value = &args[offset + 1];
+                    snprintf(path, sizeof(path), "%s.functions.%s", base,
+                             argument->kind != N_REGEX && value->type == V_INTEGER ? "ordinal" : "name");
+                    name = yx_output_field(output, path, i, j, 2);
+                    matches = argument->kind == N_REGEX ? yx_output_regex_match(argument, &name, ctx) :
+                        value->type == V_INTEGER ? name.type == YX_MO_DATA_INTEGER && name.number == value->value :
+                        yx_output_name_equal(&name, value->string, value->string_length, true);
+                }
+                if (!matches) continue;
+                if (rva) {
+                    snprintf(path, sizeof(path), "%s.functions.rva", base);
+                    name = yx_output_field(output, path, i, j, 2);
+                    return name.type == YX_MO_DATA_INTEGER ? yx_defined(name.number) : yx_undefined();
+                }
+                ++count;
+            }
+        }
+    }
+    if (rva) return yx_undefined();
+    bool count_result = node->item_count == offset + 1 ||
+        node->items[offset]->kind == N_REGEX ||
+        (offset == 0 && args[1].type == V_INTEGER);
+    return yx_defined(count_result ? count : count != 0);
+}
+
+static bool yx_output_append(char **bytes, size_t *length, const char *data, size_t size)
+{
+    if (size > SIZE_MAX - *length) return false;
+    char *grown = realloc(*bytes, *length + size + (*length + size == 0));
+    if (!grown) return false;
+    if (size) memcpy(grown + *length, data, size);
+    *bytes = grown;
+    *length += size;
+    return true;
+}
+
+typedef struct { char *data; size_t length; } yx_output_hash_name;
+
+static int yx_output_hash_name_compare(const void *a, const void *b)
+{
+    const yx_output_hash_name *left = a, *right = b;
+    size_t common = left->length < right->length ? left->length : right->length;
+    int order = memcmp(left->data, right->data, common);
+    return order ? order : left->length < right->length ? -1 : left->length > right->length;
+}
+
+static yx_value yx_output_hash_names(const yx_eval_context *ctx, yx_output_hash_name *names,
+                                      size_t count, bool deduplicate, bool tlsh)
+{
+    char *joined = NULL, *owned;
+    size_t length = 0, used = 0;
+    yx_value result = yx_undefined();
+    yx_hash_value hash;
+    char tls[73];
+    qsort(names, count, sizeof(*names), yx_output_hash_name_compare);
+    for (size_t i = 0; i < count; ++i) {
+        if (deduplicate && i && yx_output_hash_name_compare(&names[i], &names[i - 1]) == 0) continue;
+        if (yx_scan_deadline_poll(ctx->deadline) ||
+            (used && !yx_output_append(&joined, &length, ",", 1)) ||
+            !yx_output_append(&joined, &length, names[i].data, names[i].length)) goto done;
+        ++used;
+    }
+    if (tlsh) {
+        if (!xx_tlsh_hash128((const uint8_t *)(joined ? joined : ""), length, tls)) goto done;
+        owned = yx_eval_alloc_string(ctx, 72);
+        if (!owned) goto done;
+        memcpy(owned, tls, 72);
+        result = yx_defined_string(owned, 72);
+    } else {
+        if (!yx_hash_bytes(YX_HASH_MD5, (const uint8_t *)(joined ? joined : ""), length, &hash)) goto done;
+        owned = yx_eval_alloc_string(ctx, hash.text_length);
+        if (!owned) goto done;
+        memcpy(owned, hash.text, hash.text_length);
+        result = yx_defined_string(owned, hash.text_length);
+    }
+done:
+    free(joined);
+    return result;
+}
+
+static bool yx_eval_macho_output_call(const yx_mo_record *output, const yx_node *node,
+                                        const yx_eval_context *ctx, size_t current_pattern,
+                                        const yx_binding *bindings, yx_value *result)
+{
+    const char *name = node->name + 6;
+    const char *collection = NULL;
+    bool has = !strncmp(name, "has_", 4);
+    bool symhash = !strcmp(name, "symhash");
+    *result = yx_undefined();
+    if (!strcmp(name, "file_index_for_arch") || !strcmp(name, "entry_point_for_arch")) {
+        yx_value type = yx_eval(node->items[0], ctx, current_pattern, bindings), subtype = {0};
+        if (node->item_count == 2) subtype = yx_eval(node->items[1], ctx, current_pattern, bindings);
+        if (!type.defined || (node->item_count == 2 && !subtype.defined)) return true;
+        uint64_t count = yx_output_field(output, "macho.fat_arch.len", 0, 0, 0).number;
+        yx_mo_data nfat = yx_output_field(output, "macho.nfat_arch", 0, 0, 0);
+        if (nfat.type != YX_MO_DATA_INTEGER) return true;
+        if (count > nfat.number) count = nfat.number;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return true;
+            yx_mo_data cpu = yx_output_field(output, "macho.fat_arch.cputype", i, 0, 1);
+            yx_mo_data sub = yx_output_field(output, "macho.fat_arch.cpusubtype", i, 0, 1);
+            if (cpu.type != YX_MO_DATA_INTEGER || cpu.number != type.value ||
+                (node->item_count == 2 && (sub.type != YX_MO_DATA_INTEGER || sub.number != subtype.value))) continue;
+            if (!strcmp(name, "file_index_for_arch")) *result = yx_defined(i);
+            else {
+                yx_mo_data offset = yx_output_field(output, "macho.fat_arch.offset", i, 0, 1);
+                yx_mo_data entry = yx_output_field(output, "macho.file.entry_point", i, 0, 1);
+                if (offset.type == YX_MO_DATA_INTEGER && entry.type == YX_MO_DATA_INTEGER &&
+                    entry.number <= UINT64_MAX - offset.number) *result = yx_defined(offset.number + entry.number);
+            }
+            return true;
+        }
+        return true;
+    }
+    if (!strcmp(name, "has_dylib") || !strcmp(name, "dylib_hash")) collection = "dylibs";
+    else if (!strcmp(name, "has_rpath")) collection = "rpaths";
+    else if (!strcmp(name, "has_entitlement") || !strcmp(name, "entitlement_hash")) collection = "entitlements";
+    else if (!strcmp(name, "has_import") || !strcmp(name, "import_hash")) collection = "imports";
+    else if (!strcmp(name, "has_export") || !strcmp(name, "export_hash")) collection = "exports";
+    else if (symhash) collection = "symtab.entries";
+    else return false;
+    bool dylib = !strcmp(collection, "dylibs");
+    yx_value expected = {0};
+    if (has) {
+        expected = yx_eval(node->items[0], ctx, current_pattern, bindings);
+        if (!expected.defined || expected.type != V_STRING) return true;
+    }
+    uint64_t files = yx_output_field(output, "macho.file.len", 0, 0, 0).number;
+    char path[128];
+    for (uint64_t file = 0; file <= files; ++file) {
+        const char *base = file ? "macho.file" : "macho";
+        snprintf(path, sizeof(path), "%s.%s.len", base, collection);
+        uint64_t count = yx_output_field(output, path, file ? file - 1 : 0, 0, file != 0).number;
+        if (!count) {
+            if (!has && file) return true;
+            continue;
+        }
+        if (count > SIZE_MAX / sizeof(yx_output_hash_name)) return true;
+        yx_output_hash_name *names = has ? NULL : calloc((size_t)count, sizeof(*names));
+        if (!has && !names) return true;
+        size_t named = 0;
+        bool ok = true;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) { ok = false; break; }
+            snprintf(path, sizeof(path), "%s.%s.%s", base, collection, dylib ? "name" : "value");
+            yx_mo_data entry = yx_output_field(output, path, file ? file - 1 : i, file ? i : 0, file ? 2 : 1);
+            if (entry.type != YX_MO_DATA_STRING) continue;
+            if (has) {
+                if (yx_output_name_equal(&entry, expected.string, expected.string_length, true)) {
+                    *result = yx_defined(1); return true;
+                }
+            } else {
+                if (symhash) {
+                    snprintf(path, sizeof(path), "%s.symtab.nlists.n_type", base);
+                    yx_mo_data type = yx_output_field(output, path, file ? file - 1 : i, file ? i : 0, file ? 2 : 1);
+                    if ((type.number & 0xe0) || !(type.number & 1) || (type.number & 0x0e)) continue;
+                    ok = xx_string_trim_whitespace_alloc((const uint8_t *)entry.string, entry.length,
+                                                         &names[named].data, &names[named].length);
+                } else ok = xx_string_trim_lower_alloc((const uint8_t *)entry.string, entry.length, !dylib,
+                                                       &names[named].data, &names[named].length);
+                if (!ok) break;
+                ++named;
+            }
+        }
+        if (!has) {
+            if (ok) *result = yx_output_hash_names(ctx, names, named, true, false);
+            for (size_t i = 0; i < named; ++i) free(names[i].data);
+            free(names);
+            return true;
+        }
+        if (!ok) return true;
+    }
+    if (has) *result = yx_defined(0);
+    return true;
+}
+
+static bool yx_output_elf_telfhash_name(const yx_mo_data *name)
+{
+    static const char *const excluded[] = {"__libc_start_main", "main", "abort", "cachectl", "cacheflush", "puts", "atol", "malloc_trim"};
+    for (size_t i = 0; i < sizeof(excluded) / sizeof(excluded[0]); ++i)
+        if (yx_output_name_equal(name, excluded[i], strlen(excluded[i]), false)) return false;
+    if (name->length && (name->string[0] == '.' || name->string[0] == '_')) return false;
+    if (name->length >= 3 && (!memcmp(name->string, "mem", 3) || !memcmp(name->string, "str", 3))) return false;
+    return name->length < 2 || memcmp(name->string + name->length - 2, "64", 2) != 0;
+}
+
+static yx_value yx_eval_elf_output_hash(const yx_mo_record *output, const yx_node *node,
+                                         const yx_eval_context *ctx)
+{
+    bool tlsh = !strcmp(node->name, "elf.telfhash");
+    const char *base = "elf.dynsym";
+    uint64_t count = yx_output_field(output, "elf.dynsym.len", 0, 0, 0).number;
+    if (!count) { base = "elf.symtab"; count = yx_output_field(output, "elf.symtab.len", 0, 0, 0).number; }
+    if (count > SIZE_MAX / sizeof(yx_output_hash_name)) return yx_undefined();
+    yx_output_hash_name *names = calloc(count ? (size_t)count : 1, sizeof(*names));
+    yx_value result = yx_undefined();
+    if (!names) return result;
+    size_t named = 0;
+    char path[64];
+    for (uint64_t i = 0; i < count; ++i) {
+        if (yx_scan_deadline_poll(ctx->deadline)) goto done;
+        snprintf(path, sizeof(path), "%s.name", base);
+        yx_mo_data name = yx_output_field(output, path, i, 0, 1);
+        if (name.type != YX_MO_DATA_STRING) continue;
+        if (tlsh) {
+            const char *fields[] = {"type", "bind", "visibility"};
+            const uint64_t expected[] = {2, 1, 0};
+            bool valid = true;
+            for (size_t f = 0; f < 3; ++f) {
+                snprintf(path, sizeof(path), "%s.%s", base, fields[f]);
+                yx_mo_data field = yx_output_field(output, path, i, 0, 1);
+                if (field.type != YX_MO_DATA_INTEGER || field.number != expected[f]) valid = false;
+            }
+            if (!valid || !yx_output_elf_telfhash_name(&name)) continue;
+        } else {
+            snprintf(path, sizeof(path), "%s.shndx", base);
+            yx_mo_data index = yx_output_field(output, path, i, 0, 1);
+            if (!name.length || index.type != YX_MO_DATA_INTEGER || index.number != 0) continue;
+        }
+        if (!xx_string_to_lower_alloc((const uint8_t *)name.string, name.length, &names[named].data, &names[named].length)) goto done;
+        ++named;
+    }
+    result = yx_output_hash_names(ctx, names, named, false, tlsh);
+done:
+    for (size_t i = 0; i < named; ++i) free(names[i].data);
+    free(names);
+    return result;
+}
+
+static yx_value yx_eval_crx_output_hash(const yx_mo_record *output,
+                                         const yx_eval_context *ctx)
+{
+    char hash[65];
+    if (yx_crx_permhash_cached(NULL, hash)) return yx_eval_crx_string(ctx, hash, 64);
+    if (ctx->block_mode) return yx_undefined();
+    yx_crx_result borrowed = {0};
+    borrowed.is_crx = yx_output_field(output, "crx.is_crx", 0, 0, 0).number != 0;
+    uint64_t count = yx_output_field(output, "crx.permissions.len", 0, 0, 0).number;
+    if (count > SIZE_MAX / sizeof(*borrowed.permissions.items) ||
+        count > SIZE_MAX / sizeof(*borrowed.permissions.lengths)) return yx_undefined();
+    borrowed.permissions.items = calloc(count ? (size_t)count : 1, sizeof(*borrowed.permissions.items));
+    borrowed.permissions.lengths = calloc(count ? (size_t)count : 1, sizeof(*borrowed.permissions.lengths));
+    yx_value result = yx_undefined();
+    if (!borrowed.permissions.items || !borrowed.permissions.lengths) goto done;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (yx_scan_deadline_poll(ctx->deadline)) goto done;
+        yx_mo_data name = yx_output_field(output, "crx.permissions.value", i, 0, 1);
+        if (name.type != YX_MO_DATA_STRING) goto done;
+        borrowed.permissions.items[i] = (char *)name.string;
+        borrowed.permissions.lengths[i] = name.length;
+    }
+    borrowed.permissions.count = (size_t)count;
+    if (yx_crx_permhash_cached(&borrowed, hash)) result = yx_eval_crx_string(ctx, hash, 64);
+done:
+    free(borrowed.permissions.items);
+    free(borrowed.permissions.lengths);
+    return result;
+}
+
+static yx_value yx_output_pe_imphash(const yx_mo_record *output, const yx_eval_context *ctx)
+{
+    yx_mo_data is_pe = yx_output_field(output, "pe.is_pe", 0, 0, 0);
+    char *joined = NULL, *owned;
+    size_t length = 0;
+    yx_hash_value hash;
+    yx_value result = yx_undefined();
+    if (!is_pe.number) return result;
+    uint64_t count = yx_output_field(output, "pe.import_details.len", 0, 0, 0).number;
+    for (uint64_t i = 0; i < count; ++i) {
+        yx_mo_data dll = yx_output_field(output, "pe.import_details.library_name", i, 0, 1);
+        if (dll.type != YX_MO_DATA_STRING) goto done;
+        if (dll.length >= 4) {
+            yx_mo_data suffix = dll;
+            suffix.string += dll.length - 4;
+            suffix.length = 4;
+            if (yx_output_name_equal(&suffix, ".dll", 4, true) ||
+                yx_output_name_equal(&suffix, ".sys", 4, true) ||
+                yx_output_name_equal(&suffix, ".ocx", 4, true)) dll.length -= 4;
+        }
+        uint64_t functions = yx_output_field(output, "pe.import_details.functions.len", i, 0, 1).number;
+        for (uint64_t j = 0; j < functions; ++j) {
+            char *lower = NULL;
+            size_t lower_length;
+            yx_mo_data name = yx_output_field(output, "pe.import_details.functions.name", i, j, 2);
+            if (yx_scan_deadline_poll(ctx->deadline) || name.type != YX_MO_DATA_STRING) goto done;
+            if ((length && !yx_output_append(&joined, &length, ",", 1)) ||
+                !xx_string_to_lower_alloc((const uint8_t *)dll.string, dll.length, &lower, &lower_length)) goto done;
+            bool ok = yx_output_append(&joined, &length, lower, lower_length);
+            free(lower);
+            if (!ok || !yx_output_append(&joined, &length, ".", 1) ||
+                !xx_string_to_lower_alloc((const uint8_t *)name.string, name.length, &lower, &lower_length)) goto done;
+            ok = yx_output_append(&joined, &length, lower, lower_length);
+            free(lower);
+            if (!ok) goto done;
+        }
+    }
+    if (!yx_hash_bytes(YX_HASH_MD5, (const uint8_t *)(joined ? joined : ""), length, &hash)) goto done;
+    owned = yx_eval_alloc_string(ctx, hash.text_length);
+    if (!owned) goto done;
+    memcpy(owned, hash.text, hash.text_length);
+    result = yx_defined_string(owned, hash.text_length);
+done:
+    free(joined);
+    return result;
+}
+
+static bool yx_eval_pe_output_call(const yx_mo_record *output, const yx_node *node,
+                                     const yx_eval_context *ctx, size_t current_pattern,
+                                     const yx_binding *bindings, yx_value *result)
+{
+    const char *name = node->name + 3;
+    yx_value arg = {0};
+    *result = yx_undefined();
+    if (!strcmp(name, "imports") || !strcmp(name, "import_rva") || !strcmp(name, "delayed_import_rva")) {
+        *result = yx_output_pe_imports(output, node, ctx, current_pattern, bindings);
+        return true;
+    }
+    if (!strcmp(name, "imphash")) {
+        *result = yx_output_pe_imphash(output, ctx);
+        return true;
+    }
+    if (!strcmp(name, "is_32bit") || !strcmp(name, "is_64bit") || !strcmp(name, "is_dll")) {
+        bool dll = !strcmp(name, "is_dll");
+        yx_mo_data field = yx_output_field(output, dll ? "pe.characteristics" : "pe.opthdr_magic", 0, 0, 0);
+        if (field.type == YX_MO_DATA_INTEGER)
+            *result = yx_defined(dll ? (field.number & 0x2000) != 0 : field.number == (!strcmp(name, "is_32bit") ? 267 : 523));
+        return true;
+    }
+    if (!strcmp(name, "calculate_checksum")) {
+        yx_mo_data checksum = yx_output_field(output, "pe.checksum", 0, 0, 0);
+        if (!yx_output_field(output, "pe.is_pe", 0, 0, 0).number ||
+            checksum.type != YX_MO_DATA_INTEGER || ctx->block_mode) return true;
+        uint32_t sum = 0;
+        bool carry = false;
+        for (size_t i = 0; i < ctx->size;) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return true;
+            uint32_t word = 0;
+            size_t width = ctx->size - i >= 4 ? 4 : ctx->size - i >= 2 ? 2 : 0;
+            if (!width) {
+                if (ctx->data[i] < '0' || ctx->data[i] > '9') break;
+                word = ctx->data[i++] - '0';
+            } else for (size_t b = 0; b < width; ++b) word |= (uint32_t)ctx->data[i++] << (8 * b);
+            uint64_t wide = (uint64_t)sum + word + carry;
+            sum = (uint32_t)wide;
+            carry = wide > UINT32_MAX;
+        }
+        bool borrow = sum < checksum.number;
+        sum -= (uint32_t)checksum.number;
+        if (borrow) --sum;
+        sum = (sum & 0xffff) + (sum >> 16);
+        sum += sum >> 16;
+        *result = yx_defined((uint32_t)((sum & 0xffff) + (uint32_t)ctx->size));
+        return true;
+    }
+    bool rich = !strcmp(name, "rich_signature.toolid") || !strcmp(name, "rich_signature.version");
+    bool exports = !strcmp(name, "exports") || !strcmp(name, "exports_index");
+    bool section = !strcmp(name, "section_index");
+    bool rva = !strcmp(name, "rva_to_offset");
+    bool offset_to_rva = !strcmp(name, "offset_to_rva");
+    if (!rich && !exports && !section && !rva && !offset_to_rva) return false;
+    if (node->items[0]->kind != N_REGEX) {
+        arg = yx_eval(node->items[0], ctx, current_pattern, bindings);
+        if (!arg.defined) return true;
+    }
+    if (rich) {
+        yx_value second = {0};
+        uint64_t count = yx_output_field(output, "pe.rich_signature.tools.len", 0, 0, 0).number, total = 0;
+        if (node->item_count == 2) {
+            second = yx_eval(node->items[1], ctx, current_pattern, bindings);
+            if (!second.defined) return true;
+        }
+        bool tool = !strcmp(name, "rich_signature.toolid");
+        for (uint64_t i = 0; i < count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return true;
+            yx_mo_data a = yx_output_field(output, tool ? "pe.rich_signature.tools.toolid" : "pe.rich_signature.tools.version", i, 0, 1);
+            yx_mo_data b = yx_output_field(output, tool ? "pe.rich_signature.tools.version" : "pe.rich_signature.tools.toolid", i, 0, 1);
+            if (a.type == YX_MO_DATA_INTEGER && a.number == arg.value &&
+                (node->item_count == 1 || (b.type == YX_MO_DATA_INTEGER && b.number == second.value)))
+                total += yx_output_field(output, "pe.rich_signature.tools.times", i, 0, 1).number;
+        }
+        *result = yx_defined(total);
+        return true;
+    }
+    if (exports) {
+        uint64_t count = yx_output_field(output, "pe.export_details.len", 0, 0, 0).number;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return true;
+            yx_mo_data field = yx_output_field(output, arg.defined && arg.type == V_INTEGER ? "pe.export_details.ordinal" : "pe.export_details.name", i, 0, 1);
+            bool match = node->items[0]->kind == N_REGEX ? yx_output_regex_match(node->items[0], &field, ctx) :
+                arg.type == V_INTEGER ? field.type == YX_MO_DATA_INTEGER && field.number == arg.value :
+                yx_output_name_equal(&field, arg.string, arg.string_length, true);
+            if (match) { *result = yx_defined(!strcmp(name, "exports") ? 1 : i); return true; }
+        }
+        if (!strcmp(name, "exports")) *result = yx_defined(0);
+        return true;
+    }
+    uint64_t count = yx_output_field(output, "pe.sections.len", 0, 0, 0).number;
+    uint64_t lowest = UINT64_MAX, selected_rva = 0, selected_offset = 0, selected_size = 0;
+    yx_mo_data alignment = yx_output_field(output, "pe.file_alignment", 0, 0, 0);
+    yx_mo_data section_alignment = yx_output_field(output, "pe.section_alignment", 0, 0, 0);
+    if (offset_to_rva) {
+        if (arg.type != V_INTEGER || arg.value > UINT32_MAX ||
+            alignment.type != YX_MO_DATA_INTEGER ||
+            section_alignment.type != YX_MO_DATA_INTEGER) return true;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (yx_scan_deadline_poll(ctx->deadline)) return true;
+            uint64_t start = yx_output_field(output, "pe.sections.raw_data_offset", i, 0, 1).number;
+            uint64_t size = yx_output_field(output, "pe.sections.raw_data_size", i, 0, 1).number;
+            uint64_t align = alignment.number > 512 ? 512 : alignment.number;
+            if (!start) continue;
+            if (align) start -= start % align;
+            if (section_alignment.number >= 4096) start -= start % 512;
+            if (start < lowest) lowest = start;
+            uint64_t end = start + size;
+            if (end > UINT32_MAX) end = UINT32_MAX;
+            if (selected_offset <= start && arg.value >= start && arg.value < end) {
+                selected_rva = yx_output_field(output, "pe.sections.virtual_address", i, 0, 1).number;
+                selected_offset = start;
+                selected_size = size;
+            }
+        }
+        if (lowest != UINT64_MAX && arg.value < lowest) *result = yx_defined(arg.value);
+        else if (arg.value >= selected_offset && arg.value - selected_offset < selected_size) {
+            uint64_t rva = selected_rva + arg.value - selected_offset;
+            *result = yx_defined(rva > UINT32_MAX ? UINT32_MAX : rva);
+        }
+        return true;
+    }
+    if (rva && (arg.type != V_INTEGER || arg.value > UINT32_MAX || alignment.type != YX_MO_DATA_INTEGER || section_alignment.type != YX_MO_DATA_INTEGER)) return true;
+    if (section && arg.type == V_INTEGER && arg.value > UINT32_MAX) return true;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (yx_scan_deadline_poll(ctx->deadline)) return true;
+        yx_mo_data start = yx_output_field(output, "pe.sections.raw_data_offset", i, 0, 1);
+        yx_mo_data size = yx_output_field(output, "pe.sections.raw_data_size", i, 0, 1);
+        if (section) {
+            yx_mo_data field = yx_output_field(output, "pe.sections.name", i, 0, 1);
+            bool match = arg.type == V_STRING ? yx_output_name_equal(&field, arg.string, arg.string_length, false) :
+                start.type == YX_MO_DATA_INTEGER && size.type == YX_MO_DATA_INTEGER &&
+                arg.value >= start.number && arg.value - start.number < size.number;
+            if (match) { *result = yx_defined(i); return true; }
+        } else {
+            yx_mo_data address = yx_output_field(output, "pe.sections.virtual_address", i, 0, 1);
+            yx_mo_data virtual_size = yx_output_field(output, "pe.sections.virtual_size", i, 0, 1);
+            if (address.type != YX_MO_DATA_INTEGER || virtual_size.type != YX_MO_DATA_INTEGER ||
+                start.type != YX_MO_DATA_INTEGER || size.type != YX_MO_DATA_INTEGER) return true;
+            if (address.number < lowest) lowest = address.number;
+            uint64_t end = address.number + (virtual_size.number > size.number ? virtual_size.number : size.number);
+            if (end > UINT32_MAX) end = UINT32_MAX;
+            if (address.number >= selected_rva && arg.value >= address.number && arg.value < end) {
+                selected_rva = address.number;
+                selected_size = size.number;
+                selected_offset = start.number;
+                uint64_t align = alignment.number > 512 ? 512 : alignment.number;
+                if (align) selected_offset -= selected_offset % align;
+                if (section_alignment.number >= 4096) selected_offset -= selected_offset % 512;
+            }
+        }
+    }
+    if (rva) {
+        if (lowest != UINT64_MAX && arg.value < lowest) *result = yx_defined(arg.value);
+        else if (arg.value >= selected_rva && arg.value - selected_rva < selected_size) {
+            uint64_t offset = selected_offset + arg.value - selected_rva;
+            *result = yx_defined(offset > UINT32_MAX ? UINT32_MAX : offset);
+        }
+    }
+    return true;
+}
+
+static yx_value yx_eval_pe_imports(const yx_node *node,
+                                    const yx_eval_context *ctx,
+                                    size_t current_pattern,
+                                    const yx_binding *bindings)
+{
+    yx_pe_import_query query = {0};
+    yx_value first, dll, function;
+    size_t first_name = 0;
+    uint64_t count;
+    query.flags = 1;
+    if (node->item_count < 1 || node->item_count > 3)
+        return yx_undefined();
+    if (node->item_count > 1 && node->items[0]->kind != N_REGEX) {
+        first = yx_eval(node->items[0], ctx, current_pattern, bindings);
+        if (!first.defined) return yx_undefined();
+        if (first.type == V_INTEGER) {
+            query.flags = (unsigned)first.value;
+            first_name = 1;
+        }
+    }
+    if (node->item_count == first_name ||
+        node->item_count - first_name > 2) return yx_undefined();
+    if (node->item_count - first_name == 2 &&
+        node->items[first_name]->kind == N_REGEX &&
+        node->items[first_name + 1]->kind == N_REGEX) {
+        yx_pe_regex_query regex_query = {0};
+        regex_query.deadline = ctx->deadline;
+        regex_query.dll_regex = node->items[first_name];
+        regex_query.function_regex = node->items[first_name + 1];
+        regex_query.dll_matches = pcre2_match_data_create_from_pattern(
+            (pcre2_code *)regex_query.dll_regex->compiled_regex, NULL);
+        regex_query.function_matches = pcre2_match_data_create_from_pattern(
+            (pcre2_code *)regex_query.function_regex->compiled_regex, NULL);
+        if (!regex_query.dll_matches || !regex_query.function_matches) {
+            pcre2_match_data_free(regex_query.dll_matches);
+            pcre2_match_data_free(regex_query.function_matches);
+            return yx_undefined();
+        }
+        yx_pe_visit_imports(ctx->data, ctx->size, query.flags,
+                             yx_pe_regex_import_visit, &regex_query);
+        pcre2_match_data_free(regex_query.dll_matches);
+        pcre2_match_data_free(regex_query.function_matches);
+        return yx_defined(regex_query.count);
+    }
+    if (node->items[first_name]->kind == N_REGEX) return yx_undefined();
+    dll = yx_eval(node->items[first_name], ctx, current_pattern, bindings);
+    if (!dll.defined || dll.type != V_STRING) return yx_undefined();
+    query.dll_name = dll.string;
+    query.dll_name_length = dll.string_length;
+    if (node->item_count - first_name == 2) {
+        if (node->items[first_name + 1]->kind == N_REGEX)
+            return yx_undefined();
+        function = yx_eval(node->items[first_name + 1], ctx,
+                           current_pattern, bindings);
+        if (!function.defined) return yx_undefined();
+        if (function.type == V_STRING) {
+            query.function_name = function.string;
+            query.function_name_length = function.string_length;
+        } else if (function.type == V_INTEGER) {
+            query.by_ordinal = true;
+            query.ordinal = function.value;
+        } else return yx_undefined();
+    }
+    if (!yx_pe_import_count(ctx->data, ctx->size, &query, &count))
+        return yx_undefined();
+    return yx_defined(node->item_count - first_name == 1 ||
+                      (first_name == 0 && query.by_ordinal) ? count : count != 0);
+}
+
+static yx_value yx_eval_pe_rich_records(const yx_node *node,
+                                         const yx_eval_context *ctx,
+                                         size_t current_pattern,
+                                         const yx_binding *bindings)
+{
+    yx_value args[2];
+    uint64_t count, total = 0;
+    bool by_tool = strcmp(node->name, "pe.rich_signature.toolid") == 0;
+    if (node->item_count < 1 || node->item_count > 2) return yx_undefined();
+    for (size_t i = 0; i < node->item_count; ++i) {
+        args[i] = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        if (!args[i].defined || args[i].type != V_INTEGER) return yx_undefined();
+    }
+    if (!yx_pe_rich_tool_count(ctx->data, ctx->size, &count)) return yx_undefined();
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t tool, version, times;
+        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+        if (!yx_pe_rich_tool_field(ctx->data, ctx->size, i, "toolid", &tool) ||
+            !yx_pe_rich_tool_field(ctx->data, ctx->size, i, "version", &version) ||
+            !yx_pe_rich_tool_field(ctx->data, ctx->size, i, "times", &times)) continue;
+        if ((by_tool ? tool : version) == args[0].value &&
+            (node->item_count == 1 || (by_tool ? version : tool) == args[1].value))
+            total += times;
+    }
+    return yx_defined(total);
+}
+
+static yx_value yx_eval_pe_import_rva(const yx_node *node,
+                                       const yx_eval_context *ctx,
+                                       size_t current_pattern,
+                                       const yx_binding *bindings,
+                                       bool delayed)
+{
+    yx_pe_import_query query = {0};
+    yx_value dll, function;
+    uint64_t rva;
+    if (node->item_count != 2) return yx_undefined();
+    dll = yx_eval(node->items[0], ctx, current_pattern, bindings);
+    function = yx_eval(node->items[1], ctx, current_pattern, bindings);
+    if (!dll.defined || dll.type != V_STRING || !function.defined)
+        return yx_undefined();
+    query.flags = delayed ? 2u : 1u;
+    query.dll_name = dll.string;
+    query.dll_name_length = dll.string_length;
+    if (function.type == V_STRING) {
+        query.function_name = function.string;
+        query.function_name_length = function.string_length;
+    } else if (function.type == V_INTEGER) {
+        query.by_ordinal = true;
+        query.ordinal = function.value;
+    } else return yx_undefined();
+    return yx_pe_import_rva(ctx->data, ctx->size, delayed, &query, &rva) ?
+           yx_defined(rva) : yx_undefined();
+}
+
+static yx_value yx_eval_global_array_item(yx_global_type element_type,
+                                           const yx_global_scalar_value *items,
+                                           size_t count, uint64_t index)
+{
+    if (!items || index >= count) return yx_undefined();
+    switch (element_type) {
+    case YX_GLOBAL_BOOL: return yx_defined(items[index].boolean);
+    case YX_GLOBAL_INT:
+        return yx_defined((uint64_t)items[index].integer);
+    case YX_GLOBAL_FLOAT:
+        return yx_defined_float(items[index].floating);
+    case YX_GLOBAL_STR:
+        return yx_defined_string(items[index].string.data,
+                                 items[index].string.length);
+    case YX_GLOBAL_ARRAY:
+        return yx_undefined();
+    case YX_GLOBAL_STRUCT:
+        return yx_defined_struct(items[index].object);
+    }
+    return yx_undefined();
+}
+
+static yx_value yx_eval_global_object_field(const yx_global_object *object,
+                                             const char *name)
+{
+    const yx_global_field *field = yx_global_object_field(object, name);
+    if (!field) return yx_undefined();
+    switch (field->type) {
+    case YX_GLOBAL_BOOL: return yx_defined(field->value.boolean);
+    case YX_GLOBAL_INT: return yx_defined((uint64_t)field->value.integer);
+    case YX_GLOBAL_FLOAT: return yx_defined_float(field->value.floating);
+    case YX_GLOBAL_STR:
+        return yx_defined_string(field->value.string.data,
+                                 field->value.string.length);
+    case YX_GLOBAL_ARRAY:
+        return yx_undefined();
+    case YX_GLOBAL_STRUCT: return yx_defined_struct(field->value.object);
+    }
+    return yx_undefined();
+}
+
+static bool yx_eval_object_array_path(
+    const yx_eval_context *ctx, const yx_binding *bindings,
+    const char *name, const char **member,
+    const yx_global_scalar_value **items, size_t *count)
+{
+    for (const yx_binding *local = bindings; local; local = local->parent) {
+        const yx_global_object *object = local->value.object;
+        size_t root_length = strlen(local->name);
+        const char *path;
+        if (local->value.type != V_STRUCT || !object ||
+            strncmp(name, local->name, root_length) != 0 ||
+            name[root_length] != '.') continue;
+        path = name + root_length + 1;
+        const yx_global_field *field = yx_global_object_nested_array_field(object, path, member);
+        if (field) {
+            *items = field->value.array->items;
+            *count = field->value.array->count;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < ctx->global_count; ++i) {
+        const yx_eval_global *global = &ctx->globals[i];
+        size_t root_length;
+        const char *path;
+        if (!global->name) continue;
+        root_length = strlen(global->name);
+        if (strncmp(name, global->name, root_length) != 0 ||
+            name[root_length] != '.') continue;
+        path = name + root_length + 1;
+        if (global->type == YX_EVAL_GLOBAL_ARRAY &&
+            global->value.array.element_type == YX_GLOBAL_STRUCT) {
+            *member = path;
+            *items = (const yx_global_scalar_value *)
+                global->value.array.items;
+            *count = global->value.array.count;
+            return true;
+        }
+        if (global->type != YX_EVAL_GLOBAL_STRUCT ||
+            !global->value.object) continue;
+        const yx_global_object *object = global->value.object;
+        const yx_global_field *field = yx_global_object_nested_array_field(object, path, member);
+        if (field) {
+            *items = field->value.array->items;
+            *count = field->value.array->count;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* EnrichedIP.in_range(cidr) and EnrichedDomain.permutation_of(target
+ * [, kinds]) over the struct's `raw` field of the vt module output. */
+static yx_value yx_eval_vt_method(const yx_node *node, int method,
+                                  const char *raw_path,
+                                  const yx_eval_context *ctx,
+                                  size_t current_pattern,
+                                  const yx_binding *bindings)
+{
+    yx_vt_data raw;
+    yx_value argument, kinds;
+    int64_t permutations = 0x1f; /* vt.Domain.Permutation.ALL */
+    if (!node->item_count ||
+        !yx_vt_output_get(ctx->vt_output, raw_path, NULL, 0, false, &raw) ||
+        raw.type != YX_VT_DATA_STRING) return yx_undefined();
+    argument = yx_eval(node->items[0], ctx, current_pattern, bindings);
+    if (!argument.defined || argument.type != V_STRING) return yx_undefined();
+    if (method == 1)
+        return yx_defined(yx_vt_ip_in_range(raw.string, raw.length,
+                                            argument.string,
+                                            argument.string_length));
+    if (node->item_count > 1) {
+        kinds = yx_eval(node->items[1], ctx, current_pattern, bindings);
+        if (!kinds.defined || kinds.type != V_INTEGER) return yx_undefined();
+        permutations = (int64_t)kinds.value;
+    }
+    return yx_defined(yx_vt_domain_permutation_of(raw.string, raw.length,
+                                                  argument.string,
+                                                  argument.string_length,
+                                                  permutations));
+}
+
+static yx_value yx_eval_module_extension(const yx_node *node,
+                                          const yx_eval_context *ctx,
+                                          size_t current_pattern,
+                                          const yx_binding *bindings,
+                                          bool *handled)
+{
+    unsigned count = yx_module_node_indices(node);
+    const yx_node *keys[] = {node->a, node->b, node->c};
+    uint64_t indices[3] = {0};
+    const char *name = node->name;
+    *handled = false;
+    if (!name || (node->kind != N_CALL && node->kind != N_MODULE_FIELD &&
+                  !count)) return yx_undefined();
+    if (strncmp(name, "pe.", 3) != 0 && strncmp(name, "macho.", 6) != 0
+#ifdef XXYARA_ENABLE_MSI
+        && strncmp(name, "msi.", 4) != 0
+#endif
+        )
+        return yx_undefined();
+    for (const yx_binding *local = bindings; local; local = local->parent) {
+        size_t length = strlen(local->name);
+        if (strncmp(name, local->name, length) == 0 && name[length] == '.')
+            return yx_undefined();
+    }
+    if (strncmp(name, "macho.file.", 11) == 0 && count) {
+        const uint8_t *bytes;
+        size_t length;
+        yx_value index = yx_eval(keys[0], ctx, current_pattern, bindings);
+        yx_eval_context child = *ctx;
+        yx_node field = *node;
+        char path[256];
+        *handled = true;
+        if (!index.defined || index.type != V_INTEGER ||
+            (int64_t)index.value < 0 ||
+            !yx_macho_file_span(ctx->data, ctx->size, index.value,
+                                  &bytes, &length)) return yx_undefined();
+        int written = snprintf(path, sizeof(path), "macho.%s", name + 11);
+        if (written < 0 || (size_t)written >= sizeof(path)) return yx_undefined();
+        child.data = bytes;
+        child.size = length;
+        field.name = path;
+        field.a = node->b;
+        field.b = node->c;
+        field.c = NULL;
+        field.kind = count == 3 ? N_MODULE_NESTED_INDEXED_FIELD :
+                     count == 2 ? N_MODULE_INDEXED_FIELD :
+                     node->operation == TK_LPAREN ? N_CALL : N_MODULE_FIELD;
+        return yx_eval(&field, &child, current_pattern, bindings);
+    }
+    bool rich = strncmp(name, "pe.rich_signature.", 18) == 0;
+    bool directories = strncmp(name, "pe.data_directories.", 20) == 0;
+    const char *import_member = NULL;
+    bool delayed = false;
+    if (strncmp(name, "pe.import_details.", 18) == 0)
+        import_member = name + 18;
+    else if (strncmp(name, "pe.delayed_import_details.", 26) == 0) {
+        import_member = name + 26;
+        delayed = true;
+    }
+    const char *signature_member = yx_signature_member(name);
+    bool counter_chain = signature_member &&
+        strncmp(signature_member, "countersignatures.chain.", 24) == 0 &&
+        count == 3;
+    bool extras = count == 1 &&
+        (strncmp(name, "macho.entitlements.", 19) == 0 ||
+         strncmp(name, "macho.certificates.", 19) == 0 ||
+         strncmp(name, "macho.imports.", 14) == 0 ||
+         strncmp(name, "macho.exports.", 14) == 0);
+    if (!rich && !directories && !import_member && !counter_chain && !extras)
+        return yx_undefined();
+    /* The ordinary scalar Rich fields are handled by yx_pe_field. */
+    if (rich && strcmp(name, "pe.rich_signature.clear_data") != 0 &&
+        strncmp(name, "pe.rich_signature.tools.", 24) != 0)
+        return yx_undefined();
+    *handled = true;
+    for (unsigned i = 0; i < count; ++i) {
+        yx_value index = yx_eval(keys[i], ctx, current_pattern, bindings);
+        if (!index.defined || index.type != V_INTEGER ||
+            (int64_t)index.value < 0) return yx_undefined();
+        indices[i] = index.value;
+    }
+    if (strcmp(name, "pe.rich_signature.clear_data") == 0) {
+        uint8_t *bytes = NULL;
+        size_t length = 0;
+        yx_value result = yx_undefined();
+        if (yx_pe_rich_clear_data(ctx->data, ctx->size, &bytes, &length))
+            result = yx_eval_crx_string(ctx, (const char *)bytes, length);
+        free(bytes);
+        return result;
+    }
+    if (rich || directories) {
+        uint64_t number;
+        const char *member = name + (rich ? 24 : 20);
+        bool ok = !count && strcmp(member, "len") == 0 ?
+            (rich ? yx_pe_rich_tool_count(ctx->data, ctx->size, &number) :
+                    yx_pe_data_directory_count(ctx->data, ctx->size, &number)) :
+            count == 1 ?
+            (rich ? yx_pe_rich_tool_field(ctx->data, ctx->size, indices[0],
+                                          member, &number) :
+                    yx_pe_data_directory_field(ctx->data, ctx->size, indices[0],
+                                                member, &number)) : false;
+        return ok ? yx_defined(number) : yx_undefined();
+    }
+    if (import_member) {
+        if (!count && strcmp(import_member, "len") == 0) {
+            yx_pe_import_stats stats = {0};
+            (void)yx_pe_get_import_stats(ctx->data, ctx->size, &stats);
+            return yx_defined(delayed ? stats.delayed_libraries :
+                                       stats.standard_libraries);
+        }
+        if (count == 1) {
+            const uint8_t *library;
+            size_t length;
+            uint64_t functions;
+            if (!yx_pe_import_detail(ctx->data, ctx->size, delayed, indices[0],
+                                       &library, &length, &functions))
+                return yx_undefined();
+            if (strcmp(import_member, "library_name") == 0)
+                return yx_defined_string((const char *)library, length);
+            if (strcmp(import_member, "number_of_functions") == 0 ||
+                strcmp(import_member, "functions.len") == 0)
+                return yx_defined(functions);
+        } else if (count == 2 && strncmp(import_member, "functions.", 10) == 0) {
+            yx_pe_import_function function = {0};
+            yx_value result = yx_undefined();
+            const char *member = import_member + 10;
+            if (yx_pe_import_function_detail(ctx->data, ctx->size, delayed,
+                                               indices[0], indices[1], &function)) {
+                if (strcmp(member, "name") == 0 && function.name)
+                    result = yx_eval_crx_string(ctx, function.name,
+                                                 function.name_length);
+                else if (strcmp(member, "ordinal") == 0 && function.has_ordinal)
+                    result = yx_defined(function.ordinal);
+                else if (strcmp(member, "rva") == 0)
+                    result = yx_defined(function.rva);
+            }
+            free(function.name);
+            return result;
+        }
+        return yx_undefined();
+    }
+    if (counter_chain) {
+        const yx_pe_signature_result *signatures =
+            yx_eval_signature_list(ctx, name);
+        if (!signatures || indices[0] >= signatures->count) return yx_undefined();
+        const yx_pe_signature *signature = &signatures->items[indices[0]];
+        if (indices[1] >= signature->countersignature_count) return yx_undefined();
+        const yx_pe_countersignature *counter =
+            &signature->countersignatures[indices[1]];
+        if (indices[2] >= counter->chain_count) return yx_undefined();
+        size_t mapped = counter->chain_indices[indices[2]];
+        return mapped < signature->certificate_count ?
+            yx_eval_pe_certificate_field(&signature->certificates[mapped],
+                                         signature_member + 24) :
+            yx_undefined();
+    }
+    if (extras) {
+        yx_macho_extras parsed = {0};
+        yx_value result = yx_undefined();
+        const char *string = NULL;
+        size_t string_length = SIZE_MAX;
+        if (!yx_macho_extras_parse(ctx->data, ctx->size, &parsed)) return result;
+        if (strncmp(name, "macho.certificates.", 19) == 0 &&
+            indices[0] < parsed.certificate_count) {
+            const yx_macho_certificate *cert = &parsed.certificates[indices[0]];
+            const char *member = name + 19;
+            if (strcmp(member, "issuer") == 0) {
+                string = cert->issuer;
+                string_length = cert->issuer_length;
+            } else if (strcmp(member, "subject") == 0) {
+                string = cert->subject;
+                string_length = cert->subject_length;
+            }
+            else if (strcmp(member, "is_self_signed") == 0)
+                result = yx_defined(cert->is_self_signed);
+        } else if (strcmp(name, "macho.entitlements.value") == 0 &&
+                   indices[0] < parsed.entitlement_count)
+            string = parsed.entitlements[indices[0]];
+        else if (strcmp(name, "macho.imports.value") == 0 &&
+                 indices[0] < parsed.import_count)
+            string = parsed.imports[indices[0]];
+        else if (strcmp(name, "macho.exports.value") == 0 &&
+                 indices[0] < parsed.export_count)
+            string = parsed.exports[indices[0]];
+        if (string) result = yx_eval_crx_string(ctx, string,
+            string_length == SIZE_MAX ? strlen(string) : string_length);
+        yx_macho_extras_free(&parsed);
+        return result;
+    }
+    return yx_undefined();
+}
+
+static yx_value yx_test_proto_native_value(yx_vt_type type,
+                                           yx_global_scalar_value value)
+{
+    switch (type) {
+    case YX_VT_INT: return yx_defined((uint64_t)value.integer);
+    case YX_VT_BOOL: return yx_defined(value.boolean);
+    case YX_VT_FLOAT: return yx_defined_float(value.floating);
+    case YX_VT_STRING: return yx_defined_string(value.string.data, value.string.length);
+    case YX_VT_STRUCT: return yx_defined_struct(value.object);
+    default: return yx_undefined();
+    }
+}
+
+static yx_value yx_test_proto_eval_field(const yx_node *node,
+    const yx_vt_field *field, bool length_call, const yx_eval_context *ctx,
+    size_t current_pattern, const yx_binding *bindings)
+{
+    yx_vt_key keys[3] = {{0}};
+    const yx_node *index_nodes[] = {node->a, node->b, node->c};
+    for (unsigned i = 0; i < field->indices; ++i) {
+        yx_value key = yx_eval(index_nodes[i], ctx, current_pattern, bindings);
+        if (!key.defined || (key.type != V_INTEGER && key.type != V_STRING))
+            return yx_undefined();
+        keys[i] = (yx_vt_key){.number = key.value, .is_string = key.type == V_STRING,
+                             .string = key.string, .length = key.string_length};
+    }
+    yx_value result = yx_undefined();
+    if (!field->indices) {
+        for (size_t i = 0; i < sizeof(yx_tp_native_fields) / sizeof(yx_tp_native_fields[0]); ++i) {
+            const yx_tp_native_field *native = &yx_tp_native_fields[i];
+            if (strcmp(native->path, field->path) != 0) continue;
+            if (native->kind == YX_TP_UNDEFINED) return result;
+            if (native->kind == YX_TP_SCAN_SIZE)
+                return yx_defined_integer(ctx->size, yx_unsigned_module_field(node->name));
+            if (native->kind == YX_TP_METADATA)
+                return ctx->test_proto2_metadata_present ? yx_defined_string(
+                    ctx->test_proto2_metadata ? ctx->test_proto2_metadata : "",
+                    ctx->test_proto2_metadata_length) : result;
+            if (native->type == YX_VT_STRING)
+                return length_call ? yx_defined(native->length) :
+                    yx_defined_string(native->string, native->length);
+            if (native->type == YX_VT_FLOAT) return yx_defined_float(native->floating);
+            return yx_defined_integer((uint64_t)native->integer,
+                                      yx_unsigned_module_field(node->name));
+        }
+    }
+    const yx_global_object *object = NULL;
+    const yx_global_array *array = NULL;
+    const yx_tp_native_map *map = NULL;
+    const char *tail = NULL;
+    size_t root_length = 0;
+    for (size_t i = 0; i < sizeof(yx_tp_arrays) / sizeof(yx_tp_arrays[0]); ++i) {
+        const yx_module_array_desc *candidate = &yx_tp_arrays[i];
+        size_t length = strlen(candidate->path);
+        if (candidate->parent_indices == 0 && length > root_length &&
+            strncmp(field->path, candidate->path, length) == 0 &&
+            (!field->path[length] || field->path[length] == '.')) {
+            array = candidate->schema;
+            tail = field->path + length;
+            root_length = length;
+        }
+    }
+    for (size_t i = 0; i < sizeof(yx_tp_maps) / sizeof(yx_tp_maps[0]); ++i) {
+        size_t length = strlen(yx_tp_maps[i].path);
+        if (strncmp(field->path, yx_tp_maps[i].path, length) == 0 &&
+            (!field->path[length] || field->path[length] == '.')) {
+            map = &yx_tp_maps[i];
+            tail = field->path + length;
+            break;
+        }
+    }
+    if (!array && !map && strncmp(field->path, "test_proto2.nested", 18) == 0 &&
+        (!field->path[18] || field->path[18] == '.')) {
+        object = &yx_tp_nested_object_0;
+        tail = field->path + 18;
+    }
+    unsigned key_at = 0;
+    for (;;) {
+        if (map) {
+            if (key_at == field->indices) {
+                if (length_call) return yx_defined(1);
+                result = yx_defined_map();
+                result.test_proto_map = map;
+                break;
+            }
+            const yx_vt_key *key = &keys[key_at++];
+            if (map->key_type == YX_VT_STRING ?
+                (!key->is_string || key->length != strlen(map->string_key) ||
+                 memcmp(key->string, map->string_key, key->length) != 0) :
+                (key->is_string || (int64_t)key->number != map->integer_key))
+                return yx_undefined();
+            if (map->value_type != YX_VT_STRUCT)
+                return yx_test_proto_native_value(map->value_type, map->value);
+            object = map->value.object;
+            map = NULL;
+        }
+        if (array) {
+            if (key_at == field->indices) {
+                if (length_call) return yx_defined(array->count);
+                result = yx_defined(0);
+                result.type = V_STRUCT;
+                break;
+            }
+            const yx_vt_key *key = &keys[key_at++];
+            if (key->is_string || key->number >= array->count) return yx_undefined();
+            if (array->element_type != YX_GLOBAL_STRUCT) {
+                result = yx_eval_global_array_item(array->element_type,
+                    array->items, array->count, key->number);
+                if (length_call && result.defined && result.type == V_STRING)
+                    result = yx_defined(result.string_length);
+                return result;
+            }
+            object = array->items[key->number].object;
+            array = NULL;
+        }
+        if (!object) return yx_undefined();
+        if (!tail || !*tail || (node->implicit_value && strcmp(tail, ".value") == 0)) {
+            result = yx_defined_struct(object);
+            break;
+        }
+        if (*tail == '.') ++tail;
+        const char *end = strchr(tail, '.');
+        size_t length = end ? (size_t)(end - tail) : strlen(tail);
+        const yx_global_field *member = NULL;
+        for (size_t i = 0; i < object->count; ++i)
+            if (strlen(object->fields[i].name) == length &&
+                memcmp(object->fields[i].name, tail, length) == 0) {
+                member = &object->fields[i];
+                break;
+            }
+        if (!member) return yx_undefined();
+        tail += length;
+        if (member->type == YX_GLOBAL_ARRAY) { array = member->value.array; continue; }
+        if (member->type == YX_GLOBAL_STRUCT) { object = member->value.object; continue; }
+        result = yx_eval_global_array_item(member->type, &member->value, 1, 0);
+        if (result.type == V_INTEGER) result.is_unsigned = yx_unsigned_module_field(node->name);
+        if (length_call && result.defined && result.type == V_STRING)
+            result = yx_defined(result.string_length);
+        return result;
+    }
+    result.vt_path = node->name;
+    result.vt_key_count = field->indices;
+    result.vt_element = node->implicit_value;
+    memcpy(result.vt_keys, keys, sizeof(keys));
+    return result;
+}
+
+static yx_value yx_test_proto_eval_function(const yx_node *node,
+    const yx_tp_function *function, const yx_eval_context *ctx,
+    size_t current_pattern, const yx_binding *bindings)
+{
+    if (node->kind != N_CALL && node->operation != TK_LPAREN) {
+        yx_value alias = yx_defined(0);
+        alias.type = V_STRUCT;
+        alias.vt_path = node->name;
+        return alias;
+    }
+    yx_value args[2] = {{0}};
+    if (node->item_count != function->argc) return yx_undefined();
+    for (size_t i = 0; i < node->item_count; ++i) {
+        args[i] = yx_eval(node->items[i], ctx, current_pattern, bindings);
+        if (!args[i].defined) return yx_undefined();
+    }
+    const char *name = function->path + 12;
+    if (strcmp(name, "add") == 0) {
+        if (args[0].type == V_FLOAT || args[1].type == V_FLOAT)
+            return yx_defined_float((args[0].type == V_FLOAT ? args[0].floating :
+                                      (double)(int64_t)args[0].value) +
+                                    (args[1].type == V_FLOAT ? args[1].floating :
+                                      (double)(int64_t)args[1].value));
+        return yx_defined(args[0].value + args[1].value);
+    }
+    if (strcmp(name, "uppercase") == 0) {
+        char *upper = NULL;
+        size_t length = 0;
+        if (!xx_string_to_upper_alloc((const uint8_t *)args[0].string,
+                                      args[0].string_length,
+                                      &upper, &length)) return yx_undefined();
+        char *string = yx_eval_alloc_string(ctx, length);
+        if (string && length) memcpy(string, upper, length);
+        free(upper);
+        return string ? yx_defined_string(string, length) : yx_undefined();
+    }
+    if (strcmp(name, "undef_i64") == 0) return yx_undefined();
+    if (strcmp(name, "head") == 0)
+        return args[0].value <= ctx->size ?
+            yx_defined_string(ctx->data ? (const char *)ctx->data : "", (size_t)args[0].value) : yx_undefined();
+    if (strcmp(name, "get_foo") == 0) return yx_defined_string("foo", 3);
+    if (strcmp(name, "to_int") == 0) {
+        int64_t number;
+        if (!xx_str_to_i64_radix(args[0].string, args[0].string_length, 10,
+                                 &number)) return yx_undefined();
+        return yx_defined((uint64_t)number);
+    }
+    if (strcmp(name, "nested.nested_func") == 0) return yx_defined(1);
+    if (*function->receiver) {
+        const char *dot = strrchr(node->name, '.');
+        const char *member = strcmp(name, "nested_method") == 0 ?
+                             "nested_bool" : "nested_string";
+        size_t prefix = (size_t)(dot - node->name);
+        char *path = yx_eval_alloc_items(ctx, prefix + strlen(member) + 2, 1);
+        if (!path) return yx_undefined();
+        memcpy(path, node->name, prefix); path[prefix] = '.';
+        strcpy(path + prefix + 1, member);
+        yx_node access = *node;
+        access.name = path;
+        access.kind = yx_module_node_indices(node) == 1 ? N_MODULE_INDEXED_FIELD :
+                      N_MODULE_FIELD;
+        access.operation = TK_BAD;
+        access.items = NULL; access.item_count = 0;
+        yx_value receiver = yx_eval(&access, ctx, current_pattern, bindings);
+        if (strcmp(name, "nested_method") == 0 || !receiver.defined) return receiver;
+        return yx_defined(receiver.string_length == args[0].string_length &&
+            memcmp(receiver.string, args[0].string, receiver.string_length) == 0);
+    }
+    return yx_undefined();
+}
+
+static const yx_mo_record *yx_eval_module_output(const yx_eval_context *ctx,
+                                                 const char *path)
+{
+    if (!path) return NULL;
+    size_t length = strcspn(path, ".");
+    char module[32];
+    if (length >= sizeof(module)) return NULL;
+    memcpy(module, path, length); module[length] = '\0';
+    int index = yx_mo_module_index(module);
+    return index < 0 ? NULL : ctx->module_outputs[index];
+}
+
+static yx_value yx_eval_output_data(const yx_node *node, const yx_mo_data *data,
+                                     const yx_vt_key *keys, unsigned count)
+{
+    switch (data->type) {
+    case YX_MO_DATA_INTEGER: return yx_defined_integer(data->number, data->is_unsigned);
+    case YX_MO_DATA_FLOAT: return yx_defined_float(data->floating);
+    case YX_MO_DATA_STRING: return yx_defined_string(data->string, data->length);
+    case YX_MO_DATA_UNDEFINED: return yx_undefined();
+    default: {
+        yx_value value = data->type == YX_MO_DATA_MAP ? yx_defined_map() : yx_defined(0);
+        if (data->type != YX_MO_DATA_MAP) value.type = V_STRUCT;
+        value.vt_path = node->name;
+        value.vt_key_count = count;
+        value.vt_element = node->implicit_value;
+        if (count) memcpy(value.vt_keys, keys, count * sizeof(*keys));
+        value.module_map = data->collection;
+        value.module_map_origin = data->type == YX_MO_DATA_MAP;
+        value.value = data->number;
+        return value;
+    }
+    }
+}
+
+static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx,
+                                 size_t current_pattern, const yx_binding *bindings);
+
+/* Dispatch scalar kinds here before entering yx_eval_uncached. Keeping this
+ * small frame separate avoids probing the module evaluator's stack frame
+ * even when its identifier/module preamble is gated off. */
+static yx_value yx_eval_scalar(const yx_node *node, const yx_eval_context *ctx,
+    size_t current_pattern, const yx_binding *bindings)
+{
+    yx_value value;
+    if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+    switch (node->kind) {
+    case N_INTEGER: return yx_defined_integer(node->number, node->is_unsigned);
+    case N_FLOAT: return yx_defined_float(node->floating);
+    case N_STRING: return yx_defined_string(node->name, node->string_length);
+    case N_REGEX: return yx_undefined();
+    case N_FILESIZE:
+        return ctx->block_mode ? yx_undefined() : yx_defined(ctx->size);
+    case N_READ: return yx_read_integer(node, ctx, current_pattern, bindings);
+    case N_UNARY:
+        value = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (node->operation == TK_DEFINED) return yx_defined(value.defined);
+        if (!value.defined) return yx_undefined();
+        switch (node->operation) {
+        case TK_NOT: return yx_defined(!yx_truth(value));
+        case TK_MINUS:
+            return value.type == V_FLOAT ? yx_defined_float(-value.floating) :
+                   value.type == V_INTEGER ? yx_defined((uint64_t)(0 - value.value)) :
+                   yx_undefined();
+        case TK_PLUS: return value;
+        case TK_TILDE:
+            return value.type == V_INTEGER ?
+                yx_defined_integer(~value.value, value.is_unsigned) : yx_undefined();
+        default: return yx_undefined();
+        }
+    default: return yx_undefined();
+    }
+}
+
+/* Values of plain module fields within one scan. A module field without an
+ * index, argument, call, alias rewriting or enclosing binding reads only the
+ * scan's own state (module data and outputs of the scanned input, globals),
+ * never the rule's patterns, rule results or loop variables, so every rule of
+ * the scan that evaluates the same field gets the same value. The scalar
+ * results without references (integers, floats, undefined) are kept for the
+ * others; the table belongs to the scanner scratch and to one scan and input
+ * (yx_condition_scratch_new_scan, data/size check). Block scans are left
+ * alone, as are evaluations after the deadline expired. */
+static bool yx_field_memo_eligible(const yx_node *node, const yx_eval_context *ctx,
+                                   const yx_binding *bindings)
+{
+    return node && node->kind == N_MODULE_FIELD && !bindings && node->name && !node->a &&
+           !node->b && !node->c && !node->body && !node->items && !node->item_count &&
+           !node->operation && !node->resolved_module_alias && !node->module_alias_prefix_length &&
+           !node->deep_index_count && ctx->string_arena && !ctx->block_mode;
+}
+
+static uint64_t yx_field_memo_hash(const yx_node *node)
+{
+    uint64_t hash = UINT64_C(14695981039346656037) ^ (uint64_t)node->implicit_value;
+    for (const unsigned char *p = (const unsigned char *)node->name; *p; ++p)
+        hash = (hash ^ *p) * UINT64_C(1099511628211);
+    return hash;
+}
+
+/* The entry of node in the current scan's table: its slot when found, or the
+ * free slot it would take (*found false), or NULL when the table is full or
+ * cannot be allocated. */
+static yx_field_memo_entry *yx_field_memo_entry_of(const yx_node *node, const yx_eval_context *ctx,
+                                                   uint64_t hash, bool *found)
+{
+    yx_eval_string_arena *arena = ctx->string_arena;
+    *found = false;
+    if (arena->field_memo_data != ctx->data || arena->field_memo_size != ctx->size) {
+        /* Another input: earlier values do not apply. */
+        if (++arena->field_memo_generation == 0) {
+            if (arena->field_memo)
+                memset(arena->field_memo, 0, YX_FIELD_MEMO_SLOTS * sizeof(*arena->field_memo));
+            arena->field_memo_generation = 1;
+        }
+        arena->field_memo_data = ctx->data;
+        arena->field_memo_size = ctx->size;
+    }
+    if (!arena->field_memo) {
+        arena->field_memo = calloc(YX_FIELD_MEMO_SLOTS, sizeof(*arena->field_memo));
+        if (!arena->field_memo) return NULL;
+    }
+    for (size_t probe = 0, slot = (size_t)hash & (YX_FIELD_MEMO_SLOTS - 1); probe < YX_FIELD_MEMO_SLOTS;
+         ++probe, slot = (slot + 1) & (YX_FIELD_MEMO_SLOTS - 1)) {
+        yx_field_memo_entry *entry = &arena->field_memo[slot];
+        if (!entry->used || entry->generation != arena->field_memo_generation) return entry;
+        if (entry->hash == hash && entry->implicit_value == node->implicit_value &&
+            !strcmp(entry->name, node->name)) {
+            *found = true;
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static bool yx_field_memo_get(const yx_node *node, const yx_eval_context *ctx, yx_value *value)
+{
+    bool found;
+    yx_field_memo_entry *entry = yx_field_memo_entry_of(node, ctx, yx_field_memo_hash(node), &found);
+    if (!entry || !found) return false;
+    *value = entry->value;
+    return true;
+}
+
+static void yx_field_memo_put(const yx_node *node, const yx_eval_context *ctx, const yx_value *value)
+{
+    uint64_t hash;
+    size_t length;
+    bool found;
+    yx_field_memo_entry *entry;
+    if ((ctx->deadline && ctx->deadline->expired) ||
+        (value->type != V_INTEGER && value->type != V_FLOAT) || value->string || value->object ||
+        value->vt_map || value->module_map || value->test_proto_map || value->vt_path ||
+        value->vt_key_count) return;
+    length = strlen(node->name);
+    if (length >= YX_FIELD_MEMO_NAME) return;
+    hash = yx_field_memo_hash(node);
+    entry = yx_field_memo_entry_of(node, ctx, hash, &found);
+    if (!entry || found) return;
+    memcpy(entry->name, node->name, length + 1);
+    entry->hash = hash;
+    entry->generation = ctx->string_arena->field_memo_generation;
+    entry->used = true;
+    entry->implicit_value = node->implicit_value;
+    entry->value = *value;
+}
+
+static yx_value yx_eval(const yx_node *node, const yx_eval_context *ctx,
+                        size_t current_pattern, const yx_binding *bindings)
+{
+    if (node) {
+        switch (node->kind) {
+        case N_INTEGER: case N_FLOAT: case N_STRING: case N_REGEX:
+        case N_FILESIZE: case N_READ: case N_UNARY:
+            return yx_eval_scalar(node, ctx, current_pattern, bindings);
+        case N_RULE:
+            for (const yx_binding *local = bindings; local; local = local->parent)
+                if (!strcmp(local->name, node->name)) {
+                    if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+                    return local->value;
+                }
+            break;
+        default: break;
+        }
+    }
+    if (node && node->kind == N_FOR_IN && node->range_loop)
+        return yx_eval_range(node, ctx, current_pattern, bindings);
+    if (yx_arithmetic_chain(node))
+        return yx_eval_arithmetic_chain(node, ctx, current_pattern, bindings);
+    if (node && node->kind == N_BINARY &&
+        (node->operation == TK_AND || node->operation == TK_OR))
+        return yx_eval_boolean_chain(node, ctx, current_pattern, bindings);
+#ifdef _WIN32
+    if (node && node->kind == N_BINARY)
+        return yx_eval_binary_iterative(node, ctx, current_pattern, bindings);
+#endif
+    const yx_resolved_name *resolved = node && node->kind == N_CALL ?
+        yx_eval_resolved_name(ctx, node) : NULL;
+    size_t index = node && node->kind == N_CALL ?
+        (resolved ? resolved->cache_index : yx_resolve_function_cache(node->name)) :
+        YX_MO_FUNCTION_CACHE_COUNT;
+    yx_mo_function_cache *cache = ctx->module_function_cache && index < YX_MO_FUNCTION_CACHE_COUNT ?
+        &ctx->module_function_cache[index] : NULL;
+    if (cache && cache->defined)
+        return cache->string ? yx_defined_string(cache->bytes, cache->length) : yx_defined(cache->number);
+    if (ctx->block_mode && node && node->kind == N_CALL && node->name &&
+        ((!strncmp(node->name, "pe.", 3) && yx_pe_function_supported(node->name + 3)) ||
+         !strncmp(node->name, "macho.has_", 10) ||
+         !strcmp(node->name, "macho.file_index_for_arch") ||
+         !strcmp(node->name, "macho.entry_point_for_arch") ||
+         index < YX_MO_FUNCTION_CACHE_COUNT)) return yx_undefined();
+    bool memoized = yx_field_memo_eligible(node, ctx, bindings);
+    yx_value result;
+    if (memoized && yx_field_memo_get(node, ctx, &result)) return result;
+    result = yx_eval_uncached(node, ctx, current_pattern, bindings);
+    if (memoized) yx_field_memo_put(node, ctx, &result);
+    if (cache && result.defined && (result.type == V_INTEGER ||
+        (result.type == V_STRING && result.string_length <= sizeof(cache->bytes)))) {
+        cache->defined = true;
+        cache->string = result.type == V_STRING;
+        cache->number = result.value;
+        cache->length = result.string_length;
+        if (cache->string && result.string_length)
+            memcpy(cache->bytes, result.string, result.string_length);
+    }
+    return result;
+}
+
+static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx,
+                                 size_t current_pattern, const yx_binding *bindings)
+{
+    size_t i, index;
+    const yx_eval_match_list *list;
+    yx_value value, low, high;
+    if (!node || yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+    if (node->kind == N_RULE)
+        for (const yx_binding *local = bindings; local; local = local->parent)
+            if (strcmp(local->name, node->name) == 0) return local->value;
+    /* Only identifier/field/call nodes can resolve module paths or aliases.
+     * Preserve the binding lookup above and ordering within this preamble. */
+    if (node->kind == N_RULE || node->kind == N_GLOBAL_INDEXED ||
+        node->kind == N_GLOBAL_DEEP_PATH || node->kind == N_CALL ||
+        node->kind == N_MODULE_FIELD || node->kind == N_MODULE_INDEXED_FIELD ||
+        node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+        node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) {
+    {
+        yx_node alias, keys[3] = {{0}};
+        if (yx_eval_module_alias(node, ctx, bindings, &alias, keys))
+            return yx_eval(&alias, ctx, current_pattern, bindings);
+    }
+    const yx_mo_record *injected = yx_eval_module_output(ctx, node->name);
+    if (injected && (node->kind == N_MODULE_FIELD || node->kind == N_CALL ||
+        node->kind == N_MODULE_INDEXED_FIELD || node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+        node->kind == N_MODULE_TRIPLE_INDEXED_FIELD)) {
+        unsigned count = yx_module_node_indices(node);
+        yx_mo_key keys[3] = {{0}};
+        yx_vt_key alias_keys[3] = {{0}};
+        const yx_node *indices[] = {node->a, node->b, node->c};
+        for (unsigned k = 0; k < count; ++k) {
+            yx_value key = yx_eval(indices[k], ctx, current_pattern, bindings);
+            if (!key.defined || (key.type != V_INTEGER && key.type != V_STRING))
+                return yx_undefined();
+            keys[k] = (yx_mo_key){key.string, key.string_length, key.value, key.type == V_STRING};
+            alias_keys[k] = (yx_vt_key){key.string, key.string_length, key.value, key.type == V_STRING};
+        }
+        yx_mo_data data;
+        if (yx_mo_output_get(injected, node->name, keys, count, node->implicit_value, &data)) {
+            size_t length = strlen(node->name);
+            if ((node->kind == N_CALL || node->operation == TK_LPAREN) &&
+                length > 4 && !strcmp(node->name + length - 4, ".len"))
+                return data.type == YX_MO_DATA_UNDEFINED ? yx_undefined() : yx_defined(data.number);
+            return yx_eval_output_data(node, &data, alias_keys, count);
+        }
+    }
+    {
+        yx_static_type record_type;
+        const yx_module_array_desc *record = yx_module_scalar_node(node, &record_type);
+        if (record && record_type == YX_STATIC_STRUCT && node->implicit_value) {
+            unsigned count = yx_module_node_indices(node);
+            const yx_node *indices[] = {node->a, node->b, node->c};
+            yx_vt_key keys[3] = {{0}};
+            for (unsigned key = 0; key < count; ++key) {
+                yx_value value = yx_eval(indices[key], ctx, current_pattern, bindings);
+                if (!value.defined || value.type != V_INTEGER) return yx_undefined();
+                keys[key].number = value.value;
+            }
+            size_t length = strlen(record->path);
+            char *path = yx_eval_alloc_items(ctx, length + 5, 1);
+            if (!path) return yx_undefined();
+            memcpy(path, record->path, length);
+            memcpy(path + length, ".len", 5);
+            yx_node collection = *node;
+            collection.name = path;
+            collection.kind = count == 1 ? N_CALL : count == 2 ? N_MODULE_INDEXED_FIELD : N_MODULE_NESTED_INDEXED_FIELD;
+            collection.operation = TK_LPAREN;
+            collection.implicit_value = false;
+            collection.items = NULL; collection.item_count = 0;
+            yx_value size = yx_eval(&collection, ctx, current_pattern, bindings);
+            if (!size.defined || keys[count - 1].number >= size.value) return yx_undefined();
+            yx_mo_data data = {.type = YX_MO_DATA_STRUCT};
+            return yx_eval_output_data(node, &data, keys, count);
+        }
+    }
+    {
+        bool length_call = false;
+        if ((node->kind == N_RULE || node->kind == N_MODULE_FIELD) &&
+        yx_module_root_name(node->name)) {
+            bool shadowed = false;
+            for (size_t global = 0; ctx->globals && global < ctx->global_count; ++global)
+                if (ctx->globals[global].name &&
+                    !strcmp(ctx->globals[global].name, node->name)) {
+                    shadowed = true;
+                    break;
+                }
+            for (const yx_binding *local = bindings; !shadowed && local;
+                 local = local->parent)
+                if (!strcmp(local->name, node->name)) shadowed = true;
+            if (!shadowed) {
+                yx_value module = yx_defined(0);
+                module.type = V_STRUCT;
+                module.vt_path = node->name;
+                return module;
+            }
+        }
+        if (node->kind == N_MODULE_FIELD && yx_module_struct_path(node->name)) {
+            /* A module struct (`pe.overlay`) is an alias of its path, as a
+             * module root is: `with p = pe.overlay : (p.size ...)`. */
+            size_t root_length = strcspn(node->name, ".");
+            bool shadowed = false;
+            for (size_t global = 0; ctx->globals && global < ctx->global_count; ++global)
+                if (ctx->globals[global].name &&
+                    strlen(ctx->globals[global].name) == root_length &&
+                    !memcmp(ctx->globals[global].name, node->name, root_length))
+                    shadowed = true;
+            for (const yx_binding *local = bindings; !shadowed && local;
+                 local = local->parent)
+                if (strlen(local->name) == root_length &&
+                    !memcmp(local->name, node->name, root_length)) shadowed = true;
+            if (!shadowed) {
+                yx_value structure = yx_defined(0);
+                structure.type = V_STRUCT;
+                structure.vt_path = node->name;
+                return structure;
+            }
+        }
+        const yx_tp_function *function = yx_test_proto_function(node->name);
+        if (function) return yx_test_proto_eval_function(node, function, ctx,
+                                                         current_pattern, bindings);
+        if (node->kind == N_CALL) {
+            const char *raw_path = NULL;
+            int method = yx_vt_method(node->name, &raw_path);
+            if (method)
+                return yx_eval_vt_method(node, method, raw_path, ctx,
+                                         current_pattern, bindings);
+        }
+        const yx_vt_field *field = yx_vt_node_field(node, &length_call);
+        if (field && yx_test_proto_path(node->name))
+            return yx_test_proto_eval_field(node, field, length_call, ctx,
+                                            current_pattern, bindings);
+        if (field) {
+            yx_vt_key keys[3] = {{0}};
+            const yx_node *indices[] = {node->a, node->b, node->c};
+            yx_vt_data data;
+            for (unsigned i = 0; i < field->indices; ++i) {
+                yx_value key = yx_eval(indices[i], ctx, current_pattern, bindings);
+                if (!key.defined || (key.type != V_INTEGER && key.type != V_STRING))
+                    return yx_undefined();
+                keys[i].number = key.value;
+                keys[i].is_string = key.type == V_STRING;
+                keys[i].string = key.string;
+                keys[i].length = key.string_length;
+            }
+            if (!yx_vt_output_get(ctx->vt_output, node->name, keys,
+                                  field->indices, node->implicit_value, &data))
+                return yx_undefined();
+            if (length_call) return yx_defined(data.number);
+            switch (data.type) {
+            case YX_VT_DATA_INTEGER: return yx_defined_integer(data.number, data.is_unsigned);
+            case YX_VT_DATA_FLOAT: return yx_defined_float(data.floating);
+            case YX_VT_DATA_STRING: return yx_defined_string(data.string, data.length);
+            case YX_VT_DATA_MAP: {
+                yx_value map = yx_defined_map();
+                map.vt_map_origin = true;
+                map.vt_path = node->name;
+                map.vt_key_count = field->indices;
+                map.vt_element = node->implicit_value;
+                memcpy(map.vt_keys, keys, sizeof(keys));
+                map.vt_map = data.collection;
+                map.value = data.number;
+                return map;
+            }
+            case YX_VT_DATA_STRUCT:
+            case YX_VT_DATA_ARRAY: {
+                yx_value alias = yx_defined(0);
+                alias.type = V_STRUCT;
+                alias.vt_path = node->name;
+                alias.vt_key_count = field->indices;
+                alias.vt_element = node->implicit_value;
+                memcpy(alias.vt_keys, keys, sizeof(keys));
+                return alias;
+            }
+            default: return yx_undefined();
+            }
+        }
+    }
+    {
+        bool handled;
+        yx_value extended = yx_eval_module_extension(node, ctx, current_pattern,
+                                                       bindings, &handled);
+        if (handled) return extended;
+    }
+    }
+    switch (node->kind) {
+    case N_INTEGER: return yx_defined_integer(node->number, node->is_unsigned);
+    case N_FLOAT: return yx_defined_float(node->floating);
+    case N_STRING: return yx_defined_string(node->name, node->string_length);
+    case N_REGEX: return yx_undefined();
+    case N_FILESIZE:
+        return ctx->block_mode ? yx_undefined() : yx_defined(ctx->size);
+    case N_READ: return yx_read_integer(node, ctx, current_pattern, bindings);
+    case N_GLOBAL_DEEP_PATH:
+        {
+            yx_deep_eval_value result;
+            if (!yx_deep_eval_path(node, ctx, current_pattern, bindings,
+                                   &result)) return yx_undefined();
+            if (node->operation == TK_LPAREN)
+                return result.type == YX_GLOBAL_ARRAY ?
+                       yx_defined(result.array.count) : yx_undefined();
+            switch (result.type) {
+            case YX_GLOBAL_BOOL: return yx_defined(result.value.boolean);
+            case YX_GLOBAL_INT:
+                return yx_defined((uint64_t)result.value.integer);
+            case YX_GLOBAL_FLOAT:
+                return yx_defined_float(result.value.floating);
+            case YX_GLOBAL_STR:
+                return result.value.string.data ?
+                       yx_defined_string(result.value.string.data,
+                                         result.value.string.length) :
+                       yx_undefined();
+            case YX_GLOBAL_STRUCT:
+                return yx_defined_struct(result.value.object);
+            case YX_GLOBAL_ARRAY: return yx_undefined();
+            }
+            return yx_undefined();
+        }
+    case N_GLOBAL_INDEXED:
+        value = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (!value.defined || value.type != V_INTEGER ||
+            (int64_t)value.value < 0)
+            return yx_undefined();
+        for (i = 0; i < ctx->global_count; ++i) {
+            const yx_eval_global *global = &ctx->globals[i];
+            if (!global->name || strcmp(global->name, node->name) != 0 ||
+                global->type != YX_EVAL_GLOBAL_ARRAY)
+                continue;
+            return yx_eval_global_array_item(
+                (yx_global_type)global->value.array.element_type,
+                (const yx_global_scalar_value *)global->value.array.items,
+                global->value.array.count, value.value);
+        }
+        return yx_undefined();
+    case N_RULE:
+        for (const yx_binding *local = bindings; local; local = local->parent)
+            if (strcmp(local->name, node->name) == 0) return local->value;
+        for (i = 0; ctx->globals && i < ctx->global_count; ++i) {
+            const yx_eval_global *global = &ctx->globals[i];
+            if (!global->name || strcmp(global->name, node->name)) continue;
+            switch (global->type) {
+            case YX_EVAL_GLOBAL_BOOL: return yx_defined(global->value.boolean);
+            case YX_EVAL_GLOBAL_INT: return yx_defined((uint64_t)global->value.integer);
+            case YX_EVAL_GLOBAL_FLOAT: return yx_defined_float(global->value.floating);
+            case YX_EVAL_GLOBAL_STRING:
+                return global->value.string.data ?
+                    yx_defined_string(global->value.string.data, global->value.string.length) : yx_undefined();
+            case YX_EVAL_GLOBAL_STRUCT: return yx_defined_struct(global->value.object);
+            case YX_EVAL_GLOBAL_ARRAY:
+                /* Keep the collection path when a with binding aliases a
+                 * global array, just as module collection values do. */
+                value = yx_defined(global->value.array.count);
+                value.type = V_STRUCT;
+                value.vt_path = global->name;
+                return value;
+            }
+        }
+        if (ctx->rule_names && ctx->rule_values) {
+            for (i = 0; i < ctx->rule_count; ++i)
+                if (ctx->rule_names[i] && !strcmp(ctx->rule_names[i], node->name))
+                    return yx_defined(ctx->rule_values[i]);
+        }
+        return yx_undefined();
+    case N_MODULE_TRIPLE_INDEXED_FIELD:
+        {
+            const char *member = NULL, *second_member = NULL;
+            const char *third_member = NULL;
+            const yx_global_scalar_value *items = NULL;
+            size_t item_count = 0;
+            if (yx_eval_object_array_path(ctx, bindings, node->name, &member,
+                                          &items, &item_count)) {
+                const yx_global_field *second, *third;
+                const yx_global_object *object;
+                yx_value first = yx_eval(node->a, ctx, current_pattern,
+                                         bindings);
+                yx_value next = yx_eval(node->b, ctx, current_pattern,
+                                        bindings);
+                yx_value last = yx_eval(node->c, ctx, current_pattern,
+                                        bindings);
+                if (!first.defined || !next.defined || !last.defined ||
+                    first.type != V_INTEGER || next.type != V_INTEGER ||
+                    last.type != V_INTEGER ||
+                    (int64_t)first.value < 0 || (int64_t)next.value < 0 ||
+                    (int64_t)last.value < 0 || first.value >= item_count)
+                    return yx_undefined();
+                second = yx_global_object_nested_array_field(
+                    items[first.value].object, member, &second_member);
+                if (!second || second->value.array->element_type !=
+                        YX_GLOBAL_STRUCT ||
+                    next.value >= second->value.array->count)
+                    return yx_undefined();
+                object = second->value.array->items[next.value].object;
+                third = node->implicit_value ?
+                    yx_global_object_field_suffix(
+                        object, second_member, ".value") : NULL;
+                if (!third)
+                    third = yx_global_object_nested_array_field(
+                        object, second_member, &third_member);
+                if (!third || third->type != YX_GLOBAL_ARRAY)
+                    return yx_undefined();
+                if (third_member) {
+                    if (third->value.array->element_type !=
+                            YX_GLOBAL_STRUCT ||
+                        last.value >= third->value.array->count)
+                        return yx_undefined();
+                    return yx_eval_global_object_field(
+                        third->value.array->items[last.value].object,
+                        third_member);
+                }
+                return yx_eval_global_array_item(
+                    third->value.array->element_type,
+                    third->value.array->items,
+                    third->value.array->count, last.value);
+            }
+        }
+        if (strncmp(node->name, "dotnet.classes.methods.", 23) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            const char *member = node->name + 23;
+            yx_value first = yx_eval(node->a, ctx, current_pattern,
+                                     bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern,
+                                      bindings);
+            yx_value third = yx_eval(node->c, ctx, current_pattern,
+                                     bindings);
+            yx_dotnet_method method;
+            if (!parsed || !first.defined || !second.defined ||
+                !third.defined || first.type != V_INTEGER ||
+                second.type != V_INTEGER || third.type != V_INTEGER ||
+                (int64_t)first.value < 0 ||
+                (int64_t)second.value < 0 ||
+                (int64_t)third.value < 0 ||
+                !yx_dotnet_class_method_at(parsed, (size_t)first.value,
+                                            (size_t)second.value,
+                                            NULL, 0, &method))
+                return yx_undefined();
+            if (strcmp(member, "generic_parameters.value") == 0) {
+                const uint8_t *name;
+                size_t length;
+                return yx_dotnet_method_generic_parameter_at(
+                           parsed, &method, (size_t)third.value,
+                           &name, &length) ?
+                       yx_defined_string((const char *)name, length) :
+                       yx_undefined();
+            }
+            if (strncmp(member, "parameters.", 11) == 0) {
+                yx_dotnet_method_parameter parameter;
+                const char *field = member + 11;
+                if (!yx_dotnet_method_parameter_at(
+                        parsed, &method, (size_t)third.value,
+                        NULL, 0, &parameter))
+                    return yx_undefined();
+                if (strcmp(field, "name") == 0) {
+                    if (parameter.name)
+                        return yx_defined_string(
+                            (const char *)parameter.name,
+                            parameter.name_length);
+                    char *name = yx_eval_alloc_string(ctx, 32);
+                    int written;
+                    if (!name) return yx_undefined();
+                    written = snprintf(name, 33, "P_%zu",
+                                       parameter.generated_name_index);
+                    return written > 0 && written <= 32 ?
+                           yx_defined_string(name, (size_t)written) :
+                           yx_undefined();
+                }
+                if (strcmp(field, "type") == 0 &&
+                    parameter.type_length) {
+                    char *type = yx_eval_alloc_string(
+                        ctx, parameter.type_length);
+                    if (!type || !yx_dotnet_method_parameter_at(
+                            parsed, &method, (size_t)third.value,
+                            type, parameter.type_length + 1, &parameter))
+                        return yx_undefined();
+                    return yx_defined_string(type,
+                                             parameter.type_length);
+                }
+            }
+        }
+        return yx_undefined();
+    case N_PATTERN: case N_COUNT: case N_OFFSET: case N_LENGTH:
+        index = yx_eval_pattern_index(node, ctx, current_pattern);
+        list = yx_matches(ctx, index);
+        if (!list || (!list->matches && list->count)) return yx_undefined();
+        if (node->kind == N_OFFSET || node->kind == N_LENGTH) {
+            value = node->a ? yx_eval(node->a, ctx, current_pattern, bindings) :
+                              yx_defined(1);
+            if (!value.defined || value.type != V_INTEGER ||
+                value.value == 0 || value.value > list->count)
+                return yx_undefined();
+            return yx_defined(node->kind == N_OFFSET ? list->matches[value.value - 1].offset :
+                              list->matches[value.value - 1].length);
+        }
+        if (node->filter == FILTER_NONE)
+            return yx_defined(node->kind == N_COUNT ? list->count : list->present);
+        low = yx_eval(node->b, ctx, current_pattern, bindings);
+        high = node->filter == FILTER_IN ?
+               yx_eval(node->c, ctx, current_pattern, bindings) : yx_defined(0);
+        if (!low.defined || !high.defined) return yx_undefined();
+        if (node->kind == N_PATTERN)
+            return yx_defined(yx_pattern_has_match(ctx, index, node->filter, low, high));
+        index = yx_match_range_start(list, low);
+        if (index == list->count ||
+            !yx_offset_in_range(list->matches[index].offset, node->filter, low, high))
+            return yx_defined(0);
+        if (node->filter == FILTER_AT) return yx_defined(1);
+        {
+            size_t first = index, end = list->count;
+            while (index < end) {
+                size_t middle = index + (end - index) / 2;
+                if (list->matches[middle].offset <= (size_t)high.value)
+                    index = middle + 1;
+                else end = middle;
+            }
+            return yx_defined(index - first);
+        }
+    case N_UNARY:
+        value = yx_eval(node->a, ctx, current_pattern, bindings);
+        if (node->operation == TK_DEFINED) return yx_defined(value.defined);
+        if (!value.defined) return yx_undefined();
+        switch (node->operation) {
+        case TK_NOT: return yx_defined(!yx_truth(value));
+        case TK_MINUS:
+            return value.type == V_FLOAT ? yx_defined_float(-value.floating) :
+                   value.type == V_INTEGER ? yx_defined((uint64_t)(0 - value.value)) :
+                   yx_undefined();
+        case TK_PLUS: return value;
+        case TK_TILDE: return value.type == V_INTEGER ? yx_defined_integer(~value.value, value.is_unsigned) : yx_undefined();
+        default: return yx_undefined();
+        }
+    case N_BINARY: return yx_eval_binary(node, ctx, current_pattern, bindings);
+    case N_OF: case N_FOR_OF:
+        return yx_eval_set(node, ctx, current_pattern, bindings);
+    case N_OF_EXPR:
+        return yx_eval_expr_tuple(node, ctx, current_pattern, bindings);
+    case N_FOR_IN:
+        return yx_eval_for_in(node, ctx, current_pattern, bindings);
+    case N_WITH:
+        return yx_eval_with(node, ctx, current_pattern, bindings);
+    case N_MATCHES:
+        return yx_eval_matches(node, ctx, current_pattern, bindings);
+    case N_CALL:
+        for (const yx_binding *local = bindings; local; local = local->parent) {
+            const yx_global_field *field;
+            size_t root_length = strlen(local->name);
+            if (local->value.type == V_STRING &&
+                strncmp(node->name, local->name, root_length) == 0 &&
+                strcmp(node->name + root_length, ".len") == 0)
+                return local->value.defined ?
+                       yx_defined(local->value.string_length) : yx_undefined();
+            if (local->value.type != V_STRUCT || !local->value.object)
+                continue;
+            {
+                /* `s.valid_on(timestamp)` on a pe.Signature element: the
+                 * signature's not_before/not_after (pe/mod.rs valid_on).
+                 * Validation admits the call only for that shape. */
+                size_t length = strlen(local->name);
+                if (node->item_count == 1 &&
+                    strncmp(node->name, local->name, length) == 0 &&
+                    strcmp(node->name + length, ".valid_on") == 0) {
+                    const yx_global_field *before = yx_global_object_field(
+                        local->value.object, "not_before");
+                    const yx_global_field *after = yx_global_object_field(
+                        local->value.object, "not_after");
+                    yx_value timestamp = yx_eval(node->items[0], ctx,
+                                                 current_pattern, bindings);
+                    if (!before || !after || before->type != YX_GLOBAL_INT ||
+                        after->type != YX_GLOBAL_INT || !timestamp.defined ||
+                        timestamp.type != V_INTEGER) return yx_undefined();
+                    return yx_defined(
+                        (int64_t)timestamp.value >= before->value.integer &&
+                        (int64_t)timestamp.value <= after->value.integer);
+                }
+            }
+            field = yx_global_object_field_path(local->value.object,
+                                                 local->name, node->name,
+                                                 ".len");
+            if (field && field->type == YX_GLOBAL_ARRAY)
+                return yx_defined(field->value.array->count);
+            if (field && field->type == YX_GLOBAL_STR)
+                return yx_defined(field->value.string.length);
+        }
+        {
+            char *global_name = yx_global_len_base(node->name);
+            if (global_name) {
+                for (i = 0; i < ctx->global_count; ++i) {
+                    if (ctx->globals[i].name &&
+                        strcmp(ctx->globals[i].name, global_name) == 0) {
+                        yx_value length = ctx->globals[i].type ==
+                                          YX_EVAL_GLOBAL_ARRAY ?
+                            yx_defined(ctx->globals[i].value.array.count) :
+                            ctx->globals[i].type == YX_EVAL_GLOBAL_STRING ?
+                            yx_defined(ctx->globals[i].value.string.length) :
+                            yx_undefined();
+                        free(global_name);
+                        return length;
+                    }
+                }
+                free(global_name);
+            }
+        }
+        for (i = 0; i < ctx->global_count; ++i) {
+            const yx_eval_global *global = &ctx->globals[i];
+            const yx_global_field *field;
+            if (!global->name || global->type != YX_EVAL_GLOBAL_STRUCT)
+                continue;
+            field = yx_global_object_field_path(global->value.object,
+                                                 global->name, node->name,
+                                                 ".len");
+            if (field && field->type == YX_GLOBAL_ARRAY)
+                return yx_defined(field->value.array->count);
+            if (field && field->type == YX_GLOBAL_STR)
+                return yx_defined(field->value.string.length);
+        }
+        {
+            const yx_resolved_name *resolved = yx_eval_resolved_name(ctx, node);
+            if (resolved) {
+                switch (resolved->family) {
+                case YX_CALL_MATH:
+                    return yx_eval_math_call(node, ctx, current_pattern, bindings);
+                case YX_CALL_HASH:
+                    return yx_eval_hash_call(node, ctx, current_pattern, bindings);
+                case YX_CALL_STRING:
+                    return yx_eval_string_call(node, ctx, current_pattern, bindings);
+                case YX_CALL_TIME: {
+                    time_t now = time(NULL);
+                    if (now == (time_t)-1 || now < (time_t)0 ||
+                        (uintmax_t)now > (uintmax_t)INT64_MAX) return yx_undefined();
+                    return yx_defined((uint64_t)now);
+                }
+                default: break;
+                }
+            }
+        }
+        if (strncmp(node->name, "cuckoo.", 7) == 0)
+            return yx_eval_cuckoo_call(node, ctx, current_pattern, bindings);
+#ifdef XXYARA_ENABLE_MAGIC
+        if (strcmp(node->name, "magic.type") == 0 ||
+            strcmp(node->name, "magic.mime_type") == 0) {
+            const char *result;
+            size_t length;
+            bool success;
+            if (!ctx->string_arena || node->item_count)
+                return yx_undefined();
+            yx_magic_cache *cache = yx_magic_thread_cache();
+            if (!cache) return yx_undefined();
+            bool mime = strcmp(node->name, "magic.mime_type") == 0;
+            if (ctx->block_mode) {
+                result = mime ? cache->mime_type : cache->file_type;
+                length = mime ? cache->mime_type_length : cache->file_type_length;
+                success = result != NULL;
+            } else {
+                success = mime ?
+                    yx_magic_mime_type(cache, ctx->data, ctx->size, &result, &length) :
+                    yx_magic_type(cache, ctx->data, ctx->size, &result, &length);
+            }
+            if (!success) return yx_undefined();
+            char *owned = yx_eval_alloc_string(ctx, length);
+            if (!owned) return yx_undefined();
+            memcpy(owned, result, length);
+            return yx_defined_string(owned, length);
+        }
+#endif
+        if (strncmp(node->name, "dotnet.", 7) == 0 &&
+            yx_dotnet_count_member(node->name + 7, true, NULL, NULL)) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            uint64_t count;
+            return parsed && yx_dotnet_count_member(node->name + 7, true,
+                                                       parsed, &count) ?
+                   yx_defined(count) : yx_undefined();
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (strcmp(node->name, "vba.modules.len") == 0 ||
+            strcmp(node->name,
+                   "vba.project_info.references.len") == 0) {
+            const yx_vba_result *parsed = yx_eval_vba_result(ctx);
+            if (!parsed) return yx_undefined();
+            if (strcmp(node->name, "vba.modules.len") == 0)
+                return yx_defined(parsed->module_count);
+            return yx_defined(parsed->reference_count);
+        }
+#endif
+        if (strcmp(node->name, "zip.entries.len") == 0) {
+            const yx_zip_result *parsed = yx_eval_zip_result(ctx);
+            return parsed ? yx_defined(parsed->entry_count) :
+                            yx_undefined();
+        }
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *member = node->name + 4;
+            uint64_t count;
+            if (ctx->dex_output_present) {
+                unsigned number = yx_dex_output_collection_number(member);
+                if (number)
+                    return yx_defined(number == 9 &&
+                                      !ctx->dex_output_map_list_present ? 1 :
+                                      ctx->dex_output_collection_counts[number]);
+            }
+            const yx_dex_result *parsed = yx_eval_dex_result(ctx);
+            if (!parsed) return yx_undefined();
+            if (strcmp(member, "checksum") == 0)
+                return yx_dex_checksum(parsed, &count) ?
+                       yx_defined(count) : yx_undefined();
+            if (strcmp(member, "signature") == 0) {
+                char signature[41];
+                if (!yx_dex_signature(parsed, signature))
+                    return yx_undefined();
+                return yx_eval_crx_string(ctx, signature, 40);
+            }
+            if (strcmp(member, "contains_string") == 0 ||
+                strcmp(member, "contains_method") == 0 ||
+                strcmp(member, "contains_class") == 0) {
+                bool found;
+                yx_value argument = yx_eval(node->items[0], ctx,
+                                             current_pattern, bindings);
+                if (!argument.defined || argument.type != V_STRING)
+                    return yx_undefined();
+                bool success = strcmp(member, "contains_string") == 0 ?
+                    yx_dex_contains_string(parsed,
+                                            (const uint8_t *)argument.string,
+                                            argument.string_length, &found) :
+                    strcmp(member, "contains_method") == 0 ?
+                    yx_dex_contains_method(parsed,
+                                            (const uint8_t *)argument.string,
+                                            argument.string_length, &found) :
+                    yx_dex_contains_class(parsed,
+                                           (const uint8_t *)argument.string,
+                                           argument.string_length, &found);
+                return success ? yx_defined(found) : yx_undefined();
+            }
+            size_t length = strlen(member);
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = length - 4;
+                if (name_length >= sizeof(collection)) return yx_undefined();
+                memcpy(collection, member, name_length);
+                collection[name_length] = '\0';
+                return yx_dex_collection_count(parsed, collection, &count) ?
+                       yx_defined(count) : yx_undefined();
+            }
+            return yx_undefined();
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strcmp(node->name, "olecf.streams.len") == 0) {
+            uint64_t count;
+            return yx_olecf_stream_count(ctx->data, ctx->size, &count) ?
+                   yx_defined(count) : yx_undefined();
+        }
+#endif
+#ifdef XXYARA_ENABLE_MSI
+        if (strcmp(node->name, "msi.signatures.len") == 0) {
+            const yx_pe_signature_result *signatures =
+                yx_eval_msi_signatures(ctx);
+            return yx_defined(signatures ? signatures->count : 0);
+        }
+#endif
+        if (strncmp(node->name, "crx.", 4) == 0) {
+            const yx_mo_record *output = yx_eval_module_output(ctx, "crx");
+            if (!strcmp(node->name, "crx.permhash") && (output || ctx->block_mode))
+                return yx_eval_crx_output_hash(output, ctx);
+            const char *member = node->name + 4;
+            yx_crx_result parsed = {0};
+            const yx_crx_result *crx = ctx->crx_output;
+            yx_value result = yx_undefined();
+            if (!crx) {
+                if (!yx_crx_parse(ctx->data, ctx->size, &parsed))
+                    return result;
+                crx = &parsed;
+            }
+            if (strcmp(member, "permhash") == 0) {
+                char hash[65];
+                if (yx_crx_permhash_cached(crx, hash))
+                    result = yx_eval_crx_string(ctx, hash, 64);
+            } else {
+                char collection[32];
+                size_t length = strlen(member);
+                size_t name_length = length >= 4 ? length - 4 : 0;
+                const yx_crx_string_list *list = NULL;
+                if (name_length && name_length < sizeof(collection) &&
+                    strcmp(member + name_length, ".len") == 0) {
+                    memcpy(collection, member, name_length);
+                    collection[name_length] = '\0';
+                    if (strcmp(collection, "signatures") == 0)
+                        result = yx_defined(crx->signature_count);
+                    else if (yx_crx_list_info(crx, collection, &list))
+                        result = yx_defined(list->count);
+                }
+            }
+            if (crx == &parsed) yx_crx_result_free(&parsed);
+            return result;
+        }
+        if (strncmp(node->name, "console.", 8) == 0)
+            return yx_eval_console_call(node, ctx, current_pattern,
+                                         bindings);
+        if (strcmp(node->name, "lnk.target_id_list.len") == 0) {
+            yx_lnk_result parsed = {0};
+            uint64_t count;
+            if (ctx->lnk_output)
+                return yx_defined(ctx->lnk_output->target_id_list_count);
+            if (!yx_lnk_parse(ctx->data, ctx->size, &parsed))
+                return yx_undefined();
+            count = parsed.target_id_list_count;
+            yx_lnk_result_free(&parsed);
+            return yx_defined(count);
+        }
+        if (strncmp(node->name, "macho.", 6) == 0) {
+            const yx_mo_record *output = yx_eval_module_output(ctx, "macho");
+            yx_value output_result;
+            if (output && yx_eval_macho_output_call(output, node, ctx, current_pattern, bindings, &output_result))
+                return output_result;
+            const char *member = node->name + 6;
+            uint64_t result;
+            size_t length = strlen(member);
+            if (strcmp(member, "dylib_hash") == 0)
+                return yx_macho_dylib_hash(ctx);
+            if (strcmp(member, "symhash") == 0)
+                return yx_macho_symhash(ctx);
+            if (strcmp(member, "entitlement_hash") == 0 ||
+                strcmp(member, "import_hash") == 0 ||
+                strcmp(member, "export_hash") == 0)
+                return yx_macho_extra_hash(
+                    ctx, strcmp(member, "export_hash") == 0 ? 2u :
+                         strcmp(member, "import_hash") == 0 ? 1u : 0u);
+            if (strcmp(member, "has_dylib") == 0 ||
+                strcmp(member, "has_rpath") == 0 ||
+                strcmp(member, "has_entitlement") == 0 ||
+                strcmp(member, "has_import") == 0 ||
+                strcmp(member, "has_export") == 0) {
+                bool found;
+                yx_value name = yx_eval(node->items[0], ctx,
+                                        current_pattern, bindings);
+                if (!name.defined || name.type != V_STRING) return yx_undefined();
+                if (strcmp(member, "has_entitlement") == 0 ||
+                    strcmp(member, "has_import") == 0 ||
+                    strcmp(member, "has_export") == 0)
+                    return yx_defined(yx_macho_has_extra_name(
+                        ctx->data, ctx->size,
+                        strcmp(member, "has_export") == 0 ? 2u :
+                        strcmp(member, "has_import") == 0 ? 1u : 0u,
+                        (const uint8_t *)name.string,
+                        name.string_length));
+                if (strcmp(member, "has_dylib") == 0) {
+                    if (!yx_macho_has_dylib(ctx->data, ctx->size,
+                                            (const uint8_t *)name.string,
+                                            name.string_length, &found))
+                        return yx_undefined();
+                } else if (!yx_macho_has_rpath(ctx->data, ctx->size,
+                                               (const uint8_t *)name.string,
+                                               name.string_length, &found))
+                    return yx_undefined();
+                return yx_defined(found);
+            }
+            if (strcmp(member, "file_index_for_arch") == 0 ||
+                strcmp(member, "entry_point_for_arch") == 0) {
+                yx_value type = yx_eval(node->items[0], ctx,
+                                        current_pattern, bindings);
+                yx_value subtype = node->item_count == 2 ?
+                                   yx_eval(node->items[1], ctx,
+                                           current_pattern, bindings) :
+                                   yx_undefined();
+                if (!type.defined || type.type != V_INTEGER ||
+                    (int64_t)type.value < 0 ||
+                    (node->item_count == 2 &&
+                     (!subtype.defined || subtype.type != V_INTEGER ||
+                      (int64_t)subtype.value < 0)))
+                    return yx_undefined();
+                bool success = strcmp(member, "file_index_for_arch") == 0 ?
+                    yx_macho_file_index_for_arch(
+                        ctx->data, ctx->size, type.value,
+                        node->item_count == 2, subtype.value, &result) :
+                    yx_macho_entry_point_for_arch(
+                        ctx->data, ctx->size, type.value,
+                        node->item_count == 2, subtype.value, &result);
+                return success ?
+                       yx_defined(result) : yx_undefined();
+            }
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = length - 4;
+                if (name_length >= sizeof(collection)) return yx_undefined();
+                memcpy(collection, member, name_length);
+                collection[name_length] = '\0';
+                return yx_macho_collection_count(ctx->data, ctx->size,
+                                                 collection, &result) ?
+                       yx_defined(result) : yx_undefined();
+            }
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) {
+            const yx_mo_record *output = yx_eval_module_output(ctx, "elf");
+            if (output && (!strcmp(node->name, "elf.import_md5") || !strcmp(node->name, "elf.telfhash")))
+                return yx_eval_elf_output_hash(output, node, ctx);
+            const char *member = node->name + 4;
+            size_t length = strlen(member);
+            uint64_t count;
+            if (strcmp(member, "import_md5") == 0) {
+                char hash[33];
+                char *owned;
+                if (!yx_elf_import_md5(ctx->data, ctx->size, hash))
+                    return yx_undefined();
+                owned = yx_eval_alloc_string(ctx, 32);
+                if (!owned) return yx_undefined();
+                memcpy(owned, hash, 32);
+                return yx_defined_string(owned, 32);
+            }
+            if (strcmp(member, "telfhash") == 0) {
+                char hash[73];
+                char *owned;
+                if (!yx_elf_telfhash(ctx->data, ctx->size, hash))
+                    return yx_undefined();
+                owned = yx_eval_alloc_string(ctx, 72);
+                if (!owned) return yx_undefined();
+                memcpy(owned, hash, 72);
+                return yx_defined_string(owned, 72);
+            }
+            if (length > 4 && strcmp(member + length - 4, ".len") == 0) {
+                char collection[32];
+                size_t name_length = length - 4;
+                if (name_length >= sizeof(collection)) return yx_undefined();
+                memcpy(collection, member, name_length);
+                collection[name_length] = '\0';
+                return yx_elf_collection_count(ctx->data, ctx->size,
+                                               collection, &count) ?
+                       yx_defined(count) : yx_undefined();
+            }
+        }
+        if (strncmp(node->name, "pe.", 3) == 0) {
+            const yx_mo_record *output = yx_eval_module_output(ctx, "pe");
+            yx_value output_result;
+            if (output && yx_eval_pe_output_call(output, node, ctx, current_pattern, bindings, &output_result))
+                return output_result;
+            uint64_t member_value;
+            const yx_pe_signature_result *signatures;
+            if (strcmp(node->name, "pe.signatures.len") == 0) {
+                signatures = yx_eval_pe_signatures(ctx);
+                return signatures ? yx_defined(signatures->count) :
+                                    yx_undefined();
+            }
+            if (strcmp(node->name, "pe.sections.len") == 0)
+                return yx_pe_section_count(ctx->data, ctx->size,
+                                           &member_value) ?
+                       yx_defined(member_value) : yx_undefined();
+            if (strcmp(node->name, "pe.resources.len") == 0 ||
+                strcmp(node->name, "pe.export_details.len") == 0 ||
+                strcmp(node->name, "pe.version_info_list.len") == 0 ||
+                strcmp(node->name, "pe.version_info.len") == 0) {
+                if (strcmp(node->name, "pe.version_info.len") == 0)
+                    return yx_eval_pe_version_map_count(ctx);
+                const char *field = strcmp(node->name, "pe.resources.len") == 0 ?
+                                    "number_of_resources" :
+                                    strcmp(node->name,
+                                           "pe.export_details.len") == 0 ?
+                                    "number_of_exports" :
+                                    "number_of_version_infos";
+                return yx_eval_pe_count(ctx, field, &member_value) ?
+                       yx_defined(member_value) : yx_defined(0);
+            }
+            if (strcmp(node->name, "pe.rich_signature.toolid") == 0 ||
+                strcmp(node->name, "pe.rich_signature.version") == 0)
+                return yx_eval_pe_rich_records(node, ctx, current_pattern, bindings);
+            if (strcmp(node->name, "pe.imports") == 0)
+                return yx_eval_pe_imports(node, ctx, current_pattern,
+                                           bindings);
+            if (strcmp(node->name, "pe.import_rva") == 0 ||
+                strcmp(node->name, "pe.delayed_import_rva") == 0)
+                return yx_eval_pe_import_rva(
+                    node, ctx, current_pattern, bindings,
+                    strcmp(node->name, "pe.delayed_import_rva") == 0);
+            if (strcmp(node->name, "pe.imphash") == 0) {
+                char *owned = yx_eval_alloc_string(ctx, 32);
+                if (!owned || !yx_pe_imphash(ctx->data, ctx->size, owned))
+                    return yx_undefined();
+                return yx_defined_string(owned, 32);
+            }
+            if (strcmp(node->name, "pe.locale") == 0 ||
+                strcmp(node->name, "pe.language") == 0) {
+                yx_pe_resource_directory directory;
+                yx_pe_language_lookup lookup = {
+                    .language_only = strcmp(node->name, "pe.language") == 0
+                };
+                value = yx_eval(node->items[0], ctx, current_pattern, bindings);
+                if (!value.defined || value.type != V_INTEGER)
+                    return yx_undefined();
+                if ((int64_t)value.value < 0 || value.value > UINT32_MAX)
+                    return yx_defined(0);
+                lookup.value = (uint32_t)value.value;
+                const yx_mo_record *output = yx_eval_module_output(ctx, "pe");
+                if (output) {
+                    yx_mo_data resources, language;
+                    uint32_t mask = lookup.language_only ? 0xffu : 0xffffu;
+                    if (!yx_mo_output_get(output, "pe.resources.len", NULL, 0, false, &resources))
+                        return yx_undefined();
+                    for (uint64_t r = 0; r < resources.number; ++r) {
+                        yx_mo_key key = {.number = r};
+                        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+                        if (yx_mo_output_get(output, "pe.resources.language", &key, 1, false, &language) &&
+                            language.type == YX_MO_DATA_INTEGER &&
+                            (language.number & mask) == lookup.value) return yx_defined(1);
+                    }
+                    return yx_defined(0);
+                }
+                if (ctx->pe_output_present) {
+                    uint32_t mask = lookup.language_only ? 0xffu : 0xffffu;
+                    for (size_t i = 0; i < ctx->pe_output_language_count;
+                         ++i)
+                        if ((ctx->pe_output_languages[i] & mask) ==
+                            lookup.value)
+                            return yx_defined(1);
+                    return yx_defined(0);
+                }
+                (void)yx_pe_visit_resources(ctx->data, ctx->size, &directory,
+                                            yx_pe_language_lookup_visit,
+                                            &lookup);
+                return yx_defined(lookup.found);
+            }
+            if (strcmp(node->name, "pe.offset_to_rva") == 0) {
+                value = yx_eval(node->items[0], ctx, current_pattern, bindings);
+                if (!value.defined || value.type != V_INTEGER ||
+                    (int64_t)value.value < 0 ||
+                    !yx_pe_offset_to_rva(ctx->data, ctx->size, value.value,
+                                         &member_value))
+                    return yx_undefined();
+                return yx_defined(member_value);
+            }
+            if (strcmp(node->name, "pe.rva_to_offset") == 0) {
+                value = yx_eval(node->items[0], ctx, current_pattern, bindings);
+                if (!value.defined || value.type != V_INTEGER ||
+                    (int64_t)value.value < 0 ||
+                    !yx_pe_rva_to_offset(ctx->data, ctx->size, value.value,
+                                         &member_value))
+                    return yx_undefined();
+                return yx_defined(member_value);
+            }
+            if (strcmp(node->name, "pe.section_index") == 0) {
+                value = yx_eval(node->items[0], ctx, current_pattern, bindings);
+                if (!value.defined) return yx_undefined();
+                if (value.type == V_STRING)
+                    return yx_pe_section_index_name(ctx->data, ctx->size,
+                                                    value.string,
+                                                    value.string_length,
+                                                    &member_value) ?
+                           yx_defined(member_value) : yx_undefined();
+                if (value.type == V_INTEGER && (int64_t)value.value >= 0 &&
+                    yx_pe_section_index_offset(ctx->data, ctx->size,
+                                               value.value, &member_value))
+                    return yx_defined(member_value);
+                return yx_undefined();
+            }
+            if (strcmp(node->name, "pe.calculate_checksum") == 0)
+                return yx_pe_calculate_checksum(ctx->data, ctx->size,
+                                                &member_value) ?
+                       yx_defined(member_value) : yx_undefined();
+            if (strcmp(node->name, "pe.exports") == 0 ||
+                strcmp(node->name, "pe.exports_index") == 0) {
+                bool found;
+                bool index_result = strcmp(node->name, "pe.exports_index") == 0;
+                if (node->items[0]->kind == N_REGEX) {
+                    yx_output_export_regex_query query = {.regex = node->items[0], .ctx = ctx};
+                    if (!yx_pe_visit_exports(ctx->data, ctx->size, yx_output_export_regex_visit, &query) ||
+                        yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+                    return index_result ? (query.found ? yx_defined(query.index) : yx_undefined()) :
+                                          yx_defined(query.found);
+                }
+                value = yx_eval(node->items[0], ctx, current_pattern, bindings);
+                if (!value.defined || (value.type != V_STRING &&
+                                       value.type != V_INTEGER) ||
+                    !yx_pe_exports(ctx->data, ctx->size,
+                                   value.type == V_STRING ? value.string : NULL,
+                                   value.type == V_STRING ? value.string_length : 0,
+                                   value.type == V_INTEGER, value.value,
+                                   &found, &member_value))
+                    return yx_undefined();
+                if (index_result) return found ? yx_defined(member_value) :
+                                                  yx_undefined();
+                return yx_defined(found);
+            }
+            return yx_pe_function(ctx->data, ctx->size, node->name + 3,
+                                  &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+        if (strncmp(node->name, "math.", 5) == 0)
+            return yx_eval_math_call(node, ctx, current_pattern, bindings);
+        if (strncmp(node->name, "hash.", 5) == 0)
+            return yx_eval_hash_call(node, ctx, current_pattern, bindings);
+        if (strncmp(node->name, "string.", 7) == 0)
+            return yx_eval_string_call(node, ctx, current_pattern, bindings);
+        if (strcmp(node->name, "time.now") == 0) {
+            time_t now = time(NULL);
+            if (now == (time_t)-1 || now < (time_t)0 ||
+                (uintmax_t)now > (uintmax_t)INT64_MAX)
+                return yx_undefined();
+            return yx_defined((uint64_t)now);
+        }
+        return yx_undefined();
+    case N_MODULE_FIELD:
+        {
+            uint64_t vt_value;
+            if (yx_vt_permutation_constant(node->name, &vt_value))
+                return yx_defined(vt_value);
+            const char *dot = strchr(node->name, '.');
+            if (dot) {
+                size_t root_length = (size_t)(dot - node->name);
+                for (const yx_binding *local = bindings; local;
+                     local = local->parent)
+                    if (strlen(local->name) == root_length &&
+                        memcmp(local->name, node->name, root_length) == 0 &&
+                        local->value.type == V_STRUCT)
+                        return yx_eval_global_object_field(
+                            local->value.object, dot + 1);
+                for (i = 0; i < ctx->global_count; ++i) {
+                    const yx_eval_global *global = &ctx->globals[i];
+                    const yx_global_field *field;
+                    if (!global->name ||
+                        global->type != YX_EVAL_GLOBAL_STRUCT ||
+                        strlen(global->name) != root_length ||
+                        memcmp(global->name, node->name, root_length) != 0)
+                        continue;
+                    field = yx_global_object_field(global->value.object,
+                                                   dot + 1);
+                    if (!field) return yx_undefined();
+                    switch (field->type) {
+                    case YX_GLOBAL_BOOL:
+                        return yx_defined(field->value.boolean);
+                    case YX_GLOBAL_INT:
+                        return yx_defined((uint64_t)field->value.integer);
+                    case YX_GLOBAL_FLOAT:
+                        return yx_defined_float(field->value.floating);
+                    case YX_GLOBAL_STR:
+                        return yx_defined_string(field->value.string.data,
+                                                 field->value.string.length);
+                    case YX_GLOBAL_ARRAY:
+                        return yx_undefined();
+                    case YX_GLOBAL_STRUCT:
+                        return yx_defined_struct(field->value.object);
+                    }
+                }
+            }
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (strncmp(node->name, "vba.", 4) == 0) {
+            const yx_vba_result *parsed;
+            const char *member = node->name + 4;
+            uint64_t constant;
+            if (yx_vba_constant(member, &constant))
+                return yx_defined(constant);
+            parsed = yx_eval_vba_result(ctx);
+            if (!parsed) return yx_undefined();
+            if (strcmp(member, "has_macros") == 0)
+                return yx_defined(parsed->has_macros);
+            if (strcmp(member, "project_info") == 0) {
+                yx_value record = yx_defined(0);
+                record.type = V_STRUCT;
+                record.vt_path = node->name;
+                return record;
+            }
+            if (!parsed->has_project_info) return yx_undefined();
+            if (strcmp(member, "project_info.name") == 0)
+                return parsed->project_name ?
+                       yx_defined_string(parsed->project_name,
+                                         parsed->project_name_length) :
+                       yx_undefined();
+            if (strcmp(member, "project_info.version") == 0)
+                return parsed->project_version ?
+                       yx_defined_string(parsed->project_version,
+                                         parsed->project_version_length) :
+                       yx_undefined();
+            if (strcmp(member, "project_info.module_count") == 0)
+                return yx_defined((uint64_t)(int64_t)
+                                  parsed->declared_module_count);
+            return yx_undefined();
+        }
+#endif
+        if (strncmp(node->name, "dotnet.", 7) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            const char *member = node->name + 7;
+            if (!parsed) return yx_undefined();
+            if (strcmp(member, "is_dotnet") == 0)
+                return yx_defined(parsed->is_dotnet);
+            if (!parsed->is_dotnet) return yx_undefined();
+            if (strcmp(member, "version") == 0)
+                return parsed->version ?
+                       yx_defined_string((const char *)parsed->version,
+                                         parsed->version_length) :
+                       yx_undefined();
+            if (strcmp(member, "module_name") == 0)
+                return parsed->module_name ?
+                       yx_defined_string((const char *)parsed->module_name,
+                                         parsed->module_name_length) :
+                       yx_undefined();
+            if (strcmp(member, "typelib") == 0)
+                return parsed->typelib ?
+                       yx_defined_string((const char *)parsed->typelib,
+                                         parsed->typelib_length) :
+                       yx_undefined();
+            if (strncmp(member, "assembly.", 9) == 0) {
+                const char *field = member + 9;
+                if (!parsed->assembly.present) return yx_undefined();
+                if (strcmp(field, "name") == 0)
+                    return parsed->assembly.name ?
+                           yx_defined_string(
+                               (const char *)parsed->assembly.name,
+                               parsed->assembly.name_length) :
+                           yx_undefined();
+                if (strcmp(field, "culture") == 0)
+                    return parsed->assembly.culture ?
+                           yx_defined_string(
+                               (const char *)parsed->assembly.culture,
+                               parsed->assembly.culture_length) :
+                           yx_undefined();
+                if (strncmp(field, "version.", 8) == 0) {
+                    uint64_t number;
+                    return yx_dotnet_version_member(
+                        field + 8, &parsed->assembly.version, &number) ?
+                           yx_defined(number) : yx_undefined();
+                }
+                return yx_undefined();
+            }
+            {
+                uint64_t count;
+                if (yx_dotnet_count_member(member, false, parsed, &count))
+                    return yx_defined(count);
+            }
+            return yx_undefined();
+        }
+        if (strncmp(node->name, "zip.", 4) == 0) {
+            uint64_t member_value;
+            if (yx_zip_constant(node->name + 4, &member_value))
+                return yx_defined(member_value);
+            const yx_zip_result *parsed = yx_eval_zip_result(ctx);
+            return parsed && parsed->is_zip_present ?
+                   yx_defined(parsed->is_zip) : yx_undefined();
+        }
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *member = node->name + 4;
+            uint64_t member_value;
+            const uint8_t *bytes;
+            size_t length;
+            if (yx_dex_constant(member, &member_value))
+                return yx_defined(member_value);
+            if (ctx->dex_output_present) {
+                unsigned number = yx_dex_output_header_number(member);
+                if (strcmp(member, "is_dex") == 0)
+                    return yx_defined(ctx->dex_output_is_dex);
+                if (strcmp(member, "map_list.size") == 0)
+                    return ctx->dex_output_map_size_present ?
+                        yx_defined(ctx->dex_output_map_size) :
+                        yx_undefined();
+                if (strcmp(member, "header.signature") == 0)
+                    return ctx->dex_output_header_signature_present ?
+                        yx_defined_string(
+                            (const char *)ctx->dex_output_header_signature,
+                            ctx->dex_output_header_signature_length) :
+                        yx_undefined();
+                if (number)
+                    return ctx->dex_output_header_present[number] ?
+                        yx_defined(ctx->dex_output_header_values[number]) :
+                        yx_undefined();
+            }
+            const yx_dex_result *parsed = yx_eval_dex_result(ctx);
+            if (!parsed) return yx_undefined();
+            if (yx_dex_string_field_supported(member))
+                return yx_dex_string_field(parsed, member, &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            return yx_dex_numeric_field(parsed, member, &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strncmp(node->name, "olecf.", 6) == 0) {
+            uint64_t member_value;
+            if (strcmp(node->name, "olecf.is_olecf") == 0)
+                return yx_defined(yx_olecf_is_olecf(ctx->data, ctx->size));
+            return yx_olecf_constant(node->name + 6, &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+#endif
+#ifdef XXYARA_ENABLE_MSI
+        if (strcmp(node->name, "msi.is_signed") == 0) {
+            /* Always defined: false for non-OLECF or unsigned files. */
+            const yx_pe_signature_result *signatures =
+                yx_eval_msi_signatures(ctx);
+            return yx_defined(signatures && signatures->count != 0);
+        }
+#endif
+        if (strncmp(node->name, "crx.", 4) == 0)
+            return yx_eval_crx_field(ctx, node->name + 4, false, 0);
+        if (strncmp(node->name, "lnk.", 4) == 0) {
+            uint64_t member_value;
+            if (strcmp(node->name, "lnk.is_lnk") == 0 &&
+                ctx->lnk_output_present)
+                return yx_defined(ctx->lnk_output_is_lnk);
+            if (yx_lnk_constant(node->name + 4, &member_value))
+                return yx_defined(member_value);
+            return yx_eval_lnk_field(ctx, node->name + 4, false, 0);
+        }
+        if (strncmp(node->name, "macho.", 6) == 0) {
+            uint64_t member_value;
+            const uint8_t *bytes;
+            size_t length;
+            if (strcmp(node->name + 6, "source_version") == 0) {
+                char version[32];
+                return yx_macho_source_version(ctx->data, ctx->size,
+                                                version, sizeof(version),
+                                                &length) ?
+                       yx_eval_crx_string(ctx, version, length) :
+                       yx_undefined();
+            }
+            if (strcmp(node->name + 6, "uuid") == 0) {
+                char uuid[37];
+                return yx_macho_uuid(ctx->data, ctx->size, uuid,
+                                     sizeof(uuid), &length) ?
+                       yx_eval_crx_string(ctx, uuid, length) :
+                       yx_undefined();
+            }
+            if (yx_macho_text_field_supported(node->name + 6)) {
+                char text[37];
+                return yx_macho_text_field(ctx->data, ctx->size,
+                                           node->name + 6, text,
+                                           sizeof(text), &length) ?
+                       yx_eval_crx_string(ctx, text, length) :
+                       yx_undefined();
+            }
+            if (yx_macho_string_field_supported(node->name + 6))
+                return yx_macho_string_field(ctx->data, ctx->size,
+                                              node->name + 6,
+                                              &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            if (yx_macho_constant(node->name + 6, &member_value) ||
+                yx_macho_field(ctx->data, ctx->size, node->name + 6,
+                                &member_value))
+                return yx_defined(member_value);
+            return yx_undefined();
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) {
+            uint64_t member_value;
+            if (yx_elf_constant(node->name + 4, &member_value) ||
+                yx_elf_field(ctx->data, ctx->size, node->name + 4,
+                             &member_value))
+                return yx_defined(member_value);
+            return yx_undefined();
+        }
+        if (strncmp(node->name, "pe.", 3) == 0) {
+            uint64_t member_value;
+            const uint8_t *bytes;
+            size_t length;
+            if (strcmp(node->name, "pe.is_pe") == 0 &&
+                ctx->pe_output_present)
+                return yx_defined(ctx->pe_output_is_pe);
+            if (strcmp(node->name, "pe.is_signed") == 0 ||
+                strcmp(node->name, "pe.number_of_signatures") == 0) {
+                const yx_pe_signature_result *signatures;
+                if (!yx_pe_is_pe(ctx->data, ctx->size))
+                    return yx_undefined();
+                signatures = yx_eval_pe_signatures(ctx);
+                if (!signatures) return yx_undefined();
+                if (strcmp(node->name, "pe.is_signed") == 0) {
+                    for (size_t i = 0; i < signatures->count; ++i)
+                        if (signatures->items[i].verified) return yx_defined(1);
+                    return yx_defined(0);
+                }
+                return yx_defined(signatures->count);
+            }
+            if (strcmp(node->name, "pe.version_info") == 0)
+                return yx_defined_map();
+            if (strcmp(node->name, "pe.number_of_exports") == 0 ||
+                strcmp(node->name, "pe.number_of_resources") == 0 ||
+                strcmp(node->name, "pe.number_of_version_infos") == 0)
+                return yx_eval_pe_count(ctx, node->name + 3, &member_value) ?
+                       yx_defined(member_value) : yx_undefined();
+            if (yx_pe_string_field_supported(node->name + 3))
+                return yx_pe_string_field(ctx->data, ctx->size,
+                                          node->name + 3, &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            if (yx_pe_constant(node->name + 3, &member_value) ||
+                yx_pe_field(ctx->data, ctx->size, node->name + 3,
+                            &member_value))
+                return yx_defined(member_value);
+            return yx_undefined();
+        }
+        if (strcmp(node->name, "math.MEAN_BYTES") == 0)
+            return yx_defined_float(127.5);
+        return yx_undefined();
+    case N_MODULE_INDEXED_FIELD:
+        for (const yx_binding *local = bindings;
+             local && node->implicit_value;
+             local = local->parent) {
+            const yx_global_field *field;
+            if (local->value.type != V_STRUCT || !local->value.object)
+                continue;
+            field = yx_global_object_field_path(local->value.object,
+                                                 local->name, node->name,
+                                                 ".value");
+            if (!field || field->type != YX_GLOBAL_ARRAY) continue;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            return yx_eval_global_array_item(
+                field->value.array->element_type,
+                field->value.array->items,
+                field->value.array->count, value.value);
+        }
+        for (i = 0; node->implicit_value && i < ctx->global_count; ++i) {
+            const yx_eval_global *global = &ctx->globals[i];
+            const yx_global_field *field;
+            if (!global->name || global->type != YX_EVAL_GLOBAL_STRUCT)
+                continue;
+            field = yx_global_object_field_path(global->value.object,
+                                                 global->name, node->name,
+                                                 ".value");
+            if (!field || field->type != YX_GLOBAL_ARRAY) continue;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            return yx_eval_global_array_item(
+                field->value.array->element_type,
+                field->value.array->items,
+                field->value.array->count, value.value);
+        }
+        {
+            const char *array_member = NULL;
+            const yx_global_scalar_value *items = NULL;
+            size_t item_count = 0;
+            if (yx_eval_object_array_path(ctx, bindings, node->name, &array_member,
+                                          &items, &item_count)) {
+                value = yx_eval(node->a, ctx, current_pattern, bindings);
+                if (!value.defined || value.type != V_INTEGER ||
+                    (int64_t)value.value < 0 || value.value >= item_count)
+                    return yx_undefined();
+                if (node->operation == TK_LPAREN) {
+                    const yx_global_field *field =
+                        yx_global_object_field_suffix(
+                            items[value.value].object, array_member,
+                            ".len");
+                    return field && field->type == YX_GLOBAL_ARRAY ?
+                        yx_defined(field->value.array->count) :
+                        field && field->type == YX_GLOBAL_STR ?
+                        yx_defined(field->value.string.length) : yx_undefined();
+                }
+                return yx_eval_global_object_field(
+                    items[value.value].object, array_member);
+            }
+        }
+#ifdef XXYARA_ENABLE_VBA
+        if (strncmp(node->name, "vba.", 4) == 0) {
+            const yx_vba_result *parsed = yx_eval_vba_result(ctx);
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!parsed || !value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            if (strcmp(node->name,
+                       "vba.project_info.references.value") == 0) {
+                if (!parsed->has_project_info ||
+                    value.value >= parsed->reference_count)
+                    return yx_undefined();
+                return yx_defined_string(
+                    parsed->references[value.value],
+                    strlen(parsed->references[value.value]));
+            }
+            if (value.value >= parsed->module_count)
+                return yx_undefined();
+            const yx_vba_module *module = &parsed->modules[value.value];
+            const char *member = node->name + 12;
+            if (strcmp(member, "name") == 0)
+                return module->name ?
+                       yx_defined_string(module->name,
+                                         module->name_length) :
+                       yx_undefined();
+            if (strcmp(member, "code") == 0)
+                return module->code ?
+                       yx_defined_string(module->code,
+                                         module->code_length) :
+                       yx_undefined();
+            if (strcmp(member, "type") == 0)
+                return yx_defined(module->type);
+            return yx_undefined();
+        }
+#endif
+        if (strncmp(node->name, "dotnet.classes.", 15) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            yx_dotnet_class class_info;
+            const char *member = node->name + 15;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 || !parsed ||
+                !yx_dotnet_class_at(parsed, (size_t)value.value,
+                                     NULL, 0, &class_info))
+                return yx_undefined();
+            if (class_info.required_fullname_capacity) {
+                char *fullname = yx_eval_alloc_string(
+                    ctx, class_info.required_fullname_capacity - 1);
+                if (!fullname ||
+                    !yx_dotnet_class_at(parsed, (size_t)value.value,
+                                         fullname,
+                                         class_info.required_fullname_capacity,
+                                         &class_info))
+                    return yx_undefined();
+            }
+            if (strcmp(member, "fullname") == 0)
+                return class_info.fullname ?
+                       yx_defined_string(class_info.fullname,
+                                         class_info.fullname_length) :
+                       yx_undefined();
+            if (strcmp(member, "name") == 0)
+                return class_info.name ?
+                       yx_defined_string(class_info.name,
+                                         class_info.name_length) :
+                       yx_undefined();
+            if (strcmp(member, "namespace") == 0)
+                return class_info.namespace_name ?
+                       yx_defined_string(class_info.namespace_name,
+                                         class_info.namespace_length) :
+                       yx_undefined();
+            if (strcmp(member, "visibility") == 0)
+                return yx_defined_string(class_info.visibility,
+                                         strlen(class_info.visibility));
+            if (strcmp(member, "type") == 0)
+                return yx_defined_string(class_info.type,
+                                         strlen(class_info.type));
+            if (strcmp(member, "abstract") == 0)
+                return yx_defined(class_info.is_abstract);
+            if (strcmp(member, "sealed") == 0)
+                return yx_defined(class_info.is_sealed);
+            if (strcmp(member, "number_of_base_types") == 0 ||
+                strcmp(member, "base_types.len") == 0)
+                return yx_defined(class_info.number_of_base_types);
+            if (strcmp(member, "number_of_generic_parameters") == 0 ||
+                strcmp(member, "generic_parameters.len") == 0)
+                return yx_defined(class_info.number_of_generic_parameters);
+            if (strcmp(member, "number_of_methods") == 0 ||
+                strcmp(member, "methods.len") == 0)
+                return yx_defined(yx_dotnet_class_method_count(
+                    parsed, (size_t)value.value));
+            return yx_undefined();
+        }
+        if (strncmp(node->name, "dotnet.resources.", 17) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            yx_dotnet_resource resource;
+            const char *member = node->name + 17;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 || !parsed ||
+                !yx_dotnet_resource_at(parsed, (size_t)value.value,
+                                        &resource))
+                return yx_undefined();
+            if (strcmp(member, "name") == 0)
+                return resource.name ?
+                       yx_defined_string((const char *)resource.name,
+                                         resource.name_length) :
+                       yx_undefined();
+            if (strcmp(member, "offset") == 0)
+                return resource.has_offset ? yx_defined(resource.offset) :
+                                             yx_undefined();
+            return resource.has_length ? yx_defined(resource.length) :
+                                         yx_undefined();
+        }
+        if (strncmp(node->name, "dotnet.assembly_refs.", 21) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            yx_dotnet_assembly_ref reference;
+            const char *member = node->name + 21;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 || !parsed ||
+                !yx_dotnet_assembly_ref_at(parsed, (size_t)value.value,
+                                            &reference))
+                return yx_undefined();
+            if (strcmp(member, "name") == 0)
+                return reference.name ?
+                       yx_defined_string((const char *)reference.name,
+                                         reference.name_length) :
+                       yx_undefined();
+            if (strcmp(member, "public_key_or_token") == 0)
+                return reference.public_key_or_token ?
+                       yx_defined_string(
+                           (const char *)reference.public_key_or_token,
+                           reference.public_key_or_token_length) :
+                       yx_undefined();
+            if (strncmp(member, "version.", 8) == 0) {
+                uint64_t number;
+                return yx_dotnet_version_member(member + 8,
+                                                  &reference.version,
+                                                  &number) ?
+                       yx_defined(number) : yx_undefined();
+            }
+            return yx_undefined();
+        }
+        if (strcmp(node->name, "dotnet.guids.value") == 0 ||
+            strcmp(node->name, "dotnet.user_strings.value") == 0 ||
+            strcmp(node->name, "dotnet.constants.value") == 0 ||
+            strcmp(node->name, "dotnet.field_offsets.value") == 0 ||
+            strcmp(node->name, "dotnet.modulerefs.value") == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            bool guid = strcmp(node->name, "dotnet.guids.value") == 0;
+            bool user_string = strcmp(node->name,
+                                      "dotnet.user_strings.value") == 0;
+            bool constant = strcmp(node->name,
+                                   "dotnet.constants.value") == 0;
+            bool field_offset = strcmp(node->name,
+                                       "dotnet.field_offsets.value") == 0;
+            size_t count;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 || !parsed)
+                return yx_undefined();
+            count = guid ? parsed->guid_count :
+                    user_string ? parsed->user_string_count :
+                    constant ? parsed->constant_count :
+                    field_offset ? parsed->field_offset_count :
+                                   parsed->module_ref_count;
+            if (value.value >= count) return yx_undefined();
+            if (guid) {
+                char *text = yx_eval_alloc_string(ctx, 36);
+                if (!text || !yx_dotnet_guid_at(ctx->data, ctx->size,
+                                                 parsed, (size_t)value.value,
+                                                 text))
+                    return yx_undefined();
+                return yx_defined_string(text, 36);
+            }
+            if (field_offset) {
+                uint32_t offset;
+                return yx_dotnet_field_offset_at(ctx->data, ctx->size,
+                                                   parsed,
+                                                   (size_t)value.value,
+                                                   &offset) ?
+                       yx_defined(offset) : yx_undefined();
+            }
+            {
+                const uint8_t *bytes;
+                size_t length;
+                bool ok = user_string ?
+                    yx_dotnet_user_string_at(ctx->data, ctx->size, parsed,
+                                               (size_t)value.value,
+                                               &bytes, &length) :
+                    constant ? yx_dotnet_constant_at(parsed,
+                                                       (size_t)value.value,
+                                                       &bytes, &length) :
+                               yx_dotnet_module_ref_at(parsed,
+                                                         (size_t)value.value,
+                                                         &bytes, &length);
+                return ok ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            }
+        }
+        if (strncmp(node->name, "dotnet.streams.", 15) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            const yx_dotnet_stream *stream;
+            const char *member = node->name + 15;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 || !parsed ||
+                value.value >= parsed->stream_count)
+                return yx_undefined();
+            stream = &parsed->streams[value.value];
+            if (strcmp(member, "name") == 0)
+                return stream->name ?
+                       yx_defined_string((const char *)stream->name,
+                                         stream->name_length) :
+                       yx_undefined();
+            if (strcmp(member, "offset") == 0)
+                return yx_defined(stream->offset);
+            return yx_defined(stream->size);
+        }
+        if (yx_signature_member(node->name)) {
+            const yx_pe_signature_result *signatures;
+            const yx_pe_signature *signature;
+            const char *member = yx_signature_member(node->name);
+            bool msi = node->name[0] == 'm';
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            const yx_mo_record *output =
+                yx_eval_module_output(ctx, msi ? "msi" : "pe");
+            if (output && !strcmp(member, "valid_on")) {
+                yx_value timestamp = yx_eval(node->b, ctx, current_pattern, bindings);
+                yx_mo_data before = yx_output_field(output, msi ?
+                    "msi.signatures.not_before" : "pe.signatures.not_before", value.value, 0, 1);
+                yx_mo_data after = yx_output_field(output, msi ?
+                    "msi.signatures.not_after" : "pe.signatures.not_after", value.value, 0, 1);
+                if (!timestamp.defined || before.type != YX_MO_DATA_INTEGER || after.type != YX_MO_DATA_INTEGER)
+                    return yx_undefined();
+                return yx_defined((int64_t)timestamp.value >= (int64_t)before.number &&
+                                  (int64_t)timestamp.value <= (int64_t)after.number);
+            }
+            signatures = yx_eval_signature_list(ctx, node->name);
+            if (!signatures || value.value >= signatures->count)
+                return yx_undefined();
+            signature = &signatures->items[value.value];
+            if (strcmp(member, "valid_on") == 0) {
+                const yx_pe_certificate *certificate =
+                    yx_pe_signer_certificate(signature);
+                yx_value timestamp;
+                if (!certificate || !node->b) return yx_undefined();
+                timestamp = yx_eval(node->b, ctx, current_pattern, bindings);
+                if (!timestamp.defined || timestamp.type != V_INTEGER)
+                    return yx_undefined();
+                return yx_defined((int64_t)timestamp.value >=
+                                      certificate->not_before &&
+                                  (int64_t)timestamp.value <=
+                                      certificate->not_after);
+            }
+            return yx_eval_pe_signature_field(signature, member);
+        }
+        if (strncmp(node->name, "zip.entries.", 12) == 0) {
+            const char *member = node->name + 12;
+            const yx_zip_result *parsed;
+            const yx_zip_entry *entry;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            parsed = yx_eval_zip_result(ctx);
+            if (!parsed || value.value >= parsed->entry_count)
+                return yx_undefined();
+            entry = &parsed->entries[value.value];
+            if (strcmp(member, "file_path") == 0)
+                return entry->file_path_present ?
+                       yx_defined_string(entry->file_path,
+                                         entry->file_path_length) :
+                       yx_undefined();
+            if (strcmp(member, "compression") == 0)
+                return entry->compression_present ?
+                       yx_defined((uint64_t)(int64_t)
+                                  (int32_t)entry->compression) :
+                       yx_undefined();
+            if (strcmp(member, "uncompressed_size") == 0)
+                return entry->uncompressed_size_present ?
+                       yx_defined(entry->uncompressed_size) :
+                       yx_undefined();
+            return entry->compressed_size_present ?
+                   yx_defined(entry->compressed_size) : yx_undefined();
+        }
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            char collection[32];
+            const char *member, *nested;
+            uint64_t member_value;
+            const uint8_t *bytes;
+            size_t length;
+            if (!yx_dex_indexed_path(node->name, collection, &member))
+                return yx_undefined();
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            if (ctx->dex_output_present) {
+                unsigned root_field, record_field;
+                bool string_field;
+                if (yx_dex_output_method_proto_field(
+                        collection, member, &record_field,
+                        &string_field)) {
+                    const uint8_t *method;
+                    size_t method_length;
+                    if (!yx_dex_output_root_string_at(
+                            ctx->dex_output_data,
+                            ctx->dex_output_data_size, 7, value.value,
+                            &method, &method_length))
+                        return yx_undefined();
+                    if (string_field)
+                        return yx_dex_output_record_string_at(
+                                   method, method_length, 2, UINT64_MAX,
+                                   record_field, &bytes, &length) ?
+                               yx_defined_string((const char *)bytes,
+                                                 length) : yx_undefined();
+                    uint64_t number;
+                    return yx_dex_output_record_numeric_at(
+                               method, method_length, 2, UINT64_MAX,
+                               record_field, false, &number) ?
+                           yx_defined(number) : yx_undefined();
+                }
+                if (yx_dex_output_indexed_string_numbers(
+                        collection, member, &root_field, &record_field)) {
+                    bool present = record_field == 0 ?
+                        yx_dex_output_root_string_at(
+                            ctx->dex_output_data,
+                            ctx->dex_output_data_size, root_field,
+                            value.value, &bytes, &length) :
+                        yx_dex_output_record_string_at(
+                            ctx->dex_output_data,
+                            ctx->dex_output_data_size, root_field,
+                            value.value, record_field, &bytes, &length);
+                    return present ?
+                        yx_defined_string((const char *)bytes, length) :
+                        yx_undefined();
+                }
+                if (yx_dex_output_indexed_numeric_numbers(
+                        collection, member, &root_field, &record_field)) {
+                    uint64_t number;
+                    bool present = root_field == 9 ?
+                        yx_dex_output_map_item_numeric_at(
+                            ctx->dex_output_data,
+                            ctx->dex_output_data_size, value.value,
+                            record_field, record_field == 1, &number) :
+                        yx_dex_output_record_numeric_at(
+                            ctx->dex_output_data,
+                            ctx->dex_output_data_size, root_field,
+                            value.value, record_field, false, &number);
+                    return present ?
+                           yx_defined(number) : yx_undefined();
+                }
+            }
+            const yx_dex_result *parsed = yx_eval_dex_result(ctx);
+            if (!parsed) return yx_undefined();
+            if (yx_dex_indexed_string_field_supported(collection, member))
+                return yx_dex_indexed_string_field(
+                           parsed, collection, value.value, member,
+                           &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            if (yx_dex_nested_length_name(collection, member, &nested))
+                return yx_dex_nested_collection_count(
+                           parsed, collection, value.value, nested,
+                           &member_value) ?
+                       yx_defined(member_value) : yx_undefined();
+            return yx_dex_indexed_numeric_field(
+                       parsed, collection, value.value, member,
+                       &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+#ifdef XXYARA_ENABLE_OLECF
+        if (strncmp(node->name, "olecf.streams.", 14) == 0) {
+            yx_olecf_stream stream;
+            const char *member = node->name + 14;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0 ||
+                !yx_olecf_stream_get(ctx->data, ctx->size, value.value,
+                                     &stream))
+                return yx_undefined();
+            if (strcmp(member, "name") == 0)
+                return yx_eval_crx_string(ctx, stream.name,
+                                          stream.name_length);
+            if (strcmp(member, "type") == 0)
+                return yx_defined(stream.type);
+            if (strcmp(member, "size") == 0)
+                return yx_defined(stream.size);
+            return yx_undefined();
+        }
+#endif
+        if (strncmp(node->name, "crx.", 4) == 0) {
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            return yx_eval_crx_field(ctx, node->name + 4, true,
+                                      value.value);
+        }
+        if (strncmp(node->name, "lnk.target_id_list.", 19) == 0) {
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            return yx_eval_lnk_field(ctx, node->name + 19, true,
+                                      value.value);
+        }
+        if (strncmp(node->name, "macho.", 6) == 0) {
+            char collection[32];
+            const char *member;
+            uint64_t member_value;
+            const uint8_t *bytes;
+            size_t length;
+            if (!yx_macho_indexed_path(node->name, collection, &member))
+                return yx_undefined();
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            if (strcmp(collection, "file") == 0 &&
+                strcmp(member, "source_version") == 0) {
+                char version[32];
+                return yx_macho_file_source_version(ctx->data, ctx->size,
+                                                     value.value, version,
+                                                     sizeof(version),
+                                                     &length) ?
+                       yx_eval_crx_string(ctx, version, length) :
+                       yx_undefined();
+            }
+            if (strcmp(collection, "file") == 0 &&
+                strcmp(member, "uuid") == 0) {
+                char uuid[37];
+                return yx_macho_file_uuid(ctx->data, ctx->size,
+                                          value.value, uuid, sizeof(uuid),
+                                          &length) ?
+                       yx_eval_crx_string(ctx, uuid, length) :
+                       yx_undefined();
+            }
+            if (yx_macho_indexed_text_field_supported(collection, member)) {
+                char text[37];
+                return yx_macho_indexed_text_field(
+                           ctx->data, ctx->size, collection, value.value,
+                           member, text, sizeof(text), &length) ?
+                       yx_eval_crx_string(ctx, text, length) :
+                       yx_undefined();
+            }
+            if (yx_macho_indexed_string_field_supported(collection, member))
+                return yx_macho_indexed_string_field(ctx->data, ctx->size,
+                                                      collection, value.value,
+                                                      member, &bytes,
+                                                      &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            if (strcmp(collection, "file") == 0 && strlen(member) > 4 &&
+                strcmp(member + strlen(member) - 4, ".len") == 0) {
+                char nested[32];
+                size_t nested_length = strlen(member) - 4;
+                if (nested_length >= sizeof(nested)) return yx_undefined();
+                memcpy(nested, member, nested_length);
+                nested[nested_length] = '\0';
+                return yx_macho_nested_collection_count(
+                           ctx->data, ctx->size, collection, value.value,
+                           nested, &member_value) ?
+                       yx_defined(member_value) : yx_undefined();
+            }
+            return yx_macho_indexed_field(ctx->data, ctx->size,
+                                           collection, value.value, member,
+                                           &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+        if (strncmp(node->name, "elf.", 4) == 0) {
+            char collection[32];
+            const char *member;
+            const uint8_t *bytes;
+            size_t length;
+            uint64_t member_value;
+            if (!yx_elf_indexed_path(node->name, collection, &member))
+                return yx_undefined();
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            if (yx_elf_indexed_string_field_supported(collection, member)) {
+                size_t utf8_length;
+                char *owned;
+                if (!yx_elf_indexed_string_field(
+                        ctx->data, ctx->size, collection, value.value,
+                        member, &bytes, &length) ||
+                    !yx_elf_utf8_lossy(bytes, length, NULL, 0,
+                                        &utf8_length))
+                    return yx_undefined();
+                owned = yx_eval_alloc_string(ctx, utf8_length);
+                if (!owned || !yx_elf_utf8_lossy(bytes, length, owned,
+                                                 utf8_length, &utf8_length))
+                    return yx_undefined();
+                return yx_defined_string(owned, utf8_length);
+            }
+            return yx_elf_indexed_field(ctx->data, ctx->size, collection,
+                                        value.value, member, &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+        if (strncmp(node->name, "pe.sections.", 12) == 0) {
+            const char *member = node->name + 12;
+            const uint8_t *bytes;
+            size_t length;
+            uint64_t member_value;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined || value.type != V_INTEGER ||
+                (int64_t)value.value < 0)
+                return yx_undefined();
+            if (yx_pe_section_string_field_supported(member))
+                return yx_pe_section_string_field(ctx->data, ctx->size,
+                                                  value.value, member,
+                                                  &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            if (yx_pe_section_field(ctx->data, ctx->size, value.value,
+                                    member, &member_value))
+                return yx_defined(member_value);
+        }
+        if (strncmp(node->name, "pe.resources.", 13) == 0 ||
+            strncmp(node->name, "pe.export_details.", 18) == 0 ||
+            strncmp(node->name, "pe.version_info_list.", 21) == 0 ||
+            strcmp(node->name, "pe.version_info.value") == 0) {
+            const char *member;
+            value = yx_eval(node->a, ctx, current_pattern, bindings);
+            if (!value.defined) return yx_undefined();
+            if (strcmp(node->name, "pe.version_info.value") == 0) {
+                if (value.type != V_STRING) return yx_undefined();
+                return yx_eval_pe_version(ctx, 0, value.string,
+                                          value.string_length, "value");
+            }
+            if (value.type != V_INTEGER || (int64_t)value.value < 0)
+                return yx_undefined();
+            if (strncmp(node->name, "pe.resources.", 13) == 0) {
+                member = node->name + 13;
+                return yx_eval_pe_resource(ctx, value.value, member);
+            }
+            if (strncmp(node->name, "pe.export_details.", 18) == 0) {
+                member = node->name + 18;
+                return yx_eval_pe_export(ctx, value.value, member);
+            }
+            member = node->name + 21;
+            return yx_eval_pe_version(ctx, value.value, NULL, 0, member);
+        }
+        return yx_undefined();
+    case N_MODULE_NESTED_INDEXED_FIELD:
+        {
+            const char *array_member = NULL;
+            const yx_global_scalar_value *items = NULL;
+            size_t item_count = 0;
+            if (yx_eval_object_array_path(ctx, bindings, node->name, &array_member,
+                                          &items, &item_count)) {
+                const yx_global_field *field;
+                const char *inner_member = NULL;
+                yx_value first = yx_eval(node->a, ctx, current_pattern,
+                                         bindings);
+                yx_value second = yx_eval(node->b, ctx, current_pattern,
+                                          bindings);
+                if (!first.defined || !second.defined ||
+                    first.type != V_INTEGER || second.type != V_INTEGER ||
+                    (int64_t)first.value < 0 || (int64_t)second.value < 0 ||
+                    first.value >= item_count)
+                    return yx_undefined();
+                field = node->implicit_value ?
+                    yx_global_object_field_suffix(
+                        items[first.value].object, array_member,
+                        ".value") : NULL;
+                if (!field)
+                    field = yx_global_object_nested_array_field(
+                        items[first.value].object, array_member,
+                        &inner_member);
+                if (!field || field->type != YX_GLOBAL_ARRAY)
+                    return yx_undefined();
+                if (inner_member) {
+                    if (field->value.array->element_type !=
+                            YX_GLOBAL_STRUCT ||
+                        second.value >= field->value.array->count)
+                        return yx_undefined();
+                    if (node->operation == TK_LPAREN) {
+                        const yx_global_field *inner =
+                            yx_global_object_field_suffix(
+                                field->value.array->items[second.value].object,
+                                inner_member, ".len");
+                        return inner && inner->type == YX_GLOBAL_ARRAY ?
+                            yx_defined(inner->value.array->count) :
+                            inner && inner->type == YX_GLOBAL_STR ?
+                            yx_defined(inner->value.string.length) : yx_undefined();
+                    }
+                    return yx_eval_global_object_field(
+                        field->value.array->items[second.value].object,
+                        inner_member);
+                }
+                return yx_eval_global_array_item(
+                    field->value.array->element_type,
+                    field->value.array->items,
+                    field->value.array->count, second.value);
+            }
+        }
+        if (strncmp(node->name, "dotnet.classes.", 15) == 0) {
+            const yx_dotnet_result *parsed = yx_eval_dotnet_result(ctx);
+            const char *member = node->name + 15;
+            yx_value first = yx_eval(node->a, ctx, current_pattern,
+                                     bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern,
+                                      bindings);
+            if (!parsed || !first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 ||
+                (int64_t)second.value < 0 ||
+                first.value >= parsed->class_count)
+                return yx_undefined();
+            if (strcmp(member, "base_types.value") == 0) {
+                size_t required = 0;
+                size_t length = 0;
+                char *text;
+                if (!yx_dotnet_class_base_type_at(
+                        parsed, (size_t)first.value, (size_t)second.value,
+                        NULL, 0, &required, &length) || !required)
+                    return yx_undefined();
+                text = yx_eval_alloc_string(ctx, length);
+                if (!text || !yx_dotnet_class_base_type_at(
+                        parsed, (size_t)first.value, (size_t)second.value,
+                        text, required, &required, &length))
+                    return yx_undefined();
+                return yx_defined_string(text, length);
+            }
+            if (strcmp(member, "generic_parameters.value") == 0) {
+                const uint8_t *name;
+                size_t length;
+                return yx_dotnet_class_generic_parameter_at(
+                           parsed, (size_t)first.value,
+                           (size_t)second.value, &name, &length) ?
+                       yx_defined_string((const char *)name, length) :
+                       yx_undefined();
+            }
+            if (strncmp(member, "methods.", 8) == 0) {
+                yx_dotnet_method method;
+                const char *field = member + 8;
+                if (!yx_dotnet_class_method_at(
+                        parsed, (size_t)first.value,
+                        (size_t)second.value, NULL, 0, &method))
+                    return yx_undefined();
+                if (strcmp(field, "name") == 0)
+                    return method.name ?
+                           yx_defined_string((const char *)method.name,
+                                             method.name_length) :
+                           yx_undefined();
+                if (strcmp(field, "visibility") == 0)
+                    return method.visibility ?
+                           yx_defined_string(method.visibility,
+                                             strlen(method.visibility)) :
+                           yx_undefined();
+                if (strcmp(field, "abstract") == 0)
+                    return yx_defined(method.is_abstract);
+                if (strcmp(field, "static") == 0)
+                    return yx_defined(method.is_static);
+                if (strcmp(field, "virtual") == 0)
+                    return yx_defined(method.is_virtual);
+                if (strcmp(field, "final") == 0)
+                    return yx_defined(method.is_final);
+                if (strcmp(field, "number_of_generic_parameters") == 0 ||
+                    strcmp(field, "generic_parameters.len") == 0)
+                    return yx_defined(method.number_of_generic_parameters);
+                if (strcmp(field, "number_of_parameters") == 0 ||
+                    strcmp(field, "parameters.len") == 0)
+                    return yx_defined(method.number_of_parameters);
+                if (strcmp(field, "return_type") == 0 &&
+                    method.has_return_type) {
+                    char *text = yx_eval_alloc_string(
+                        ctx, method.return_type_length);
+                    if (!text || !yx_dotnet_class_method_at(
+                            parsed, (size_t)first.value,
+                            (size_t)second.value, text,
+                            method.return_type_length + 1, &method))
+                        return yx_undefined();
+                    return yx_defined_string(text,
+                                             method.return_type_length);
+                }
+            }
+            return yx_undefined();
+        }
+        if (yx_signature_member(node->name)) {
+            const yx_pe_signature_result *signatures;
+            yx_value first = yx_eval(node->a, ctx, current_pattern,
+                                     bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern,
+                                      bindings);
+            if (!first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 || (int64_t)second.value < 0)
+                return yx_undefined();
+            signatures = yx_eval_signature_list(ctx, node->name);
+            if (!signatures || first.value >= signatures->count)
+                return yx_undefined();
+            return yx_eval_pe_signature_nested_field(
+                &signatures->items[first.value], second.value, node->name);
+        }
+        if (strncmp(node->name, "dex.", 4) == 0) {
+            const char *collection, *nested;
+            yx_value first, second;
+            const uint8_t *bytes;
+            size_t length;
+            if (!yx_dex_nested_name(node->name, &collection, &nested))
+                return yx_undefined();
+            first = yx_eval(node->a, ctx, current_pattern, bindings);
+            second = yx_eval(node->b, ctx, current_pattern, bindings);
+            if (!first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 || (int64_t)second.value < 0)
+                return yx_undefined();
+            const yx_dex_result *parsed = yx_eval_dex_result(ctx);
+            if (!parsed) return yx_undefined();
+            return yx_dex_nested_indexed_string(
+                       parsed, collection, first.value, nested, second.value,
+                       &bytes, &length) ?
+                   yx_defined_string((const char *)bytes, length) :
+                   yx_undefined();
+        }
+        if (strncmp(node->name, "macho.segments.sections.", 24) == 0) {
+            const char *member = node->name + 24;
+            yx_value first = yx_eval(node->a, ctx, current_pattern, bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern, bindings);
+            const uint8_t *bytes;
+            size_t length;
+            uint64_t member_value;
+            if (!first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 || (int64_t)second.value < 0)
+                return yx_undefined();
+            if (yx_macho_section_string_field_supported(member))
+                return yx_macho_section_string_field(
+                           ctx->data, ctx->size, first.value, second.value,
+                           member, &bytes, &length) ?
+                       yx_defined_string((const char *)bytes, length) :
+                       yx_undefined();
+            return yx_macho_section_field(ctx->data, ctx->size,
+                                           first.value, second.value, member,
+                                           &member_value) ?
+                   yx_defined(member_value) : yx_undefined();
+        }
+        if (strncmp(node->name, "macho.file.dylibs.", 18) == 0) {
+            const char *member = node->name + 18;
+            yx_value first = yx_eval(node->a, ctx, current_pattern, bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern, bindings);
+            char text[37];
+            size_t length;
+            if (!first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 || (int64_t)second.value < 0)
+                return yx_undefined();
+            return yx_macho_file_dylib_version(
+                       ctx->data, ctx->size, first.value, second.value,
+                       member, text, sizeof(text), &length) ?
+                   yx_eval_crx_string(ctx, text, length) : yx_undefined();
+        }
+        if (strncmp(node->name, "macho.file.build_version.tools.", 31) == 0) {
+            const char *member = node->name + 31;
+            yx_value first = yx_eval(node->a, ctx, current_pattern, bindings);
+            yx_value second = yx_eval(node->b, ctx, current_pattern, bindings);
+            size_t length;
+            uint64_t number;
+            char version[16];
+            if (!first.defined || !second.defined ||
+                first.type != V_INTEGER || second.type != V_INTEGER ||
+                (int64_t)first.value < 0 || (int64_t)second.value < 0)
+                return yx_undefined();
+            if (strcmp(member, "tool") == 0)
+                return yx_macho_file_build_tool_field(
+                           ctx->data, ctx->size, first.value, second.value,
+                           member, &number) ?
+                       yx_defined(number) : yx_undefined();
+            return yx_macho_file_build_tool_version(
+                       ctx->data, ctx->size, first.value, second.value,
+                       version, sizeof(version), &length) ?
+                   yx_eval_crx_string(ctx, version, length) : yx_undefined();
+        }
+        return yx_undefined();
+    }
+    return yx_undefined();
+}
+
+typedef struct { const yx_node *root; const yx_eval_context *context; yx_value result; } yx_eval_job;
+static void yx_eval_thunk(void *data)
+{ yx_eval_job *job = data; job->result = yx_eval(job->root, job->context, SIZE_MAX, NULL); }
+
+bool yx_condition_evaluate(const yx_condition *condition,
+                           const yx_eval_context *context, bool *out)
+{
+    yx_value result;
+    yx_eval_context bounded_context;
+    yx_eval_string_arena string_arena = {0};
+    yx_eval_string_arena *scratch;
+    const yx_eval_context *evaluated = context;
+    if (!condition || !condition->root || !context || !out ||
+        (context->pattern_count && (!context->pattern_names || !context->patterns)) ||
+        (context->rule_count && (!context->rule_names || !context->rule_values)) ||
+        (context->global_count && !context->globals) ||
+        (context->size && !context->data)) return false;
+    /* A context with the scanner's scratch is evaluated as it is; otherwise a
+     * copy gets this evaluation's own arena. */
+    if (!context->string_arena) {
+        bounded_context = *context;
+        bounded_context.string_arena = &string_arena;
+        evaluated = &bounded_context;
+    }
+    scratch = evaluated->string_arena;
+    yx_eval_prepare_names(condition, evaluated);
+    {
+        yx_eval_job job = {condition->root, evaluated, yx_undefined()};
+        yx_run_deep(condition->depth, yx_eval_thunk, &job);
+        result = job.result;
+    }
+    *out = yx_truth(result);
+    yx_eval_free_strings(scratch);
+    if (scratch == &string_arena) yx_eval_free_scratch_cache(scratch);
+    return !yx_scan_deadline_reached(context->deadline);
+}
+
+static bool yx_regexp_constant_node(const yx_node *node,
+                                    const yx_scope_name *scope,
+                                    bool *has_regexp_with)
+{
+    if (!node) return true;
+    switch (node->kind) {
+    case N_INTEGER: case N_FLOAT: case N_STRING: case N_REGEX:
+        return true;
+    case N_RULE:
+        return yx_scope_find(scope, node->name, strlen(node->name)) != NULL;
+    case N_UNARY: case N_BINARY: case N_MATCHES:
+        return yx_regexp_constant_node(node->a, scope, has_regexp_with) &&
+               yx_regexp_constant_node(node->b, scope, has_regexp_with);
+    case N_WITH: {
+        yx_scope_name *locals = calloc(node->item_count ? node->item_count : 1,
+                                       sizeof(*locals));
+        const yx_scope_name *current = scope;
+        bool valid = locals != NULL;
+        for (size_t i = 0; valid && i < node->item_count; ++i) {
+            valid = yx_regexp_constant_node(node->items[i], current, has_regexp_with);
+            if (node->items[i]->kind == N_REGEX) *has_regexp_with = true;
+            locals[i].name = node->set_names[i];
+            locals[i].parent = current; current = &locals[i];
+        }
+        valid = valid && yx_regexp_constant_node(node->body, current, has_regexp_with);
+        free(locals); return valid;
+    }
+    default: return false;
+    }
+}
+
+bool yx_condition_regexp_constant(const yx_condition *condition, bool *out)
+{
+    bool has_regexp_with = false;
+    yx_eval_context context = {0};
+    return condition && out &&
+        yx_regexp_constant_node(condition->root, NULL, &has_regexp_with) &&
+        has_regexp_with && yx_condition_evaluate(condition, &context, out);
+}
+
+/* Compiler::c_rule's condition analysis (lib/src/compiler/ir/mod.rs,
+ * IR::filesize_bounds and IR::header_constraints, YARA-X v1.23.0): the DFS
+ * enters the root and the operands of `and` only. */
+static void yx_constraints_max_start(yx_rule_constraints *c, uint8_t kind, int64_t value)
+{
+    if (!kind) return;
+    if (!c->lower_kind || value > c->lower || (value == c->lower && c->lower_kind == 1 && kind == 2)) {
+        c->lower_kind = kind; c->lower = value;
+    }
+}
+
+static void yx_constraints_min_end(yx_rule_constraints *c, uint8_t kind, int64_t value)
+{
+    if (!kind) return;
+    if (!c->upper_kind || value < c->upper || (value == c->upper && c->upper_kind == 1 && kind == 2)) {
+        c->upper_kind = kind; c->upper = value;
+    }
+}
+
+bool yx_rule_constraints_merge(yx_rule_constraints *into, const yx_rule_constraints *other)
+{
+    yx_constraints_max_start(into, other->lower_kind, other->lower);
+    yx_constraints_min_end(into, other->upper_kind, other->upper);
+    if (into->header_kind == 1 || other->header_kind == 0) return true;
+    if (other->header_kind == 1) {
+        free(into->header); into->header = NULL; into->header_length = 0; into->header_kind = 1;
+        return true;
+    }
+    size_t common = into->header_kind == 2 && into->header_length < other->header_length ?
+                    into->header_length : other->header_length;
+    if (into->header_kind == 2 && common && memcmp(into->header, other->header, common)) {
+        free(into->header); into->header = NULL; into->header_length = 0; into->header_kind = 1;
+        return true;
+    }
+    if (into->header_kind == 0 || other->header_length > into->header_length) {
+        uint8_t *copy = malloc(other->header_length ? other->header_length : 1);
+        if (!copy) return false;
+        if (other->header_length) memcpy(copy, other->header, other->header_length);
+        free(into->header);
+        into->header = copy; into->header_length = other->header_length; into->header_kind = 2;
+    }
+    return true;
+}
+
+bool yx_rule_constraints_equal(const yx_rule_constraints *a, const yx_rule_constraints *b)
+{
+    return a->lower_kind == b->lower_kind && a->upper_kind == b->upper_kind &&
+           (!a->lower_kind || a->lower == b->lower) && (!a->upper_kind || a->upper == b->upper) &&
+           a->header_kind == b->header_kind &&
+           (a->header_kind != 2 || (a->header_length == b->header_length &&
+            (!a->header_length || !memcmp(a->header, b->header, a->header_length))));
+}
+
+/* IR::upper_bound_from_const and lower_bound_from_const: 0 when the operand
+ * is not a usable constant. */
+static uint8_t yx_constraints_bound(const yx_node *node, bool inclusive, bool upper, int64_t *value)
+{
+    if (!node || node->operation == TK_TRUE || node->operation == TK_FALSE) return 0;
+    if (node->kind == N_INTEGER) {
+        if (node->is_unsigned && node->number > (uint64_t)INT64_MAX) return 0;
+        *value = (int64_t)node->number;
+        return inclusive ? 1 : 2;
+    }
+    if (node->kind != N_FLOAT || !isfinite(node->floating)) return 0;
+    double rounded = upper ? ceil(node->floating) : floor(node->floating);
+    *value = rounded >= 9223372036854775808.0 ? INT64_MAX :
+             rounded <= -9223372036854775808.0 ? INT64_MIN : (int64_t)rounded;
+    return inclusive && rounded == node->floating ? 1 : 2;
+}
+
+typedef struct { size_t offset; uint8_t value; } yx_constraints_byte;
+typedef struct {
+    yx_constraints_byte *items;
+    size_t count, capacity;
+    bool unsatisfiable, oom;
+} yx_constraints_bytes;
+
+static void yx_constraints_add(yx_constraints_bytes *bytes, size_t offset, uint8_t value)
+{
+    size_t low = 0, high = bytes->count;
+    if (bytes->unsatisfiable || bytes->oom) return;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (bytes->items[middle].offset < offset) low = middle + 1; else high = middle;
+    }
+    if (low < bytes->count && bytes->items[low].offset == offset) {
+        if (bytes->items[low].value != value) bytes->unsatisfiable = true;
+        return;
+    }
+    if (bytes->count == bytes->capacity) {
+        size_t capacity = bytes->capacity ? bytes->capacity * 2 : 16;
+        yx_constraints_byte *items = realloc(bytes->items, capacity * sizeof(*items));
+        if (!items) { bytes->oom = true; return; }
+        bytes->items = items; bytes->capacity = capacity;
+    }
+    memmove(bytes->items + low + 1, bytes->items + low, (bytes->count - low) * sizeof(*bytes->items));
+    bytes->items[low].offset = offset; bytes->items[low].value = value; ++bytes->count;
+}
+
+/* IR::apply_int_read_constraint. */
+static bool yx_constraints_read(yx_constraints_bytes *bytes, const yx_node *read, int64_t value)
+{
+    if (!read || read->kind != N_READ || read->floating_read || read->read_arity_error || !read->a ||
+        read->a->kind != N_INTEGER || read->a->operation == TK_TRUE || read->a->operation == TK_FALSE ||
+        read->a->number > (uint64_t)INT64_MAX || read->a->number > SIZE_MAX ||
+        (read->width != 1 && read->width != 2 && read->width != 4 && read->width != 8)) return false;
+    size_t offset = (size_t)read->a->number;
+    for (unsigned i = 0; i < read->width; ++i) {
+        unsigned shift = read->big_endian ? (read->width - 1 - i) * 8 : i * 8;
+        if (offset + i < offset) break;
+        yx_constraints_add(bytes, offset + i, (uint8_t)((uint64_t)value >> shift));
+    }
+    return true;
+}
+
+static bool yx_constraints_integer(const yx_node *node, int64_t *value)
+{
+    if (!node || node->kind != N_INTEGER || node->operation == TK_TRUE || node->operation == TK_FALSE)
+        return false;
+    *value = (int64_t)node->number;
+    return true;
+}
+
+bool yx_condition_rule_constraints(const yx_condition *condition,
+                                   yx_constraints_rule_lookup rule_lookup,
+                                   yx_constraints_pattern_lookup pattern_lookup,
+                                   void *user, yx_rule_constraints *out)
+{
+    yx_constraints_bytes bytes = {0};
+    const yx_node **stack = NULL;
+    size_t used = 0, capacity = 0;
+    bool ok = false;
+    memset(out, 0, sizeof(*out));
+    if (!condition || !condition->root) return true;
+    capacity = 64;
+    stack = malloc(capacity * sizeof(*stack));
+    if (!stack) return false;
+    stack[used++] = condition->root;
+    /* Upstream walks twice: a header contradiction does not end the filesize walk. */
+    while (used) {
+        const yx_node *node = stack[--used];
+        int64_t value;
+        uint8_t kind;
+        if (!node) continue;
+        if (node->kind == N_BINARY && node->operation == TK_AND) {
+            if (capacity - used < 2) {
+                const yx_node **grown = realloc(stack, capacity * 2 * sizeof(*stack));
+                if (!grown) goto done;
+                stack = grown; capacity *= 2;
+            }
+            /* Operands in source order. */
+            stack[used++] = node->b; stack[used++] = node->a;
+            continue;
+        }
+        if (node->kind == N_RULE && node->name && rule_lookup) {
+            const yx_rule_constraints *rule = rule_lookup(user, node->name);
+            if (!rule) continue;
+            yx_constraints_max_start(out, rule->lower_kind, rule->lower);
+            yx_constraints_min_end(out, rule->upper_kind, rule->upper);
+            if (rule->header_kind == 1) bytes.unsatisfiable = true;
+            else if (rule->header_kind == 2)
+                for (size_t i = 0; i < rule->header_length && !bytes.unsatisfiable; ++i)
+                    yx_constraints_add(&bytes, i, rule->header[i]);
+            continue;
+        }
+        if (node->kind == N_PATTERN && node->filter == FILTER_AT && node->name && pattern_lookup &&
+            yx_constraints_integer(node->b, &value) && value == 0 &&
+            !(node->b->is_unsigned && node->b->number > (uint64_t)INT64_MAX)) {
+            const uint8_t *literal = NULL; size_t length = 0;
+            if (pattern_lookup(user, node->name, &literal, &length))
+                for (size_t i = 0; i < length && !bytes.unsatisfiable; ++i)
+                    yx_constraints_add(&bytes, i, literal[i]);
+            continue;
+        }
+        if (node->kind != N_BINARY || !node->a || !node->b) continue;
+        bool a_size = node->a->kind == N_FILESIZE, b_size = node->b->kind == N_FILESIZE;
+        switch (node->operation) {
+        case TK_GT: case TK_GE:
+            /* constant > filesize bounds the end, filesize > constant the start. */
+            if (b_size && (kind = yx_constraints_bound(node->a, node->operation == TK_GE, true, &value)) != 0)
+                yx_constraints_min_end(out, kind, value);
+            else if (a_size && (kind = yx_constraints_bound(node->b, node->operation == TK_GE, false, &value)) != 0)
+                yx_constraints_max_start(out, kind, value);
+            break;
+        case TK_LT: case TK_LE:
+            if (b_size && (kind = yx_constraints_bound(node->a, node->operation == TK_LE, false, &value)) != 0)
+                yx_constraints_max_start(out, kind, value);
+            else if (a_size && (kind = yx_constraints_bound(node->b, node->operation == TK_LE, true, &value)) != 0)
+                yx_constraints_min_end(out, kind, value);
+            break;
+        case TK_EQ:
+            if (yx_constraints_integer(node->b, &value) && yx_constraints_read(&bytes, node->a, value)) break;
+            if (yx_constraints_integer(node->a, &value)) (void)yx_constraints_read(&bytes, node->b, value);
+            break;
+        default: break;
+        }
+    }
+    if (bytes.oom) goto done;
+    if (bytes.unsatisfiable) out->header_kind = 1;
+    else if (bytes.count && bytes.items[0].offset == 0) {
+        size_t length = 0;
+        while (length < bytes.count && bytes.items[length].offset == length) ++length;
+        out->header = malloc(length);
+        if (!out->header) goto done;
+        for (size_t i = 0; i < length; ++i) out->header[i] = bytes.items[i].value;
+        out->header_length = length; out->header_kind = 2;
+    }
+    ok = true;
+done:
+    free(stack); free(bytes.items);
+    return ok;
+}
