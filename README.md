@@ -94,7 +94,7 @@ Loading large precompiled rule sets is the part of xxyara still being optimized.
 | Third-party dependencies | OpenSSL, jansson; libmagic (optional) | wasmtime and several hundred Rust crates | none (xxfclib only) |
 | Windows x64 binaries | `yara64.exe` 2.4 MB | `yr.exe` 26.4 MB, `yara_x_capi.dll` 23.2 MB | `yr.exe` 6.5 MB, `xxyara.dll` 4.7 MB |
 | DLLs imported | KERNEL32, ADVAPI32, CRYPT32, bcrypt, USER32, WS2_32, C runtime | KERNEL32, ntdll, bcryptprimitives, combase, shell32, api-ms-win-core-synch | KERNEL32 only |
-| License | BSD-3-Clause | BSD-3-Clause | MIT (upstream notices included) |
+| License | BSD-3-Clause | BSD-3-Clause | MIT (YARA-X notice included) |
 
 ### Command line
 
@@ -361,7 +361,6 @@ How to build and run each: [examples/README.md](examples/README.md).
 
 ## License
 
-xxyara's own code is [MIT](LICENSE). It follows YARA-X's design and behaviour, and the upstream notices are
-included: [YARA-X](LICENSE.YARA-X), [encoding_rs](LICENSE.ENCODING_RS), [regex-syntax](LICENSE.REGEX-SYNTAX),
-[unicode-width](LICENSE.UNICODE-WIDTH) and [annotate-snippets](LICENSE.ANNOTATE-SNIPPETS). YARA and YARA-X are
-VirusTotal projects; xxyara is an independent implementation.
+xxyara's own code is [MIT](LICENSE). It follows YARA-X's design and behaviour, and the
+[YARA-X notice](LICENSE.YARA-X) is included. YARA and YARA-X are VirusTotal projects;
+xxyara is an independent implementation.
