@@ -1218,6 +1218,47 @@ done:
     return result;
 }
 
+/* The program of an archive's own code and atoms. The sub-patterns, their
+ * flags and atoms and the code are the archive's; the guards, the index and
+ * the windows are derived from them as yx_ser_regexp_program derives them. */
+int yx_ser_archived_regexp_program(const yx_archived_regexp *archived, yx_rx_program *out)
+{
+    const yx_archived_regexp_atom *from = (const yx_archived_regexp_atom *)(archived + 1);
+    size_t total = 0;
+    memset(out, 0, sizeof(*out));
+    if (archived->sub_count > 2) return -1;
+    for (size_t s = 0; s < archived->sub_count; ++s) total += archived->atom_count[s];
+    out->code = malloc(archived->code_length ? archived->code_length : 1);
+    if (!out->code) goto failed;
+    if (archived->code_length) memcpy(out->code, from + total, archived->code_length);
+    out->code_length = archived->code_length;
+    for (size_t s = 0; s < archived->sub_count; ++s) {
+        yx_rx_sub *sub = &out->subs[s];
+        size_t count = archived->atom_count[s];
+        sub->flags = archived->flags[s];
+        sub->atoms = calloc(count ? count : 1, sizeof(*sub->atoms));
+        if (!sub->atoms) goto failed;
+        out->sub_count = s + 1;
+        sub->atom_count = count;
+        for (size_t i = 0; i < count; ++i, ++from) {
+            yx_rx_atom *to = &sub->atoms[i];
+            memcpy(to->bytes, from->bytes, sizeof(to->bytes));
+            to->length = from->length;
+            to->backtrack = from->backtrack;
+            to->exact = from->exact;
+            to->has_fwd = from->has_fwd;
+            to->has_bck = from->has_bck;
+            to->fwd = from->fwd;
+            to->bck = from->bck;
+        }
+    }
+    yx_se_guards(out);
+    if (yx_rx_program_prepare(out)) return 1;
+failed:
+    yx_rx_program_free(out);
+    return -1;
+}
+
 /* A copy of a program that yx_ser_regexp_program built, for a pattern with
  * the same inputs (kind, regexp, gap head, modifiers): the code, the
  * sub-patterns' atoms, the guards (each atom's guard rebased into the

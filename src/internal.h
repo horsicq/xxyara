@@ -127,6 +127,22 @@ typedef struct yx_archived_literal_prefilter {
     size_t count;
 } yx_archived_literal_prefilter;
 
+/* A regexp sub-pattern program read from a compiled-rules archive: one
+ * allocation of `size` bytes holding this header, the atoms of the
+ * sub-patterns in order and then the code. Offsets count from the code's
+ * first byte. */
+typedef struct yx_archived_regexp_atom {
+    uint8_t bytes[8];
+    uint8_t length;
+    bool exact, has_fwd, has_bck;
+    uint32_t backtrack, fwd, bck;
+} yx_archived_regexp_atom;
+typedef struct yx_archived_regexp {
+    size_t size, code_length, sub_count;
+    unsigned flags[2];
+    size_t atom_count[2];
+} yx_archived_regexp;
+
 typedef union yx_global_scalar_value {
     bool boolean;
     int64_t integer;
@@ -204,6 +220,8 @@ struct YRX_PATTERN {
     char *base64wide_alphabet;
     yx_base64_archived_prefilter base64_archived_prefilter;
     yx_archived_literal_prefilter archived_literal_prefilter;
+    /* The archive's own program for this pattern, or NULL (owned). */
+    yx_archived_regexp *archived_regexp;
     uint8_t xor_min;
     uint8_t xor_max;
     YRX_MATCH *matches;
@@ -930,6 +948,11 @@ void yx_compile_memo_store(uint64_t tag, const void *key, size_t key_length,
 struct yx_compile_memos;
 struct yx_compile_memos *yx_compile_memos_take(void);
 void yx_compile_memos_merge(struct yx_compile_memos *taken);
+/* The merge in two steps: the adoption by the calling thread, then the
+ * release of what it did not keep, which touches `taken` only. */
+void yx_compile_memos_adopt(struct yx_compile_memos *taken);
+size_t yx_compile_memos_leftover(const struct yx_compile_memos *taken);
+void yx_compile_memos_release(struct yx_compile_memos *taken);
 /* match.c: a regexp plan copied for a pattern with the same plan inputs. */
 struct yx_candidate_plan *yx_candidate_plan_clone(const struct yx_candidate_plan *plan,
                                                   const YRX_PATTERN *pattern);

@@ -123,6 +123,21 @@ typedef struct yx_rx_match_list {
 } yx_rx_match_list;
 
 void yx_rx_program_free(yx_rx_program *program);
+/* Whether code that did not come from this library's own compiler (a
+ * compiled-rules archive) is safe to run from the given entry offsets.
+ * PikeVM code (fast false): every instruction reachable from an entry
+ * decodes inside the code, no reachable instruction starts inside another
+ * one, every jump, split and repeat target and every fall-through is inside
+ * the code, and there is no cycle made only of jumps, repeats and zero-width
+ * assertions (the epsilon closure marks splits and byte-consuming
+ * instructions, and nothing else). FastVM code (fast true) has no jump
+ * targets: every entry must decode in a line to its MATCH, alternations
+ * hold literals only, and the exact jumps of one line add up to at most
+ * YX_RX_FAST_EXACT_JUMP_LIMIT bytes (positions they produce are stored
+ * without looking at the input). False also without memory. */
+enum { YX_RX_FAST_EXACT_JUMP_LIMIT = 65536 };
+bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries,
+                               size_t entry_count, bool fast);
 /* Builds the search index and the atoms' windows once the atoms are final.
  * False on allocation failure (a program without memory for windows just
  * has none). */

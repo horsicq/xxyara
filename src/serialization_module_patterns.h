@@ -2117,6 +2117,12 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_prefilter(&decoded->runtime_literal_prefilters[i],
             &loaded->rules[0].patterns[i].archived_literal_prefilter)){status=YX_SER_NO_MEMORY;goto done;}
+    decoded->runtime_regexp_programs=calloc(a->logical,sizeof(*decoded->runtime_regexp_programs));
+    if(!decoded->runtime_regexp_programs){status=YX_SER_NO_MEMORY;goto done;}
+    decoded->runtime_regexp_program_count=a->logical;
+    for(size_t i=0;i<a->logical;++i)
+        if(!yx_physical_copy_regexp(&decoded->runtime_regexp_programs[i],
+            loaded->rules[0].patterns[i].archived_regexp)){status=YX_SER_NO_MEMORY;goto done;}
     decoded->namespace_name=yx_copy_string(a->names[a->namespace_id]);decoded->identifier=yx_copy_string(a->names[a->rule_name_id]);
     if(!decoded->namespace_name||!decoded->identifier){status=YX_SER_NO_MEMORY;goto done;}
     decoded->runtime_module_names=calloc(a->import_count?a->import_count:1,sizeof(*decoded->runtime_module_names));

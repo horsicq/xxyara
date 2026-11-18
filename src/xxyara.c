@@ -60,6 +60,9 @@
 #include <string.h>
 #include <time.h>
 #include "os_error.h"
+#if defined(XXYARA_VERIFY_LOAD) && defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
@@ -13339,6 +13342,192 @@ static int yx_build_pattern_program(YRX_PATTERN *pattern)
     return result;
 }
 
+/* A pattern loaded from an archive runs the archive's own program
+ * (archived_regexp) instead of the one its declaration compiles to; the
+ * gap head and the program's provenance are set as yx_build_pattern_program
+ * sets them. Without memory the pattern is left for that function. Verify
+ * builds (-DXXYARA_VERIFY_LOAD) build both and abort when the code, a
+ * sub-pattern's flags or an atom differ. */
+static void yx_build_archived_program(YRX_PATTERN *pattern)
+{
+    yx_rx_program *program = calloc(1, sizeof(*program));
+    char *source = pattern->kind == YX_PATTERN_REGEX && pattern->regexp ? yx_strdup(pattern->regexp) : NULL;
+    if (!program || (pattern->kind == YX_PATTERN_REGEX && pattern->regexp && !source) ||
+        yx_ser_archived_regexp_program(pattern->archived_regexp, program) != 1) {
+        free(program);
+        free(source);
+        return;
+    }
+    if (!pattern->gap_head_regexp) pattern->gap_head_regexp = yx_ser_gap_head_regexp(pattern);
+#ifdef XXYARA_VERIFY_LOAD
+    {
+        /* The program the declaration compiles to, compared with the
+         * archive's. A difference is reported with its class: the code, the
+         * GREEDY flag alone, other flags, the atoms, or no program at all.
+         * XXYARA_VERIFY_LOAD_LOG appends one line per difference to a file;
+         * XXYARA_VERIFY_LOAD_STRICT aborts on any difference. */
+        yx_rx_program built;
+        int result = yx_ser_regexp_program(pattern, &built);
+        const char *what = NULL;
+        if (result != 1) what = "no rebuilt program";
+        else if (built.code_length != program->code_length || built.sub_count != program->sub_count ||
+                 (built.code_length && memcmp(built.code, program->code, built.code_length))) what = "code";
+        for (size_t s = 0; !what && s < built.sub_count; ++s) {
+            const yx_rx_sub *p = &built.subs[s], *q = &program->subs[s];
+            if (p->atom_count != q->atom_count) { what = "atom count"; break; }
+            for (size_t i = 0; !what && i < p->atom_count; ++i) {
+                const yx_rx_atom *m = &p->atoms[i], *n = &q->atoms[i];
+                if (m->length != n->length || m->exact != n->exact || m->backtrack != n->backtrack ||
+                    m->has_fwd != n->has_fwd || m->has_bck != n->has_bck ||
+                    (m->has_fwd && m->fwd != n->fwd) || (m->has_bck && m->bck != n->bck) ||
+                    memcmp(m->bytes, n->bytes, m->length) != 0) what = "atom";
+            }
+        }
+        for (size_t s = 0; !what && s < built.sub_count; ++s)
+            if (built.subs[s].flags != program->subs[s].flags)
+                what = (built.subs[s].flags ^ program->subs[s].flags) == YX_RX_GREEDY
+                    ? (program->subs[s].flags & YX_RX_GREEDY ? "greedy flag set in archive only"
+                                                             : "greedy flag set in rebuilt only")
+                    : "flags";
+        if (what) {
+            static volatile long lock;
+            const char *path = getenv("XXYARA_VERIFY_LOAD_LOG");
+            if (path) {
+                FILE *log;
+#ifdef _MSC_VER
+                while (_InterlockedExchange(&lock, 1)) ;
+#endif
+                log = fopen(path, "ab");
+                if (log) {
+                    fprintf(log, "%s\tkind %d\tmodifiers %#x\tflags %#x/%#x\t%s\n", what, (int)pattern->kind,
+                            (unsigned)pattern->modifiers, result == 1 ? built.subs[0].flags : 0u,
+                            program->subs[0].flags, pattern->regexp ? pattern->regexp : "");
+                    fclose(log);
+                }
+#ifdef _MSC_VER
+                _InterlockedExchange(&lock, 0);
+#endif
+            }
+            if (getenv("XXYARA_VERIFY_LOAD_STRICT")) {
+                fprintf(stderr, "XXYARA_VERIFY_LOAD: archived program differs (%s): kind %d modifiers %#x `%s`\n",
+                        what, (int)pattern->kind, (unsigned)pattern->modifiers,
+                        pattern->regexp ? pattern->regexp : "");
+                abort();
+            }
+        }
+        if (result == 1) yx_rx_program_free(&built);
+    }
+#endif
+    pattern->rx_program = program;
+    if (source) {
+        pattern->rx_program_regexp = source;
+        pattern->rx_program_modifiers = pattern->modifiers;
+    }
+}
+
+/* Patterns with the same archived program (the same bytes: flags, atoms
+ * and code) get the same program. The first of them builds it; a later one
+ * takes a copy (yx_ser_regexp_program_copy, as later copies of one regexp or
+ * hex form do), with its own gap head and provenance, or builds its own
+ * when the first has none or the copy cannot be allocated. */
+typedef struct {
+    YRX_PATTERN **patterns;
+    /* The first pattern with the same archived program, or the pattern's
+     * own index. */
+    size_t *first;
+    /* The patterns one pass handles: the firsts, then the others. */
+    size_t *order;
+} yx_archived_program_tasks;
+
+static void yx_build_archived_program_task(size_t index, void *context)
+{
+    const yx_archived_program_tasks *tasks = context;
+    yx_build_archived_program(tasks->patterns[tasks->order[index]]);
+}
+
+static void yx_copy_archived_program_task(size_t index, void *context)
+{
+    const yx_archived_program_tasks *tasks = context;
+    size_t i = tasks->order[index];
+    YRX_PATTERN *pattern = tasks->patterns[i];
+    const YRX_PATTERN *first = tasks->patterns[tasks->first[i]];
+    yx_rx_program *program = first->rx_program ? calloc(1, sizeof(*program)) : NULL;
+    char *source = pattern->kind == YX_PATTERN_REGEX && pattern->regexp ? yx_strdup(pattern->regexp) : NULL;
+    if (!program || (pattern->kind == YX_PATTERN_REGEX && pattern->regexp && !source) ||
+        yx_ser_regexp_program_copy(first->rx_program, program) != 1) {
+        free(program);
+        free(source);
+        yx_build_archived_program(pattern);
+        return;
+    }
+    if (!pattern->gap_head_regexp) pattern->gap_head_regexp = yx_ser_gap_head_regexp(pattern);
+    pattern->rx_program = program;
+    if (source) {
+        pattern->rx_program_regexp = source;
+        pattern->rx_program_modifiers = pattern->modifiers;
+    }
+}
+
+/* The archive's programs, built on several threads: each build or copy
+ * writes its own pattern only, and the copies run after every first is
+ * built. */
+static void yx_build_archived_programs(YRX_RULES *rules)
+{
+    size_t count = 0, used = 0, buckets = 64, firsts = 0, others = 0;
+    yx_archived_program_tasks tasks = {NULL, NULL, NULL};
+    size_t *heads = NULL, *chain = NULL;
+    uint64_t *hashes = NULL;
+    for (size_t i = 0; rules && i < rules->rule_count; ++i)
+        for (size_t j = 0; j < rules->rules[i].pattern_count; ++j)
+            if (rules->rules[i].patterns[j].archived_regexp && !rules->rules[i].patterns[j].rx_program) ++count;
+    if (!count) return;
+    while (buckets < count * 2 && buckets <= SIZE_MAX / 4) buckets *= 2;
+    tasks.patterns = malloc(count * sizeof(*tasks.patterns));
+    tasks.first = malloc(count * sizeof(*tasks.first));
+    tasks.order = malloc(count * sizeof(*tasks.order));
+    heads = malloc(buckets * sizeof(*heads));
+    chain = malloc(count * sizeof(*chain));
+    hashes = malloc(count * sizeof(*hashes));
+    if (!tasks.patterns || !tasks.first || !tasks.order || !heads || !chain || !hashes) goto done;
+    for (size_t i = 0; i < rules->rule_count; ++i)
+        for (size_t j = 0; j < rules->rules[i].pattern_count; ++j) {
+            YRX_PATTERN *pattern = &rules->rules[i].patterns[j];
+            if (pattern->archived_regexp && !pattern->rx_program) tasks.patterns[used++] = pattern;
+        }
+    for (size_t i = 0; i < buckets; ++i) heads[i] = SIZE_MAX;
+    for (size_t i = 0; i < used; ++i) {
+        const yx_archived_regexp *archived = tasks.patterns[i]->archived_regexp;
+        const unsigned char *bytes = (const unsigned char *)archived;
+        uint64_t hash = 1469598103934665603ull;
+        size_t bucket, at;
+        for (size_t k = 0; k < archived->size; ++k) hash = (hash ^ bytes[k]) * 1099511628211ull;
+        bucket = (size_t)hash & (buckets - 1);
+        for (at = heads[bucket]; at != SIZE_MAX; at = chain[at])
+            if (hashes[at] == hash && tasks.patterns[at]->archived_regexp->size == archived->size &&
+                !memcmp(tasks.patterns[at]->archived_regexp, archived, archived->size)) break;
+        hashes[i] = hash;
+        if (at != SIZE_MAX) {
+            tasks.first[i] = at;
+            chain[i] = SIZE_MAX;
+            continue;
+        }
+        tasks.first[i] = i;
+        chain[i] = heads[bucket];
+        heads[bucket] = i;
+    }
+    for (size_t i = 0; i < used; ++i) if (tasks.first[i] == i) tasks.order[firsts++] = i;
+    yx_parallel_run(firsts, yx_parallel_threads(firsts, 16), yx_build_archived_program_task, &tasks);
+    for (size_t i = 0; i < used; ++i) if (tasks.first[i] != i) tasks.order[others++] = i;
+    yx_parallel_run(others, yx_parallel_threads(others, 16), yx_copy_archived_program_task, &tasks);
+done:
+    free(tasks.patterns);
+    free(tasks.first);
+    free(tasks.order);
+    free(heads);
+    free(chain);
+    free(hashes);
+}
+
 typedef struct {
     YRX_PATTERN **patterns;
     int *results;
@@ -13661,6 +13850,33 @@ static void yx_build_candidate_plans(YRX_RULES *rules)
  * never scan: their callers read pattern declarations and conditions. */
 static _Thread_local unsigned yx_inspect_depth;
 void yx_inspect_begin(void) { ++yx_inspect_depth; }
+/* The decoded rules of the archive being loaded on this thread, while its
+ * rules are built: the build gives each pattern its archived program
+ * before the programs are built. */
+static _Thread_local yx_ser_rule *yx_attach_decoded;
+static _Thread_local size_t yx_attach_decoded_count;
+static void yx_attach_archived_regexps(YRX_RULES *rules)
+{
+    yx_ser_rule *decoded = yx_attach_decoded;
+    if (!decoded || !rules || rules->rule_count != yx_attach_decoded_count) return;
+    for (size_t i = 0; i < rules->rule_count; ++i) {
+        YRX_RULE *rule = &rules->rules[i];
+        if (!decoded[i].runtime_regexp_programs ||
+            rule->pattern_count != decoded[i].runtime_regexp_program_count) continue;
+        for (size_t p = 0; p < rule->pattern_count; ++p) {
+            YRX_PATTERN *pattern = &rule->patterns[p];
+            /* yx_ser_regexp_program's own conditions for a program. */
+            if (!decoded[i].runtime_regexp_programs[p] || pattern->archived_regexp ||
+                (pattern->kind != YX_PATTERN_REGEX && pattern->kind != YX_PATTERN_HEX) ||
+                (pattern->kind == YX_PATTERN_REGEX && !pattern->regexp) ||
+                (pattern->kind == YX_PATTERN_HEX && !pattern->hex_atoms) ||
+                (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE |
+                                        YX_MOD_FULLWORD | YX_MOD_PRIVATE))) continue;
+            pattern->archived_regexp = decoded[i].runtime_regexp_programs[p];
+            decoded[i].runtime_regexp_programs[p] = NULL;
+        }
+    }
+}
 void yx_inspect_end(void) { if (yx_inspect_depth) --yx_inspect_depth; }
 
 /* Set on every thread while it runs a parallel loop's calls (the calling
@@ -13710,6 +13926,15 @@ static void yx_parallel_helper_done(void *arg)
     yx_parallel_call *call = arg;
     long slot = xx_atomic_add(&call->memo_count, 1);
     if (slot < call->memo_capacity) call->memos[slot] = yx_compile_memos_take();
+}
+
+/* Regexp compilations left by a loop's helpers below which they are freed
+ * on the calling thread alone. */
+enum { YX_PARALLEL_RELEASE_MINIMUM = 128 };
+static void yx_parallel_release_one(size_t index, void *arg)
+{
+    struct yx_compile_memos **memos = arg;
+    yx_compile_memos_release(memos[index]);
 }
 
 static uint64_t yx_parallel_now_ns(void)
@@ -13763,7 +13988,21 @@ void yx_parallel_run_ex(size_t count, unsigned threads, uint64_t serial_ns, uint
     --yx_parallel_depth;
     /* The pure compile-time results the helpers memoized stay with this
      * thread, which would have made them itself on one thread. */
-    for (long i = 0; i < call.memo_count && i < call.memo_capacity; ++i) yx_compile_memos_merge(call.memos[i]);
+    {
+        /* Adopted in the helpers' order, as a merge of each in turn adopts
+         * them. The compilations this thread does not keep are then only
+         * freed: many of them, on as many threads as there were helpers. */
+        long merged = call.memo_count < call.memo_capacity ? call.memo_count : call.memo_capacity;
+        size_t leftover = 0;
+        for (long i = 0; i < merged; ++i) {
+            yx_compile_memos_adopt(call.memos[i]);
+            leftover += yx_compile_memos_leftover(call.memos[i]);
+        }
+        if (merged > 1 && leftover >= YX_PARALLEL_RELEASE_MINIMUM)
+            (void)xx_parallel_for_ex((size_t)merged, (uint32_t)merged, 0, yx_parallel_release_one, NULL, call.memos);
+        else
+            for (long i = 0; i < merged; ++i) yx_compile_memos_release(call.memos[i]);
+    }
     free(call.memos);
 }
 
@@ -13825,6 +14064,8 @@ static YRX_RULES *yx_compiler_build_impl(YRX_COMPILER *compiler,
     compiler->global_rules_scanned = compiler->global_rule_count = 0;
     yx_rule_name_cache_free(compiler->rule_name_cache);
     compiler->rule_name_cache = NULL;
+    yx_attach_archived_regexps(rules);
+    if (!yx_inspect_depth) yx_build_archived_programs(rules);
     if (!yx_inspect_depth) yx_build_regexp_programs(rules);
     if (!yx_inspect_depth) yx_build_chains(rules);
     if (prepare_candidates && !yx_inspect_depth) yx_build_candidate_plans(rules);
@@ -17575,8 +17816,15 @@ classify_serialized_archive:
     }
     free(batch_starts);
     free(batch_source);
-    if (result == YRX_SUCCESS)
+    if (result == YRX_SUCCESS) {
+        yx_ser_rule *outer_decoded = yx_attach_decoded;
+        size_t outer_count = yx_attach_decoded_count;
+        yx_attach_decoded = decoded;
+        yx_attach_decoded_count = decoded_count;
         deserialized = yx_compiler_build_impl(compiler, false);
+        yx_attach_decoded = outer_decoded;
+        yx_attach_decoded_count = outer_count;
+    }
     if (result == YRX_SUCCESS && deserialized &&
         deserialized->rule_count == decoded_count) {
         for (size_t i = 0; i < decoded_count; ++i) {

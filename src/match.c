@@ -3528,6 +3528,15 @@ struct yx_compile_memos *yx_compile_memos_take(void)
  * is the result this thread would make; entries already present are kept. */
 void yx_compile_memos_merge(struct yx_compile_memos *taken)
 {
+    yx_compile_memos_adopt(taken);
+    yx_compile_memos_release(taken);
+}
+
+/* The first half of yx_compile_memos_merge: this thread's memos take the
+ * results they keep, in the order and by the rules of the merge. What they
+ * do not keep stays in `taken`. */
+void yx_compile_memos_adopt(struct yx_compile_memos *taken)
+{
     if (!taken) return;
     yx_memo *memo = yx_compile_memo();
     for (size_t i = 0; memo && i < taken->memo.slot_count; ++i) {
@@ -3537,7 +3546,6 @@ void yx_compile_memos_merge(struct yx_compile_memos *taken)
         yx_memo_store(memo, entry->tag, entry->data, entry->key_length, entry->data + entry->key_length,
                       entry->value_length);
     }
-    yx_memo_destroy(&taken->memo);
     yx_pcre_memo *pcre = yx_pcre_memo_get();
     for (size_t i = 0; i < taken->pcre_count; ++i) {
         yx_pcre_memo_entry *moved = &taken->pcre[i];
@@ -3560,6 +3568,27 @@ void yx_compile_memos_merge(struct yx_compile_memos *taken)
             }
             slot = (slot + 1) & (YX_PCRE_MEMO_SLOTS - 1);
         }
+    }
+}
+
+/* The regexp compilations yx_compile_memos_adopt left in `taken`. */
+size_t yx_compile_memos_leftover(const struct yx_compile_memos *taken)
+{
+    size_t count = 0;
+    for (size_t i = 0; taken && i < taken->pcre_count; ++i) count += taken->pcre[i].source != NULL;
+    return count;
+}
+
+/* The second half of yx_compile_memos_merge: frees what the adoption left.
+ * It reads and writes `taken` only, so several results are released at the
+ * same time on different threads. */
+void yx_compile_memos_release(struct yx_compile_memos *taken)
+{
+    if (!taken) return;
+    yx_memo_destroy(&taken->memo);
+    for (size_t i = 0; i < taken->pcre_count; ++i) {
+        yx_pcre_memo_entry *moved = &taken->pcre[i];
+        if (!moved->source) continue;
         free(moved->source);
         pcre2_code_free(moved->code);
     }

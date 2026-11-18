@@ -28480,6 +28480,8 @@ void yx_ser_rule_destroy(yx_ser_rule *rule)
     free(rule->runtime_pattern_declarations);
     for(size_t i=0;i<rule->runtime_literal_prefilter_count;++i)free(rule->runtime_literal_prefilters[i].atoms);
     free(rule->runtime_literal_prefilters);
+    for(size_t i=0;i<rule->runtime_regexp_program_count;++i)free(rule->runtime_regexp_programs[i]);
+    free(rule->runtime_regexp_programs);
     free(rule->runtime_module_name);
     for(size_t i=0;i<rule->runtime_module_count;++i)free(rule->runtime_module_names[i]);
     free(rule->runtime_module_names);

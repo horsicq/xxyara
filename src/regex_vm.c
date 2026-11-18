@@ -1645,6 +1645,153 @@ static bool yx_rx_find(const uint8_t *data, size_t size, const yx_rx_atom *atom,
 struct yx_rx_index;
 static void yx_rx_index_free(struct yx_rx_index *index);
 
+/* The successors of the PikeVM instruction at ip: targets[0, *count), of
+ * which the first *unmarked are followed by the epsilon closure without a
+ * visited mark (jump, repeat, zero-width assertion). False when a target
+ * or the fall-through is outside the code. A split has at most 255 targets. */
+static bool yx_pv_successors(const uint8_t *code, size_t length, size_t ip, const yx_pi_instr *instr,
+                             size_t targets[256], size_t *count, size_t *unmarked)
+{
+    const uint8_t *c = code + ip;
+    size_t next = ip + instr->size, n = 0;
+    int64_t target;
+    *unmarked = 0;
+#define YX_PV_TARGET(relative) \
+    do { \
+        target = (int64_t)ip + (relative); \
+        if (target < 0 || (uint64_t)target >= length) return false; \
+        targets[n++] = (size_t)target; \
+    } while (0)
+    switch (instr->op) {
+    case YX_PI_MATCH:
+        break;
+    case YX_PI_JUMP:
+        YX_PV_TARGET(yx_rx_i32(c + 2));
+        *unmarked = n;
+        break;
+    case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY:
+        YX_PV_TARGET(yx_rx_i32(c + 2));
+        if (next >= length) return false;
+        targets[n++] = next;
+        *unmarked = n;
+        break;
+    case YX_PI_SPLIT_A: case YX_PI_SPLIT_B:
+        YX_PV_TARGET(yx_rx_i32(c + 4));
+        if (next >= length) return false;
+        targets[n++] = next;
+        break;
+    case YX_PI_SPLIT_N:
+        for (size_t k = 0; k < c[4]; ++k) YX_PV_TARGET(yx_rx_i32(c + 5 + 4 * k));
+        break;
+    case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE: case YX_PI_NOCASE:
+    case YX_PI_BITMAP: case YX_PI_RANGES:
+        if (next >= length) return false;
+        targets[n++] = next;
+        break;
+    default: /* the zero-width assertions */
+        if (next >= length) return false;
+        targets[n++] = next;
+        *unmarked = n;
+        break;
+    }
+#undef YX_PV_TARGET
+    *count = n;
+    return true;
+}
+
+static bool yx_pv_code_valid(const uint8_t *code, size_t length, const size_t *entries, size_t entry_count)
+{
+    /* state: 0 not reached, 1 the start of a reached instruction, 2 inside
+     * one. colour (cycle search over the unmarked edges): 0 new, 1 on the
+     * path, 2 done. */
+    uint8_t *state = calloc(length ? length : 1, 1), *colour = calloc(length ? length : 1, 1);
+    uint32_t *stack = malloc((length ? length : 1) * sizeof(*stack));
+    uint8_t *edge = malloc(length ? length : 1);
+    size_t used = 0, targets[256], count, unmarked;
+    yx_pi_instr instr;
+    bool valid = false;
+    if (!state || !colour || !stack || !edge || length > UINT32_MAX) goto done;
+    /* Every instruction reachable from the entries; each offset is pushed
+     * once, when it becomes a start. */
+    for (size_t i = 0; i < entry_count; ++i) {
+        if (entries[i] >= length || state[entries[i]] == 2) goto done;
+        if (!state[entries[i]]) { state[entries[i]] = 1; stack[used++] = (uint32_t)entries[i]; }
+    }
+    while (used) {
+        size_t ip = stack[--used];
+        if (!yx_pi_decode(code, length, ip, false, &instr) || !instr.size || instr.size > length - ip) goto done;
+        for (size_t k = 1; k < instr.size; ++k) {
+            if (state[ip + k]) goto done;
+            state[ip + k] = 2;
+        }
+        if (!yx_pv_successors(code, length, ip, &instr, targets, &count, &unmarked)) goto done;
+        for (size_t k = 0; k < count; ++k) {
+            if (state[targets[k]] == 2) goto done;
+            if (!state[targets[k]]) { state[targets[k]] = 1; stack[used++] = (uint32_t)targets[k]; }
+        }
+    }
+    /* No cycle of unmarked edges: a depth-first search from every reached
+     * instruction, with the path kept in stack and the next edge in edge. */
+    for (size_t root = 0; root < length; ++root) {
+        if (state[root] != 1 || colour[root]) continue;
+        used = 0;
+        stack[used] = (uint32_t)root; edge[used++] = 0; colour[root] = 1;
+        while (used) {
+            size_t ip = stack[used - 1];
+            if (!yx_pi_decode(code, length, ip, false, &instr) ||
+                !yx_pv_successors(code, length, ip, &instr, targets, &count, &unmarked)) goto done;
+            if (edge[used - 1] < unmarked) {
+                size_t to = targets[edge[used - 1]++];
+                if (colour[to] == 1) goto done;
+                if (!colour[to]) { colour[to] = 1; stack[used] = (uint32_t)to; edge[used++] = 0; }
+            } else {
+                colour[ip] = 2;
+                --used;
+            }
+        }
+    }
+    valid = true;
+done:
+    free(state); free(colour); free(stack); free(edge);
+    return valid;
+}
+
+static bool yx_fv_code_valid(const uint8_t *code, size_t length, const size_t *entries, size_t entry_count)
+{
+    for (size_t i = 0; i < entry_count; ++i) {
+        size_t ip = entries[i];
+        uint64_t exact = 0;
+        for (;;) {
+            yx_fi_instr instr;
+            if (!yx_fi_decode(code, length, ip, &instr) || !instr.size) return false;
+            if (instr.op == YX_FI_MATCH) break;
+            if (instr.op == YX_FI_ALTERNATION) {
+                size_t alt = 0;
+                while (alt < instr.length) {
+                    yx_fi_instr a;
+                    if (!yx_fi_decode(instr.literal, instr.length, alt, &a) || !a.size ||
+                        (a.op != YX_FI_LITERAL && a.op != YX_FI_MASKED)) return false;
+                    alt += a.size;
+                }
+            } else if (instr.op == YX_FI_JUMP_EXACT || instr.op == YX_FI_JUMP_EXACT_NO_NEWLINE) {
+                exact += instr.min;
+                if (exact > YX_RX_FAST_EXACT_JUMP_LIMIT) return false;
+            }
+            ip += instr.size;
+        }
+    }
+    return true;
+}
+
+bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries,
+                               size_t entry_count, bool fast)
+{
+    if (!entry_count) return true;
+    if (!code || !entries) return false;
+    return fast ? yx_fv_code_valid(code, code_length, entries, entry_count)
+                : yx_pv_code_valid(code, code_length, entries, entry_count);
+}
+
 void yx_rx_program_free(yx_rx_program *program)
 {
     if (!program) return;

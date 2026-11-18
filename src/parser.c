@@ -10155,6 +10155,7 @@ void yx_free_rule(YRX_RULE *rule)
         free(pattern->base64_alphabet);
         free(pattern->base64wide_alphabet);
         free(pattern->archived_literal_prefilter.atoms);
+        free(pattern->archived_regexp);
         free(pattern->matches);
         yx_candidate_plan_free(pattern->candidate_plan);
         free(pattern->rx_program_regexp);

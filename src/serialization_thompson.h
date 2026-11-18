@@ -3179,6 +3179,53 @@ done:
     yrx_rules_destroy(rules); free(source.data);
     return same;
 }
+/* One \xHH escape at t: its value, or -1. */
+static int yx_tr_hex_escape(const char *t)
+{
+    int value = 0;
+    if (t[0] != '\\' || t[1] != 'x') return -1;
+    for (unsigned k = 2; k < 4; ++k) {
+        char c = t[k];
+        if (c >= '0' && c <= '9') value = value * 16 + (c - '0');
+        else if (c >= 'a' && c <= 'f') value = value * 16 + (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') value = value * 16 + (c - 'A' + 10);
+        else return -1;
+    }
+    return value;
+}
+/* A regexp of at most 1024 characters made of \xHH bytes and positive
+ * classes of \xHH bytes and ascending \xHH-\xHH ranges only, with at least
+ * one byte and one class. The rule `$a = /text/` (with or without nocase)
+ * always compiles to one regexp pattern: the text has no syntax to reject
+ * and no construct that can be too large. */
+static bool yx_tr_plain_regexp(const char *t)
+{
+    size_t bytes = 0, classes = 0;
+    const char *start = t;
+    while (*t) {
+        if (*t == '[') {
+            size_t items = 0;
+            ++t;
+            while (*t != ']') {
+                int low = yx_tr_hex_escape(t), high;
+                if (low < 0) return false;
+                t += 4;
+                if (*t == '-') {
+                    high = yx_tr_hex_escape(t + 1);
+                    if (high < low) return false;
+                    t += 5;
+                }
+                ++items;
+            }
+            if (!items) return false;
+            ++t; ++classes;
+        } else {
+            if (yx_tr_hex_escape(t) < 0) return false;
+            t += 4; ++bytes;
+        }
+    }
+    return bytes && classes && (size_t)(t - start) <= 1024;
+}
 /* The forward program at begin, decoded with e{n,} repetitions rolled up. */
 static bool yx_tr_roll_forward(const yx_archive_regexp_envelope *e, size_t begin, yx_writer *out)
 {
@@ -3266,9 +3313,22 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
         } else if (decoded_forward) {
             /* Hex patterns have an exact FastVM model, so their residue must
              * match; regexp text decoded from Thompson code is a lowered
-             * form whose FastVM residue can differ from the original's. */
-            decoded_forward = yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c],
-                                                     envelope.pattern_kind == 1 && !gap, NULL);
+             * form whose FastVM residue can differ from the original's.
+             * For a regexp the call only asks whether the decoded text
+             * compiles as one regexp pattern, which a plain text
+             * (yx_tr_plain_regexp) always does: it is not compiled. Verify
+             * builds (-DXXYARA_VERIFY_LOAD) compile it and abort when it
+             * does not. */
+            bool plain = envelope.pattern_kind == 2 && text.data && yx_tr_plain_regexp((const char *)text.data);
+#ifdef XXYARA_VERIFY_LOAD
+            if (plain && !yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c], false, NULL)) {
+                fprintf(stderr, "XXYARA_VERIFY_LOAD: plain regexp does not compile: `%s`\n", (const char *)text.data);
+                abort();
+            }
+#endif
+            if (!plain)
+                decoded_forward = yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c],
+                                                         envelope.pattern_kind == 1 && !gap, NULL);
         }
         free(raw.data); free(raw_backward.data);
     }

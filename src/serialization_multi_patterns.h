@@ -720,6 +720,12 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
         for(size_t j=0;j<counts[i];++j)
             if(!yx_physical_copy_prefilter(&decoded[i].runtime_literal_prefilters[j],
                &loaded->rules[0].patterns[firsts[i]+j].archived_literal_prefilter)){status=YX_SER_NO_MEMORY;goto done;}
+        decoded[i].runtime_regexp_programs=calloc(counts[i],sizeof(*decoded[i].runtime_regexp_programs));
+        if(!decoded[i].runtime_regexp_programs){status=YX_SER_NO_MEMORY;goto done;}
+        decoded[i].runtime_regexp_program_count=counts[i];
+        for(size_t j=0;j<counts[i];++j)
+            if(!yx_physical_copy_regexp(&decoded[i].runtime_regexp_programs[j],
+               loaded->rules[0].patterns[firsts[i]+j].archived_regexp)){status=YX_SER_NO_MEMORY;goto done;}
         for(size_t j=0;valid&&j<counts[i];++j) {
             size_t k=firsts[i]+j;valid=yx_physical_flagged_declaration(&declarations,a->names[names[k]],&loaded->rules[0].patterns[k],a,frame_flags,mapping[k]);
             if(valid&&private_patterns[k])valid=yx_tr_text(&declarations,"private ");

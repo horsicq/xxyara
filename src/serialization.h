@@ -31,6 +31,9 @@ struct yx_rx_program;
 /* The head YARA-X compiles when it drops a trailing large any-byte gap. */
 char *yx_ser_gap_head_regexp(const YRX_PATTERN *pattern);
 int yx_ser_regexp_program(const YRX_PATTERN *pattern, struct yx_rx_program *out);
+/* The program of an archive's own code and atoms (yx_archived_regexp), with
+ * the guards, index and windows yx_ser_regexp_program derives: 1, or -1. */
+int yx_ser_archived_regexp_program(const yx_archived_regexp *archived, struct yx_rx_program *out);
 /* A copy of such a program for a pattern with the same inputs: 1, or -1. */
 int yx_ser_regexp_program_copy(const struct yx_rx_program *from, struct yx_rx_program *out);
 int yx_ser_literal_branches(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **offsets);
@@ -201,6 +204,8 @@ typedef struct yx_ser_rule {
     char *runtime_pattern_declarations; /* owned source declarations on decode */
     yx_archived_literal_prefilter *runtime_literal_prefilters; /* owned per pattern */
     size_t runtime_literal_prefilter_count;
+    yx_archived_regexp **runtime_regexp_programs; /* owned per pattern, entries may be NULL */
+    size_t runtime_regexp_program_count;
     char *runtime_module_name; /* owned on decode; NULL for expressions without imports */
     char **runtime_module_names; /* owned ordered imports for composed expressions */
     size_t runtime_module_count;

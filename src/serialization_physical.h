@@ -1148,6 +1148,87 @@ static bool yx_physical_copy_prefilter(yx_archived_literal_prefilter *to,const y
     to->atoms=malloc(from->count*sizeof(*to->atoms));if(!to->atoms)return false;
     memcpy(to->atoms,from->atoms,from->count*sizeof(*to->atoms));to->count=from->count;return true;
 }
+/* A copy of an archived program (one allocation), or NULL without one. False
+ * on allocation failure. */
+static bool yx_physical_copy_regexp(yx_archived_regexp **to,const yx_archived_regexp *from)
+{
+    *to=NULL;
+    if(!from)return true;
+    *to=malloc(from->size);if(!*to)return false;
+    memcpy(*to,from,from->size);return true;
+}
+/* regex_vm.h, which this file's includer reads later. */
+bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries,
+                               size_t entry_count, bool fast);
+/* The archive's own program of a part (frames, atoms and code already those
+ * of the part alone): every frame is a Regexp sub-pattern, at most two of
+ * them. NULL for any other part, an atom outside the code or without
+ * memory; the pattern then gets the program its declaration compiles to.
+ * The archive's code is run as it is and need not come from a compiler:
+ * code that yx_rx_archived_code_valid does not accept from the atoms' entry
+ * offsets gives NULL as well. */
+static yx_archived_regexp *yx_physical_part_regexp(const yx_physical_archive *one)
+{
+    size_t counts[2]={0,0},filled[2]={0,0},total;
+    if(!one->frame_count||one->frame_count>2||one->code_length>UINT32_MAX)return NULL;
+    for(size_t i=0;i<one->frame_count;++i)
+        if(one->frames[i].frame.variant!=4||one->frames[i].anchored)return NULL;
+    for(size_t i=0;i<one->atom_count;++i) {
+        const yx_chain_atom *atom=&one->atoms[i];
+        if(atom->frame>=one->frame_count||atom->atom.length>8||
+           (atom->atom.has_forward&&atom->atom.forward>=one->code_length)||
+           (atom->atom.has_backward&&atom->atom.backward>=one->code_length))return NULL;
+        ++counts[atom->frame];
+    }
+    total=counts[0]+counts[1];
+    if(total>(SIZE_MAX-sizeof(yx_archived_regexp)-one->code_length)/sizeof(yx_archived_regexp_atom))return NULL;
+    {
+        /* The entry offsets of the FastVM atoms, then of the PikeVM ones. */
+        size_t *entries=malloc((total?total:1)*2*sizeof(*entries)),fast_count=0,pike_count=0;
+        bool valid=entries!=NULL;
+        for(unsigned fast=2;valid&&fast-->0;) {
+            size_t n=0,*list=entries+(fast?0:fast_count);
+            for(size_t i=0;i<one->atom_count;++i) {
+                const yx_chain_atom *atom=&one->atoms[i];
+                if(((one->frames[atom->frame].frame.flags&64u)!=0)!=(fast!=0))continue;
+                if(atom->atom.has_forward)list[n++]=atom->atom.forward;
+                if(atom->atom.has_backward)list[n++]=atom->atom.backward;
+            }
+            if(fast)fast_count=n;else pike_count=n;
+            valid=yx_rx_archived_code_valid(one->code,one->code_length,list,n,fast!=0);
+        }
+        free(entries);
+        (void)pike_count;
+        if(!valid) {
+#ifdef XXYARA_VERIFY_LOAD
+            /* No official archive has such code: the verify runs prove it. */
+            if(!getenv("XXYARA_VERIFY_LOAD_ALLOW_REJECTED_CODE")) {
+                fprintf(stderr,"XXYARA_VERIFY_LOAD: archived regexp code rejected\n");
+                abort();
+            }
+#endif
+            return NULL;
+        }
+    }
+    size_t size=sizeof(yx_archived_regexp)+total*sizeof(yx_archived_regexp_atom)+one->code_length;
+    yx_archived_regexp *out=calloc(1,size);
+    if(!out)return NULL;
+    yx_archived_regexp_atom *atoms=(yx_archived_regexp_atom *)(out+1);
+    out->size=size;out->code_length=one->code_length;out->sub_count=one->frame_count;
+    for(size_t i=0;i<one->frame_count;++i)out->flags[i]=one->frames[i].frame.flags,out->atom_count[i]=counts[i];
+    for(size_t i=0;i<one->atom_count;++i) {
+        const yx_chain_atom *atom=&one->atoms[i];
+        yx_archived_regexp_atom *to=&atoms[(atom->frame?counts[0]:0)+filled[atom->frame]++];
+        memcpy(to->bytes,atom->atom.bytes,atom->atom.length);
+        to->length=(uint8_t)atom->atom.length;to->exact=atom->atom.exact;
+        to->has_fwd=atom->atom.has_forward;to->has_bck=atom->atom.has_backward;
+        to->backtrack=atom->atom.backtrack;
+        to->fwd=atom->atom.has_forward?(uint32_t)atom->atom.forward:0;
+        to->bck=atom->atom.has_backward?(uint32_t)atom->atom.backward:0;
+    }
+    if(one->code_length)memcpy(atoms+total,one->code,one->code_length);
+    return out;
+}
 /* Rule identity of a single-rule physical archive: namespace, name, tags,
  * metadata and the private flag. */
 static yx_ser_result yx_physical_copy_rule_info(const yx_physical_archive *a,yx_ser_rule *decoded)
@@ -1515,6 +1596,11 @@ static yx_ser_result yx_physical_load_part(const yx_physical_parts_job *job,size
     if(direct){yx_physical_part_verify(direct,*out,status);yrx_rules_destroy(direct);}
 #endif
 done:
+    if(status==YX_SER_SUCCESS&&*out&&(*out)->rule_count==1&&(*out)->rules[0].pattern_count==1) {
+        YRX_PATTERN *pattern=&(*out)->rules[0].patterns[0];
+        if((pattern->kind==YX_PATTERN_REGEX||pattern->kind==YX_PATTERN_HEX)&&!pattern->archived_regexp)
+            pattern->archived_regexp=yx_physical_part_regexp(one);
+    }
     yx_physical_destroy(one);free(one);free(single);
     return status;
 }
@@ -1622,6 +1708,12 @@ static yx_ser_result yx_decode_physical_patterns(const uint8_t *data,size_t leng
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_prefilter(&decoded->runtime_literal_prefilters[i],
            &loaded[a->mapping[i]]->rules[0].patterns[0].archived_literal_prefilter)){status=YX_SER_NO_MEMORY;goto done;}
+    decoded->runtime_regexp_programs=calloc(a->logical,sizeof(*decoded->runtime_regexp_programs));
+    if(!decoded->runtime_regexp_programs){status=YX_SER_NO_MEMORY;goto done;}
+    decoded->runtime_regexp_program_count=a->logical;
+    for(size_t i=0;i<a->logical;++i)
+        if(!yx_physical_copy_regexp(&decoded->runtime_regexp_programs[i],
+           loaded[a->mapping[i]]->rules[0].patterns[0].archived_regexp)){status=YX_SER_NO_MEMORY;goto done;}
     frame_flags=yx_physical_frame_flags(a);
     if(!frame_flags){status=YX_SER_NO_MEMORY;goto done;}
     for(size_t i=0;i<a->logical;++i)
@@ -1856,6 +1948,11 @@ static bool yx_physical_reconstruct_direct(const yx_physical_archive *a,YRX_RULE
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_prefilter(&rules->rules[0].patterns[i].archived_literal_prefilter,
                                        &parts[a->mapping[i]]->rules[0].patterns[0].archived_literal_prefilter))goto done;
+    for(size_t i=0;i<a->logical;++i) {
+        free(rules->rules[0].patterns[i].archived_regexp);
+        if(!yx_physical_copy_regexp(&rules->rules[0].patterns[i].archived_regexp,
+                                    parts[a->mapping[i]]->rules[0].patterns[0].archived_regexp))goto done;
+    }
     *loaded=rules;rules=NULL;ok=true;
 done:
     yx_physical_destroy_parts(parts,a->physical);
