@@ -753,6 +753,15 @@ void yx_inspect_end(void);
  * calls must write only their own results. */
 unsigned yx_parallel_threads(size_t count, size_t per_thread);
 void yx_parallel_run(size_t count, unsigned threads, void (*fn)(size_t index, void *context), void *context);
+/* As yx_parallel_run, with its own serial start (serial_ns) and measured
+ * work per helper (thread_ns), for loops of a few milliseconds. */
+void yx_parallel_run_ex(size_t count, unsigned threads, uint64_t serial_ns, uint64_t thread_ns,
+                        void (*fn)(size_t index, void *context), void *context);
+#ifdef XXYARA_VERIFY_LOAD
+/* Verify builds: whether two compiled patterns agree in every field the
+ * parser sets. */
+bool yx_verify_pattern(const YRX_PATTERN *a, const YRX_PATTERN *b);
+#endif
 /* fn(context) on another thread while the caller goes on, when two threads
  * are available (yx_parallel_threads); otherwise it runs at once on the
  * caller and the result is NULL. yx_async_wait (NULL is a no-op) returns

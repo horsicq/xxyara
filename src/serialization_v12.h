@@ -418,6 +418,41 @@ static uint32_t yx_v12_rank(const yx_v12_import *p,unsigned profile)
     return UINT32_MAX;
 }
 
+/* yx_v12_wasm_impl reduces and then relocates every function body on its
+ * own (yx_v12_body reads its body and the shared maps only), so the bodies
+ * of a large module are done on several threads; the results are checked in
+ * body order afterwards, and any failure fails the module as before. */
+typedef struct yx_v12_bodies_job {
+    const uint8_t *code;
+    const size_t *starts,*lengths,*functions,*globals;
+    size_t function_count,global_count,search;
+    bool explicit_or,relocate;
+    yx_writer *bodies;
+    size_t *counts;
+    yx_v12_origins *origins;
+    bool *ok;
+} yx_v12_bodies_job;
+static void yx_v12_body_task(size_t i,void *context)
+{
+    yx_v12_bodies_job *job=context;
+    if(!job->relocate) {
+        job->ok[i]=yx_v12_body(job->code+job->starts[i],job->lengths[i],job->functions,job->function_count,job->globals,
+            job->global_count,job->search,job->explicit_or,&job->bodies[i],&job->counts[i],NULL,
+            job->origins?&job->origins[i]:NULL);
+        return;
+    }
+    yx_writer body={0};size_t ignored;yx_v12_origins relocated_origins={0};
+    job->ok[i]=yx_v12_body(job->bodies[i].data,job->bodies[i].used,job->functions,job->function_count,job->globals,
+        job->global_count,SIZE_MAX,false,&body,&ignored,job->origins?&job->origins[i]:NULL,
+        job->origins?&relocated_origins:NULL);
+    if(job->ok[i]) {
+        free(job->bodies[i].data);job->bodies[i]=body;
+        if(job->origins){free(job->origins[i].items);job->origins[i]=relocated_origins;}
+    } else {free(body.data);free(relocated_origins.items);}
+}
+/* Function bodies per thread below which a module's bodies stay on the
+ * calling thread. */
+enum { YX_V12_BODIES_PER_THREAD = 32 };
 static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
                         yx_writer *out,size_t *definition_map,size_t map_capacity,
                         yx_v12_origins **constant_origins,size_t *origin_function_count)
@@ -429,6 +464,7 @@ static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
     uint64_t *types=NULL;size_t *map=NULL,*order=NULL,*counts=NULL;
     yx_writer *bodies=NULL;yx_v12_origins *origins=NULL;
     yx_writer imp={0},fun={0},exp={0},code={0};bool ok=false;
+    size_t *body_starts=NULL,*body_lengths=NULL;bool *body_ok=NULL;
     if(length<8||memcmp(data,"\0asm\1\0\0\0",8))return false;
     while(r.at<length) {
         uint8_t id;uint64_t n;
@@ -488,7 +524,23 @@ static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
     r=(yx_reader){sections[10],sizes[10],0,false,false};
     if(!yx_get_uleb(&r,&n)||n!=defined)goto done;
     /* First pass counts the reduced functions, then sorts like walrus. */
-    for(size_t i=0;i<defined;++i) {
+    unsigned body_threads=yx_parallel_threads(defined,YX_V12_BODIES_PER_THREAD);
+    if(body_threads>1) {
+        body_starts=malloc(defined*sizeof(*body_starts));body_lengths=malloc(defined*sizeof(*body_lengths));
+        body_ok=calloc(defined,sizeof(*body_ok));
+        if(!body_starts||!body_lengths||!body_ok)goto done;
+        for(size_t i=0;i<defined;++i) {
+            if(!yx_get_uleb(&r,&n)||n>r.length-r.at)goto done;
+            body_starts[i]=r.at;body_lengths[i]=(size_t)n;r.at+=(size_t)n;
+        }
+        yx_v12_bodies_job job={r.data,body_starts,body_lengths,map,globals,import_count+defined,global_count,search,
+            (profile&256)!=0,false,bodies,counts,origins,body_ok};
+        yx_parallel_run(defined,body_threads,yx_v12_body_task,&job);
+        /* emit_rule measures before finish_rule_func appends its final
+         * i32.const 0 (see below). */
+        for(size_t i=0;i<defined;++i)
+            if(!body_ok[i]||counts[i]>YX_ARCHIVE_MAX_FUNCTION_INSTRUCTIONS+1u)goto done;
+    } else for(size_t i=0;i<defined;++i) {
         if(!yx_get_uleb(&r,&n)||n>r.length-r.at||!yx_v12_body(r.data+r.at,(size_t)n,map,import_count+defined,globals,global_count,search,(profile&256)!=0,&bodies[i],&counts[i],NULL,origins?&origins[i]:NULL))goto done;
         /* emit_rule measures before finish_rule_func appends its final
          * i32.const 0. Check the lowered spelling too: single-rule module
@@ -513,7 +565,12 @@ static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
     for(size_t i=0;i<import_count;++i)identity_imports[i]=i;
     for(size_t i=0;i<defined;++i)identity_imports[import_count+i]=map[import_count+i];
     bool relocated=true;
-    for(size_t i=0;relocated&&i<defined;++i) {
+    if(body_threads>1) {
+        yx_v12_bodies_job job={NULL,NULL,NULL,identity_imports,identity_globals,import_count+defined,3,SIZE_MAX,
+            false,true,bodies,counts,origins,body_ok};
+        yx_parallel_run(defined,body_threads,yx_v12_body_task,&job);
+        for(size_t i=0;relocated&&i<defined;++i)relocated=body_ok[i];
+    } else for(size_t i=0;relocated&&i<defined;++i) {
         yx_writer body={0};size_t ignored;yx_v12_origins relocated_origins={0};
         relocated=yx_v12_body(bodies[i].data,bodies[i].used,identity_imports,import_count+defined,identity_globals,3,SIZE_MAX,false,&body,&ignored,origins?&origins[i]:NULL,origins?&relocated_origins:NULL);
         if(relocated){
@@ -554,6 +611,7 @@ done:
     if(origins)for(size_t i=0;i<defined;++i)free(origins[i].items);
     free(origins);
     if(bodies)for(size_t i=0;i<defined;++i)free(bodies[i].data);
+    free(body_starts);free(body_lengths);free(body_ok);
     free(types);free(map);free(order);free(counts);free(bodies);
     free(imp.data);free(fun.data);free(exp.data);free(code.data);return ok;
 }
@@ -660,6 +718,16 @@ static bool yx_v12_body_constants(const uint8_t *expected,size_t expected_length
     *values=v;*value_count=n;v=NULL;ok=true;
 done:
     free(a);free(b);free(v);return ok;
+}
+
+/* The function count of a module's code section; false when the module has
+ * no readable code section. */
+static bool yx_v12_code_function_count(const uint8_t *module,size_t length,uint64_t *count)
+{
+    const uint8_t *parts[13];size_t sizes[13];
+    if(!yx_v12_sections(module,length,parts,sizes)||!parts[10])return false;
+    yx_reader r={parts[10],sizes[10],0,false,false};
+    return yx_get_uleb(&r,count);
 }
 
 static bool yx_v12_restore_template(const uint8_t *actual,size_t actual_length,
@@ -978,11 +1046,22 @@ static bool yx_v12_decode_archive_mode(const uint8_t *data,size_t length,
         found=yx_v12_restore_module_expression(data+start,size,&restored);
         goto restored_ready;
     }
-    for(size_t i=0;!found&&i<sizeof(templates)/sizeof(templates[0]);++i)
+    /* A template restores only a module with its number of functions: the
+     * lowering keeps a module's functions (yx_v12_wasm_impl), and the module
+     * yx_v12_restore_template matches, identical or with restored constants,
+     * has the lowered code section's function count. A template of another
+     * count is skipped without lowering it for each profile. */
+    uint64_t actual_functions=0;
+    bool counted=yx_v12_code_function_count(data+start,size,&actual_functions);
+    for(size_t i=0;!found&&i<sizeof(templates)/sizeof(templates[0]);++i) {
+        uint64_t template_functions=0;
+        if(counted&&yx_v12_code_function_count(templates[i].data,templates[i].length,&template_functions)&&
+           template_functions!=actual_functions)continue;
         for(unsigned p=0;!found&&p<4;++p) {
             restored.used=0;
             found=yx_v12_restore_template(data+start,size,templates[i].data,templates[i].length,(p&1?4:0)|(p&2?256:0),&restored);
         }
+    }
     if(!found) {
         restored.used=0;
         found=yx_v12_restore_numeric(data+start,size,&restored);

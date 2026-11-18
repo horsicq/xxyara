@@ -12413,6 +12413,8 @@ static void yx_candidate_select_window(const uint8_t *bytes,
     *selected = *selected_length = 0;
     for (size_t start = 0; start < length; ++start) {
         unsigned score = 0, letters = 0;
+        /* The bytes of the window so far, bytes[start, index). */
+        uint64_t present[4] = {0, 0, 0, 0};
         for (size_t width = 1; width <= 8 && width <= length - start; ++width) {
             size_t index = start + width - 1;
             uint8_t byte = bytes[index];
@@ -12421,8 +12423,8 @@ static void yx_candidate_select_window(const uint8_t *bytes,
                           (byte >= 'A' && byte <= 'Z');
             if (nocase && letter && ++letters > 4) break;
             /* A byte is new when the window's earlier bytes lack it. */
-            bool seen = false;
-            for (size_t k = start; k < index && !seen; ++k) seen = bytes[k] == byte;
+            bool seen = ((present[byte >> 6] >> (byte & 63u)) & 1u) != 0;
+            present[byte >> 6] |= UINT64_C(1) << (byte & 63u);
             score += yx_candidate_byte_quality(byte) + (!seen ? 5 : 0);
             unsigned quality = score + (unsigned)width * 8;
             if (quality > best) {

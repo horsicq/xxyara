@@ -6925,30 +6925,67 @@ static bool yx_ser_build_atom_ac_uncached(const uint8_t *const *atoms, const siz
                 if (block_used[block] + label_count > 256u) continue;
                 if (failed_counts[block] == label_count &&
                     !memcmp(failed_sets + block * 4u, label_set, sizeof(label_set))) continue;
-                for (unsigned w = 0; w < 4 && slot == state_count; ++w) {
-                    size_t word_first = block * 256u + w * 64u;
-                    uint64_t candidates = ~index_bits[block * 4u + w];
-                    if (word_first + 64u <= first_slot || !candidates) continue;
-                    candidates &= ~yx_ac_xor_bits(base_bits[block * 4u + (w ^ high)], low);
-                    if (word_first < first_slot) candidates &= ~UINT64_C(0) << (first_slot - word_first);
-                    if (!block && w == high) candidates &= ~(UINT64_C(1) << low);
-                    while (candidates) {
-                        size_t candidate = word_first + yx_ac_lowest_bit(candidates);
-                        uint32_t trial = (uint32_t) candidate ^ (uint32_t) first_label;
-                        bool fits = true;
-                        for (size_t i = 1; i < label_count; ++i)
-                            if (used_indices[trial ^ (uint32_t) labels[i]]) {
-                                fits = false;
-                                break;
-                            }
-                        if (fits) {
-                            slot = candidate;
-                            base = trial;
+                {
+                    /* All candidates of the block at once: bit c of fit is
+                     * set when slot c is a candidate (vacant, base c ^ first
+                     * label unused) and, for every other label, slot c ^
+                     * first label ^ label is vacant, which is the block's
+                     * vacancy set permuted by that exclusive or. The lowest
+                     * bit is the first candidate a slot-by-slot check takes. */
+                    uint64_t vacant[4], fit[4];
+                    for (unsigned w = 0; w < 4; ++w) vacant[w] = ~index_bits[block * 4u + w];
+                    for (unsigned w = 0; w < 4; ++w) {
+                        size_t word_first = block * 256u + w * 64u;
+                        fit[w] = vacant[w] & ~yx_ac_xor_bits(base_bits[block * 4u + (w ^ high)], low);
+                        if (word_first + 64u <= first_slot) fit[w] = 0;
+                        else if (word_first < first_slot) fit[w] &= ~UINT64_C(0) << (first_slot - word_first);
+                    }
+                    if (!block) fit[high] &= ~(UINT64_C(1) << low);
+                    for (size_t i = 1; i < label_count && (fit[0] | fit[1] | fit[2] | fit[3]); ++i) {
+                        unsigned delta = (unsigned) first_label ^ (unsigned) labels[i];
+                        for (unsigned w = 0; w < 4; ++w)
+                            fit[w] &= yx_ac_xor_bits(vacant[w ^ (delta >> 6)], delta & 63u);
+                    }
+                    for (unsigned w = 0; w < 4; ++w)
+                        if (fit[w]) {
+                            slot = block * 256u + w * 64u + yx_ac_lowest_bit(fit[w]);
+                            base = (uint32_t) slot ^ (uint32_t) first_label;
                             break;
                         }
-                        candidates &= candidates - 1;
+                }
+#ifdef XXYARA_VERIFY_LOAD
+                {
+                    /* The slot-by-slot first fit must pick the same slot. */
+                    size_t check = state_count;
+                    for (unsigned w = 0; w < 4 && check == state_count; ++w) {
+                        size_t word_first = block * 256u + w * 64u;
+                        uint64_t candidates = ~index_bits[block * 4u + w];
+                        if (word_first + 64u <= first_slot || !candidates) continue;
+                        candidates &= ~yx_ac_xor_bits(base_bits[block * 4u + (w ^ high)], low);
+                        if (word_first < first_slot) candidates &= ~UINT64_C(0) << (first_slot - word_first);
+                        if (!block && w == high) candidates &= ~(UINT64_C(1) << low);
+                        while (candidates) {
+                            size_t candidate = word_first + yx_ac_lowest_bit(candidates);
+                            uint32_t trial = (uint32_t) candidate ^ (uint32_t) first_label;
+                            bool fits = true;
+                            for (size_t i = 1; i < label_count; ++i)
+                                if (used_indices[trial ^ (uint32_t) labels[i]]) {
+                                    fits = false;
+                                    break;
+                                }
+                            if (fits) {
+                                check = candidate;
+                                break;
+                            }
+                            candidates &= candidates - 1;
+                        }
+                    }
+                    if (check != slot) {
+                        fprintf(stderr, "XXYARA_VERIFY_LOAD: atom automaton slot %zu, expected %zu\n", slot, check);
+                        abort();
                     }
                 }
+#endif
                 if (slot == state_count) {
                     memcpy(failed_sets + block * 4u, label_set, sizeof(label_set));
                     failed_counts[block] = (uint16_t) label_count;

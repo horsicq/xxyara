@@ -378,13 +378,21 @@ static int yx_push_byte(uint8_t **bytes, size_t *length, size_t *capacity, uint8
     return 1;
 }
 
+/* Every sequence is built here from an empty one, so its capacity follows
+ * from its count: 4, then doubled at each power of two (one realloc per atom
+ * made long hex patterns quadratic). */
 static int yx_push_hex_atom(yx_hex_sequence *sequence, yx_hex_atom atom)
 {
-    if (sequence->count >= SIZE_MAX / sizeof(yx_hex_atom)) return 0;
-    yx_hex_atom *grown = realloc(sequence->atoms,
-                                 (sequence->count + 1) * sizeof(*grown));
-    if (!grown) return 0;
-    sequence->atoms = grown;
+    size_t count = sequence->count;
+    if (count >= SIZE_MAX / sizeof(yx_hex_atom)) return 0;
+    if (count == 0 || (count >= 4 && (count & (count - 1)) == 0)) {
+        size_t capacity = count ? count * 2 : 4;
+        yx_hex_atom *grown;
+        if (capacity > SIZE_MAX / sizeof(yx_hex_atom)) return 0;
+        grown = realloc(sequence->atoms, capacity * sizeof(*grown));
+        if (!grown) return 0;
+        sequence->atoms = grown;
+    }
     sequence->atoms[sequence->count++] = atom;
     return 1;
 }
@@ -10470,6 +10478,20 @@ static void yx_sc_chunk_task(size_t index, void *context)
 
 enum { YX_SC_CHUNK_BYTES = 256u << 10 };
 
+/* Whether a line starts like a top-level item. Any line start may bound a
+ * chunk (the chunks decide by themselves whether the split holds); one that
+ * starts an item keeps a rule of several lines in one chunk, so the chunks of
+ * such a source check clean instead of leaving it to the whole check. */
+static bool yx_sc_item_line(const char *line, size_t left)
+{
+    static const char *const words[] = {"rule ", "private ", "global ", "import ", "include "};
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); ++i) {
+        size_t width = strlen(words[i]);
+        if (left >= width && !memcmp(line, words[i], width)) return true;
+    }
+    return false;
+}
+
 static bool yx_syntax_check_chunked(const char *source, size_t length, yx_sc_result *result)
 {
     unsigned threads = yx_parallel_threads(length / YX_SC_CHUNK_BYTES, 1);
@@ -10483,6 +10505,14 @@ static bool yx_syntax_check_chunked(const char *source, size_t length, yx_sc_res
             size_t at = length / threads * i;
             if (at <= bounds[count]) at = bounds[count] + 1;
             while (at < length && source[at - 1] != '\n') ++at;
+            /* The next line that starts an item, when there is one. */
+            for (size_t item = at; item < length;) {
+                const char *newline;
+                if (yx_sc_item_line(source + item, length - item)) { at = item; break; }
+                newline = memchr(source + item, '\n', length - item);
+                if (!newline) break;
+                item = (size_t)(newline - source) + 1;
+            }
             if (at < length) bounds[++count] = at;
         }
         bounds[++count] = length;
@@ -10496,6 +10526,14 @@ static bool yx_syntax_check_chunked(const char *source, size_t length, yx_sc_res
     free(bounds);
     free(clean);
     if (all) {
+#ifdef XXYARA_VERIFY_LOAD
+        /* The whole check must find no error either. */
+        if (!yx_syntax_check((const uint8_t *)source, length, result) || result->error_count) {
+            fprintf(stderr, "XXYARA_VERIFY_LOAD: clean chunks of a source with syntax errors\n");
+            abort();
+        }
+        yx_sc_result_free(result);
+#endif
         memset(result, 0, sizeof(*result));
         return true;
     }

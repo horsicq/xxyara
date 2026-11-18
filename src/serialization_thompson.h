@@ -1021,7 +1021,66 @@ static int yx_tr_quality(const yx_tr_atom_entry *a)
 typedef struct { uint8_t bytes[YX_SQ_BYTES]; uint8_t length; bool exact; } yx_sq_lit;
 typedef struct { yx_sq_lit *items; size_t count, capacity; bool infinite; } yx_sq;
 enum { YX_SQ_LIMIT_TOTAL = 16384, YX_SQ_LITERAL_LEN = 4, YX_SQ_REPEAT = 4, YX_SQ_CLASS = 256 };
-static void yx_sq_free(yx_sq *s) { free(s->items); *s = (yx_sq){0}; }
+/* The literal buffers of sequences are recycled per thread: one compilation
+ * builds and drops many sequences of thousands of literals, and blocks of
+ * that size come from the heap's locked large-block path, freshly committed
+ * each time. yx_sq_buffer gives a buffer of at least count literals with
+ * unspecified contents (*capacity is its size in literals) and
+ * yx_sq_buffer_release takes one back; only the memory's origin changes. */
+enum { YX_SQ_POOL_SLOTS = 8, YX_SQ_POOL_MINIMUM = 64, YX_SQ_POOL_MAXIMUM = 32768 };
+typedef struct { void *items[YX_SQ_POOL_SLOTS]; size_t capacity[YX_SQ_POOL_SLOTS]; } yx_sq_pool;
+static yx_thread_storage yx_sq_pool_storage = YX_THREAD_STORAGE_INIT;
+static void yx_sq_pool_destroy(void *opaque)
+{
+    yx_sq_pool *pool = opaque;
+    for (size_t i = 0; i < YX_SQ_POOL_SLOTS; ++i) free(pool->items[i]);
+}
+static yx_sq_pool *yx_sq_pool_get(void)
+{
+    static _Thread_local yx_sq_pool *thread_pool;
+    if (!thread_pool)
+        thread_pool = yx_thread_storage_get(&yx_sq_pool_storage, sizeof(*thread_pool), yx_sq_pool_destroy);
+    return thread_pool;
+}
+static void *yx_sq_buffer(size_t count, size_t size, size_t *capacity)
+{
+    if (count >= YX_SQ_POOL_MINIMUM && count <= YX_SQ_POOL_MAXIMUM) {
+        yx_sq_pool *pool = yx_sq_pool_get();
+        size_t best = YX_SQ_POOL_SLOTS;
+        /* The smallest kept buffer that is large enough. */
+        for (size_t i = 0; pool && i < YX_SQ_POOL_SLOTS; ++i)
+            if (pool->items[i] && pool->capacity[i] >= count &&
+                (best == YX_SQ_POOL_SLOTS || pool->capacity[i] < pool->capacity[best])) best = i;
+        if (best != YX_SQ_POOL_SLOTS) {
+            void *items = pool->items[best];
+            *capacity = pool->capacity[best];
+            pool->items[best] = NULL; pool->capacity[best] = 0;
+            return items;
+        }
+    }
+    if (count > SIZE_MAX / size) return NULL;
+    *capacity = count;
+    return malloc(count * size);
+}
+static void yx_sq_buffer_release(void *items, size_t capacity)
+{
+    if (items && capacity >= YX_SQ_POOL_MINIMUM && capacity <= YX_SQ_POOL_MAXIMUM) {
+        yx_sq_pool *pool = yx_sq_pool_get();
+        size_t smallest = 0;
+        for (size_t i = 0; pool && i < YX_SQ_POOL_SLOTS; ++i) {
+            if (!pool->items[i]) { pool->items[i] = items; pool->capacity[i] = capacity; return; }
+            if (pool->capacity[i] < pool->capacity[smallest]) smallest = i;
+        }
+        /* A full pool keeps its larger buffers. */
+        if (pool && pool->capacity[smallest] < capacity) {
+            void *dropped = pool->items[smallest];
+            pool->items[smallest] = items; pool->capacity[smallest] = capacity;
+            items = dropped;
+        }
+    }
+    free(items);
+}
+static void yx_sq_free(yx_sq *s) { yx_sq_buffer_release(s->items, s->capacity); *s = (yx_sq){0}; }
 static void yx_sq_make_infinite(yx_sq *s) { yx_sq_free(s); s->infinite = true; }
 /* Nothing reads a literal's bytes past its length, so copies and
  * comparisons take only those (literals are mostly one to four bytes). */
@@ -1039,10 +1098,19 @@ static bool yx_sq_same_bytes(const yx_sq_lit *a, const yx_sq_lit *b)
 static bool yx_sq_raw_push(yx_sq *s, const yx_sq_lit *lit)
 {
     if (s->count == s->capacity) {
-        size_t next = s->capacity ? s->capacity * 2 : 4;
-        yx_sq_lit *items = realloc(s->items, next * sizeof(*items));
-        if (!items) return false;
-        s->items = items; s->capacity = next;
+        size_t next = s->capacity ? s->capacity * 2 : 4, capacity;
+        yx_sq_lit *items;
+        if (next < YX_SQ_POOL_MINIMUM) {
+            items = realloc(s->items, next * sizeof(*items));
+            if (!items) return false;
+            capacity = next;
+        } else {
+            items = yx_sq_buffer(next, sizeof(*items), &capacity);
+            if (!items) return false;
+            if (s->count) memcpy(items, s->items, s->count * sizeof(*items));
+            yx_sq_buffer_release(s->items, s->capacity);
+        }
+        s->items = items; s->capacity = capacity;
     }
     yx_sq_lit_copy(&s->items[s->count++], lit); return true;
 }
@@ -1103,11 +1171,10 @@ static bool yx_sq_copy(yx_sq *to, const yx_sq *from)
 {
     *to = (yx_sq){.infinite = from->infinite};
     if (!from->count) return true;
-    if (from->count > SIZE_MAX / sizeof(*to->items)) return false;
-    to->items = malloc(from->count * sizeof(*to->items));
-    if (!to->items) return false;
+    to->items = yx_sq_buffer(from->count, sizeof(*to->items), &to->capacity);
+    if (!to->items) { to->capacity = 0; return false; }
     memcpy(to->items, from->items, from->count * sizeof(*to->items));
-    to->count = to->capacity = from->count;
+    to->count = from->count;
     return true;
 }
 static size_t yx_sq_mul(size_t a, size_t b) { return a && b > SIZE_MAX / a ? SIZE_MAX : a * b; }
@@ -1127,10 +1194,8 @@ static bool yx_sq_cross_from(yx_sq *self, const yx_sq *other)
     for (size_t i = 0; i < self->count; ++i)
         total += self->items[i].exact ? other->count : 1;
     if (total) {
-        if (total > SIZE_MAX / sizeof(*result.items)) return false;
-        result.items = malloc(total * sizeof(*result.items));
+        result.items = yx_sq_buffer(total, sizeof(*result.items), &result.capacity);
         if (!result.items) return false;
-        result.capacity = total;
     }
     /* The product, deduplicated as it is built: each literal is merged into
      * the last one kept when their bytes are equal, as yx_sq_dedup's single
@@ -1872,15 +1937,27 @@ static void yx_ex_memo_keep(const yx_tr_node *node, const yx_sq *seq)
     if (!yx_sq_copy(&memo->items[memo->count].seq, seq)) return;
     memo->items[memo->count++].node = node;
 }
-static bool yx_ex_memo_take(const yx_tr_node *node, size_t from, yx_sq *out)
+/* The first entry of node from *from on, taken. A taken entry keeps no node,
+ * so it matches none: *from moves past the entries before it when all of
+ * them are taken, and a concatenation, which takes its children's entries
+ * in order, searches each child from the first entry not taken (a search
+ * from its mark restarted at the first entry and made a flat concatenation
+ * of n classes quadratic). Only the generic branch keeps entries, never for
+ * a literal or a concatenation, so those find none at once. */
+static bool yx_ex_memo_take(const yx_tr_node *node, size_t *from, yx_sq *out)
 {
     yx_ex_memo *memo = yx_ex_memo_active;
-    for (size_t i = from; memo && i < memo->count; ++i)
+    bool all_taken = true;
+    if (node->kind == YX_TR_LITERAL || node->kind == YX_TR_CONCAT) return false;
+    for (size_t i = *from; memo && i < memo->count; ++i) {
         if (memo->items[i].node == node) {
             *out = memo->items[i].seq;
             memo->items[i].seq = (yx_sq){0}; memo->items[i].node = NULL;
+            if (all_taken) *from = i + 1;
             return true;
         }
+        if (memo->items[i].node) all_taken = false;
+    }
     return false;
 }
 static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
@@ -2051,10 +2128,10 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         /* The best concat_seq over each suffix of the children. */
         yx_sq *seqs = calloc(node->count, sizeof(*seqs)), best = {0};
         yx_aq best_quality = yx_aq_min();
-        size_t best_at = 0;
+        size_t best_at = 0, memo_from = memo_mark;
         bool seq_ok = seqs != NULL, have = false, none;
         for (size_t i = 0; seq_ok && i < node->count; ++i)
-            seq_ok = yx_ex_memo_take(node->children[i], memo_mark, &seqs[i]) ||
+            seq_ok = yx_ex_memo_take(node->children[i], &memo_from, &seqs[i]) ||
                      yx_ex_extract(node->children[i], &seqs[i], 0);
         yx_ex_memo_truncate(memo_mark);
         for (size_t start = 0; seq_ok && start < node->count; ++start) {
@@ -3021,6 +3098,9 @@ static bool yx_tr_leftover_matches(const yx_archive_regexp_envelope *e, const ch
             !yx_put_u8(&hex_text, 0)) goto done;
         regexp = (const char *)hex_text.data;
     } else if (pattern->kind != YX_PATTERN_REGEX || !regexp) goto done;
+    /* Without a residue to check or a raw program to compare, the result is
+     * decided here: the rest only computes values that nothing reads. */
+    if (!check_residue && !raw) { ok = true; goto done; }
     yx_tr_parser eligibility = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
         .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0, .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
     yx_tr_node *root = yx_tr_expression(&eligibility);
@@ -3197,12 +3277,15 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
      * decide which matches the 4096-byte scan limit cuts: `[a-z]{2,}` gives
      * 4095-byte matches on a long run where `([a-z])+[a-z]` gives longer
      * ones. A rolled-up spelling replaces the decoded text only when it, and
-     * not the decoded text, recompiles to this very archive. */
-    if (envelope.pattern_kind == 2 && !decoded_gap &&
-        !yx_tr_reproduces(&envelope, data, (const char *)text.data)) {
+     * not the decoded text, recompiles to this very archive. The rolled-up
+     * spelling is decoded first (a pure read of the program): without one,
+     * or when it is the decoded text itself (no e{n,} repetition), the text
+     * stays whatever the two recompiles say, so they are skipped. */
+    if (envelope.pattern_kind == 2 && !decoded_gap) {
         yx_writer rolled = {0};
         if (yx_tr_roll_forward(&envelope, decoded_begin, &rolled) &&
             strcmp((const char *)rolled.data, (const char *)text.data) &&
+            !yx_tr_reproduces(&envelope, data, (const char *)text.data) &&
             yx_tr_reproduces(&envelope, data, (const char *)rolled.data)) {
             free(text.data); text = rolled;
         } else free(rolled.data);

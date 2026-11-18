@@ -352,8 +352,11 @@ static size_t yx_sc_lex_normal(const uint8_t *s, size_t n, size_t at,
         while (end < n && (width = yx_sc_word_char(s + end, n - end)) != 0)
             end += width;
         *id = T_IDENT;
+        /* A keyword starts with the token's first byte (a cheap test before
+         * its length). */
         for (size_t i = 0; i < sizeof(yx_sc_keywords) / sizeof(*yx_sc_keywords); ++i)
-            if (strlen(yx_sc_keywords[i].word) == end - at &&
+            if ((uint8_t)yx_sc_keywords[i].word[0] == c &&
+                strlen(yx_sc_keywords[i].word) == end - at &&
                 memcmp(yx_sc_keywords[i].word, s + at, end - at) == 0)
                 *id = yx_sc_keywords[i].id;
         return end;
@@ -876,6 +879,20 @@ static void yx_sc_add_expected(yx_sc *p, size_t start, size_t end,
                                const char *description)
 {
     yx_sc_expected *entry = NULL;
+    /* yx_sc_handle_errors reads only the last entry at the largest start.
+     * Until the entries are cleared that start only grows, so an entry at a
+     * smaller start is never read: only the entries at the largest start so
+     * far are kept (all at expected[0].start), in their order of addition. */
+    if (p->expected_count && start != p->expected[0].start) {
+        if (start < p->expected[0].start) return;
+        p->expected_count = 0;
+        if (++p->expected_generation == 0) {
+            if (p->expected_index)
+                memset(p->expected_index, 0,
+                       p->expected_index_capacity * sizeof(*p->expected_index));
+            p->expected_generation = 1;
+        }
+    }
     if (p->expected_index_capacity) {
         size_t mask = p->expected_index_capacity - 1;
         for (size_t i = yx_sc_expected_hash(start, end, id) & mask;

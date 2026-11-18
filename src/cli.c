@@ -4396,6 +4396,13 @@ typedef struct yx_cli_scan_work {
     bool *file_first;
     yx_cli_json_counts *file_counts;
     FILE *json_output;
+    /* The calling thread's scanner, created from these rules and set up with
+     * these options as yx_cli_scan_action sets up a worker's scanner. The
+     * worker of the first file (the first index any worker takes, so its
+     * thread has no scanner yet) scans with it instead of creating another;
+     * first_scanner_taken then tells the caller it belongs to that worker. */
+    YRX_SCANNER *first_scanner;
+    bool first_scanner_taken;
 } yx_cli_scan_work;
 
 static void yx_cli_json_begin(const yx_cli_options *options)
@@ -4406,12 +4413,27 @@ static void yx_cli_json_begin(const yx_cli_options *options)
                stdout);
 }
 
+/* Whether the scan command frees its scanner and rules before the process
+ * ends: only in debug and AddressSanitizer builds. */
+#if !defined(NDEBUG) || defined(__SANITIZE_ADDRESS__)
+#define YX_CLI_FREE_RULES_AT_EXIT 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define YX_CLI_FREE_RULES_AT_EXIT 1
+#endif
+#endif
+#ifndef YX_CLI_FREE_RULES_AT_EXIT
+#define YX_CLI_FREE_RULES_AT_EXIT 0
+#endif
+
 static YX_CLI_THREAD_LOCAL YRX_SCANNER *yx_cli_worker_scanner;
 
+/* A worker's scanner, like the command's own, is left to the process exit
+ * outside debug and sanitizer builds. */
 static void yx_cli_scan_finalize(void *user_data)
 {
     (void)user_data;
-    if (yx_cli_worker_scanner) yrx_scanner_destroy(yx_cli_worker_scanner);
+    if (YX_CLI_FREE_RULES_AT_EXIT && yx_cli_worker_scanner) yrx_scanner_destroy(yx_cli_worker_scanner);
     yx_cli_worker_scanner = NULL;
 }
 
@@ -4420,6 +4442,11 @@ static int yx_cli_scan_action(size_t index, void *user_data)
     yx_cli_scan_work *work = (yx_cli_scan_work *)user_data;
     YRX_SCANNER *scanner = yx_cli_worker_scanner;
     work->file_first[index] = true;
+    if (!scanner && index == 0 && work->first_scanner) {
+        scanner = yx_cli_worker_scanner = work->first_scanner;
+        work->first_scanner = NULL;
+        work->first_scanner_taken = true;
+    }
     if (!scanner) {
         if (yrx_scanner_create(work->rules, &yx_cli_worker_scanner) != YRX_SUCCESS) {
             fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() :
@@ -4475,10 +4502,12 @@ static int yx_cli_scan_parallel(const YRX_RULES *rules,
                                 const yx_cli_paths *target_files,
                                 const uint64_t *started,
                                 bool *first_json_result,
-                                yx_cli_json_counts *json_counts)
+                                yx_cli_json_counts *json_counts,
+                                YRX_SCANNER **first_scanner)
 {
     yx_cli_scan_work work = {rules, options, target_files, started,
-                             first_json_result, json_counts, NULL, NULL, NULL};
+                             first_json_result, json_counts, NULL, NULL, NULL,
+                             NULL, false};
     int status;
     work.file_first = calloc(target_files->count, sizeof(*work.file_first));
     work.file_counts = calloc(target_files->count, sizeof(*work.file_counts));
@@ -4494,9 +4523,12 @@ static int yx_cli_scan_parallel(const YRX_RULES *rules,
 #ifdef _WIN32
     if (work.json_output) (void)_setmode(_fileno(work.json_output), _O_BINARY);
 #endif
+    work.first_scanner = *first_scanner;
     status = yx_cli_parallel_files(target_files->count, options->threads,
         options->cpu_limit, "Scanning", true, yx_cli_scan_action,
         yx_cli_scan_finalize, yx_cli_scan_publish, &work);
+    /* The worker that took the scanner owns it now (yx_cli_scan_finalize). */
+    if (work.first_scanner_taken) *first_scanner = NULL;
     if (status >= 0) {
         yx_cli_json_begin(options);
         if (work.json_output) yx_cli_copy_stream(work.json_output, stdout);
@@ -4510,19 +4542,6 @@ static int yx_cli_scan_parallel(const YRX_RULES *rules,
 }
 
 static char yx_cli_packed_hyphen[] = "--";
-
-/* Whether the scan command frees its scanner and rules before the process
- * ends: only in debug and AddressSanitizer builds. */
-#if !defined(NDEBUG) || defined(__SANITIZE_ADDRESS__)
-#define YX_CLI_FREE_RULES_AT_EXIT 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define YX_CLI_FREE_RULES_AT_EXIT 1
-#endif
-#endif
-#ifndef YX_CLI_FREE_RULES_AT_EXIT
-#define YX_CLI_FREE_RULES_AT_EXIT 0
-#endif
 
 static int yx_cli_run_scan_impl(int argc, char **argv, int start,
                                 bool parse_only)
@@ -5360,7 +5379,7 @@ rules_ready:
         target_files.count > 0) {
         int parallel_status = yx_cli_scan_parallel(
             rules, &options, &target_files, &scan_started,
-            &first_json_result, &json_counts);
+            &first_json_result, &json_counts, &scanner);
         if (parallel_status >= 0) {
             status = parallel_status;
             goto scan_complete;

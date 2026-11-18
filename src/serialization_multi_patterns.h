@@ -438,9 +438,24 @@ static void yx_multi_canonical_run(void *context)
 /* Archives with this many atoms check their canonical encoding (dominated
  * by the automaton image) on another thread while the rest is decoded. */
 enum { YX_MULTI_ASYNC_CANONICAL_ATOMS = 4096 };
+/* The pattern set of a (yx_physical_reconstruct_patterns), read from a only,
+ * on another thread while the conditions are decoded and re-emitted. Its
+ * part loads already run on helper threads of their own, so the thread it
+ * runs on does not matter; it starts only outside internal loads. */
+typedef struct yx_multi_reconstruct {
+    const yx_physical_archive *a;
+    YRX_RULES *loaded;
+    bool ok;
+} yx_multi_reconstruct;
+static void yx_multi_reconstruct_run(void *context)
+{
+    yx_multi_reconstruct *job=context;
+    job->ok=yx_physical_reconstruct_patterns(job->a,&job->loaded);
+}
 static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *rule_count)
 {
     yx_multi_canonical_check check={0};yx_async *canonical_task=NULL;
+    yx_multi_reconstruct reconstruct={0};yx_async *reconstruct_task=NULL;
     size_t begin,end,count=0,logical=0,*firsts=NULL,*counts=NULL;
     size_t *ids=NULL,*namespaces=NULL,*metadata_starts=NULL,*names=NULL,*mapping=NULL;
     size_t *body_starts=NULL,*body_ends=NULL;
@@ -511,6 +526,9 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
     else yx_multi_canonical_run(&check);
     if(!canonical_task&&check.status!=YX_SER_SUCCESS){status=check.status;goto done;}
     status=YX_SER_UNSUPPORTED;
+    /* Started here, its result is taken where it was computed before. */
+    bool reconstructing=!yx_physical_inspect_nesting;
+    if(reconstructing){reconstruct.a=a;reconstruct_task=yx_async_start(yx_multi_reconstruct_run,&reconstruct);}
     contexts=calloc(count,sizeof(*contexts));decoded=calloc(count,sizeof(*decoded));
     if(!yx_tree_store_init(&store,count)||!contexts||!decoded){status=YX_SER_NO_MEMORY;goto done;}
     limits=calloc(a->physical?a->physical:1,sizeof(*limits));patterns=calloc(a->physical?a->physical:1,sizeof(*patterns));
@@ -575,7 +593,12 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
         if(yx_multi_pattern_wasm_list(&trees,roots,contexts,count,a->physical,profile,&canonical,&canonical_length,limits)&&
            canonical_length==a->wasm_length&&!memcmp(canonical,a->wasm,a->wasm_length))break;
     }
-    if(profile==4||!yx_physical_reconstruct_patterns(a,&loaded))goto done;
+    if(profile==4)goto done;
+    if(reconstructing) {
+        yx_async_wait(reconstruct_task);reconstruct_task=NULL;
+        loaded=reconstruct.loaded;reconstruct.loaded=NULL;
+        if(!reconstruct.ok)goto done;
+    } else if(!yx_physical_reconstruct_patterns(a,&loaded))goto done;
     /* The bytecode and physical search restrictions must describe the same
      * condition. A canonical wire representation alone does not establish
      * that an arbitrary anchor, bound, or match limit is semantically valid. */
@@ -708,6 +731,9 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
     if(check.status!=YX_SER_SUCCESS){status=check.status;goto done;}
     *rules=decoded;*rule_count=count;decoded=NULL;status=YX_SER_SUCCESS;
 done:
+    /* The pattern set reads a: it ends before a is freed. */
+    if(reconstruct_task)yx_async_wait(reconstruct_task);
+    yrx_rules_destroy(reconstruct.loaded);
     if(canonical_task){yx_async_wait(canonical_task);if(check.status!=YX_SER_SUCCESS)status=check.status;}
     if(a){yx_physical_destroy(a);free(a);}yx_ser_rules_destroy(decoded,decoded?count:0);yrx_rules_destroy(loaded);
     if(header_storage)for(size_t i=0;i<count;++i)free(header_storage[i].data);

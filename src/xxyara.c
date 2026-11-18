@@ -13733,17 +13733,23 @@ enum { YX_PARALLEL_SERIAL_NS = 1000000, YX_PARALLEL_THREAD_NS = 5000000 };
 
 void yx_parallel_run(size_t count, unsigned threads, void (*fn)(size_t index, void *context), void *context)
 {
+    yx_parallel_run_ex(count, threads, YX_PARALLEL_SERIAL_NS, YX_PARALLEL_THREAD_NS, fn, context);
+}
+
+void yx_parallel_run_ex(size_t count, unsigned threads, uint64_t serial_ns, uint64_t thread_ns,
+                        void (*fn)(size_t index, void *context), void *context)
+{
     yx_parallel_call call = {fn, context, 0, NULL, 0, 0};
     ++yx_parallel_depth;
     if (threads > 1 && count > 1) {
         uint64_t started = yx_parallel_now_ns(), elapsed = 0;
-        while (call.first < count && elapsed < YX_PARALLEL_SERIAL_NS) {
+        while (call.first < count && elapsed < serial_ns) {
             fn(call.first++, context);
             elapsed = yx_parallel_now_ns() - started;
         }
         if (call.first < count) {
             double left = (double)elapsed / (double)call.first * (double)(count - call.first);
-            double wanted = left / YX_PARALLEL_THREAD_NS + 1.0;
+            double wanted = left / (double)thread_ns + 1.0;
             if (wanted < (double)threads) threads = (unsigned)wanted;
         }
     }
@@ -15209,7 +15215,7 @@ static bool yx_verify_bytes(const void *a, const void *b, size_t length)
     return (!a && !b) || (a && b && (!length || !memcmp(a, b, length)));
 }
 
-static bool yx_verify_pattern(const YRX_PATTERN *a, const YRX_PATTERN *b)
+bool yx_verify_pattern(const YRX_PATTERN *a, const YRX_PATTERN *b)
 {
     return yx_verify_string(a->identifier, b->identifier) &&
            a->declaration_start == b->declaration_start && a->declaration_end == b->declaration_end &&
