@@ -499,6 +499,12 @@ typedef struct yx_ser_rule {
 /* True for the literal-only HIR shapes eligible for anchored scanning. */
 bool yx_ser_regexp_literal_atoms(const char *regexp);
 
+/* The value of an enum constant of the vt module, by its full path. */
+bool yx_ser_vt_enum_constant(const char *name, uint64_t *value);
+/* Whether the first `length` bytes of `path` name an enum or a message of
+ * the vt module that enum values hang from. */
+bool yx_ser_vt_enum_scope(const char *path, size_t length);
+
 yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data,
                             size_t *length);
 yx_ser_result yx_ser_decode_many(const uint8_t *data, size_t length,

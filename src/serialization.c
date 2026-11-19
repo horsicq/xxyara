@@ -5228,6 +5228,7 @@ static bool yx_condition_first_rule(const char *condition,
  * predictable shape. The compiler has already validated the source. */
 static bool yx_integer_literal(yx_bool_parser *parser, int64_t *value)
 {
+    const unsigned char *start = parser->at;
     uint64_t magnitude = 0;
     uint64_t limit;
     unsigned base = 10;
@@ -5242,22 +5243,35 @@ static bool yx_integer_literal(yx_bool_parser *parser, int64_t *value)
         (parser->at[1] == 'x' || parser->at[1] == 'X')) {
         base = 16;
         parser->at += 2;
+    } else if (parser->at[0] == '0' &&
+               (parser->at[1] == 'o' || parser->at[1] == 'O')) {
+        base = 8;
+        parser->at += 2;
     }
     limit = negative ? (uint64_t) INT64_MAX + 1 : (uint64_t) INT64_MAX;
     for (;;) {
         unsigned char c = *parser->at;
         unsigned digit;
+        if (c == '_' && digits) {
+            ++parser->at;
+            continue;
+        }
         if (c >= '0' && c <= '9') digit = c - '0';
         else if (base == 16 && c >= 'a' && c <= 'f') digit = c - 'a' + 10;
         else if (base == 16 && c >= 'A' && c <= 'F') digit = c - 'A' + 10;
         else break;
-        if (digit >= base || magnitude > (limit - digit) / base)
+        if (digit >= base || magnitude > (limit - digit) / base) {
+            parser->at = start;
             return false;
+        }
         magnitude = magnitude * base + digit;
         digits = true;
         ++parser->at;
     }
-    if (!digits) return false;
+    if (!digits) {
+        parser->at = start;
+        return false;
+    }
     if (negative)
         *value = magnitude == (uint64_t) INT64_MAX + 1
             ? INT64_MIN : -(int64_t) magnitude;
@@ -19766,10 +19780,11 @@ static char *yx_plain_integer_literals(const char *text)
             while (isalnum((unsigned char)*at) || *at == '_' || *at == '*') ++at;
             regexp_next = (size_t)(at - start) == 7 && !memcmp(start, "matches", 7);
         } else if (isdigit((unsigned char)*at)) {
-            bool prefixed = at[0] == '0' && (at[1] == 'x' || at[1] == 'o');
+            bool prefixed = at[0] == '0' && (at[1] == 'x' || at[1] == 'X' || at[1] == 'o' || at[1] == 'O');
             bool underscore = false;
             uint64_t value = 0, multiplier = 1;
             bool overflow = false;
+            bool is_float = false;
             at += prefixed ? 2 : 0;
             while (isxdigit((unsigned char)*at) || *at == '_') {
                 if (!prefixed && !isdigit((unsigned char)*at) && *at != '_') break;
@@ -19783,12 +19798,27 @@ static char *yx_plain_integer_literals(const char *text)
             }
             if (!prefixed && *at == '.' && isdigit((unsigned char)at[1])) {
                 /* A float literal. */
+                is_float = true;
                 ++at;
-                while (isdigit((unsigned char)*at) || *at == '_') ++at;
+                while (isdigit((unsigned char)*at) || *at == '_') {
+                    if (*at == '_') underscore = true;
+                    ++at;
+                }
             } else if (!prefixed && (at[0] == 'K' || at[0] == 'M') && at[1] == 'B' &&
                        !(isalnum((unsigned char)at[2]) || at[2] == '_')) {
                 multiplier = at[0] == 'K' ? 1024 : 1048576;
                 at += 2;
+            }
+            if (is_float) {
+                if (underscore) {
+                    for (const char *p = start; p < at; ++p)
+                        if (*p != '_') YX_PLAIN_PUT(p, 1);
+                    changed = true;
+                } else {
+                    YX_PLAIN_PUT(start, (size_t)(at - start));
+                }
+                regexp_next = false;
+                continue;
             }
             if (!prefixed && !overflow && (multiplier > 1 || underscore) &&
                 value <= (uint64_t)INT64_MAX / multiplier) {
@@ -19980,7 +20010,8 @@ static yx_ser_result yx_ser_encode_archive(const YRX_RULES *rules,
                 yx_condition_regexp_constant(rule->condition, &truth) &&
                 strcmp(rule->condition_text, truth ? "true" : "false") != 0)
                 plain = yx_copy_string(truth ? "true" : "false");
-            else plain = yx_plain_integer_literals(rule->condition_text);
+            else if (!(plain = yx_condition_folded_text(rule->condition_text)))
+                plain = yx_plain_integer_literals(rule->condition_text);
             if (!plain) continue;
             if (!copies) {
                 if (!(copies = malloc(rules->rule_count * sizeof(*copies)))) {

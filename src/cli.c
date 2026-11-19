@@ -21460,6 +21460,3383 @@ static yx_fmt_result yx_fmt_pipeline(const uint8_t *source, size_t length,
     return YX_FMT_OK;
 }
 
+/* ------------------------------------------------------------------------
+ * CST formatter.
+ *
+ * A port of the official formatter's own machinery: the tokenizer
+ * (parser/src/tokenizer/mod.rs), the error-tolerant PEG parser with its
+ * recovery rules and ERROR nodes (parser/src/parser/mod.rs,
+ * parser/src/cst/syntax_stream.rs, parser/src/cst/error_merger.rs), the
+ * conversion of the event stream into formatter tokens
+ * (fmt/src/tokens/mod.rs) and the formatting pipeline (fmt/src/lib.rs with
+ * processor/, comments.rs, bubble.rs, align.rs, indentation.rs,
+ * trailing_spaces.rs and format_hex_patterns.rs).
+ *
+ * Every stage of the pipeline is a pure function of its input sequence, so
+ * the lazy iterators of the original are run here one after the other on
+ * complete token vectors.
+ * ---------------------------------------------------------------------- */
+
+enum {
+    YXC_NONE = 0,
+    /* Tokens. For these the syntax kind and the token id are the same. */
+    YXC_ALL_KW, YXC_AND_KW, YXC_ANY_KW, YXC_ASCII_KW, YXC_AT_KW,
+    YXC_BASE64_KW, YXC_BASE64WIDE_KW, YXC_CONDITION_KW, YXC_CONTAINS_KW,
+    YXC_DEFINED_KW, YXC_ENDSWITH_KW, YXC_ENTRYPOINT_KW, YXC_FALSE_KW,
+    YXC_FILESIZE_KW, YXC_FOR_KW, YXC_FULLWORD_KW, YXC_GLOBAL_KW,
+    YXC_ICONTAINS_KW, YXC_IENDSWITH_KW, YXC_IEQUALS_KW, YXC_IMPORT_KW,
+    YXC_IN_KW, YXC_INCLUDE_KW, YXC_ISTARTSWITH_KW, YXC_MATCHES_KW,
+    YXC_META_KW, YXC_NOCASE_KW, YXC_NONE_KW, YXC_NOT_KW, YXC_OF_KW,
+    YXC_OR_KW, YXC_PRIVATE_KW, YXC_RULE_KW, YXC_STARTSWITH_KW,
+    YXC_STRINGS_KW, YXC_THEM_KW, YXC_TRUE_KW, YXC_WIDE_KW, YXC_XOR_KW,
+    YXC_WITH_KW,
+    YXC_SHL, YXC_SHR, YXC_EQ, YXC_NE, YXC_LT, YXC_GT, YXC_LE, YXC_GE,
+    YXC_AMPERSAND, YXC_ASTERISK, YXC_BACKSLASH, YXC_CARET, YXC_COLON,
+    YXC_COMMA, YXC_DOT, YXC_EQUAL, YXC_HYPHEN, YXC_PERCENT, YXC_PIPE,
+    YXC_PLUS, YXC_TILDE,
+    YXC_L_BRACE, YXC_R_BRACE, YXC_L_PAREN, YXC_R_PAREN, YXC_L_BRACKET,
+    YXC_R_BRACKET,
+    YXC_STRING_LIT, YXC_REGEXP, YXC_COMMENT, YXC_WHITESPACE, YXC_NEWLINE,
+    YXC_IDENT, YXC_PATTERN_IDENT, YXC_PATTERN_COUNT, YXC_PATTERN_OFFSET,
+    YXC_PATTERN_LENGTH, YXC_FLOAT_LIT, YXC_INTEGER_LIT, YXC_HEX_BYTE,
+    YXC_UNKNOWN, YXC_INVALID_UTF8,
+    /* Syntax kinds that share a token with one of the kinds above. */
+    YXC_ADD, YXC_SUB, YXC_MUL, YXC_DIV, YXC_MOD, YXC_MINUS,
+    YXC_BITWISE_AND, YXC_BITWISE_OR, YXC_BITWISE_XOR, YXC_BITWISE_NOT,
+    /* Non-terminals. */
+    YXC_SOURCE_FILE, YXC_IMPORT_STMT, YXC_INCLUDE_STMT, YXC_RULE_DECL,
+    YXC_RULE_MODS, YXC_RULE_TAGS, YXC_META_BLK, YXC_META_DEF,
+    YXC_PATTERNS_BLK, YXC_PATTERN_DEF, YXC_PATTERN_MODS, YXC_PATTERN_MOD,
+    YXC_HEX_PATTERN, YXC_HEX_SUB_PATTERN, YXC_HEX_ALTERNATIVE, YXC_HEX_JUMP,
+    YXC_CONDITION_BLK, YXC_BOOLEAN_EXPR, YXC_BOOLEAN_TERM, YXC_EXPR,
+    YXC_TERM, YXC_PRIMARY_EXPR, YXC_FUNC_CALL, YXC_RANGE, YXC_FOR_EXPR,
+    YXC_OF_EXPR, YXC_WITH_EXPR, YXC_WITH_DECLS, YXC_WITH_DECL,
+    YXC_QUANTIFIER, YXC_ITERABLE, YXC_BOOLEAN_EXPR_TUPLE, YXC_EXPR_TUPLE,
+    YXC_PATTERN_IDENT_TUPLE, YXC_ERROR
+};
+
+/* In the order of YXC_ALL_KW .. YXC_WITH_KW. */
+static const char *const yxc_keywords[] = {
+    "all", "and", "any", "ascii", "at", "base64", "base64wide", "condition",
+    "contains", "defined", "endswith", "entrypoint", "false", "filesize",
+    "for", "fullword", "global", "icontains", "iendswith", "iequals",
+    "import", "in", "include", "istartswith", "matches", "meta", "nocase",
+    "none", "not", "of", "or", "private", "rule", "startswith", "strings",
+    "them", "true", "wide", "xor", "with"
+};
+
+/* SyntaxKind::token_id (parser/src/cst/syntax_kind.rs). */
+static int yxc_token_id(int kind)
+{
+    switch (kind) {
+    case YXC_ADD: return YXC_PLUS;
+    case YXC_SUB: return YXC_HYPHEN;
+    case YXC_MUL: return YXC_ASTERISK;
+    case YXC_DIV: return YXC_BACKSLASH;
+    case YXC_MOD: return YXC_PERCENT;
+    case YXC_MINUS: return YXC_HYPHEN;
+    case YXC_BITWISE_AND: return YXC_AMPERSAND;
+    case YXC_BITWISE_OR: return YXC_PIPE;
+    case YXC_BITWISE_XOR: return YXC_CARET;
+    case YXC_BITWISE_NOT: return YXC_TILDE;
+    default: return kind;
+    }
+}
+
+static bool yxc_is_trivia(int id)
+{
+    return id == YXC_COMMENT || id == YXC_WHITESPACE || id == YXC_NEWLINE;
+}
+
+/* ---- Tokenizer ------------------------------------------------------- */
+
+enum { YXC_MODE_NORMAL, YXC_MODE_HEX_PATTERN, YXC_MODE_HEX_JUMP };
+
+typedef struct yxc_tok {
+    uint8_t id;
+    size_t start;
+    size_t end;
+} yxc_tok;
+
+static bool yxc_alpha(uint8_t c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static bool yxc_digit(uint8_t c)
+{
+    return c >= '0' && c <= '9';
+}
+
+static bool yxc_xdigit(uint8_t c)
+{
+    return yxc_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+
+/* Length of one character of the tokenizer's Whitespace class at `p`:
+ * space, tab, U+00A0, U+1680, U+2000..U+200A, U+202F, U+205F, U+3000. */
+static size_t yxc_space_len(const uint8_t *p, const uint8_t *end)
+{
+    if (p >= end) return 0;
+    if (*p == ' ' || *p == '\t') return 1;
+    if (*p == 0xc2) return end - p >= 2 && p[1] == 0xa0 ? 2 : 0;
+    if (end - p < 3) return 0;
+    if (p[0] == 0xe1) return p[1] == 0x9a && p[2] == 0x80 ? 3 : 0;
+    if (p[0] == 0xe2) {
+        if (p[1] == 0x80)
+            return (p[2] >= 0x80 && p[2] <= 0x8a) || p[2] == 0xaf ? 3 : 0;
+        return p[1] == 0x81 && p[2] == 0x9f ? 3 : 0;
+    }
+    if (p[0] == 0xe3) return p[1] == 0x80 && p[2] == 0x80 ? 3 : 0;
+    return 0;
+}
+
+/* Decodes one UTF-8 character. Returns its length, or 0 when the bytes at
+ * `p` are not valid UTF-8. */
+static size_t yxc_utf8_char(const uint8_t *p, const uint8_t *end,
+                            uint32_t *point)
+{
+    uint8_t c = *p;
+    size_t width, j;
+    uint32_t value;
+    if (c < 0x80) { *point = c; return 1; }
+    if (c >= 0xc2 && c <= 0xdf) { width = 2; value = c & 0x1f; }
+    else if (c >= 0xe0 && c <= 0xef) { width = 3; value = c & 0x0f; }
+    else if (c >= 0xf0 && c <= 0xf4) { width = 4; value = c & 0x07; }
+    else return 0;
+    if ((size_t)(end - p) < width) return 0;
+    for (j = 1; j < width; ++j) {
+        if ((p[j] & 0xc0) != 0x80) return 0;
+        value = (value << 6) | (p[j] & 0x3f);
+    }
+    if ((width == 3 && value < 0x800) || (width == 4 && value < 0x10000) ||
+        (value >= 0xd800 && value <= 0xdfff) || value > 0x10ffff) return 0;
+    *point = value;
+    return width;
+}
+
+/* The decimal digits (general category Nd) outside ASCII, as in
+ * regex-syntax 0.8.11 (Unicode 16.0.0). The tokenizer's identifier
+ * patterns use `\d`, which is the Unicode class. */
+static const uint32_t yxc_decimal_digits[][2] = {
+    {0x0660, 0x0669}, {0x06f0, 0x06f9}, {0x07c0, 0x07c9}, {0x0966, 0x096f},
+    {0x09e6, 0x09ef}, {0x0a66, 0x0a6f}, {0x0ae6, 0x0aef}, {0x0b66, 0x0b6f},
+    {0x0be6, 0x0bef}, {0x0c66, 0x0c6f}, {0x0ce6, 0x0cef}, {0x0d66, 0x0d6f},
+    {0x0de6, 0x0def}, {0x0e50, 0x0e59}, {0x0ed0, 0x0ed9}, {0x0f20, 0x0f29},
+    {0x1040, 0x1049}, {0x1090, 0x1099}, {0x17e0, 0x17e9}, {0x1810, 0x1819},
+    {0x1946, 0x194f}, {0x19d0, 0x19d9}, {0x1a80, 0x1a89}, {0x1a90, 0x1a99},
+    {0x1b50, 0x1b59}, {0x1bb0, 0x1bb9}, {0x1c40, 0x1c49}, {0x1c50, 0x1c59},
+    {0xa620, 0xa629}, {0xa8d0, 0xa8d9}, {0xa900, 0xa909}, {0xa9d0, 0xa9d9},
+    {0xa9f0, 0xa9f9}, {0xaa50, 0xaa59}, {0xabf0, 0xabf9}, {0xff10, 0xff19},
+    {0x104a0, 0x104a9}, {0x10d30, 0x10d39}, {0x10d40, 0x10d49},
+    {0x11066, 0x1106f}, {0x110f0, 0x110f9}, {0x11136, 0x1113f},
+    {0x111d0, 0x111d9}, {0x112f0, 0x112f9}, {0x11450, 0x11459},
+    {0x114d0, 0x114d9}, {0x11650, 0x11659}, {0x116c0, 0x116c9},
+    {0x116d0, 0x116e3}, {0x11730, 0x11739}, {0x118e0, 0x118e9},
+    {0x11950, 0x11959}, {0x11bf0, 0x11bf9}, {0x11c50, 0x11c59},
+    {0x11d50, 0x11d59}, {0x11da0, 0x11da9}, {0x11f50, 0x11f59},
+    {0x16130, 0x16139}, {0x16a60, 0x16a69}, {0x16ac0, 0x16ac9},
+    {0x16b50, 0x16b59}, {0x16d70, 0x16d79}, {0x1ccf0, 0x1ccf9},
+    {0x1d7ce, 0x1d7ff}, {0x1e140, 0x1e149}, {0x1e2f0, 0x1e2f9},
+    {0x1e4f0, 0x1e4f9}, {0x1e5f1, 0x1e5fa}, {0x1e950, 0x1e959},
+    {0x1fbf0, 0x1fbf9}
+};
+
+/* The end of the run of identifier characters (letters, digits and
+ * underscores) that starts at `p`. */
+static const uint8_t *yxc_ident_run(const uint8_t *p, const uint8_t *end)
+{
+    while (p < end) {
+        uint32_t point;
+        size_t width, i;
+        bool digit = false;
+        if (yxc_alpha(*p) || yxc_digit(*p) || *p == '_') { ++p; continue; }
+        if (*p < 0x80) break;
+        width = yxc_utf8_char(p, end, &point);
+        if (!width) break;
+        for (i = 0; i < sizeof(yxc_decimal_digits) /
+                        sizeof(yxc_decimal_digits[0]) && !digit; ++i)
+            digit = point >= yxc_decimal_digits[i][0] &&
+                    point <= yxc_decimal_digits[i][1];
+        if (!digit) break;
+        p += width;
+    }
+    return p;
+}
+
+/* Rust's char::is_whitespace. */
+static bool yxc_rust_whitespace(uint32_t c)
+{
+    return (c >= 0x09 && c <= 0x0d) || c == 0x20 || c == 0x85 ||
+           c == 0xa0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+           c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f ||
+           c == 0x3000;
+}
+
+/* Block comment starting at `p` ("/" "*" already checked). Returns the end
+ * of the comment or NULL when it is not closed. */
+static const uint8_t *yxc_block_comment(const uint8_t *p, const uint8_t *end)
+{
+    const uint8_t *q;
+    for (q = p + 2; q + 1 < end; ++q)
+        if (q[0] == '*' && q[1] == '/') return q + 2;
+    return NULL;
+}
+
+/* One token in normal mode. A token is always produced: when nothing
+ * matches, it is UNKNOWN (or INVALID_UTF8), built the way
+ * Tokenizer::unexpected_token does it. `*resume` is where the lexer goes on,
+ * which differs from the token's end only for INVALID_UTF8. */
+static void yxc_lex_normal(const uint8_t *src, size_t length, size_t at,
+                           yxc_tok *token, size_t *resume)
+{
+    const uint8_t *begin = src + at, *end = src + length, *p = begin, *q;
+    /* The longest prefix some token pattern could still be completed
+     * from; the lexer's own error span. */
+    size_t viable = 1;
+    int id = YXC_NONE;
+    uint8_t c = *p;
+    size_t n;
+    if (yxc_alpha(c) || c == '_') {
+        size_t k;
+        q = yxc_ident_run(p + 1, end);
+        id = YXC_IDENT;
+        n = (size_t)(q - p);
+        for (k = 0; k < sizeof(yxc_keywords) / sizeof(yxc_keywords[0]); ++k)
+            if (strlen(yxc_keywords[k]) == n &&
+                !memcmp(yxc_keywords[k], p, n)) {
+                id = YXC_ALL_KW + (int)k;
+                break;
+            }
+        p = q;
+    } else if (yxc_digit(c)) {
+        const uint8_t *best, *dec;
+        id = YXC_INTEGER_LIT;
+        for (dec = p + 1; dec < end && (yxc_digit(*dec) || *dec == '_');
+             ++dec) {}
+        best = dec;
+        if (end - dec >= 2 && (dec[0] == 'K' || dec[0] == 'M') &&
+            dec[1] == 'B') best = dec + 2;
+        if (c == '0' && end - p >= 3 && p[1] == 'x' && yxc_xdigit(p[2])) {
+            for (q = p + 3; q < end && (yxc_xdigit(*q) || *q == '_'); ++q) {}
+            if (q > best) best = q;
+        }
+        if (c == '0' && end - p >= 3 && p[1] == 'o' &&
+            p[2] >= '0' && p[2] <= '7') {
+            for (q = p + 3;
+                 q < end && ((*q >= '0' && *q <= '7') || *q == '_'); ++q) {}
+            if (q > best) best = q;
+        }
+        if (end - dec >= 2 && dec[0] == '.' &&
+            (yxc_digit(dec[1]) || dec[1] == '_')) {
+            for (q = dec + 2; q < end && (yxc_digit(*q) || *q == '_'); ++q) {}
+            if (q > best) { best = q; id = YXC_FLOAT_LIT; }
+        }
+        p = best;
+    } else if (c == '$' || c == '#' || c == '@' ||
+               (c == '!' && !(end - p >= 2 && p[1] == '='))) {
+        id = c == '$' ? YXC_PATTERN_IDENT : c == '#' ? YXC_PATTERN_COUNT :
+             c == '@' ? YXC_PATTERN_OFFSET : YXC_PATTERN_LENGTH;
+        p = yxc_ident_run(p + 1, end);
+    } else if (c == '"') {
+        const uint8_t *accept = NULL;
+        /* Single-line string. */
+        for (q = p + 1; q < end; ) {
+            if (*q == '"') { accept = q + 1; break; }
+            if (*q == '\n') break;
+            if (*q == '\\') {
+                if (q + 1 < end && q[1] == '\n') { ++q; break; }
+                q += q + 1 < end ? 2 : 1;
+            } else {
+                ++q;
+            }
+        }
+        if (!accept && (size_t)(q - p) > viable) viable = (size_t)(q - p);
+        /* Multi-line string. */
+        if (end - p >= 3 && p[1] == '"' && p[2] == '"') {
+            for (q = p + 3; q < end; ) {
+                if (*q == '"') {
+                    if (end - q >= 3 && q[1] == '"' && q[2] == '"')
+                        accept = q + 3;
+                    break;
+                }
+                if (*q == '\\') {
+                    if (q + 1 < end && q[1] == '\n') break;
+                    q += q + 1 < end ? 2 : 1;
+                } else {
+                    ++q;
+                }
+            }
+        }
+        if (accept) { id = YXC_STRING_LIT; p = accept; }
+    } else if (c == '/') {
+        if (end - p >= 2 && p[1] == '/') {
+            for (p += 2; p < end && *p != '\n'; ++p) {}
+            id = YXC_COMMENT;
+        } else if (end - p >= 2 && p[1] == '*') {
+            q = yxc_block_comment(p, end);
+            if (q) { id = YXC_COMMENT; p = q; }
+            else viable = (size_t)(end - p);
+        } else {
+            /* Regular expression. */
+            bool closed = false;
+            for (q = p + 1; q < end; ) {
+                if (*q == '\n') break;
+                if (*q == '/') {
+                    if (q == p + 1) break;
+                    closed = true;
+                    ++q;
+                    break;
+                }
+                if (*q == '\\') {
+                    if (q + 1 < end && q[1] == '\n') { ++q; break; }
+                    q += q + 1 < end ? 2 : 1;
+                } else {
+                    ++q;
+                }
+            }
+            if (closed) {
+                if (q < end && yxc_alpha(*q)) ++q;
+                if (q < end && yxc_alpha(*q)) ++q;
+                id = YXC_REGEXP;
+                p = q;
+            } else if ((size_t)(q - p) > viable) {
+                viable = (size_t)(q - p);
+            }
+        }
+    } else if (c == '\n') {
+        id = YXC_NEWLINE; ++p;
+    } else if (c == '\r') {
+        id = YXC_NEWLINE;
+        p += end - p >= 2 && p[1] == '\n' ? 2 : 1;
+    } else if (yxc_space_len(p, end)) {
+        while ((n = yxc_space_len(p, end)) != 0) p += n;
+        id = YXC_WHITESPACE;
+    } else {
+        bool two = end - p >= 2;
+        switch (c) {
+        case '<':
+            if (two && p[1] == '<') { id = YXC_SHL; p += 2; }
+            else if (two && p[1] == '=') { id = YXC_LE; p += 2; }
+            else { id = YXC_LT; ++p; }
+            break;
+        case '>':
+            if (two && p[1] == '>') { id = YXC_SHR; p += 2; }
+            else if (two && p[1] == '=') { id = YXC_GE; p += 2; }
+            else { id = YXC_GT; ++p; }
+            break;
+        case '=':
+            if (two && p[1] == '=') { id = YXC_EQ; p += 2; }
+            else { id = YXC_EQUAL; ++p; }
+            break;
+        case '!': id = YXC_NE; p += 2; break;
+        case '&': id = YXC_AMPERSAND; ++p; break;
+        case '*': id = YXC_ASTERISK; ++p; break;
+        case '\\': id = YXC_BACKSLASH; ++p; break;
+        case ':': id = YXC_COLON; ++p; break;
+        case ',': id = YXC_COMMA; ++p; break;
+        case '.': id = YXC_DOT; ++p; break;
+        case '+': id = YXC_PLUS; ++p; break;
+        case '-': id = YXC_HYPHEN; ++p; break;
+        case '%': id = YXC_PERCENT; ++p; break;
+        case '|': id = YXC_PIPE; ++p; break;
+        case '^': id = YXC_CARET; ++p; break;
+        case '~': id = YXC_TILDE; ++p; break;
+        case '{': id = YXC_L_BRACE; ++p; break;
+        case '}': id = YXC_R_BRACE; ++p; break;
+        case '(': id = YXC_L_PAREN; ++p; break;
+        case ')': id = YXC_R_PAREN; ++p; break;
+        case '[': id = YXC_L_BRACKET; ++p; break;
+        case ']': id = YXC_R_BRACKET; ++p; break;
+        default: break;
+        }
+    }
+    token->start = at;
+    if (id != YXC_NONE) {
+        token->id = (uint8_t)id;
+        token->end = (size_t)(p - src);
+        *resume = token->end;
+        return;
+    }
+    {
+        /* Tokenizer::unexpected_token: the valid UTF-8 prefix of the rest
+         * of the source, cut at the first whitespace character. */
+        uint32_t point;
+        size_t unexpected = 0, width = yxc_utf8_char(begin, end, &point);
+        if (!width) {
+            token->id = YXC_INVALID_UTF8;
+            token->end = at + 1;
+            *resume = at + viable;
+            return;
+        }
+        if (yxc_rust_whitespace(point)) {
+            unexpected = width;
+        } else {
+            for (q = begin; q < end; q += width) {
+                width = yxc_utf8_char(q, end, &point);
+                if (!width || yxc_rust_whitespace(point)) break;
+            }
+            unexpected = (size_t)(q - begin);
+        }
+        if (unexpected < viable) unexpected = viable;
+        token->id = YXC_UNKNOWN;
+        token->end = at + unexpected;
+        *resume = token->end;
+    }
+}
+
+static bool yxc_hex_byte_char(uint8_t c)
+{
+    return c == '?' || yxc_xdigit(c);
+}
+
+/* One token in hex pattern mode; false when nothing matches. */
+static bool yxc_lex_hex_pattern(const uint8_t *src, size_t length, size_t at,
+                                yxc_tok *token)
+{
+    const uint8_t *begin = src + at, *end = src + length, *p = begin, *q;
+    int id = YXC_NONE;
+    uint8_t c = *p;
+    size_t n;
+    if (c == '\n') { id = YXC_NEWLINE; ++p; }
+    else if (c == '\r') {
+        id = YXC_NEWLINE;
+        p += end - p >= 2 && p[1] == '\n' ? 2 : 1;
+    } else if (yxc_space_len(p, end)) {
+        while ((n = yxc_space_len(p, end)) != 0) p += n;
+        id = YXC_WHITESPACE;
+    } else if (c == '|') { id = YXC_PIPE; ++p; }
+    else if (c == '(') { id = YXC_L_PAREN; ++p; }
+    else if (c == ')') { id = YXC_R_PAREN; ++p; }
+    else if (c == '[') { id = YXC_L_BRACKET; ++p; }
+    else if (c == ']') { id = YXC_R_BRACKET; ++p; }
+    else if (c == '/' && end - p >= 2 && p[1] == '/') {
+        for (p += 2; p < end && *p != '\n'; ++p) {}
+        id = YXC_COMMENT;
+    } else if (c == '/' && end - p >= 2 && p[1] == '*') {
+        /* Unlike in normal mode, this pattern is a Unicode one: it does
+         * not match a comment that holds invalid UTF-8. */
+        q = yxc_block_comment(p, end);
+        if (q) {
+            const uint8_t *scan = p;
+            uint32_t point;
+            while (scan < q && (n = yxc_utf8_char(scan, q, &point)) != 0)
+                scan += n;
+            if (scan == q) { id = YXC_COMMENT; p = q; }
+        }
+    } else {
+        q = c == '~' ? p + 1 : p;
+        if (end - q >= 2 && yxc_hex_byte_char(q[0]) &&
+            yxc_hex_byte_char(q[1])) {
+            id = YXC_HEX_BYTE;
+            p = q + 2;
+        }
+    }
+    if (id == YXC_NONE) return false;
+    token->id = (uint8_t)id;
+    token->start = at;
+    token->end = (size_t)(p - src);
+    return true;
+}
+
+/* One token in hex jump mode; false when nothing matches. */
+static bool yxc_lex_hex_jump(const uint8_t *src, size_t length, size_t at,
+                             yxc_tok *token)
+{
+    const uint8_t *begin = src + at, *end = src + length, *p = begin, *q;
+    int id = YXC_NONE;
+    uint8_t c = *p;
+    size_t n;
+    if (c == '\n') { id = YXC_NEWLINE; ++p; }
+    else if (c == '\r') {
+        id = YXC_NEWLINE;
+        p += end - p >= 2 && p[1] == '\n' ? 2 : 1;
+    } else if (yxc_space_len(p, end)) {
+        while ((n = yxc_space_len(p, end)) != 0) p += n;
+        id = YXC_WHITESPACE;
+    } else if (c == '-') { id = YXC_HYPHEN; ++p; }
+    else if (yxc_digit(c)) {
+        id = YXC_INTEGER_LIT;
+        for (q = p + 1; q < end && yxc_digit(*q); ++q) {}
+        if (c == '0' && end - p >= 3 && p[1] == 'x' && yxc_xdigit(p[2]))
+            for (q = p + 3; q < end && yxc_xdigit(*q); ++q) {}
+        else if (c == '0' && end - p >= 3 && p[1] == 'o' &&
+                 p[2] >= '0' && p[2] <= '7')
+            for (q = p + 3; q < end && *q >= '0' && *q <= '7'; ++q) {}
+        p = q;
+    }
+    if (id == YXC_NONE) return false;
+    token->id = (uint8_t)id;
+    token->start = at;
+    token->end = (size_t)(p - src);
+    return true;
+}
+
+/* ---- Parser ----------------------------------------------------------- */
+
+enum { YXC_EV_BEGIN, YXC_EV_END, YXC_EV_TOKEN, YXC_EV_MESSAGE };
+
+typedef struct yxc_event {
+    uint8_t type;
+    uint8_t kind;
+    size_t start;
+    size_t end;
+} yxc_event;
+
+enum {
+    YXC_STATE_OK, YXC_STATE_FAILURE, YXC_STATE_OUT_OF_FUEL,
+    YXC_STATE_MAX_DEPTH
+};
+
+#define YXC_MAX_CST_DEPTH 1000
+
+typedef struct yxc_parser {
+    const uint8_t *source;
+    size_t length;
+    /* Tokenizer. Tokens are produced on demand, in the mode the tokenizer
+     * is in at that moment, and stay as they were produced when the parser
+     * backtracks over them. */
+    int mode;
+    size_t lex_at;
+    yxc_tok *tokens;
+    size_t token_count, token_capacity;
+    size_t current;
+    /* SyntaxStream. */
+    yxc_event *events;
+    size_t event_count, event_capacity;
+    size_t item_base;
+    size_t *open;
+    size_t open_count, open_capacity;
+    size_t last_start, last_end;
+    int state;
+    size_t opt_depth, not_depth, depth;
+    /* Whether expected_token_errors / unexpected_token_errors hold an
+     * entry, and whether pending_errors does. The messages themselves are
+     * not needed: the formatter only depends on where they appear in the
+     * event stream (they keep two ERROR nodes from being merged). */
+    bool expected_errors, unexpected_errors, pending_errors;
+    /* Failure cache for EXPR and TERM, by token index. */
+    uint32_t *cache[2];
+    size_t cache_capacity;
+    uint32_t generation;
+    uint64_t fuel;
+    bool no_memory;
+} yxc_parser;
+
+typedef struct yxc_bookmark {
+    size_t token;
+    size_t event;
+} yxc_bookmark;
+
+typedef void (*yxc_rule_fn)(yxc_parser *p);
+
+static bool yxc_fetch(yxc_parser *p, size_t index)
+{
+    while (index >= p->token_count) {
+        yxc_tok token;
+        size_t resume;
+        if (p->no_memory) return false;
+        for (;;) {
+            if (p->lex_at >= p->length) return false;
+            if (p->mode == YXC_MODE_NORMAL) {
+                yxc_lex_normal(p->source, p->length, p->lex_at, &token,
+                               &resume);
+                break;
+            }
+            if (p->mode == YXC_MODE_HEX_PATTERN) {
+                if (yxc_lex_hex_pattern(p->source, p->length, p->lex_at,
+                                        &token)) {
+                    resume = token.end;
+                    break;
+                }
+                p->mode = YXC_MODE_NORMAL;
+            } else {
+                if (yxc_lex_hex_jump(p->source, p->length, p->lex_at,
+                                     &token)) {
+                    resume = token.end;
+                    break;
+                }
+                p->mode = YXC_MODE_HEX_PATTERN;
+            }
+        }
+        p->lex_at = resume;
+        if (p->token_count == p->token_capacity) {
+            size_t capacity = p->token_capacity ? p->token_capacity * 2 : 256;
+            yxc_tok *larger = (yxc_tok *)realloc(
+                p->tokens, capacity * sizeof(*larger));
+            if (!larger) { p->no_memory = true; return false; }
+            p->tokens = larger;
+            p->token_capacity = capacity;
+        }
+        p->tokens[p->token_count++] = token;
+    }
+    return true;
+}
+
+static const yxc_tok *yxc_peek(yxc_parser *p)
+{
+    return yxc_fetch(p, p->current) ? &p->tokens[p->current] : NULL;
+}
+
+static const yxc_tok *yxc_peek_non_trivia(yxc_parser *p)
+{
+    size_t i = p->current;
+    for (;; ++i) {
+        if (!yxc_fetch(p, i)) return NULL;
+        if (!yxc_is_trivia(p->tokens[i].id)) return &p->tokens[i];
+    }
+}
+
+static void yxc_push_event(yxc_parser *p, int type, int kind, size_t start,
+                           size_t end)
+{
+    if (p->event_count == p->event_capacity) {
+        size_t capacity = p->event_capacity ? p->event_capacity * 2 : 256;
+        yxc_event *larger = (yxc_event *)realloc(
+            p->events, capacity * sizeof(*larger));
+        if (!larger) { p->no_memory = true; return; }
+        p->events = larger;
+        p->event_capacity = capacity;
+    }
+    p->events[p->event_count].type = (uint8_t)type;
+    p->events[p->event_count].kind = (uint8_t)kind;
+    p->events[p->event_count].start = start;
+    p->events[p->event_count].end = end;
+    ++p->event_count;
+}
+
+static void yxc_push_token(yxc_parser *p, int kind, const yxc_tok *token)
+{
+    p->last_start = token->start;
+    p->last_end = token->end;
+    yxc_push_event(p, YXC_EV_TOKEN, kind, token->start, token->end);
+}
+
+/* SyntaxStream::begin. */
+static void yxc_out_begin(yxc_parser *p, int kind)
+{
+    if (p->open_count == p->open_capacity) {
+        size_t capacity = p->open_capacity ? p->open_capacity * 2 : 64;
+        size_t *larger = (size_t *)realloc(p->open,
+                                           capacity * sizeof(*larger));
+        if (!larger) { p->no_memory = true; return; }
+        p->open = larger;
+        p->open_capacity = capacity;
+    }
+    p->open[p->open_count++] = p->event_count;
+    yxc_push_event(p, YXC_EV_BEGIN, kind, p->last_end, p->last_end);
+}
+
+/* SyntaxStream::end and SyntaxStream::end_with_error. */
+static void yxc_out_end(yxc_parser *p, bool error)
+{
+    size_t begin;
+    if (p->no_memory || !p->open_count) return;
+    begin = p->open[--p->open_count];
+    if (error) {
+        if (begin + 1 == p->event_count) {
+            --p->event_count;
+            return;
+        }
+        p->events[begin].kind = YXC_ERROR;
+    }
+    p->events[begin].end = p->last_end;
+    yxc_push_event(p, YXC_EV_END, p->events[begin].kind,
+                   p->events[begin].start, p->events[begin].end);
+}
+
+static void yxc_bump(yxc_parser *p)
+{
+    const yxc_tok *token = yxc_peek(p);
+    if (!token) return;
+    yxc_push_token(p, token->id, token);
+    ++p->current;
+}
+
+static yxc_bookmark yxc_mark(yxc_parser *p)
+{
+    yxc_bookmark bookmark;
+    bookmark.token = p->current;
+    bookmark.event = p->event_count;
+    return bookmark;
+}
+
+/* TokenStream::restore_bookmark and SyntaxStream::truncate. The events of
+ * the earlier top-level items have already left the stream, so the last
+ * token is looked for only among the events of the current item. */
+static void yxc_restore(yxc_parser *p, const yxc_bookmark *bookmark)
+{
+    size_t i;
+    p->current = bookmark->token;
+    if (bookmark->event < p->event_count) p->event_count = bookmark->event;
+    p->last_start = p->last_end = 0;
+    for (i = p->event_count; i > p->item_base; --i)
+        if (p->events[i - 1].type == YXC_EV_TOKEN) {
+            p->last_start = p->events[i - 1].start;
+            p->last_end = p->events[i - 1].end;
+            break;
+        }
+}
+
+static bool yxc_stopped(const yxc_parser *p)
+{
+    return p->state != YXC_STATE_OK;
+}
+
+static void yxc_set_state(yxc_parser *p, int state)
+{
+    if (p->state != YXC_STATE_OUT_OF_FUEL &&
+        p->state != YXC_STATE_MAX_DEPTH) p->state = state;
+}
+
+static void yxc_trivia(yxc_parser *p)
+{
+    const yxc_tok *token;
+    if (yxc_stopped(p)) return;
+    while ((token = yxc_peek(p)) != NULL && yxc_is_trivia(token->id))
+        yxc_bump(p);
+}
+
+static void yxc_handle_errors(yxc_parser *p)
+{
+    if (p->expected_errors || p->unexpected_errors) p->pending_errors = true;
+    p->expected_errors = p->unexpected_errors = false;
+}
+
+static void yxc_begin(yxc_parser *p, int kind)
+{
+    yxc_trivia(p);
+    if (p->depth == YXC_MAX_CST_DEPTH && p->state == YXC_STATE_OK) {
+        p->state = YXC_STATE_MAX_DEPTH;
+        p->expected_errors = p->unexpected_errors = false;
+        p->pending_errors = true;
+    }
+    ++p->depth;
+    if (p->fuel) --p->fuel;
+    else p->state = YXC_STATE_OUT_OF_FUEL;
+    yxc_out_begin(p, kind);
+}
+
+static void yxc_end(yxc_parser *p)
+{
+    --p->depth;
+    if (p->state == YXC_STATE_FAILURE || p->state == YXC_STATE_OUT_OF_FUEL) {
+        if (!p->opt_depth) yxc_handle_errors(p);
+        yxc_out_end(p, true);
+    } else if (p->state == YXC_STATE_MAX_DEPTH) {
+        yxc_out_end(p, true);
+    } else {
+        yxc_out_end(p, false);
+    }
+}
+
+/* Token sets are lists of syntax kinds that end with YXC_NONE. Returns the
+ * kind of the set the token matches, or YXC_NONE. */
+static int yxc_in_set(const uint8_t *set, const yxc_tok *token)
+{
+    for (; *set; ++set)
+        if (yxc_token_id(*set) == token->id) return *set;
+    return YXC_NONE;
+}
+
+static void yxc_recover(yxc_parser *p, const uint8_t *set)
+{
+    const yxc_tok *token;
+    bool was_ok, in_set;
+    if (p->state == YXC_STATE_OUT_OF_FUEL) return;
+    if (p->state == YXC_STATE_MAX_DEPTH && p->depth > 1) return;
+    was_ok = p->state == YXC_STATE_OK;
+    p->state = YXC_STATE_OK;
+    token = yxc_peek_non_trivia(p);
+    if (!token) return;
+    in_set = yxc_in_set(set, token) != YXC_NONE;
+    if (!p->pending_errors && !in_set) p->expected_errors = true;
+    if (!was_ok || !in_set) yxc_handle_errors(p);
+    if (!in_set) {
+        yxc_trivia(p);
+        yxc_begin(p, YXC_ERROR);
+        yxc_bump(p);
+        while ((token = yxc_peek_non_trivia(p)) != NULL &&
+               yxc_in_set(set, token) == YXC_NONE) {
+            yxc_trivia(p);
+            yxc_bump(p);
+            if (p->no_memory) break;
+        }
+        yxc_end(p);
+    }
+}
+
+static void yxc_expect(yxc_parser *p, const uint8_t *set)
+{
+    const yxc_tok *token;
+    int match = YXC_NONE;
+    if (yxc_stopped(p)) return;
+    token = yxc_peek_non_trivia(p);
+    if (token) match = yxc_in_set(set, token);
+    if (p->not_depth) {
+        if (match != YXC_NONE) p->unexpected_errors = true;
+    } else if (match == YXC_NONE) {
+        p->expected_errors = true;
+    }
+    if (match != YXC_NONE) {
+        yxc_trivia(p);
+        token = yxc_peek(p);
+        if (token) {
+            yxc_push_token(p, match, token);
+            ++p->current;
+        }
+    } else {
+        yxc_set_state(p, YXC_STATE_FAILURE);
+    }
+}
+
+static void yxc_opt(yxc_parser *p, yxc_rule_fn rule)
+{
+    yxc_bookmark bookmark;
+    if (yxc_stopped(p)) return;
+    bookmark = yxc_mark(p);
+    yxc_trivia(p);
+    ++p->opt_depth;
+    rule(p);
+    --p->opt_depth;
+    if (p->state == YXC_STATE_FAILURE || p->state == YXC_STATE_MAX_DEPTH) {
+        yxc_set_state(p, YXC_STATE_OK);
+        yxc_restore(p, &bookmark);
+    }
+}
+
+static void yxc_not(yxc_parser *p, yxc_rule_fn rule)
+{
+    yxc_bookmark bookmark;
+    if (yxc_stopped(p)) return;
+    bookmark = yxc_mark(p);
+    yxc_trivia(p);
+    ++p->not_depth;
+    rule(p);
+    --p->not_depth;
+    if (p->state == YXC_STATE_OK) p->state = YXC_STATE_FAILURE;
+    else if (p->state == YXC_STATE_FAILURE) p->state = YXC_STATE_OK;
+    yxc_restore(p, &bookmark);
+}
+
+static void yxc_then(yxc_parser *p, yxc_rule_fn rule)
+{
+    if (yxc_stopped(p)) return;
+    yxc_trivia(p);
+    rule(p);
+}
+
+static void yxc_if_next(yxc_parser *p, const uint8_t *set, yxc_rule_fn rule)
+{
+    const yxc_tok *token;
+    if (yxc_stopped(p)) return;
+    token = yxc_peek_non_trivia(p);
+    if (!token) return;
+    if (yxc_in_set(set, token) != YXC_NONE) {
+        yxc_trivia(p);
+        rule(p);
+    } else {
+        p->expected_errors = true;
+    }
+}
+
+/* ParserImpl::cond: like if_next, but the expected token is consumed
+ * before `rule` runs. */
+static void yxc_cond(yxc_parser *p, const uint8_t *set, yxc_rule_fn rule)
+{
+    const yxc_tok *token;
+    if (yxc_stopped(p)) return;
+    token = yxc_peek_non_trivia(p);
+    if (!token) return;
+    if (yxc_in_set(set, token) != YXC_NONE) {
+        yxc_trivia(p);
+        yxc_expect(p, set);
+        yxc_then(p, rule);
+    } else {
+        p->expected_errors = true;
+    }
+}
+
+static void yxc_n_or_more(yxc_parser *p, size_t n, yxc_rule_fn rule)
+{
+    if (yxc_stopped(p)) return;
+    while (n--) {
+        yxc_trivia(p);
+        rule(p);
+        if (yxc_stopped(p)) return;
+    }
+    for (;;) {
+        yxc_bookmark bookmark = yxc_mark(p);
+        yxc_trivia(p);
+        ++p->opt_depth;
+        rule(p);
+        --p->opt_depth;
+        if (p->state != YXC_STATE_OK) {
+            yxc_set_state(p, YXC_STATE_OK);
+            yxc_restore(p, &bookmark);
+            break;
+        }
+        if (p->no_memory) break;
+    }
+}
+
+typedef struct yxc_alt {
+    yxc_bookmark bookmark;
+    bool matched;
+} yxc_alt;
+
+static yxc_alt yxc_begin_alt(yxc_parser *p)
+{
+    yxc_alt alt;
+    alt.bookmark = yxc_mark(p);
+    alt.matched = false;
+    return alt;
+}
+
+static void yxc_alt_try(yxc_parser *p, yxc_alt *alt, yxc_rule_fn rule)
+{
+    if (yxc_stopped(p) || alt->matched) return;
+    yxc_trivia(p);
+    ++p->opt_depth;
+    rule(p);
+    --p->opt_depth;
+    if (p->state == YXC_STATE_OK) {
+        alt->matched = true;
+    } else if (p->state == YXC_STATE_FAILURE ||
+               p->state == YXC_STATE_MAX_DEPTH) {
+        yxc_set_state(p, YXC_STATE_OK);
+        yxc_restore(p, &alt->bookmark);
+    }
+}
+
+static void yxc_end_alt(yxc_parser *p, const yxc_alt *alt)
+{
+    yxc_set_state(p, alt->matched ? YXC_STATE_OK : YXC_STATE_FAILURE);
+}
+
+/* ParserImpl::cached. `slot` is 0 for EXPR and 1 for TERM. */
+static void yxc_cached(yxc_parser *p, int slot, yxc_rule_fn rule)
+{
+    size_t start;
+    if (yxc_stopped(p)) return;
+    start = p->current;
+    if (start >= p->cache_capacity) {
+        size_t capacity = p->cache_capacity ? p->cache_capacity : 256;
+        int i;
+        while (capacity <= start) capacity *= 2;
+        for (i = 0; i < 2; ++i) {
+            uint32_t *larger = (uint32_t *)realloc(
+                p->cache[i], capacity * sizeof(*larger));
+            if (!larger) { p->no_memory = true; return; }
+            memset(larger + p->cache_capacity, 0,
+                   (capacity - p->cache_capacity) * sizeof(*larger));
+            p->cache[i] = larger;
+        }
+        p->cache_capacity = capacity;
+    }
+    if (p->cache[slot][start] == p->generation) {
+        yxc_set_state(p, YXC_STATE_FAILURE);
+        return;
+    }
+    rule(p);
+    if (p->state == YXC_STATE_FAILURE && start < p->cache_capacity)
+        p->cache[slot][start] = p->generation;
+}
+
+#define YXC_SET(name, ...) static const uint8_t name[] = {__VA_ARGS__, 0}
+
+YXC_SET(yxc_s_import, YXC_IMPORT_KW);
+YXC_SET(yxc_s_include, YXC_INCLUDE_KW);
+YXC_SET(yxc_s_string, YXC_STRING_LIT);
+YXC_SET(yxc_s_rule, YXC_RULE_KW);
+YXC_SET(yxc_s_ident, YXC_IDENT);
+YXC_SET(yxc_s_colon, YXC_COLON);
+YXC_SET(yxc_s_l_brace, YXC_L_BRACE);
+YXC_SET(yxc_s_r_brace, YXC_R_BRACE);
+YXC_SET(yxc_s_meta, YXC_META_KW);
+YXC_SET(yxc_s_strings, YXC_STRINGS_KW);
+YXC_SET(yxc_s_condition, YXC_CONDITION_KW);
+YXC_SET(yxc_s_top, YXC_GLOBAL_KW, YXC_PRIVATE_KW, YXC_RULE_KW,
+        YXC_IMPORT_KW, YXC_INCLUDE_KW);
+YXC_SET(yxc_s_private, YXC_PRIVATE_KW);
+YXC_SET(yxc_s_global, YXC_GLOBAL_KW);
+YXC_SET(yxc_s_sections, YXC_STRINGS_KW, YXC_CONDITION_KW);
+YXC_SET(yxc_s_equal, YXC_EQUAL);
+YXC_SET(yxc_s_minus, YXC_MINUS);
+YXC_SET(yxc_s_number, YXC_INTEGER_LIT, YXC_FLOAT_LIT);
+YXC_SET(yxc_s_meta_value, YXC_STRING_LIT, YXC_TRUE_KW, YXC_FALSE_KW);
+YXC_SET(yxc_s_pattern_ident, YXC_PATTERN_IDENT);
+YXC_SET(yxc_s_regexp, YXC_REGEXP);
+YXC_SET(yxc_s_plain_mods, YXC_ASCII_KW, YXC_WIDE_KW, YXC_NOCASE_KW,
+        YXC_PRIVATE_KW, YXC_FULLWORD_KW);
+YXC_SET(yxc_s_base64, YXC_BASE64_KW, YXC_BASE64WIDE_KW);
+YXC_SET(yxc_s_xor, YXC_XOR_KW);
+YXC_SET(yxc_s_l_paren, YXC_L_PAREN);
+YXC_SET(yxc_s_r_paren, YXC_R_PAREN);
+YXC_SET(yxc_s_integer, YXC_INTEGER_LIT);
+YXC_SET(yxc_s_hyphen, YXC_HYPHEN);
+YXC_SET(yxc_s_hex_byte, YXC_HEX_BYTE);
+YXC_SET(yxc_s_pipe, YXC_PIPE);
+YXC_SET(yxc_s_l_bracket, YXC_L_BRACKET);
+YXC_SET(yxc_s_r_bracket, YXC_R_BRACKET);
+YXC_SET(yxc_s_and_or, YXC_AND_KW, YXC_OR_KW);
+YXC_SET(yxc_s_at_in, YXC_AT_KW, YXC_IN_KW);
+YXC_SET(yxc_s_at, YXC_AT_KW);
+YXC_SET(yxc_s_in, YXC_IN_KW);
+YXC_SET(yxc_s_true_false, YXC_TRUE_KW, YXC_FALSE_KW);
+YXC_SET(yxc_s_not_defined, YXC_NOT_KW, YXC_DEFINED_KW);
+YXC_SET(yxc_s_comparison, YXC_EQ, YXC_NE, YXC_LE, YXC_LT, YXC_GE, YXC_GT,
+        YXC_CONTAINS_KW, YXC_ICONTAINS_KW, YXC_STARTSWITH_KW,
+        YXC_ISTARTSWITH_KW, YXC_ENDSWITH_KW, YXC_IENDSWITH_KW,
+        YXC_IEQUALS_KW, YXC_MATCHES_KW);
+YXC_SET(yxc_s_operator, YXC_ADD, YXC_SUB, YXC_MUL, YXC_DIV, YXC_MOD,
+        YXC_SHL, YXC_SHR, YXC_BITWISE_AND, YXC_BITWISE_OR,
+        YXC_BITWISE_XOR);
+YXC_SET(yxc_s_comma, YXC_COMMA);
+YXC_SET(yxc_s_dot, YXC_DOT);
+YXC_SET(yxc_s_literal, YXC_FLOAT_LIT, YXC_INTEGER_LIT, YXC_STRING_LIT,
+        YXC_REGEXP, YXC_FILESIZE_KW, YXC_ENTRYPOINT_KW);
+YXC_SET(yxc_s_pattern_count, YXC_PATTERN_COUNT);
+YXC_SET(yxc_s_offset_length, YXC_PATTERN_OFFSET, YXC_PATTERN_LENGTH);
+YXC_SET(yxc_s_bitwise_not, YXC_BITWISE_NOT);
+YXC_SET(yxc_s_for, YXC_FOR_KW);
+YXC_SET(yxc_s_of, YXC_OF_KW);
+YXC_SET(yxc_s_them, YXC_THEM_KW);
+YXC_SET(yxc_s_with, YXC_WITH_KW);
+YXC_SET(yxc_s_colon_l_paren, YXC_COLON, YXC_L_PAREN);
+YXC_SET(yxc_s_quantifier, YXC_ALL_KW, YXC_NONE_KW, YXC_ANY_KW);
+YXC_SET(yxc_s_percent, YXC_PERCENT);
+YXC_SET(yxc_s_asterisk, YXC_ASTERISK);
+
+static void yxc_boolean_expr(yxc_parser *p);
+static void yxc_boolean_term(yxc_parser *p);
+static void yxc_expr(yxc_parser *p);
+static void yxc_term(yxc_parser *p);
+static void yxc_range(yxc_parser *p);
+static void yxc_hex_sub_pattern(yxc_parser *p);
+static void yxc_primary_expr(yxc_parser *p);
+static void yxc_pattern_ident_tuple(yxc_parser *p);
+
+static void yxc_import_stmt(yxc_parser *p)
+{
+    yxc_begin(p, YXC_IMPORT_STMT);
+    yxc_expect(p, yxc_s_import);
+    yxc_expect(p, yxc_s_string);
+    yxc_end(p);
+}
+
+static void yxc_include_stmt(yxc_parser *p)
+{
+    yxc_begin(p, YXC_INCLUDE_STMT);
+    yxc_expect(p, yxc_s_include);
+    yxc_expect(p, yxc_s_string);
+    yxc_end(p);
+}
+
+static void yxc_expect_private(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_private);
+}
+
+static void yxc_expect_global(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_global);
+}
+
+static void yxc_expect_ident(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_ident);
+}
+
+static void yxc_expect_string(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_string);
+}
+
+static void yxc_expect_regexp(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_regexp);
+}
+
+static void yxc_expect_integer(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_integer);
+}
+
+static void yxc_expect_minus(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_minus);
+}
+
+static void yxc_expect_hex_byte(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_hex_byte);
+}
+
+static void yxc_expect_them(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_them);
+}
+
+static void yxc_expect_percent(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_percent);
+}
+
+static void yxc_expect_asterisk(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_asterisk);
+}
+
+static void yxc_expect_at_in(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_at_in);
+}
+
+static void yxc_mods_private(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_private);
+    yxc_opt(p, yxc_expect_global);
+}
+
+static void yxc_mods_global(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_global);
+    yxc_opt(p, yxc_expect_private);
+}
+
+static void yxc_rule_mods(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_RULE_MODS);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_mods_private);
+    yxc_alt_try(p, &alt, yxc_mods_global);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_rule_tags(yxc_parser *p)
+{
+    yxc_begin(p, YXC_RULE_TAGS);
+    yxc_expect(p, yxc_s_colon);
+    yxc_n_or_more(p, 1, yxc_expect_ident);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_l_brace);
+}
+
+static void yxc_meta_number(yxc_parser *p)
+{
+    yxc_opt(p, yxc_expect_minus);
+    yxc_expect(p, yxc_s_number);
+}
+
+static void yxc_meta_other(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_meta_value);
+}
+
+static void yxc_meta_def(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_META_DEF);
+    yxc_expect(p, yxc_s_ident);
+    yxc_expect(p, yxc_s_equal);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_meta_number);
+    yxc_alt_try(p, &alt, yxc_meta_other);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_meta_blk(yxc_parser *p)
+{
+    yxc_begin(p, YXC_META_BLK);
+    yxc_expect(p, yxc_s_meta);
+    yxc_expect(p, yxc_s_colon);
+    yxc_n_or_more(p, 1, yxc_meta_def);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_sections);
+}
+
+static void yxc_enter_mode(yxc_parser *p, int mode)
+{
+    if (yxc_stopped(p)) return;
+    p->mode = mode;
+}
+
+static void yxc_jump_range(yxc_parser *p)
+{
+    yxc_opt(p, yxc_expect_integer);
+    yxc_expect(p, yxc_s_hyphen);
+    yxc_opt(p, yxc_expect_integer);
+}
+
+static void yxc_hex_jump(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_HEX_JUMP);
+    yxc_expect(p, yxc_s_l_bracket);
+    yxc_enter_mode(p, YXC_MODE_HEX_JUMP);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_jump_range);
+    yxc_alt_try(p, &alt, yxc_expect_integer);
+    yxc_end_alt(p, &alt);
+    yxc_expect(p, yxc_s_r_bracket);
+    yxc_end(p);
+}
+
+static void yxc_alternative_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_pipe);
+    yxc_then(p, yxc_hex_sub_pattern);
+}
+
+static void yxc_hex_alternative(yxc_parser *p)
+{
+    yxc_begin(p, YXC_HEX_ALTERNATIVE);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_hex_sub_pattern);
+    yxc_n_or_more(p, 0, yxc_alternative_tail);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_sub_pattern_tail(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_n_or_more(p, 0, yxc_hex_jump);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_expect_hex_byte);
+    yxc_alt_try(p, &alt, yxc_hex_alternative);
+    yxc_end_alt(p, &alt);
+}
+
+static void yxc_hex_sub_pattern(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_HEX_SUB_PATTERN);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_expect_hex_byte);
+    yxc_alt_try(p, &alt, yxc_hex_alternative);
+    yxc_end_alt(p, &alt);
+    yxc_n_or_more(p, 0, yxc_sub_pattern_tail);
+    yxc_end(p);
+}
+
+static void yxc_hex_pattern(yxc_parser *p)
+{
+    yxc_begin(p, YXC_HEX_PATTERN);
+    yxc_expect(p, yxc_s_l_brace);
+    yxc_enter_mode(p, YXC_MODE_HEX_PATTERN);
+    yxc_then(p, yxc_hex_sub_pattern);
+    yxc_expect(p, yxc_s_r_brace);
+    yxc_end(p);
+}
+
+static void yxc_mod_plain(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_plain_mods);
+}
+
+static void yxc_mod_base64_args(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_string);
+    yxc_expect(p, yxc_s_r_paren);
+}
+
+static void yxc_mod_base64(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_base64);
+    yxc_cond(p, yxc_s_l_paren, yxc_mod_base64_args);
+}
+
+static void yxc_mod_xor_args(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_integer);
+    yxc_cond(p, yxc_s_hyphen, yxc_expect_integer);
+    yxc_expect(p, yxc_s_r_paren);
+}
+
+static void yxc_mod_xor(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_xor);
+    yxc_cond(p, yxc_s_l_paren, yxc_mod_xor_args);
+}
+
+static void yxc_pattern_mod(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_PATTERN_MOD);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_mod_plain);
+    yxc_alt_try(p, &alt, yxc_mod_base64);
+    yxc_alt_try(p, &alt, yxc_mod_xor);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_pattern_mods(yxc_parser *p)
+{
+    yxc_begin(p, YXC_PATTERN_MODS);
+    yxc_n_or_more(p, 1, yxc_pattern_mod);
+    yxc_end(p);
+}
+
+static void yxc_pattern_def(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_PATTERN_DEF);
+    yxc_expect(p, yxc_s_pattern_ident);
+    yxc_expect(p, yxc_s_equal);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_expect_string);
+    yxc_alt_try(p, &alt, yxc_expect_regexp);
+    yxc_alt_try(p, &alt, yxc_hex_pattern);
+    yxc_end_alt(p, &alt);
+    yxc_opt(p, yxc_pattern_mods);
+    yxc_end(p);
+}
+
+static void yxc_patterns_blk(yxc_parser *p)
+{
+    yxc_begin(p, YXC_PATTERNS_BLK);
+    yxc_expect(p, yxc_s_strings);
+    yxc_expect(p, yxc_s_colon);
+    yxc_n_or_more(p, 1, yxc_pattern_def);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_condition);
+}
+
+static void yxc_condition_body(yxc_parser *p)
+{
+    yxc_boolean_expr(p);
+    yxc_recover(p, yxc_s_r_brace);
+}
+
+static void yxc_condition_blk(yxc_parser *p)
+{
+    yxc_begin(p, YXC_CONDITION_BLK);
+    yxc_expect(p, yxc_s_condition);
+    yxc_expect(p, yxc_s_colon);
+    yxc_then(p, yxc_condition_body);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_r_brace);
+}
+
+static void yxc_rule_decl(yxc_parser *p)
+{
+    yxc_begin(p, YXC_RULE_DECL);
+    yxc_opt(p, yxc_rule_mods);
+    yxc_expect(p, yxc_s_rule);
+    yxc_expect(p, yxc_s_ident);
+    yxc_if_next(p, yxc_s_colon, yxc_rule_tags);
+    yxc_expect(p, yxc_s_l_brace);
+    yxc_if_next(p, yxc_s_meta, yxc_meta_blk);
+    yxc_if_next(p, yxc_s_strings, yxc_patterns_blk);
+    yxc_then(p, yxc_condition_blk);
+    yxc_expect(p, yxc_s_r_brace);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_top);
+}
+
+static void yxc_boolean_expr_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_and_or);
+    yxc_then(p, yxc_boolean_term);
+}
+
+static void yxc_boolean_expr(yxc_parser *p)
+{
+    yxc_begin(p, YXC_BOOLEAN_EXPR);
+    yxc_then(p, yxc_boolean_term);
+    yxc_n_or_more(p, 0, yxc_boolean_expr_tail);
+    yxc_end(p);
+}
+
+static void yxc_at_expr(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_at);
+    yxc_then(p, yxc_expr);
+}
+
+static void yxc_in_range(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_in);
+    yxc_then(p, yxc_range);
+}
+
+static void yxc_at_or_in(yxc_parser *p)
+{
+    yxc_alt alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_at_expr);
+    yxc_alt_try(p, &alt, yxc_in_range);
+    yxc_end_alt(p, &alt);
+}
+
+static void yxc_bt_pattern(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_pattern_ident);
+    yxc_if_next(p, yxc_s_at_in, yxc_at_or_in);
+}
+
+static void yxc_bt_bool(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_true_false);
+}
+
+static void yxc_bt_not(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_not_defined);
+    yxc_then(p, yxc_boolean_term);
+}
+
+static void yxc_comparison_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comparison);
+    yxc_then(p, yxc_expr);
+}
+
+static void yxc_bt_comparison(yxc_parser *p)
+{
+    yxc_expr(p);
+    yxc_n_or_more(p, 0, yxc_comparison_tail);
+}
+
+static void yxc_bt_group(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_boolean_expr);
+    yxc_expect(p, yxc_s_r_paren);
+}
+
+static void yxc_quantifier_keyword(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_quantifier);
+}
+
+static void yxc_quantifier_percent(yxc_parser *p)
+{
+    yxc_term(p);
+    yxc_expect(p, yxc_s_percent);
+}
+
+static void yxc_quantifier_expr(yxc_parser *p)
+{
+    yxc_expr(p);
+    yxc_not(p, yxc_expect_percent);
+}
+
+static void yxc_quantifier(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_QUANTIFIER);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_quantifier_keyword);
+    yxc_alt_try(p, &alt, yxc_quantifier_percent);
+    yxc_alt_try(p, &alt, yxc_quantifier_expr);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_expr_tuple_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_then(p, yxc_expr);
+}
+
+static void yxc_expr_tuple(yxc_parser *p)
+{
+    yxc_begin(p, YXC_EXPR_TUPLE);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_expr);
+    yxc_n_or_more(p, 0, yxc_expr_tuple_tail);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_iterable(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_ITERABLE);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_range);
+    yxc_alt_try(p, &alt, yxc_expr_tuple);
+    yxc_alt_try(p, &alt, yxc_expr);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_of_them_or_tuple(yxc_parser *p)
+{
+    yxc_alt alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_expect_them);
+    yxc_alt_try(p, &alt, yxc_pattern_ident_tuple);
+    yxc_end_alt(p, &alt);
+}
+
+static void yxc_for_of(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_of);
+    yxc_of_them_or_tuple(p);
+}
+
+static void yxc_for_ident_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_expect(p, yxc_s_ident);
+}
+
+static void yxc_for_in(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_ident);
+    yxc_n_or_more(p, 0, yxc_for_ident_tail);
+    yxc_expect(p, yxc_s_in);
+    yxc_iterable(p);
+}
+
+static void yxc_paren_body(yxc_parser *p)
+{
+    yxc_boolean_expr(p);
+    yxc_recover(p, yxc_s_r_paren);
+}
+
+static void yxc_for_expr(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_FOR_EXPR);
+    yxc_expect(p, yxc_s_for);
+    yxc_then(p, yxc_quantifier);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_for_of);
+    yxc_alt_try(p, &alt, yxc_for_in);
+    yxc_end_alt(p, &alt);
+    yxc_expect(p, yxc_s_colon);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_paren_body);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_boolean_expr_tuple_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_then(p, yxc_boolean_expr);
+}
+
+static void yxc_boolean_expr_tuple(yxc_parser *p)
+{
+    yxc_begin(p, YXC_BOOLEAN_EXPR_TUPLE);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_boolean_expr);
+    yxc_n_or_more(p, 0, yxc_boolean_expr_tuple_tail);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_of_patterns(yxc_parser *p)
+{
+    yxc_of_them_or_tuple(p);
+    yxc_if_next(p, yxc_s_at_in, yxc_at_or_in);
+}
+
+static void yxc_of_exprs(yxc_parser *p)
+{
+    yxc_boolean_expr_tuple(p);
+    yxc_not(p, yxc_expect_at_in);
+}
+
+static void yxc_of_expr(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_OF_EXPR);
+    yxc_then(p, yxc_quantifier);
+    yxc_expect(p, yxc_s_of);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_of_patterns);
+    yxc_alt_try(p, &alt, yxc_of_exprs);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_with_declaration(yxc_parser *p)
+{
+    yxc_begin(p, YXC_WITH_DECL);
+    yxc_expect(p, yxc_s_ident);
+    yxc_expect(p, yxc_s_equal);
+    yxc_then(p, yxc_expr);
+    yxc_end(p);
+}
+
+static void yxc_with_declarations_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_with_declaration(p);
+}
+
+static void yxc_with_declarations(yxc_parser *p)
+{
+    yxc_begin(p, YXC_WITH_DECLS);
+    yxc_then(p, yxc_with_declaration);
+    yxc_n_or_more(p, 0, yxc_with_declarations_tail);
+    yxc_end(p);
+    yxc_recover(p, yxc_s_colon_l_paren);
+}
+
+static void yxc_with_expr(yxc_parser *p)
+{
+    yxc_begin(p, YXC_WITH_EXPR);
+    yxc_expect(p, yxc_s_with);
+    yxc_then(p, yxc_with_declarations);
+    yxc_expect(p, yxc_s_colon);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_paren_body);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_boolean_term(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_BOOLEAN_TERM);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_bt_pattern);
+    yxc_alt_try(p, &alt, yxc_bt_bool);
+    yxc_alt_try(p, &alt, yxc_bt_not);
+    yxc_alt_try(p, &alt, yxc_for_expr);
+    yxc_alt_try(p, &alt, yxc_of_expr);
+    yxc_alt_try(p, &alt, yxc_with_expr);
+    yxc_alt_try(p, &alt, yxc_bt_comparison);
+    yxc_alt_try(p, &alt, yxc_bt_group);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_expr_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_operator);
+    yxc_then(p, yxc_term);
+}
+
+static void yxc_expr_body(yxc_parser *p)
+{
+    yxc_begin(p, YXC_EXPR);
+    yxc_then(p, yxc_term);
+    yxc_n_or_more(p, 0, yxc_expr_tail);
+    yxc_end(p);
+}
+
+static void yxc_expr(yxc_parser *p)
+{
+    yxc_cached(p, 0, yxc_expr_body);
+}
+
+static void yxc_func_call_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_then(p, yxc_boolean_expr);
+}
+
+static void yxc_func_call_args(yxc_parser *p)
+{
+    yxc_boolean_expr(p);
+    yxc_n_or_more(p, 0, yxc_func_call_tail);
+}
+
+static void yxc_func_call(yxc_parser *p)
+{
+    yxc_begin(p, YXC_FUNC_CALL);
+    yxc_expect(p, yxc_s_ident);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_opt(p, yxc_func_call_args);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_range(yxc_parser *p)
+{
+    yxc_begin(p, YXC_RANGE);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_expr);
+    yxc_expect(p, yxc_s_dot);
+    yxc_expect(p, yxc_s_dot);
+    yxc_then(p, yxc_expr);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_term_literal(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_literal);
+}
+
+static void yxc_term_count(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_pattern_count);
+    yxc_cond(p, yxc_s_in, yxc_range);
+}
+
+static void yxc_term_index(yxc_parser *p)
+{
+    yxc_expr(p);
+    yxc_expect(p, yxc_s_r_bracket);
+}
+
+static void yxc_term_offset(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_offset_length);
+    yxc_cond(p, yxc_s_l_bracket, yxc_term_index);
+}
+
+static void yxc_term_minus(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_minus);
+    yxc_then(p, yxc_term);
+}
+
+static void yxc_term_not(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_bitwise_not);
+    yxc_then(p, yxc_term);
+}
+
+static void yxc_term_group(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_then(p, yxc_expr);
+    yxc_expect(p, yxc_s_r_paren);
+}
+
+static void yxc_term_field_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_dot);
+    yxc_then(p, yxc_primary_expr);
+}
+
+static void yxc_term_field(yxc_parser *p)
+{
+    yxc_primary_expr(p);
+    yxc_n_or_more(p, 0, yxc_term_field_tail);
+}
+
+static void yxc_term_body(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_TERM);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_term_literal);
+    yxc_alt_try(p, &alt, yxc_term_count);
+    yxc_alt_try(p, &alt, yxc_term_offset);
+    yxc_alt_try(p, &alt, yxc_term_minus);
+    yxc_alt_try(p, &alt, yxc_term_not);
+    yxc_alt_try(p, &alt, yxc_term_group);
+    yxc_alt_try(p, &alt, yxc_term_field);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_term(yxc_parser *p)
+{
+    yxc_cached(p, 1, yxc_term_body);
+}
+
+static void yxc_primary_index(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_ident);
+    yxc_expect(p, yxc_s_l_bracket);
+    yxc_then(p, yxc_expr);
+    yxc_expect(p, yxc_s_r_bracket);
+}
+
+static void yxc_primary_expr(yxc_parser *p)
+{
+    yxc_alt alt;
+    yxc_begin(p, YXC_PRIMARY_EXPR);
+    alt = yxc_begin_alt(p);
+    yxc_alt_try(p, &alt, yxc_func_call);
+    yxc_alt_try(p, &alt, yxc_primary_index);
+    yxc_alt_try(p, &alt, yxc_expect_ident);
+    yxc_end_alt(p, &alt);
+    yxc_end(p);
+}
+
+static void yxc_pattern_ident_tuple_tail(yxc_parser *p)
+{
+    yxc_expect(p, yxc_s_comma);
+    yxc_expect(p, yxc_s_pattern_ident);
+    yxc_opt(p, yxc_expect_asterisk);
+}
+
+static void yxc_pattern_ident_tuple(yxc_parser *p)
+{
+    yxc_begin(p, YXC_PATTERN_IDENT_TUPLE);
+    yxc_expect(p, yxc_s_l_paren);
+    yxc_expect(p, yxc_s_pattern_ident);
+    yxc_opt(p, yxc_expect_asterisk);
+    yxc_n_or_more(p, 0, yxc_pattern_ident_tuple_tail);
+    yxc_expect(p, yxc_s_r_paren);
+    yxc_end(p);
+}
+
+static void yxc_top_level_item(yxc_parser *p)
+{
+    const yxc_tok *token = yxc_peek(p);
+    if (!token) {
+        yxc_set_state(p, YXC_STATE_FAILURE);
+        return;
+    }
+    switch (token->id) {
+    case YXC_IMPORT_KW: yxc_import_stmt(p); break;
+    case YXC_INCLUDE_KW: yxc_include_stmt(p); break;
+    case YXC_GLOBAL_KW:
+    case YXC_PRIVATE_KW:
+    case YXC_RULE_KW: yxc_rule_decl(p); break;
+    default:
+        /* "expecting import statement or rule definition" */
+        yxc_push_event(p, YXC_EV_MESSAGE, YXC_NONE, token->start, token->end);
+        yxc_out_begin(p, YXC_ERROR);
+        while ((token = yxc_peek_non_trivia(p)) != NULL &&
+               token->id != YXC_GLOBAL_KW && token->id != YXC_PRIVATE_KW &&
+               token->id != YXC_RULE_KW) {
+            yxc_trivia(p);
+            yxc_bump(p);
+            if (p->no_memory) break;
+        }
+        yxc_out_end(p, false);
+        yxc_set_state(p, YXC_STATE_FAILURE);
+        break;
+    }
+}
+
+/* Parses the whole source into the event stream. */
+static void yxc_parse(yxc_parser *p)
+{
+    yxc_push_event(p, YXC_EV_BEGIN, YXC_SOURCE_FILE, 0, p->length);
+    p->state = YXC_STATE_OK;
+    p->fuel = 100000000u;
+    p->generation = 1;
+    while (p->state != YXC_STATE_OUT_OF_FUEL && !p->no_memory &&
+           yxc_peek(p)) {
+        p->item_base = p->event_count;
+        yxc_trivia(p);
+        yxc_top_level_item(p);
+        /* flush_errors */
+        p->expected_errors = p->unexpected_errors = false;
+        if (p->pending_errors)
+            yxc_push_event(p, YXC_EV_MESSAGE, YXC_NONE, 0, 0);
+        p->pending_errors = false;
+        ++p->generation;
+        if (p->state != YXC_STATE_OUT_OF_FUEL) p->state = YXC_STATE_OK;
+    }
+    yxc_push_event(p, YXC_EV_END, YXC_SOURCE_FILE, 0, p->length);
+}
+
+static void yxc_parser_free(yxc_parser *p)
+{
+    free(p->tokens);
+    free(p->events);
+    free(p->open);
+    free(p->cache[0]);
+    free(p->cache[1]);
+}
+
+/* ErrorMerger: two ERROR nodes with nothing in between become one. Done in
+ * place. Returns false when out of memory. */
+static bool yxc_merge_errors(yxc_parser *p)
+{
+    size_t *open = NULL, open_count = 0, open_capacity = 0;
+    size_t in, out = 0;
+    for (in = 0; in < p->event_count; ++in) {
+        yxc_event event = p->events[in];
+        if (event.type == YXC_EV_BEGIN && event.kind == YXC_ERROR) {
+            if (open_count == open_capacity) {
+                size_t capacity = open_capacity ? open_capacity * 2 : 16;
+                size_t *larger = (size_t *)realloc(
+                    open, capacity * sizeof(*larger));
+                if (!larger) { free(open); return false; }
+                open = larger;
+                open_capacity = capacity;
+            }
+            open[open_count++] = out;
+            p->events[out++] = event;
+        } else if (event.type == YXC_EV_END && event.kind == YXC_ERROR &&
+                   open_count) {
+            if (in + 1 < p->event_count &&
+                p->events[in + 1].type == YXC_EV_BEGIN &&
+                p->events[in + 1].kind == YXC_ERROR) {
+                p->events[open[open_count - 1]].end = p->events[in + 1].end;
+                ++in;
+            } else {
+                size_t begin = open[--open_count];
+                event.start = p->events[begin].start;
+                event.end = p->events[begin].end;
+                p->events[out++] = event;
+            }
+        } else {
+            p->events[out++] = event;
+        }
+    }
+    p->event_count = out;
+    free(open);
+    return true;
+}
+
+/* ---- Formatter tokens -------------------------------------------------- */
+
+enum {
+    YXC_T_NONE, YXC_T_BEGIN, YXC_T_END, YXC_T_INDENTATION,
+    YXC_T_BLOCK_BEGIN, YXC_T_BLOCK_END, YXC_T_ALIGN_BEGIN, YXC_T_ALIGN_END,
+    YXC_T_ALIGN_MARKER, YXC_T_WHITESPACE, YXC_T_TAB, YXC_T_COMMENT,
+    YXC_T_BLOCK_COMMENT, YXC_T_HEAD_COMMENT, YXC_T_TAIL_COMMENT,
+    YXC_T_INLINE_COMMENT, YXC_T_NEWLINE, YXC_T_IDENTIFIER, YXC_T_KEYWORD,
+    YXC_T_PUNCTUATION, YXC_T_LITERAL, YXC_T_LGROUPING, YXC_T_RGROUPING
+};
+
+#define YXC_C_NONE         0x00001u
+#define YXC_C_BEGIN        0x00002u
+#define YXC_C_END          0x00004u
+#define YXC_C_BLOCK_BEGIN  0x00008u
+#define YXC_C_BLOCK_END    0x00010u
+#define YXC_C_ALIGN_BEGIN  0x00020u
+#define YXC_C_ALIGN_END    0x00040u
+#define YXC_C_ALIGN_MARKER 0x00080u
+#define YXC_C_INDENTATION  0x00100u
+#define YXC_C_WHITESPACE   0x00200u
+#define YXC_C_COMMENT      0x00400u
+#define YXC_C_NEWLINE      0x00800u
+#define YXC_C_PUNCTUATION  0x01000u
+#define YXC_C_IDENTIFIER   0x02000u
+#define YXC_C_KEYWORD      0x04000u
+#define YXC_C_LITERAL      0x08000u
+#define YXC_C_LGROUPING    0x10000u
+#define YXC_C_RGROUPING    0x20000u
+#define YXC_C_CONTROL (YXC_C_BEGIN | YXC_C_END | YXC_C_INDENTATION | \
+                       YXC_C_BLOCK_BEGIN | YXC_C_BLOCK_END | \
+                       YXC_C_ALIGN_BEGIN | YXC_C_ALIGN_END)
+#define YXC_C_TEXT (YXC_C_KEYWORD | YXC_C_PUNCTUATION | YXC_C_LGROUPING | \
+                    YXC_C_RGROUPING | YXC_C_IDENTIFIER | YXC_C_LITERAL)
+
+typedef struct yxc_line {
+    const uint8_t *text;
+    size_t length;
+} yxc_line;
+
+typedef struct yxc_lines {
+    yxc_line *items;
+    size_t count;
+    size_t capacity;
+    struct yxc_lines *next;
+} yxc_lines;
+
+typedef struct yxc_ftok {
+    uint8_t type;
+    int16_t value;          /* kind of Begin/End, levels of Indentation */
+    const uint8_t *text;    /* text tokens and unprocessed comments */
+    size_t length;
+    yxc_lines *lines;       /* processed comments */
+} yxc_ftok;
+
+typedef struct yxc_vec {
+    yxc_ftok *items;
+    size_t count;
+    size_t capacity;
+} yxc_vec;
+
+typedef struct yxc_fmt {
+    const yx_fmt_options *options;
+    size_t tab_size;
+    yxc_lines *all_lines;
+    bool no_memory;
+} yxc_fmt;
+
+static const yxc_ftok yxc_no_token = {YXC_T_NONE, 0, NULL, 0, NULL};
+
+static uint32_t yxc_category(const yxc_ftok *token)
+{
+    static const uint32_t categories[] = {
+        YXC_C_NONE, YXC_C_BEGIN, YXC_C_END, YXC_C_INDENTATION,
+        YXC_C_BLOCK_BEGIN, YXC_C_BLOCK_END, YXC_C_ALIGN_BEGIN,
+        YXC_C_ALIGN_END, YXC_C_ALIGN_MARKER, YXC_C_WHITESPACE,
+        YXC_C_WHITESPACE, YXC_C_COMMENT, YXC_C_COMMENT, YXC_C_COMMENT,
+        YXC_C_COMMENT, YXC_C_COMMENT, YXC_C_NEWLINE, YXC_C_IDENTIFIER,
+        YXC_C_KEYWORD, YXC_C_PUNCTUATION, YXC_C_LITERAL, YXC_C_LGROUPING,
+        YXC_C_RGROUPING
+    };
+    return categories[token->type];
+}
+
+static bool yxc_is(const yxc_ftok *token, uint32_t category)
+{
+    return (yxc_category(token) & category) != 0;
+}
+
+/* Token::len: the length of the token in text form. */
+static size_t yxc_len(const yxc_ftok *token)
+{
+    switch (token->type) {
+    case YXC_T_WHITESPACE:
+    case YXC_T_TAB:
+    case YXC_T_NEWLINE: return 1;
+    case YXC_T_IDENTIFIER:
+    case YXC_T_KEYWORD:
+    case YXC_T_PUNCTUATION:
+    case YXC_T_LITERAL:
+    case YXC_T_LGROUPING:
+    case YXC_T_RGROUPING:
+    case YXC_T_COMMENT: return token->length;
+    default: return 0;
+    }
+}
+
+static bool yxc_text_is(const yxc_ftok *token, int type, const char *text)
+{
+    size_t length = strlen(text);
+    return token->type == type && token->length == length &&
+           !memcmp(token->text, text, length);
+}
+
+static bool yxc_node_is(const yxc_ftok *token, int type, int kind)
+{
+    return token->type == type && token->value == kind;
+}
+
+static void yxc_push(yxc_fmt *f, yxc_vec *vec, const yxc_ftok *token)
+{
+    if (f->no_memory) return;
+    if (vec->count == vec->capacity) {
+        size_t capacity = vec->capacity ? vec->capacity * 2 : 256;
+        yxc_ftok *larger = (yxc_ftok *)realloc(vec->items,
+                                               capacity * sizeof(*larger));
+        if (!larger) { f->no_memory = true; return; }
+        vec->items = larger;
+        vec->capacity = capacity;
+    }
+    vec->items[vec->count++] = *token;
+}
+
+static void yxc_push_simple(yxc_fmt *f, yxc_vec *vec, int type, int value)
+{
+    yxc_ftok token = yxc_no_token;
+    token.type = (uint8_t)type;
+    token.value = (int16_t)value;
+    yxc_push(f, vec, &token);
+}
+
+/* Replaces `vec` with `out`. */
+static void yxc_replace(yxc_vec *vec, yxc_vec *out)
+{
+    free(vec->items);
+    *vec = *out;
+    out->items = NULL;
+    out->count = out->capacity = 0;
+}
+
+/* Token::new: the formatter token for a syntax kind. */
+static int yxc_token_type(int kind)
+{
+    if (kind >= YXC_ALL_KW && kind <= YXC_WITH_KW) return YXC_T_KEYWORD;
+    switch (kind) {
+    case YXC_COMMENT: return YXC_T_COMMENT;
+    case YXC_NEWLINE: return YXC_T_NEWLINE;
+    case YXC_ASTERISK:
+    case YXC_COLON:
+    case YXC_COMMA:
+    case YXC_DOT:
+    case YXC_EQUAL:
+    case YXC_L_BRACE:
+    case YXC_R_BRACE:
+    case YXC_MINUS:
+    case YXC_HYPHEN:
+    case YXC_PERCENT:
+    case YXC_PIPE:
+    case YXC_TILDE: return YXC_T_PUNCTUATION;
+    case YXC_L_BRACKET:
+    case YXC_L_PAREN: return YXC_T_LGROUPING;
+    case YXC_R_BRACKET:
+    case YXC_R_PAREN: return YXC_T_RGROUPING;
+    case YXC_IDENT:
+    case YXC_PATTERN_IDENT:
+    case YXC_PATTERN_COUNT:
+    case YXC_PATTERN_OFFSET:
+    case YXC_PATTERN_LENGTH: return YXC_T_IDENTIFIER;
+    default: return YXC_T_LITERAL;
+    }
+}
+
+/* Tokens::next (fmt/src/tokens/mod.rs): the events become formatter
+ * tokens; an ERROR node becomes one literal with its source text. */
+static void yxc_tokens(yxc_fmt *f, const yxc_parser *p, yxc_vec *out)
+{
+    size_t i;
+    for (i = 0; i < p->event_count && !f->no_memory; ++i) {
+        const yxc_event *event = &p->events[i];
+        yxc_ftok token = yxc_no_token;
+        if (event->type == YXC_EV_MESSAGE) continue;
+        if (event->type == YXC_EV_BEGIN && event->kind == YXC_ERROR) {
+            size_t depth = 1;
+            token.type = YXC_T_LITERAL;
+            token.text = p->source + event->start;
+            token.length = event->end - event->start;
+            while (depth && ++i < p->event_count) {
+                if (p->events[i].kind != YXC_ERROR) continue;
+                if (p->events[i].type == YXC_EV_BEGIN) ++depth;
+                else if (p->events[i].type == YXC_EV_END) --depth;
+            }
+            /* The original stops here when the events run out. */
+            if (depth) return;
+            yxc_push(f, out, &token);
+        } else if (event->type == YXC_EV_BEGIN) {
+            yxc_push_simple(f, out, YXC_T_BEGIN, event->kind);
+        } else if (event->type == YXC_EV_END) {
+            yxc_push_simple(f, out, YXC_T_END, event->kind);
+        } else if (event->kind == YXC_WHITESPACE) {
+            const uint8_t *at = p->source + event->start;
+            const uint8_t *end = p->source + event->end;
+            while (at < end) {
+                size_t width = yxc_space_len(at, end);
+                yxc_push_simple(f, out, *at == '\t' ? YXC_T_TAB :
+                                YXC_T_WHITESPACE, 0);
+                at += width ? width : 1;
+            }
+        } else {
+            token.type = (uint8_t)yxc_token_type(event->kind);
+            token.text = p->source + event->start;
+            token.length = event->end - event->start;
+            yxc_push(f, out, &token);
+        }
+    }
+}
+
+/* ---- Processor (fmt/src/processor/mod.rs) ------------------------------ */
+
+typedef struct yxc_ctx {
+    yxc_fmt *f;
+    const yxc_ftok *input;
+    size_t count;
+    size_t at;
+    yxc_vec *output;
+    uint32_t passthrough;
+    uint8_t *stack;
+    size_t depth, capacity;
+    yxc_ftok previous[3];
+    size_t previous_count;
+    int block_kind, item_kind;
+} yxc_ctx;
+
+typedef bool (*yxc_condition_fn)(const yxc_ctx *c);
+typedef void (*yxc_action_fn)(yxc_ctx *c);
+
+typedef struct yxc_rule {
+    yxc_condition_fn condition;
+    yxc_action_fn action;
+} yxc_rule;
+
+/* Context::token. */
+static const yxc_ftok *yxc_at(const yxc_ctx *c, int n)
+{
+    if (n > 0) {
+        size_t i;
+        for (i = c->at; i < c->count; ++i)
+            if (!yxc_is(&c->input[i], c->passthrough) && --n == 0)
+                return &c->input[i];
+        return &yxc_no_token;
+    }
+    n = -n - 1;
+    return (size_t)n < c->previous_count ? &c->previous[n] : &yxc_no_token;
+}
+
+static void yxc_track(yxc_ctx *c, const yxc_ftok *token)
+{
+    if (token->type == YXC_T_BEGIN) {
+        if (c->depth == c->capacity) {
+            size_t capacity = c->capacity ? c->capacity * 2 : 64;
+            uint8_t *larger = (uint8_t *)realloc(c->stack, capacity);
+            if (!larger) { c->f->no_memory = true; return; }
+            c->stack = larger;
+            c->capacity = capacity;
+        }
+        c->stack[c->depth++] = (uint8_t)token->value;
+    } else if (token->type == YXC_T_END && c->depth) {
+        --c->depth;
+    }
+}
+
+/* Context::push_output_token. */
+static void yxc_emit(yxc_ctx *c, const yxc_ftok *token)
+{
+    yxc_track(c, token);
+    if (!yxc_is(token, c->passthrough)) {
+        c->previous[2] = c->previous[1];
+        c->previous[1] = c->previous[0];
+        c->previous[0] = *token;
+        if (c->previous_count < 3) ++c->previous_count;
+    }
+    yxc_push(c->f, c->output, token);
+}
+
+static void yxc_emit_simple(yxc_ctx *c, int type, int value)
+{
+    yxc_ftok token = yxc_no_token;
+    token.type = (uint8_t)type;
+    token.value = (int16_t)value;
+    yxc_emit(c, &token);
+}
+
+/* Context::in_rule. */
+static bool yxc_in_rule(const yxc_ctx *c, int kind, bool deep)
+{
+    size_t top = c->depth, i;
+    if (c->at < c->count && c->input[c->at].type == YXC_T_END && top) --top;
+    if (!deep) return top && c->stack[top - 1] == kind;
+    for (i = 0; i < top; ++i)
+        if (c->stack[i] == kind) return true;
+    return false;
+}
+
+static void yxc_act_drop(yxc_ctx *c)
+{
+    if (c->at < c->count) ++c->at;
+}
+
+static void yxc_act_newline(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_NEWLINE, 0);
+}
+
+static void yxc_act_emptyline(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_NEWLINE, 0);
+    yxc_emit_simple(c, YXC_T_NEWLINE, 0);
+}
+
+static void yxc_act_space(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_WHITESPACE, 0);
+}
+
+static void yxc_act_two_spaces(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_WHITESPACE, 0);
+    yxc_emit_simple(c, YXC_T_WHITESPACE, 0);
+}
+
+static void yxc_act_indent(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_INDENTATION, 1);
+}
+
+static void yxc_act_dedent(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_INDENTATION, -1);
+}
+
+static void yxc_act_align_begin(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_ALIGN_BEGIN, 0);
+}
+
+static void yxc_act_align_end(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_ALIGN_END, 0);
+}
+
+static void yxc_act_align_split(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_ALIGN_END, 0);
+    yxc_emit_simple(c, YXC_T_ALIGN_BEGIN, 0);
+}
+
+static void yxc_act_align_marker(yxc_ctx *c)
+{
+    yxc_emit_simple(c, YXC_T_ALIGN_MARKER, 0);
+}
+
+/* Runs one processor over `vec` and replaces it with the output. */
+static void yxc_process(yxc_fmt *f, yxc_vec *vec, uint32_t passthrough,
+                        const yxc_rule *rules, size_t rule_count,
+                        int block_kind, int item_kind)
+{
+    yxc_vec out = {0};
+    yxc_ctx c;
+    size_t limit;
+    if (f->no_memory) return;
+    memset(&c, 0, sizeof(c));
+    c.f = f;
+    c.input = vec->items;
+    c.count = vec->count;
+    c.output = &out;
+    c.passthrough = passthrough;
+    c.block_kind = block_kind;
+    c.item_kind = item_kind;
+    /* No rule adds more than two tokens per input token; the limit only
+     * keeps a mistake from running away. */
+    limit = vec->count * 8 + 4096;
+    while (!f->no_memory) {
+        bool flushed = false, found = false;
+        size_t i;
+        /* Context::advance: pass-through tokens at the front of the input
+         * go directly to the output. */
+        while (c.at < c.count && yxc_is(&c.input[c.at], passthrough)) {
+            yxc_track(&c, &c.input[c.at]);
+            yxc_push(f, &out, &c.input[c.at]);
+            ++c.at;
+            flushed = true;
+        }
+        if (c.at >= c.count && !flushed) break;
+        for (i = 0; i < rule_count; ++i)
+            if (rules[i].condition(&c)) {
+                rules[i].action(&c);
+                found = true;
+                break;
+            }
+        if (!found && c.at < c.count) {
+            yxc_ftok token = c.input[c.at++];
+            yxc_emit(&c, &token);
+        }
+        if (out.count > limit) f->no_memory = true;
+    }
+    free(c.stack);
+    yxc_replace(vec, &out);
+}
+
+#define YXC_RUN(f, vec, passthrough, rules) \
+    yxc_process(f, vec, passthrough, rules, \
+                sizeof(rules) / sizeof((rules)[0]), 0, 0)
+
+/* ---- Comments (fmt/src/comments.rs) ------------------------------------ */
+
+static yxc_lines *yxc_lines_new(yxc_fmt *f)
+{
+    yxc_lines *lines = (yxc_lines *)calloc(1, sizeof(*lines));
+    if (!lines) { f->no_memory = true; return NULL; }
+    lines->next = f->all_lines;
+    f->all_lines = lines;
+    return lines;
+}
+
+/* split_comment_lines, appending to `lines`. */
+static void yxc_split_comment(yxc_fmt *f, yxc_lines *lines,
+                              const uint8_t *text, size_t length,
+                              size_t indentation, size_t tab_size)
+{
+    const uint8_t *at = text, *end = text + length;
+    if (!lines) return;
+    while (at < end) {
+        const uint8_t *stop = at, *next;
+        size_t columns = 0, start = 0, k, size;
+        while (stop < end && *stop != '\n') ++stop;
+        next = stop < end ? stop + 1 : stop;
+        if (stop < end && stop > at && stop[-1] == '\r') --stop;
+        size = (size_t)(stop - at);
+        for (k = 0; k < size; ++k) {
+            if (columns >= indentation) { start = k; break; }
+            if (at[k] == ' ') ++columns;
+            else if (at[k] == '\t') columns += tab_size;
+            else { start = k; break; }
+        }
+        if (lines->count == lines->capacity) {
+            size_t capacity = lines->capacity ? lines->capacity * 2 : 4;
+            yxc_line *larger = (yxc_line *)realloc(
+                lines->items, capacity * sizeof(*larger));
+            if (!larger) { f->no_memory = true; return; }
+            lines->items = larger;
+            lines->capacity = capacity;
+        }
+        lines->items[lines->count].text = at + start;
+        lines->items[lines->count].length = size - start;
+        ++lines->count;
+        at = next;
+    }
+}
+
+typedef struct yxc_comments {
+    yxc_fmt *f;
+    yxc_vec *output;
+    bool start_of_input;
+    bool end_of_input;
+    size_t indentation;
+} yxc_comments;
+
+static void yxc_push_comment(yxc_comments *s, yxc_lines *lines,
+                             bool leading_newline, bool trailing_newline)
+{
+    yxc_ftok token = yxc_no_token;
+    token.type = (uint8_t)(leading_newline ?
+        (trailing_newline ? YXC_T_BLOCK_COMMENT : YXC_T_HEAD_COMMENT) :
+        (trailing_newline ? YXC_T_TAIL_COMMENT : YXC_T_INLINE_COMMENT));
+    token.lines = lines;
+    yxc_push(s->f, s->output, &token);
+    if (trailing_newline) yxc_push_simple(s->f, s->output, YXC_T_NEWLINE, 0);
+}
+
+/* CommentProcessor::process_input_buffer. */
+static void yxc_process_comment_buffer(yxc_comments *s,
+                                       const yxc_ftok *buffer, size_t count)
+{
+    yxc_fmt *f = s->f;
+    size_t tab_size = f->tab_size, i;
+    bool in_comment = false;
+    bool leading_newline = s->start_of_input, trailing_newline = false;
+    size_t indentation = 0;
+    yxc_lines *lines = NULL;
+    for (i = 0; i < count && !f->no_memory; ++i) {
+        const yxc_ftok *token = &buffer[i];
+        if (!in_comment) {
+            if (token->type == YXC_T_WHITESPACE) {
+                ++s->indentation;
+                yxc_push(f, s->output, token);
+            } else if (token->type == YXC_T_TAB) {
+                s->indentation += tab_size;
+                yxc_push(f, s->output, token);
+            } else if (token->type == YXC_T_NEWLINE) {
+                s->indentation = 0;
+                yxc_push(f, s->output, token);
+                leading_newline = true;
+            } else if (token->type == YXC_T_COMMENT) {
+                in_comment = true;
+                indentation = s->indentation;
+                trailing_newline = false;
+                lines = yxc_lines_new(f);
+                yxc_split_comment(f, lines, token->text, token->length,
+                                  s->indentation, tab_size);
+                s->indentation += token->length;
+            } else {
+                yxc_push(f, s->output, token);
+            }
+        } else if (token->type == YXC_T_WHITESPACE) {
+            ++s->indentation;
+        } else if (token->type == YXC_T_TAB) {
+            s->indentation += tab_size;
+        } else if (token->type == YXC_T_NEWLINE) {
+            if (trailing_newline) {
+                yxc_push_comment(s, lines, leading_newline, true);
+                yxc_push_simple(f, s->output, YXC_T_NEWLINE, 0);
+                in_comment = false;
+                leading_newline = true;
+            } else {
+                trailing_newline = true;
+            }
+            s->indentation = 0;
+        } else if (token->type == YXC_T_COMMENT) {
+            if (indentation == s->indentation) {
+                yxc_split_comment(f, lines, token->text, token->length,
+                                  indentation, tab_size);
+                trailing_newline = false;
+            } else {
+                yxc_push_comment(s, lines, leading_newline,
+                                 trailing_newline);
+                indentation = s->indentation;
+                leading_newline = trailing_newline;
+                trailing_newline = false;
+                lines = yxc_lines_new(f);
+                yxc_split_comment(f, lines, token->text, token->length,
+                                  s->indentation, tab_size);
+            }
+        } else {
+            yxc_push(f, s->output, token);
+        }
+    }
+    if (in_comment && !f->no_memory)
+        yxc_push_comment(s, lines, leading_newline,
+                         trailing_newline || s->end_of_input);
+}
+
+static void yxc_process_comments(yxc_fmt *f, yxc_vec *vec)
+{
+    yxc_vec out = {0};
+    yxc_comments s;
+    size_t i, buffered = 0;
+    if (f->no_memory) return;
+    memset(&s, 0, sizeof(s));
+    s.f = f;
+    s.output = &out;
+    s.start_of_input = true;
+    for (i = 0; i < vec->count && !f->no_memory; ++i) {
+        const yxc_ftok *token = &vec->items[i];
+        if (yxc_is(token, YXC_C_NEWLINE | YXC_C_WHITESPACE | YXC_C_COMMENT |
+                          YXC_C_CONTROL)) {
+            ++buffered;
+            continue;
+        }
+        yxc_process_comment_buffer(&s, token - buffered, buffered);
+        buffered = 0;
+        s.start_of_input = false;
+        s.indentation += yxc_len(token);
+        yxc_push(f, &out, token);
+    }
+    if (buffered) {
+        s.end_of_input = true;
+        yxc_process_comment_buffer(&s, vec->items + vec->count - buffered,
+                                   buffered);
+    }
+    yxc_replace(vec, &out);
+}
+
+/* ---- Bubble (fmt/src/bubble.rs) ---------------------------------------- */
+
+typedef bool (*yxc_class_fn)(const yxc_ftok *token);
+
+static void yxc_bubble(yxc_fmt *f, yxc_vec *vec, yxc_class_fn is_air,
+                       yxc_class_fn is_water)
+{
+    yxc_vec out = {0};
+    size_t i, held = 0, k;
+    if (f->no_memory) return;
+    for (i = 0; i < vec->count; ++i) {
+        const yxc_ftok *token = &vec->items[i];
+        if (is_water(token)) {
+            /* Water is kept in `vec` itself, compacted to the front. */
+            vec->items[held++] = *token;
+        } else if (is_air(token)) {
+            yxc_push(f, &out, token);
+        } else {
+            yxc_ftok copy = *token;
+            for (k = 0; k < held; ++k) yxc_push(f, &out, &vec->items[k]);
+            held = 0;
+            yxc_push(f, &out, &copy);
+        }
+    }
+    for (k = 0; k < held; ++k) yxc_push(f, &out, &vec->items[k]);
+    yxc_replace(vec, &out);
+}
+
+static bool yxc_is_tail_comment_or_newline(const yxc_ftok *token)
+{
+    return token->type == YXC_T_TAIL_COMMENT || token->type == YXC_T_NEWLINE;
+}
+
+static bool yxc_is_begin_or_end(const yxc_ftok *token)
+{
+    return token->type == YXC_T_BEGIN || token->type == YXC_T_END;
+}
+
+static bool yxc_is_end(const yxc_ftok *token)
+{
+    return token->type == YXC_T_END;
+}
+
+static bool yxc_is_newline(const yxc_ftok *token)
+{
+    return token->type == YXC_T_NEWLINE;
+}
+
+static bool yxc_is_indentation(const yxc_ftok *token)
+{
+    return token->type == YXC_T_INDENTATION;
+}
+
+/* ---- The rules of fmt/src/lib.rs --------------------------------------- */
+
+#define YXC_NEXT(n) yxc_at(c, n)
+#define YXC_PREV(n) yxc_at(c, -(n))
+
+static bool yxc_lbrace(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_PUNCTUATION, "{");
+}
+
+static bool yxc_rbrace(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_PUNCTUATION, "}");
+}
+
+static bool yxc_colon(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_PUNCTUATION, ":");
+}
+
+static bool yxc_section_keyword(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_KEYWORD, "meta") ||
+           yxc_text_is(token, YXC_T_KEYWORD, "strings") ||
+           yxc_text_is(token, YXC_T_KEYWORD, "condition");
+}
+
+static bool yxc_dedent_before(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_PREV(1), YXC_T_INDENTATION, -1);
+}
+
+static bool yxc_r_import_newline(const yxc_ctx *c)
+{
+    const yxc_ftok *next = YXC_NEXT(1), *prev = YXC_PREV(1);
+    return (yxc_node_is(next, YXC_T_BEGIN, YXC_IMPORT_STMT) ||
+            yxc_node_is(next, YXC_T_BEGIN, YXC_INCLUDE_STMT)) &&
+           !yxc_node_is(prev, YXC_T_BEGIN, YXC_SOURCE_FILE) &&
+           !yxc_is(prev, YXC_C_NEWLINE);
+}
+
+static bool yxc_r_rule_newline(const yxc_ctx *c)
+{
+    const yxc_ftok *prev = YXC_PREV(1);
+    return yxc_node_is(YXC_NEXT(1), YXC_T_BEGIN, YXC_RULE_DECL) &&
+           !yxc_node_is(prev, YXC_T_BEGIN, YXC_SOURCE_FILE) &&
+           !yxc_is(prev, YXC_C_NEWLINE);
+}
+
+static bool yxc_r_whitespace(const yxc_ctx *c)
+{
+    return yxc_is(YXC_NEXT(1), YXC_C_WHITESPACE);
+}
+
+static bool yxc_r_leading_newline(const yxc_ctx *c)
+{
+    return yxc_is(YXC_PREV(1), YXC_C_NONE) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_three_newlines(const yxc_ctx *c)
+{
+    return yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           yxc_is(YXC_NEXT(2), YXC_C_NEWLINE) &&
+           yxc_is(YXC_NEXT(3), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_trailing_newline(const yxc_ctx *c)
+{
+    return yxc_is(YXC_PREV(1), YXC_C_NEWLINE) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           yxc_is(YXC_NEXT(2), YXC_C_NONE);
+}
+
+static bool yxc_r_header_newline(const yxc_ctx *c)
+{
+    return (yxc_in_rule(c, YXC_RULE_MODS, false) ||
+            yxc_in_rule(c, YXC_RULE_TAGS, false)) &&
+           !yxc_is(YXC_PREV(1), YXC_C_COMMENT) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_newline_after_mods(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_PREV(1), YXC_T_END, YXC_RULE_MODS) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_newline_after_tags(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_PREV(1), YXC_T_END, YXC_RULE_TAGS) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_newline_before_brace(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_RULE_DECL, false) &&
+           yxc_lbrace(YXC_NEXT(1)) && !yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_no_newline_before_brace(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_RULE_DECL, false) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           (yxc_lbrace(YXC_NEXT(2)) ||
+            (yxc_is(YXC_NEXT(2), YXC_C_NEWLINE) && yxc_lbrace(YXC_NEXT(3))));
+}
+
+static bool yxc_r_empty_line_before_rule(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_BEGIN, YXC_RULE_DECL) &&
+           yxc_is(YXC_PREV(1), YXC_C_NEWLINE) &&
+           !yxc_is(YXC_PREV(2), YXC_C_NEWLINE | YXC_C_COMMENT);
+}
+
+static bool yxc_r_section_no_newline(const yxc_ctx *c)
+{
+    return yxc_section_keyword(YXC_NEXT(1)) &&
+           !yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_section_one_newline(const yxc_ctx *c)
+{
+    return yxc_section_keyword(YXC_NEXT(1)) &&
+           yxc_is(YXC_PREV(1), YXC_C_NEWLINE) &&
+           !yxc_is(YXC_PREV(2), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_section_two_newlines(const yxc_ctx *c)
+{
+    return yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           yxc_section_keyword(YXC_NEXT(2)) &&
+           yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_first_section(const yxc_ctx *c)
+{
+    return yxc_r_section_two_newlines(c) && yxc_lbrace(YXC_PREV(2));
+}
+
+static bool yxc_after_section_header(const yxc_ctx *c)
+{
+    return yxc_colon(YXC_PREV(1)) && yxc_section_keyword(YXC_PREV(2));
+}
+
+static bool yxc_r_header_no_newline(const yxc_ctx *c)
+{
+    return yxc_after_section_header(c) &&
+           !yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_header_one_newline(const yxc_ctx *c)
+{
+    return yxc_after_section_header(c) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           !yxc_is(YXC_NEXT(2), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_header_two_newlines(const yxc_ctx *c)
+{
+    return yxc_after_section_header(c) &&
+           yxc_is(YXC_NEXT(1), YXC_C_NEWLINE) &&
+           yxc_is(YXC_NEXT(2), YXC_C_NEWLINE);
+}
+
+static bool yxc_definition_start(const yxc_ctx *c, int kind)
+{
+    return yxc_in_rule(c, kind, false) &&
+           yxc_is(YXC_NEXT(1), YXC_C_IDENTIFIER) &&
+           !yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_meta_def(const yxc_ctx *c)
+{
+    return yxc_definition_start(c, YXC_META_DEF);
+}
+
+static bool yxc_r_pattern_def(const yxc_ctx *c)
+{
+    return yxc_definition_start(c, YXC_PATTERN_DEF);
+}
+
+static bool yxc_r_with_decl(const yxc_ctx *c)
+{
+    return yxc_definition_start(c, YXC_WITH_DECL);
+}
+
+static bool yxc_r_closing_brace(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_RULE_DECL, false) &&
+           yxc_rbrace(YXC_NEXT(1)) && !yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_end_of_file(const yxc_ctx *c)
+{
+    return yxc_is(YXC_NEXT(1), YXC_C_NONE) &&
+           !yxc_is(YXC_PREV(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_r_body_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_RULE_DECL, false) && yxc_lbrace(YXC_PREV(1));
+}
+
+static bool yxc_r_body_dedent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_RULE_DECL, false) &&
+           yxc_rbrace(YXC_NEXT(1)) && !yxc_dedent_before(c);
+}
+
+static bool yxc_r_condition_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_CONDITION_BLK, false) &&
+           yxc_colon(YXC_PREV(1));
+}
+
+static bool yxc_r_condition_dedent(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, YXC_CONDITION_BLK) &&
+           !yxc_dedent_before(c);
+}
+
+static bool yxc_r_meta_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_META_BLK, false) && yxc_colon(YXC_PREV(1));
+}
+
+static bool yxc_r_meta_dedent(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, YXC_META_BLK) &&
+           !yxc_dedent_before(c);
+}
+
+static bool yxc_r_patterns_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_PATTERNS_BLK, false) &&
+           yxc_colon(YXC_PREV(1));
+}
+
+static bool yxc_r_patterns_dedent(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, YXC_PATTERNS_BLK) &&
+           !yxc_dedent_before(c);
+}
+
+static bool yxc_r_hex_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_HEX_PATTERN, true) && yxc_lbrace(YXC_PREV(1));
+}
+
+static bool yxc_r_hex_dedent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_HEX_PATTERN, true) &&
+           yxc_rbrace(YXC_NEXT(1)) && !yxc_dedent_before(c);
+}
+
+static bool yxc_r_paren_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_BOOLEAN_EXPR, true) &&
+           yxc_text_is(YXC_PREV(1), YXC_T_LGROUPING, "(");
+}
+
+static bool yxc_r_paren_dedent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_BOOLEAN_EXPR, true) &&
+           yxc_text_is(YXC_NEXT(1), YXC_T_RGROUPING, ")") &&
+           !yxc_dedent_before(c);
+}
+
+static bool yxc_r_with_indent(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_WITH_EXPR, false) &&
+           yxc_text_is(YXC_PREV(1), YXC_T_KEYWORD, "with");
+}
+
+static bool yxc_r_with_dedent(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, YXC_WITH_EXPR) &&
+           !yxc_dedent_before(c);
+}
+
+static bool yxc_r_newline_after_comment(const yxc_ctx *c)
+{
+    int type = YXC_PREV(1)->type;
+    return (type == YXC_T_HEAD_COMMENT || type == YXC_T_TAIL_COMMENT ||
+            type == YXC_T_BLOCK_COMMENT) &&
+           !yxc_is(YXC_NEXT(1), YXC_C_NEWLINE);
+}
+
+static bool yxc_hyphen(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_PUNCTUATION, "-");
+}
+
+static bool yxc_dot(const yxc_ftok *token)
+{
+    return yxc_text_is(token, YXC_T_PUNCTUATION, ".");
+}
+
+static bool yxc_r_space(const yxc_ctx *c)
+{
+    const yxc_ftok *prev = YXC_PREV(1), *next = YXC_NEXT(1);
+    bool add_space = yxc_is(prev, YXC_C_TEXT ^ YXC_C_LGROUPING) &&
+                     yxc_is(next, YXC_C_TEXT ^ YXC_C_RGROUPING);
+    bool drop_space;
+    if (!add_space) return false;
+    drop_space =
+        yxc_colon(next) ||
+        yxc_text_is(next, YXC_T_PUNCTUATION, ",") ||
+        yxc_hyphen(prev) ||
+        yxc_dot(prev) ||
+        yxc_dot(next) ||
+        (yxc_is(prev, YXC_C_IDENTIFIER) && yxc_is(next, YXC_C_LGROUPING)) ||
+        (yxc_is(prev, YXC_C_IDENTIFIER) &&
+         yxc_text_is(next, YXC_T_PUNCTUATION, "*")) ||
+        (yxc_in_rule(c, YXC_PATTERN_MOD, false) &&
+         yxc_is(next, YXC_C_LGROUPING)) ||
+        ((yxc_in_rule(c, YXC_PATTERN_MOD, false) ||
+          yxc_in_rule(c, YXC_HEX_JUMP, false)) &&
+         (yxc_hyphen(next) || yxc_hyphen(prev)));
+    return !drop_space;
+}
+
+static bool yxc_r_space_after_inline(const yxc_ctx *c)
+{
+    return YXC_PREV(1)->type == YXC_T_INLINE_COMMENT;
+}
+
+static bool yxc_r_spaces_before_comment(const yxc_ctx *c)
+{
+    return yxc_is(YXC_PREV(1), YXC_C_TEXT) &&
+           yxc_is(YXC_NEXT(1), YXC_C_COMMENT);
+}
+
+static bool yxc_r_hex_align_begin(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_PREV(1), YXC_T_BEGIN, YXC_HEX_PATTERN);
+}
+
+static bool yxc_r_hex_align_end(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, YXC_HEX_PATTERN) &&
+           YXC_PREV(1)->type != YXC_T_ALIGN_END;
+}
+
+static bool yxc_r_hex_align_marker(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, YXC_HEX_PATTERN, true) &&
+           YXC_NEXT(1)->type == YXC_T_TAIL_COMMENT &&
+           YXC_PREV(1)->type != YXC_T_ALIGN_MARKER;
+}
+
+static bool yxc_r_block_align_begin(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_PREV(1), YXC_T_BEGIN, c->block_kind);
+}
+
+static bool yxc_r_block_align_end(const yxc_ctx *c)
+{
+    return yxc_node_is(YXC_NEXT(1), YXC_T_END, c->block_kind) &&
+           YXC_PREV(1)->type != YXC_T_ALIGN_END;
+}
+
+static bool yxc_r_block_align_split(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, c->block_kind, false) &&
+           YXC_PREV(2)->type == YXC_T_NEWLINE &&
+           YXC_PREV(1)->type == YXC_T_NEWLINE;
+}
+
+static bool yxc_r_block_align_marker(const yxc_ctx *c)
+{
+    return yxc_in_rule(c, c->item_kind, false) &&
+           yxc_text_is(YXC_NEXT(1), YXC_T_PUNCTUATION, "=") &&
+           YXC_PREV(1)->type != YXC_T_ALIGN_MARKER;
+}
+
+/* ---- FormatHexPatterns (fmt/src/format_hex_patterns.rs) ---------------- */
+
+static void yxc_format_hex_patterns(yxc_fmt *f, yxc_vec *vec)
+{
+    yxc_vec out = {0}, buffer = {0};
+    bool buffering = false, in_hex_pattern = false, multi_line = false;
+    size_t i, k;
+    if (f->no_memory) return;
+    for (i = 0; i < vec->count && !f->no_memory; ++i) {
+        const yxc_ftok *next = &vec->items[i];
+        bool flush = true;
+        if (yxc_node_is(next, YXC_T_BEGIN, YXC_HEX_PATTERN)) {
+            in_hex_pattern = true;
+            multi_line = false;
+            buffering = false;
+            yxc_push(f, &buffer, next);
+        } else if (yxc_node_is(next, YXC_T_END, YXC_HEX_PATTERN)) {
+            in_hex_pattern = false;
+            yxc_push(f, &buffer, next);
+        } else if (in_hex_pattern && yxc_lbrace(next)) {
+            buffering = true;
+            yxc_push(f, &buffer, next);
+        } else if (in_hex_pattern && yxc_rbrace(next)) {
+            if (buffer.count &&
+                buffer.items[buffer.count - 1].type != YXC_T_NEWLINE &&
+                multi_line)
+                yxc_push_simple(f, &buffer, YXC_T_NEWLINE, 0);
+            yxc_push(f, &buffer, next);
+        } else if (in_hex_pattern && next->type == YXC_T_NEWLINE) {
+            yxc_push(f, &buffer, next);
+            if (!multi_line && !f->no_memory &&
+                buffer.items[0].type != YXC_T_NEWLINE)
+                yxc_push_simple(f, &out, YXC_T_NEWLINE, 0);
+            multi_line = true;
+        } else {
+            yxc_push(f, &buffer, next);
+            flush = !buffering;
+        }
+        if (flush) {
+            for (k = 0; k < buffer.count; ++k)
+                yxc_push(f, &out, &buffer.items[k]);
+            buffer.count = 0;
+        }
+    }
+    for (k = 0; k < buffer.count; ++k) yxc_push(f, &out, &buffer.items[k]);
+    free(buffer.items);
+    yxc_replace(vec, &out);
+}
+
+/* ---- Align (fmt/src/align.rs) ------------------------------------------ */
+
+static void yxc_align(yxc_fmt *f, yxc_vec *vec)
+{
+    yxc_vec out = {0};
+    size_t i = 0;
+    if (f->no_memory) return;
+    while (i < vec->count && !f->no_memory) {
+        size_t begin, end, column = 0, max_column = 0, k;
+        if (vec->items[i].type != YXC_T_ALIGN_BEGIN) {
+            yxc_push(f, &out, &vec->items[i++]);
+            continue;
+        }
+        begin = ++i;
+        for (end = begin; end < vec->count &&
+                          vec->items[end].type != YXC_T_ALIGN_END; ++end) {
+            const yxc_ftok *token = &vec->items[end];
+            if (token->type == YXC_T_ALIGN_MARKER) {
+                if (column > max_column) max_column = column;
+            } else if (token->type == YXC_T_NEWLINE) {
+                column = 0;
+            } else {
+                column += yxc_len(token);
+            }
+        }
+        column = 0;
+        for (k = begin; k < end; ++k) {
+            const yxc_ftok *token = &vec->items[k];
+            if (token->type == YXC_T_ALIGN_MARKER) {
+                size_t spaces = max_column - column;
+                while (spaces--) yxc_push_simple(f, &out, YXC_T_WHITESPACE, 0);
+            } else {
+                if (token->type == YXC_T_NEWLINE) column = 0;
+                else column += yxc_len(token);
+                yxc_push(f, &out, token);
+            }
+        }
+        i = end < vec->count ? end + 1 : end;
+    }
+    yxc_replace(vec, &out);
+}
+
+static void yxc_align_blocks(yxc_fmt *f, yxc_vec *vec, int block_kind,
+                             int item_kind)
+{
+    static const yxc_rule rules[] = {
+        {yxc_r_block_align_begin, yxc_act_align_begin},
+        {yxc_r_block_align_end, yxc_act_align_end},
+        {yxc_r_block_align_split, yxc_act_align_split},
+        {yxc_r_block_align_marker, yxc_act_align_marker},
+    };
+    yxc_process(f, vec, YXC_C_NONE, rules, sizeof(rules) / sizeof(rules[0]),
+                block_kind, item_kind);
+    yxc_align(f, vec);
+}
+
+/* ---- AddIndentation, RemoveTrailingSpaces, write_to -------------------- */
+
+static void yxc_add_indentation(yxc_fmt *f, yxc_vec *vec)
+{
+    yxc_vec out = {0};
+    int level = 0;
+    size_t i;
+    if (f->no_memory) return;
+    for (i = 0; i < vec->count && !f->no_memory; ++i) {
+        const yxc_ftok *token = &vec->items[i];
+        if (token->type == YXC_T_INDENTATION) {
+            level += token->value;
+        } else if (token->type == YXC_T_NEWLINE) {
+            int n;
+            yxc_push(f, &out, token);
+            for (n = 0; n < level; ++n) {
+                unsigned spaces = f->options->indent_spaces;
+                if (!spaces) yxc_push_simple(f, &out, YXC_T_TAB, 0);
+                while (spaces--)
+                    yxc_push_simple(f, &out, YXC_T_WHITESPACE, 0);
+            }
+        } else {
+            yxc_push(f, &out, token);
+        }
+    }
+    yxc_replace(vec, &out);
+}
+
+static void yxc_remove_trailing_spaces(yxc_fmt *f, yxc_vec *vec)
+{
+    yxc_vec out = {0};
+    size_t i, held = 0, k;
+    if (f->no_memory) return;
+    for (i = 0; i < vec->count && !f->no_memory; ++i) {
+        yxc_ftok token = vec->items[i];
+        if (token.type == YXC_T_WHITESPACE || token.type == YXC_T_TAB) {
+            vec->items[held++] = token;
+        } else if (token.type == YXC_T_NEWLINE) {
+            for (k = 0; k < held; ++k)
+                if (yxc_is(&vec->items[k], YXC_C_CONTROL))
+                    yxc_push(f, &out, &vec->items[k]);
+            held = 0;
+            yxc_push(f, &out, &token);
+        } else if (yxc_is(&token, YXC_C_CONTROL)) {
+            vec->items[held++] = token;
+        } else {
+            for (k = 0; k < held; ++k) yxc_push(f, &out, &vec->items[k]);
+            held = 0;
+            yxc_push(f, &out, &token);
+        }
+    }
+    for (k = 0; k < held; ++k) yxc_push(f, &out, &vec->items[k]);
+    yxc_replace(vec, &out);
+}
+
+/* TokenStream::write_to. */
+static bool yxc_write(const yxc_vec *vec, yx_fmt_buffer *output)
+{
+    yx_fmt_buffer indent = {0};
+    bool ok = true;
+    size_t i, k;
+    for (i = 0; i < vec->count && ok; ++i) {
+        const yxc_ftok *token = &vec->items[i];
+        switch (token->type) {
+        case YXC_T_NEWLINE:
+            ok = yx_fmt_char(output, '\n');
+            indent.length = 0;
+            break;
+        case YXC_T_TAB:
+            ok = yx_fmt_char(output, '\t') && yx_fmt_char(&indent, '\t');
+            break;
+        case YXC_T_WHITESPACE:
+            ok = yx_fmt_char(output, ' ') && yx_fmt_char(&indent, ' ');
+            break;
+        case YXC_T_COMMENT:
+        case YXC_T_IDENTIFIER:
+        case YXC_T_KEYWORD:
+        case YXC_T_LITERAL:
+        case YXC_T_LGROUPING:
+        case YXC_T_RGROUPING:
+        case YXC_T_PUNCTUATION:
+            ok = yx_fmt_append(output, token->text, token->length) &&
+                 yx_fmt_spaces(&indent, token->length);
+            break;
+        case YXC_T_BLOCK_COMMENT:
+        case YXC_T_HEAD_COMMENT:
+        case YXC_T_TAIL_COMMENT:
+        case YXC_T_INLINE_COMMENT:
+            for (k = 0; token->lines && k < token->lines->count && ok; ++k) {
+                if (k)
+                    ok = yx_fmt_char(output, '\n') &&
+                         yx_fmt_append(output, indent.data, indent.length);
+                ok = ok && yx_fmt_append(output, token->lines->items[k].text,
+                                         token->lines->items[k].length);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    free(indent.data);
+    return ok;
+}
+
+/* Formatter::format_impl. */
+static void yxc_format_tokens(yxc_fmt *f, yxc_vec *tokens)
+{
+    const yx_fmt_options *options = f->options;
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_import_newline, yxc_act_newline},
+            {yxc_r_rule_newline, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    yxc_process_comments(f, tokens);
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_whitespace, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    yxc_bubble(f, tokens, yxc_is_tail_comment_or_newline,
+               yxc_is_begin_or_end);
+    yxc_bubble(f, tokens, yxc_is_end, yxc_is_newline);
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_leading_newline, yxc_act_drop},
+            {yxc_r_three_newlines, yxc_act_drop},
+            {yxc_r_trailing_newline, yxc_act_drop},
+            {yxc_r_header_newline, yxc_act_drop},
+            {yxc_r_newline_after_mods, yxc_act_drop},
+            {yxc_r_newline_after_tags, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    if (options->newline_before_curly_brace) {
+        static const yxc_rule rules[] = {
+            {yxc_r_newline_before_brace, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    } else {
+        static const yxc_rule rules[] = {
+            {yxc_r_no_newline_before_brace, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_empty_line_before_rule, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    if (options->empty_line_before_section_header) {
+        static const yxc_rule rules[] = {
+            {yxc_r_section_no_newline, yxc_act_emptyline},
+            {yxc_r_section_one_newline, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    } else {
+        static const yxc_rule rules[] = {
+            {yxc_r_section_no_newline, yxc_act_newline},
+            {yxc_r_section_two_newlines, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_first_section, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    }
+    if (options->empty_line_after_section_header) {
+        static const yxc_rule rules[] = {
+            {yxc_r_header_no_newline, yxc_act_emptyline},
+            {yxc_r_header_one_newline, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    } else {
+        static const yxc_rule rules[] = {
+            {yxc_r_header_no_newline, yxc_act_newline},
+            {yxc_r_header_two_newlines, yxc_act_drop},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_meta_def, yxc_act_newline},
+            {yxc_r_pattern_def, yxc_act_newline},
+            {yxc_r_with_decl, yxc_act_newline},
+            {yxc_r_closing_brace, yxc_act_newline},
+            {yxc_r_end_of_file, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    }
+    yxc_format_hex_patterns(f, tokens);
+    if (options->indent_section_headers) {
+        static const yxc_rule rules[] = {
+            {yxc_r_body_indent, yxc_act_indent},
+            {yxc_r_body_dedent, yxc_act_dedent},
+        };
+        YXC_RUN(f, tokens, YXC_C_COMMENT, rules);
+    }
+    if (options->indent_section_contents) {
+        static const yxc_rule rules[] = {
+            {yxc_r_condition_indent, yxc_act_indent},
+            {yxc_r_condition_dedent, yxc_act_dedent},
+            {yxc_r_meta_indent, yxc_act_indent},
+            {yxc_r_meta_dedent, yxc_act_dedent},
+            {yxc_r_patterns_indent, yxc_act_indent},
+            {yxc_r_patterns_dedent, yxc_act_dedent},
+        };
+        YXC_RUN(f, tokens, YXC_C_COMMENT, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_hex_indent, yxc_act_indent},
+            {yxc_r_hex_dedent, yxc_act_dedent},
+        };
+        YXC_RUN(f, tokens, YXC_C_COMMENT, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_paren_indent, yxc_act_indent},
+            {yxc_r_paren_dedent, yxc_act_dedent},
+        };
+        YXC_RUN(f, tokens, YXC_C_COMMENT, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_with_indent, yxc_act_indent},
+            {yxc_r_with_dedent, yxc_act_dedent},
+        };
+        YXC_RUN(f, tokens, YXC_C_COMMENT, rules);
+    }
+    yxc_bubble(f, tokens, yxc_is_indentation, yxc_is_newline);
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_newline_after_comment, yxc_act_newline},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_space, yxc_act_space},
+            {yxc_r_space_after_inline, yxc_act_space},
+            {yxc_r_spaces_before_comment, yxc_act_two_spaces},
+        };
+        YXC_RUN(f, tokens, YXC_C_CONTROL, rules);
+    }
+    {
+        static const yxc_rule rules[] = {
+            {yxc_r_hex_align_begin, yxc_act_align_begin},
+            {yxc_r_hex_align_end, yxc_act_align_end},
+            {yxc_r_hex_align_marker, yxc_act_align_marker},
+        };
+        YXC_RUN(f, tokens, YXC_C_NONE, rules);
+        yxc_align(f, tokens);
+    }
+    if (options->align_metadata)
+        yxc_align_blocks(f, tokens, YXC_META_BLK, YXC_META_DEF);
+    if (options->align_patterns)
+        yxc_align_blocks(f, tokens, YXC_PATTERNS_BLK, YXC_PATTERN_DEF);
+    yxc_add_indentation(f, tokens);
+    yxc_remove_trailing_spaces(f, tokens);
+}
+
+/* Formats `source` the way the official formatter does: through the
+ * lossless syntax tree, so that a source with syntax errors still gets
+ * every well-formed part formatted and only the text of its ERROR nodes is
+ * kept as it is.
+ *
+ * Invalid UTF-8 is an error only where the tokenizer makes an INVALID_UTF8
+ * token of it, which is anywhere but inside string literals, regular
+ * expressions and comments. `*invalid_utf8` gets the offset of the first
+ * such token, or SIZE_MAX; when there is one nothing is formatted.
+ *
+ * Returns YX_FMT_UNSUPPORTED only for a source the tokenizer does not
+ * accept (4 GiB or more). */
+static yx_fmt_result yx_fmt_cst(const uint8_t *source, size_t length,
+                                yx_fmt_buffer *output, size_t tab_size,
+                                const yx_fmt_options *options,
+                                size_t *invalid_utf8)
+{
+    yxc_parser parser;
+    yxc_fmt f;
+    yxc_vec tokens = {0};
+    yx_fmt_result result = YX_FMT_NO_MEMORY;
+    size_t i;
+    *invalid_utf8 = SIZE_MAX;
+    /* The tokenizer refuses sources whose offsets do not fit its spans. */
+    if (length >= UINT32_MAX) return YX_FMT_UNSUPPORTED;
+    memset(&parser, 0, sizeof(parser));
+    memset(&f, 0, sizeof(f));
+    parser.source = source;
+    parser.length = length;
+    yxc_parse(&parser);
+    if (parser.no_memory) goto done;
+    for (i = 0; i < parser.event_count; ++i)
+        if (parser.events[i].type == YXC_EV_TOKEN &&
+            parser.events[i].kind == YXC_INVALID_UTF8) {
+            *invalid_utf8 = parser.events[i].start;
+            result = YX_FMT_OK;
+            goto done;
+        }
+    if (!yxc_merge_errors(&parser)) goto done;
+    f.options = options;
+    f.tab_size = tab_size;
+    yxc_tokens(&f, &parser, &tokens);
+    yxc_format_tokens(&f, &tokens);
+    if (f.no_memory) goto done;
+    output->length = 0;
+    if (output->data) output->data[0] = 0;
+    if (!yxc_write(&tokens, output)) goto done;
+    /* An empty result still has to be a valid buffer for the caller. */
+    if (!output->data && !yx_fmt_append(output, "", 0)) goto done;
+    result = YX_FMT_OK;
+done:
+    while (f.all_lines) {
+        yxc_lines *next = f.all_lines->next;
+        free(f.all_lines->items);
+        free(f.all_lines);
+        f.all_lines = next;
+    }
+    free(tokens.items);
+    yxc_parser_free(&parser);
+    return result;
+}
+
 static int yx_fmt_file(const char *path, bool check, size_t tab_size,
                        const yx_fmt_options *options)
 {
@@ -21473,12 +24850,24 @@ static int yx_fmt_file(const char *path, bool check, size_t tab_size,
                 path, yx_os_error_text(yx_os_error_last()));
         return -1;
     }
-    if (yx_fmt_invalid_utf8(source, length, &bad_start, &bad_end)) {
+    /* Every source is formatted through the syntax tree, as the official
+     * formatter does it. The rule-based formatter is left for a source the
+     * tokenizer does not accept. */
+    result = yx_fmt_cst(source, length, &output, tab_size, options,
+                        &bad_start);
+    if (result == YX_FMT_OK && bad_start != SIZE_MAX) {
         fprintf(stderr, "error: invalid UTF-8 at [%zu..%zu]\n",
-                bad_start, bad_end);
+                bad_start, bad_start + 1);
         goto done;
     }
-    result = yx_fmt_pipeline(source, length, &output, tab_size, options);
+    if (result == YX_FMT_UNSUPPORTED) {
+        if (yx_fmt_invalid_utf8(source, length, &bad_start, &bad_end)) {
+            fprintf(stderr, "error: invalid UTF-8 at [%zu..%zu]\n",
+                    bad_start, bad_end);
+            goto done;
+        }
+        result = yx_fmt_pipeline(source, length, &output, tab_size, options);
+    }
     if (result != YX_FMT_OK) {
         fprintf(stderr, "error: %s while formatting `%s`\n",
                 result == YX_FMT_NO_MEMORY ? "out of memory" :
@@ -30350,8 +33739,6 @@ static bool yx_fix_warn_invariant_of(const char *path, bool enabled,
 static bool yx_fix_warn_redundant_modifier(const char *path, bool enabled,
                                             bool warning_from_core,
                                             size_t *warnings);
-static bool yx_fix_warn_unsat_at(const char *path, bool enabled,
-                                  bool warning_from_core, size_t *warnings);
 static bool yx_fix_warn_too_many_iterations(const char *path, bool enabled,
                                               bool warning_from_core,
                                               size_t *warnings);
@@ -30868,9 +34255,6 @@ static int yx_cli_check_file(const char *path,
         (result == YRX_SUCCESS &&
          !yx_fix_warn_redundant_modifier(path, true, core_redundant,
                                           &redundant_warnings)) ||
-        ((result == YRX_SUCCESS || failed_unused_pattern_rule) &&
-         !yx_fix_warn_unsat_at(path, true, core_unsat,
-                                &unsat_warnings)) ||
         ((result == YRX_SUCCESS || failed_unused_pattern_rule) &&
          !yx_fix_warn_unsat_lengths_ranges(path, true, core_unsat,
                                             &unsat_warnings, NULL)) ||
@@ -31669,6 +35053,15 @@ static bool yx_fix_patch_jumps(const char *path, bool enabled,
                          min, max);
             if (n < 0 || (size_t)n >= sizeof(replacement) ||
                 end - start > 60 || copied > start) continue;
+            if (yx_warning_suppressed((const uint8_t *)source, length,
+                                      "consecutive_jumps", start) &&
+                yx_warning_suppressed((const uint8_t *)source, length,
+                                      "consecutive_jumps", end - 1)) {
+                copied = end;
+                while (j + 1 < close &&
+                       (size_t)(tokens.items[j + 1].text - source) < end) ++j;
+                continue;
+            }
             if (patches && !warning_from_core &&
                 !yx_fix_patches_add(patches, path, start, end,
                                     replacement, (size_t)n)) goto done;
@@ -32596,123 +35989,6 @@ static bool yx_fix_comment_suppresses(const uint8_t *source, size_t begin,
         i = comment_end;
     }
     return false;
-}
-
-static void yx_fix_unsat_at_warning(const char *path, const uint8_t *source,
-                                     size_t length, size_t first,
-                                     size_t first_length, size_t at,
-                                     size_t end)
-{
-    size_t line = 1, line_start = 0, line_end = end, column, digits;
-    char number[32];
-    for (size_t i = 0; i < first; ++i)
-        if (source[i] == '\n') { ++line; line_start = i + 1; }
-    while (line_end < length && source[line_end] != '\n' &&
-           source[line_end] != '\r') ++line_end;
-    column = first - line_start + 1;
-    snprintf(number, sizeof(number), "%zu", line);
-    digits = strlen(number);
-    fprintf(stderr,
-            "warning[unsatisfiable_expr]: potentially unsatisfiable expression\n"
-            "%*s--> %s:%zu:%zu\n%*s|\n"
-            "%zu | %.*s\n%*s| %*s",
-            (int)digits, "", path, line, column, (int)(digits + 1), "",
-            line, (int)(line_end - line_start), source + line_start,
-            (int)(digits + 1), "", (int)(column - 1), "");
-    for (size_t i = 0; i < first_length; ++i) fputc('-', stderr);
-    for (size_t i = first + first_length; i < at; ++i) fputc(' ', stderr);
-    for (size_t i = at; i < end; ++i) fputc('-', stderr);
-    fprintf(stderr,
-            " but they must match at the same offset\n"
-            "%*s| %*s|\n"
-            "%*s| %*sthis implies that multiple patterns must match\n",
-            (int)(digits + 1), "", (int)(column - 1), "",
-            (int)(digits + 1), "", (int)(column - 1), "");
-}
-
-static bool yx_fix_warn_unsat_at(const char *path, bool enabled,
-                                  bool warning_from_core, size_t *warnings)
-{
-    uint8_t *source = NULL;
-    size_t length = 0;
-    yx_dep_tokens tokens = {0};
-    bool ok = false;
-    if (!enabled || warning_from_core) return true;
-    if (!yx_cli_read_file(path, &source, &length) ||
-        !yx_dep_lex(source, length, &tokens)) goto done;
-    for (size_t i = 0; i + 4 < tokens.count; ++i) {
-        size_t count, required = 0, value, j, rule_begin = SIZE_MAX;
-        size_t first, at, end;
-        bool in_condition = false;
-        if (yx_dep_equal(&tokens.items[i], "all")) required = 2;
-        else if (!yx_fix_decimal_token(&tokens.items[i], &required) ||
-                 required < 2) continue;
-        if (!yx_dep_equal(&tokens.items[i + 1], "of")) continue;
-        for (size_t k = i; k > 0; --k) {
-            if (yx_dep_equal(&tokens.items[k - 1], "rule")) {
-                rule_begin = k - 1;
-                break;
-            }
-        }
-        if (rule_begin == SIZE_MAX) continue;
-        count = 0;
-        for (size_t k = rule_begin; k < i; ++k) {
-            if (yx_dep_equal(&tokens.items[k], "condition"))
-                in_condition = true;
-            if (k + 1 < i && tokens.items[k].kind == YX_DEP_OTHER &&
-                tokens.items[k].length && tokens.items[k].text[0] == '$' &&
-                yx_dep_symbol(&tokens.items[k + 1], '=')) ++count;
-        }
-        if (!in_condition || count < required) continue;
-        j = i + 2;
-        if (yx_dep_equal(&tokens.items[j], "them")) ++j;
-        else if (yx_dep_symbol(&tokens.items[j], '(')) {
-            while (++j < tokens.count &&
-                   !yx_dep_symbol(&tokens.items[j], ')')) { }
-            if (j == tokens.count) continue;
-            ++j;
-        } else continue;
-        if (j + 1 >= tokens.count ||
-            !yx_dep_equal(&tokens.items[j], "at") ||
-            !yx_fix_decimal_token(&tokens.items[j + 1], &value)) continue;
-        first = (size_t)(tokens.items[i].text - source);
-        at = (size_t)(tokens.items[j].text - source);
-        end = (size_t)(tokens.items[j + 1].text - source) +
-              tokens.items[j + 1].length;
-        if (memchr(source + first, '\n', end - first)) continue;
-        {
-            size_t rule_start = (size_t)(tokens.items[rule_begin].text -
-                                         source);
-            size_t rule_prev_end = rule_begin ?
-                (size_t)(tokens.items[rule_begin - 1].text - source) +
-                    tokens.items[rule_begin - 1].length : 0;
-            size_t prev_end = i ?
-                (size_t)(tokens.items[i - 1].text - source) +
-                    tokens.items[i - 1].length : 0;
-            size_t next_start = j + 2 < tokens.count ?
-                (size_t)(tokens.items[j + 2].text - source) : length;
-            size_t line_end = end;
-            while (line_end < length && source[line_end] != '\n')
-                ++line_end;
-            if (next_start > line_end) next_start = line_end;
-            if (yx_fix_comment_suppresses(source, rule_prev_end,
-                                           rule_start, "unsatisfiable_expr",
-                                           true) ||
-                yx_fix_comment_suppresses(source, prev_end, first,
-                                           "unsatisfiable_expr", true) ||
-                yx_fix_comment_suppresses(source, end, next_start,
-                                           "unsatisfiable_expr", false))
-                continue;
-        }
-        yx_fix_unsat_at_warning(path, source, length, first,
-                                 tokens.items[i].length, at, end);
-        ++*warnings;
-    }
-    ok = true;
-done:
-    free(source);
-    free(tokens.items);
-    return ok;
 }
 
 static bool yx_fix_read_integer_range(const yx_dep_token *name,
@@ -33979,8 +37255,7 @@ done:
 
 static bool yx_cli_check_unsat_file(const char *path, size_t *warnings)
 {
-    return yx_fix_warn_unsat_at(path, true, false, warnings) &&
-           yx_fix_warn_unsat_lengths_ranges(path, true, false, warnings,
+    return yx_fix_warn_unsat_lengths_ranges(path, true, false, warnings,
                                              NULL);
 }
 
@@ -34138,6 +37413,12 @@ static bool yx_fix_patch_imports_range(const char *path, bool enabled,
         first_column = first_start - first_line_start + 1;
         duplicate_column = duplicate_start - duplicate_line_start + 1;
         if (duplicate_start < from || duplicate_start >= to) {
+            copied = duplicate_end;
+            ++i;
+            continue;
+        }
+        if (yx_warning_suppressed(source, length, "duplicate_import", first_start) ||
+            yx_warning_suppressed(source, length, "duplicate_import", duplicate_start)) {
             copied = duplicate_end;
             ++i;
             continue;
@@ -34690,11 +37971,6 @@ static int yx_cli_fix_warnings(int argc, char **argv)
                                  !yx_cli_warning_disabled("ambiguous_expr",
                                                           &disabled),
                                  core_ambiguous, &warnings, &patches) &&
-            yx_fix_warn_unsat_at(files.items[i],
-                                   !disable_all &&
-                                   !yx_cli_warning_disabled("unsatisfiable_expr",
-                                                            &disabled),
-                                   core_unsat, &warnings) &&
             yx_fix_warn_unsat_lengths_ranges(
                 files.items[i], !disable_all &&
                 !yx_cli_warning_disabled("unsatisfiable_expr", &disabled),

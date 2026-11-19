@@ -611,6 +611,14 @@ static bool yx_pattern_expression_wasm(yx_integer_expr *tree,int root,yx_pattern
     for(size_t i=0;i<yx_pattern_capacity(c);++i)yx_pattern_limits(c)[i]=1;
     tree->has_filesize=tree->has_shift=tree->has_divisor=tree->has_memory=tree->has_loop=false;tree->read_mask=0;tree->small_shift=true;
     if(!yx_integer_expr_resources(tree,root,0,0)||!c->used[1]||!yx_pattern_expression_header(tree,root,c,profile,&wasm))goto done;
+    /* disallow_fast_scan (ast2ir.rs) runs for every offset, length, anchored
+     * match and ranged count the condition names, also in an operand that
+     * IR::and / IR::or fold away afterwards and the walk above skips. */
+    for(size_t n=0;n<tree->count;++n) {
+        const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
+        if(node->op>=0xd3&&node->op<=0xd7&&node->value>=0&&(uint64_t)node->value<yx_pattern_capacity(c))
+            yx_pattern_limits(c)[node->value]=0;
+    }
     bool locals=tree->has_filesize||tree->has_shift||tree->has_divisor||tree->has_loop;
     if(!yx_put_u8(&body,locals?1:0)||(locals&&(!yx_put_u8(&body,tree->has_loop||
        (tree->has_shift&&(!tree->small_shift||tree->has_filesize||tree->has_divisor))?2:1)||!yx_put_u8(&body,0x7e)))||

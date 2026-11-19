@@ -642,6 +642,40 @@ static bool yx_physical_set_condition(const yx_physical_archive *a,char **source
     }
     return false;
 }
+/* IR::or and IR::and fold a condition with an absorbing constant
+ * (`$a or true`) to that constant, after ast2ir.rs has marked the patterns
+ * as used: the archive keeps the patterns and its module is that of the
+ * constant alone. */
+static bool yx_physical_folded(const yx_physical_archive *a,bool *truth)
+{
+    for(unsigned choice=0;choice<2;++choice) {
+        uint8_t *wasm=NULL;size_t length=0;
+        *truth=choice==0;
+        bool exact=yx_make_constant_wasm(truth,NULL,1,&wasm,&length,NULL)&&
+            length==a->wasm_length&&!memcmp(wasm,a->wasm,length);
+        free(wasm);if(exact)return true;
+    }
+    return false;
+}
+/* The source that folds the same way names every pattern, in the
+ * ` and (true or $a)` terms the composed rules use for a pattern without an
+ * operand of its own. */
+static bool yx_physical_folded_condition(const yx_physical_archive *a,char **source,uint8_t *profile)
+{
+    bool truth;yx_writer text={0};
+    if(!yx_physical_folded(a,&truth))return false;
+    bool ok=yx_tr_text(&text,truth?"true":"false");
+    for(size_t i=0;ok&&i<a->logical;++i) {
+        char anchor[32]="";
+        for(size_t f=0;f<a->frame_count;++f)
+            if(a->frames[f].pattern==a->mapping[i]&&a->frames[f].anchored) {
+                snprintf(anchor,sizeof(anchor)," at %" PRIu64,a->frames[f].offset);break;
+            }
+        ok=yx_tr_text(&text," and (true or ")&&yx_tr_text(&text,a->names[a->name_ids[i]])&&yx_tr_text(&text,anchor)&&yx_put_u8(&text,')');
+    }
+    if(!ok||!yx_put_u8(&text,0)){free(text.data);return false;}
+    *source=(char *)text.data;*profile=0;return true;
+}
 /* A part's Aho-Corasick automaton is built from its atoms, which precede it,
  * and is never read back: a composition builds its own from all atoms.
  * Parts are retained until write, so drop the automaton payload (leaving an
@@ -948,6 +982,21 @@ static bool yx_physical_condition(const yx_physical_archive *a,char **condition,
         if(!yx_pattern_names(&c)[a->mapping[i]])yx_pattern_names(&c)[a->mapping[i]]=a->names[a->name_ids[i]];
     c.name=yx_pattern_names(&c)[0];
     if(!yx_put_u8(&source,'(')||!yx_integer_expr_print(tree,root,&source,0,false,0)||!yx_put_u8(&source,')'))goto done;
+    /* A pattern whose operands IR::and / IR::or folded away has no operand
+     * in the module: name it in a term that folds away again, with a range
+     * when the archive tracks all its matches (disallow_fast_scan ran for
+     * the folded operand). Sets name their patterns themselves. */
+    for(size_t i=0;!c.of_set_count&&i<a->logical;++i) {
+        bool read=false;
+        for(size_t q=0;q<i;++q)read|=a->mapping[q]==a->mapping[i];
+        for(size_t n=0;!read&&n<tree->count;++n) {
+            const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
+            read=node->op>=0xd1&&node->op<=0xd7&&node->value==(int64_t)a->mapping[i];
+        }
+        if(read)continue;
+        if(!yx_tr_text(&source," and (true or ")||!yx_tr_text(&source,a->names[a->name_ids[i]])||
+           !yx_tr_text(&source,a->limits[a->mapping[i]]?")":" in (0..1))"))goto done;
+    }
     for(size_t i=0;i<a->logical;++i) {
         char anchor[32]="";
         if(!strcmp(yx_pattern_names(&c)[a->mapping[i]],a->names[a->name_ids[i]]))continue;
@@ -962,7 +1011,7 @@ static bool yx_physical_condition(const yx_physical_archive *a,char **condition,
     if(!yx_put_u8(&source,0))goto done;
     *condition=(char *)source.data;source.data=NULL;*profile_out=profile;ok=true;
 done:tree->legacy_boolean_or=false;yx_pattern_expression_destroy(&c);yx_integer_expr_free(tree);free(canonical);free(source.data);
-    return ok||yx_physical_set_condition(a,condition,profile_out);
+    return ok||yx_physical_set_condition(a,condition,profile_out)||yx_physical_folded_condition(a,condition,profile_out);
 }
 static bool yx_physical_hex(yx_writer *w,const yx_hex_atom *atoms,size_t count,unsigned depth)
 {
@@ -1572,7 +1621,11 @@ static yx_ser_result yx_physical_load_part(const yx_physical_parts_job *job,size
         }
         one->anchored_count=0;yx_chain_storage_destroy(literal);free(literal);
     }
-    YRX_RULES *direct=NULL;
+    YRX_RULES *direct=NULL;bool truth;
+    /* One pattern under a plain `$a` belongs to the earlier codecs, which
+     * reach this one for a literal only; under a folded condition the part
+     * (with the module of `$a`) is theirs to read. */
+    bool inspect=a->logical!=1||yx_physical_folded(a,&truth);
     if(a->logical!=1&&yx_physical_part_direct(one,&direct)) {
 #ifndef XXYARA_VERIFY_LOAD
         *out=direct;status=YX_SER_SUCCESS;goto done;
@@ -1584,7 +1637,7 @@ static yx_ser_result yx_physical_load_part(const yx_physical_parts_job *job,size
     status=yx_physical_write(one,&single,&single_length);
     if(status==YX_SER_SUCCESS) {
         status=YX_SER_UNSUPPORTED;
-        if(a->logical==1) {
+        if(!inspect) {
             if(yx_physical_load_literal(one,out))status=YX_SER_SUCCESS;
         } else if(yx_physical_inspect_load(single,single_length,out)==YRX_SUCCESS||
                   yx_physical_load_literal(one,out))status=YX_SER_SUCCESS;

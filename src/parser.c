@@ -23,6 +23,7 @@
 #include "scan_candidates.h"
 #include "regex_vm.h"
 #include "condition.h"
+#include "serialization.h"
 #include "syntax_check.h"
 #include "xxfclib/regex/xx_regex_unicode16.h"
 
@@ -3260,6 +3261,46 @@ static bool yx_hex_sequence_alternations_fit(const yx_hex_atom *atoms,
     return true;
 }
 
+/* Whether an alternative is a literal for Hir::alternation: exact bytes, or
+ * a nested alternation of literals, which Hir::alternation flattens (a
+ * nested alternation of single bytes is a class instead). */
+static bool yx_hex_branch_is_literal(const yx_hex_sequence *branch,
+                                     unsigned depth)
+{
+    const yx_hex_atom *atom;
+    bool bytes = true;
+    size_t i;
+    if (!branch->count || depth > 64) return false;
+    for (i = 0; i < branch->count; ++i)
+        if (!yx_hex_exact(&branch->atoms[i])) break;
+    if (i == branch->count) return true;
+    atom = &branch->atoms[0];
+    if (branch->count != 1 || atom->kind != YX_HEX_ALTERNATIVE ||
+        !atom->branch_count) return false;
+    if (atom->branch_count == 1)
+        return yx_hex_branch_is_literal(&atom->branches[0], depth + 1);
+    for (i = 0; i < atom->branch_count; ++i) {
+        if (!(atom->branches[i].count == 1 &&
+              yx_hex_exact(&atom->branches[i].atoms[0]))) bytes = false;
+        if (!yx_hex_branch_is_literal(&atom->branches[i], depth + 1))
+            return false;
+    }
+    return !bytes;
+}
+
+/* A hex pattern that is one alternation of literals is not compiled by the
+ * Thompson or Fast compiler: c_regexp_pattern (compiler/mod.rs) hands a
+ * pattern whose Hir is_alternation_literal to c_alternation_literal, which
+ * takes any number of alternatives. */
+static bool yx_hex_pattern_is_literal_alternation(const yx_hex_atom *atoms,
+                                                  size_t count)
+{
+    if (count != 1 || atoms[0].kind != YX_HEX_ALTERNATIVE) return false;
+    for (size_t i = 0; i < atoms[0].branch_count; ++i)
+        if (!yx_hex_branch_is_literal(&atoms[0].branches[i], 0)) return false;
+    return true;
+}
+
 static int yx_parse_strings_indexed(yx_parser *p, YRX_RULE *rule,
                                     yx_pattern_index *index)
 {
@@ -3370,7 +3411,9 @@ static int yx_parse_strings_indexed(yx_parser *p, YRX_RULE *rule,
             hex_literal_start = p->at;
             if (!yx_hex_pattern(p, &pattern)) goto failure;
             hex_literal_end = p->at;
-            if (!yx_hex_sequence_alternations_fit(pattern.hex_atoms,
+            if (!yx_hex_pattern_is_literal_alternation(pattern.hex_atoms,
+                                                       pattern.hex_atom_count) &&
+                !yx_hex_sequence_alternations_fit(pattern.hex_atoms,
                                                   pattern.hex_atom_count, 0)) {
                 if (yx_compiler_invalid_regexp_error(
                         p->compiler, p->begin, p->origin,
@@ -4252,8 +4295,13 @@ static bool yx_anonymous_pattern_condition_error(yx_parser *p,
 {
     const char *cursor = start;
     char label[96];
-    if (strcmp(detail, "anonymous pattern reference requires for-of") != 0)
-        return false;
+    static const char prefix[] = "anonymous pattern reference requires for-of";
+    size_t at;
+    if (strncmp(detail, prefix, sizeof(prefix) - 1) != 0) return false;
+    /* The detail carries the reference the validation rejected. */
+    if (sscanf(detail + sizeof(prefix) - 1, " span:%zu", &at) == 1 &&
+        at < (size_t)(p->at - start))
+        cursor = start + at;
     while (cursor < p->at) {
         const char *next = yx_condition_skip_noncode(cursor, start, p->at);
         if (next != cursor) { cursor = next; continue; }
@@ -4938,111 +4986,126 @@ done:
     return ok;
 }
 
-static size_t yx_diag_pattern_set_count(const YRX_RULE *rule,
-                                         const yx_diag_token *tokens,
-                                         size_t begin, size_t end)
+/* Where in the source YARA-X is when it raises a condition warning, for
+ * the kinds whose order against an `of` expression's warnings is known:
+ * a recorded point (warning_point_keys in internal.h); `<n> of` asking for
+ * more items than there are, the whole rule's invariant_expr (raised after
+ * the condition) and the label of the kinds raised at their label. */
+static bool yx_warning_raise_position(const YRX_COMPILER *compiler,
+                                      const char *warning, size_t *position)
 {
-    size_t count = 0;
-    if (yx_diag_token_is(&tokens[begin], "them"))
-        return rule->pattern_count;
-    for (size_t p = 0; p < rule->pattern_count; ++p) {
-        const char *name = rule->patterns[p].identifier;
-        bool selected = false;
-        for (size_t i = begin + 1; i < end; ++i) {
-            size_t length;
-            bool wildcard;
-            if (tokens[i].kind != YX_DIAG_WORD ||
-                tokens[i].start[0] != '$') continue;
-            length = (size_t)(tokens[i].end - tokens[i].start);
-            wildcard = i + 1 < end && yx_diag_token_is(&tokens[i + 1], "*");
-            if ((wildcard && strncmp(name, tokens[i].start, length) == 0) ||
-                (!wildcard && strlen(name) == length &&
-                 memcmp(name, tokens[i].start, length) == 0)) {
-                selected = true;
-                break;
-            }
+    const char *span = strstr(warning, "\"span\":{\"start\":");
+    size_t start, end;
+    for (size_t i = 0; i < compiler->warning_point_count; ++i)
+        if (compiler->warning_point_keys[i] == warning) {
+            *position = compiler->warning_point_values[i];
+            return true;
         }
-        if (selected) ++count;
+    if (!yx_compiler_json_span(compiler, span, &start, &end)) return false;
+    if (strstr(warning, "\"type\":\"InvariantBooleanExpression\"")) {
+        *position = strstr(warning, "the expression requires ") ?
+                    start : SIZE_MAX;
+        return true;
     }
-    return count;
+    if (strstr(warning, "\"type\":\"AmbiguousExpression\"")) {
+        *position = end;
+        return true;
+    }
+    if (strstr(warning, "\"type\":\"PotentiallyUnsatisfiableExpression\"")) {
+        /* Raised before the anchor's expression: its second label. */
+        span = strstr(span + 1, "\"span\":{\"start\":");
+        return yx_compiler_json_span(compiler, span, position, NULL);
+    }
+    if (strstr(warning, "\"type\":\"TooManyIterations\"") ||
+        strstr(warning, "\"type\":\"UnsatisfiableExpression\"") ||
+        strstr(warning, "\"type\":\"BooleanIntegerComparison\"") ||
+        strstr(warning, "\"type\":\"NonBooleanAsBoolean\"") ||
+        strstr(warning, "\"type\":\"DeprecatedField\"")) {
+        *position = start;
+        return true;
+    }
+    return false;
 }
 
-/* Removes the warnings from `first` on with a label ending after `limit`. */
-static void yx_keep_warnings_before(YRX_COMPILER *compiler, size_t first,
-                                    size_t limit)
+/* YARA-X raises ambiguous_expr and the potentially unsatisfiable
+ * expression while it compiles their `of` expression (ast2ir.rs
+ * of_expr_from_ast). Moves each warning from `first` on before the first
+ * warning of this condition that is raised later in the source. */
+static void yx_order_of_warnings(YRX_COMPILER *compiler,
+                                 size_t first_condition_warning, size_t first)
 {
-    size_t kept = first;
     for (size_t i = first; i < compiler->warning_count; ++i) {
-        const char *span = compiler->warnings[i];
-        bool keep = true;
-        while ((span = strstr(span, "\"span\":{\"start\":")) != NULL) {
-            size_t start, end;
-            if (yx_compiler_json_span(compiler, span, &start, &end) &&
-                end > limit) {
-                keep = false;
+        size_t position;
+        if (!yx_warning_raise_position(compiler, compiler->warnings[i],
+                                       &position)) continue;
+        for (size_t j = first_condition_warning; j < i; ++j) {
+            size_t other;
+            if (yx_warning_raise_position(compiler, compiler->warnings[j],
+                                          &other) && other > position) {
+                char *saved = compiler->warnings[i];
+                memmove(compiler->warnings + j + 1, compiler->warnings + j,
+                        (i - j) * sizeof(*compiler->warnings));
+                compiler->warnings[j] = saved;
                 break;
             }
-            ++span;
         }
-        if (keep) compiler->warnings[kept++] = compiler->warnings[i];
-        else free(compiler->warnings[i]);
     }
-    compiler->warning_count = kept;
 }
 
+typedef struct {
+    yx_parser *parser;
+    const char *start;
+    size_t error_end;
+} yx_anchored_quantifier_context;
+
+static bool yx_condition_anchored_quantifier_warning(size_t quantifier_start,
+                                                     size_t quantifier_end,
+                                                     size_t anchor_start,
+                                                     size_t anchor_end,
+                                                     void *user)
+{
+    yx_anchored_quantifier_context *context = user;
+    yx_parser *p = context->parser;
+    size_t offset = (size_t)(context->start - p->begin);
+    if (anchor_end > (size_t)(p->at - context->start)) return true;
+    /* Raised once the items are compiled and before the anchor is: an error
+     * that ends before the anchor leaves it out. */
+    if (context->error_end != SIZE_MAX &&
+        offset + anchor_start >= context->error_end) return true;
+    return yx_compiler_unsatisfiable_pattern_at_warning(
+        p->compiler, p->begin, p->origin, offset + quantifier_start,
+        offset + quantifier_end, offset + anchor_start,
+        offset + anchor_end) != 0;
+}
+
+/* `<quantifier> of <pattern set> at <expr>` from the parsed condition
+ * (condition.c, yx_condition_visit_anchored_quantifiers). `error_end` is
+ * where the condition's error ends, SIZE_MAX when it has none. */
 static bool yx_condition_warn_unsatisfiable_at(yx_parser *p,
                                                 const YRX_RULE *rule,
-                                                const char *start)
+                                                const char *start,
+                                                size_t error_end)
 {
-    yx_diag_token *tokens = NULL;
-    size_t count = 0;
-    bool ok = false;
-    if (!yx_condition_diag_tokens(start, p->at, &tokens, &count))
-        return false;
-    for (size_t i = 0; i + 4 < count; ++i) {
-        size_t set_end, required, selected;
-        uint64_t parsed_required, offset;
-        if (yx_diag_token_is(&tokens[i], "all")) required = 2;
-        else if (yx_diag_decimal_u64(&tokens[i], &parsed_required) &&
-                 parsed_required >= 2 && parsed_required <= SIZE_MAX)
-            required = (size_t)parsed_required;
-        else continue;
-        if (!yx_diag_token_is(&tokens[i + 1], "of")) continue;
-        if (yx_diag_token_is(&tokens[i + 2], "them"))
-            set_end = i + 2;
-        else if (yx_diag_token_is(&tokens[i + 2], "(")) {
-            size_t nesting = 0;
-            for (set_end = i + 2; set_end < count; ++set_end) {
-                if (yx_diag_token_is(&tokens[set_end], "(")) ++nesting;
-                else if (yx_diag_token_is(&tokens[set_end], ")") &&
-                         --nesting == 0) break;
-            }
-            if (set_end == count) continue;
-        } else continue;
-        if (set_end + 2 >= count ||
-            !yx_diag_token_is(&tokens[set_end + 1], "at") ||
-            !yx_diag_decimal_u64(&tokens[set_end + 2], &offset)) continue;
-        selected = yx_diag_pattern_set_count(rule, tokens, i + 2, set_end);
-        if (selected < required ||
-            memchr(tokens[i].start, '\n',
-                   (size_t)(tokens[set_end + 2].end - tokens[i].start)))
-            continue;
-        if (!yx_compiler_unsatisfiable_pattern_at_warning(
-                p->compiler, p->begin, p->origin,
-                (size_t)(tokens[i].start - p->begin),
-                (size_t)(tokens[i].end - p->begin),
-                (size_t)(tokens[set_end + 1].start - p->begin),
-                (size_t)(tokens[set_end + 2].end - p->begin))) goto done;
+    yx_anchored_quantifier_context context = {p, start, error_end};
+    const char **names = NULL;
+    bool ok;
+    if (rule->pattern_count) {
+        names = (const char **)malloc(rule->pattern_count * sizeof(*names));
+        if (!names) return false;
+        for (size_t i = 0; i < rule->pattern_count; ++i)
+            names[i] = rule->patterns[i].identifier;
     }
-    ok = true;
-done:
-    free(tokens);
+    ok = yx_condition_visit_anchored_quantifiers(
+        rule->condition, names, rule->pattern_count,
+        yx_condition_anchored_quantifier_warning, &context);
+    free((void *)names);
     return ok;
 }
 
 typedef struct {
     yx_parser *parser;
     const char *start;
+    size_t error_start;
 } yx_zero_quantifier_context;
 
 static bool yx_condition_zero_quantifier_warning(size_t quantifier_start,
@@ -5053,6 +5116,8 @@ static bool yx_condition_zero_quantifier_warning(size_t quantifier_start,
     yx_parser *p = context->parser;
     size_t offset = (size_t)(context->start - p->begin);
     if (end > (size_t)(p->at - context->start)) return true;
+    if (context->error_start != SIZE_MAX &&
+        offset + end > context->error_start) return true;
     return yx_compiler_ambiguous_expr_warning(
         p->compiler, p->begin, p->origin, offset + quantifier_start,
         offset + quantifier_end, offset + end) != 0;
@@ -5063,9 +5128,10 @@ static bool yx_condition_zero_quantifier_warning(size_t quantifier_start,
  * `of` expression span. */
 static bool yx_condition_warn_ambiguous_zero_of(yx_parser *p,
                                                  const YRX_RULE *rule,
-                                                 const char *start)
+                                                 const char *start,
+                                                 size_t error_start)
 {
-    yx_zero_quantifier_context context = {p, start};
+    yx_zero_quantifier_context context = {p, start, error_start};
     return yx_condition_visit_zero_quantifiers(
         rule->condition, yx_condition_zero_quantifier_warning, &context);
 }
@@ -7757,12 +7823,16 @@ static bool yx_vt_condition_error(yx_parser *p, const char *start,
         return false;
     --path_length;
     if (!acl) {
+        /* The enum and message names that lead to the member
+         * (`Domain.Permutation.`). */
         const char *member = path_start + 3;
-        if (path_length >= 10 && strncmp(member, "Domain.", 7) == 0) {
-            member += 7;
-            if ((size_t)(path_start + path_length - member) >= 12 &&
-                strncmp(member, "Permutation.", 12) == 0)
-                member += 12;
+        for (;;) {
+            const char *dot = memchr(member, '.',
+                (size_t)(path_start + path_length - member));
+            if (!dot || !yx_ser_vt_enum_scope(path_start,
+                                              (size_t)(dot - path_start)))
+                break;
+            member = dot + 1;
         }
         field = member;
     }
@@ -8837,7 +8907,7 @@ condition_failed:
             return yx_error(p, "out of memory recording deprecated field");
         return 0;
     }
-    size_t first_type_warning = p->compiler->warning_count;
+    size_t first_type_warning = p->compiler->warning_count, first_of_warning;
     yx_type_warning_context warning_context = {p, start, false, 0, 0, 0, NULL};
     const YRX_RULES *warning_rules = p->compiler->rules;
     p->compiler->warning_point_count = 0;
@@ -8931,6 +9001,17 @@ condition_failed:
                                 p->compiler, rule->condition_text,
                                 rule, p->begin, p->origin,
                                 (size_t)(start - p->begin), first_type_warning)) return 0;
+                        if (!yx_condition_warn_too_many_iterations(p, start, NULL))
+                            return yx_error(p, "out of memory recording loop warning");
+                        first_of_warning = p->compiler->warning_count;
+                        if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
+                            return yx_error(p, "out of memory recording expression warning");
+                        if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, SIZE_MAX))
+                            return yx_error(p, "out of memory recording expression warning");
+                        yx_order_of_warnings(p->compiler, first_type_warning,
+                                             first_of_warning);
+                        if (!yx_condition_warn_overlapping_pattern_sets(p, rule, start))
+                            return yx_error(p, "out of memory recording pattern-set warning");
                         if (!yx_compiler_unused_pattern_error(
                                 p->compiler, pattern->identifier,
                                 p->begin, p->origin,
@@ -9036,10 +9117,12 @@ validation_failed:
             /* YARA-X raised these while compiling the operands before the
              * failing one: keep those that end before the error. */
             first_expression_warning = p->compiler->warning_count;
-            if (!yx_condition_warn_unsatisfiable_at(p, rule, start))
+            if (!yx_condition_warn_unsatisfiable_at(p, rule, start, error_end))
                 return yx_error(p, "out of memory recording expression warning");
-            yx_keep_warnings_before(p->compiler, first_expression_warning,
-                                    error_start);
+            if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, error_start))
+                return yx_error(p, "out of memory recording expression warning");
+            yx_order_of_warnings(p->compiler, first_type_warning,
+                                 first_expression_warning);
         }
         if (p->too_many_variables_at) {
             const char *limit = p->too_many_variables_at;
@@ -9073,10 +9156,12 @@ validation_failed:
     }
     if (!yx_condition_warn_too_many_iterations(p, start, NULL))
         return yx_error(p, "out of memory recording loop warning");
-    if (!yx_condition_warn_unsatisfiable_at(p, rule, start))
+    first_of_warning = p->compiler->warning_count;
+    if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
         return yx_error(p, "out of memory recording expression warning");
-    if (!yx_condition_warn_ambiguous_zero_of(p, rule, start))
+    if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, SIZE_MAX))
         return yx_error(p, "out of memory recording expression warning");
+    yx_order_of_warnings(p->compiler, first_type_warning, first_of_warning);
     if (!yx_condition_warn_overlapping_pattern_sets(p, rule, start))
         return yx_error(p, "out of memory recording pattern-set warning");
     ++p->at;

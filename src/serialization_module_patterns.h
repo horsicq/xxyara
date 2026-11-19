@@ -1550,6 +1550,8 @@ static void yx_module_pattern_setup(yx_module_program *p,yx_module_patterns *c)
     p->print_primary=yx_module_pattern_print;p->decode_primary=yx_module_pattern_decode_primary;
     p->decode_call=yx_module_pattern_decode_call;p->boolean_scope=yx_module_pattern_scope;
     p->decode_set=yx_module_pattern_decode_set;p->definite_primary=yx_module_pattern_definite;c->for_of=-1;
+    /* Regexp arguments of module functions share the pool of `matches`. */
+    p->regexes=&c->regexes;p->regex_count=&c->regex_count;p->regex_capacity=&c->regex_capacity;
 }
 
 static bool yx_module_pattern_live_globals(yx_module_program *p,int root)
@@ -1749,6 +1751,9 @@ static bool yx_module_pattern_limits(yx_module_program *p)
                 c->archive->limits[id]=0;
             }
         if(n->op<YX_MP_COUNT||n->op>YX_MP_COUNT_IN)continue;
+        /* required_matches_for_count (rule_condition_from_ast) visits the
+         * folded IR only; disallow_fast_scan above and below ran before. */
+        if(n->op==YX_MP_COUNT&&n->folded_away)continue;
         uint64_t limit=0;
         if(n->op==YX_MP_COUNT)for(size_t j=0;j<p->count;++j) {
             const yx_module_node *parent=&p->nodes[j];
@@ -2073,7 +2078,15 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     for(size_t i=0;i<a->logical;++i) {
         bool duplicate=false;
         for(size_t q=0;q<i&&!duplicate;++q)duplicate=a->mapping[q]==a->mapping[i];
-        if(duplicate&&(!yx_tr_text(&source," and (true or ")||!yx_tr_text(&source,a->names[a->name_ids[i]])||
+        /* So does a pattern whose operands IR::and / IR::or folded away. */
+        bool read=duplicate||(a->pattern_private[i]&&!c.pattern_search);
+        for(size_t n=0;!read&&n<p->count;++n) {
+            const yx_module_node *node=&p->nodes[n];
+            if(node->op>=YX_MP_PRESENT&&node->op<=YX_MP_COUNT_IN)read=node->integer<0||node->integer==(int64_t)a->mapping[i];
+            if(node->op==YX_MP_OF||node->op==YX_MP_FOR_OF)for(size_t m=0;m<node->length;++m)
+                read|=((const uint32_t *)node->bytes)[m]==a->mapping[i];
+        }
+        if((duplicate||!read)&&(!yx_tr_text(&source," and (true or ")||!yx_tr_text(&source,a->names[a->name_ids[i]])||
                        !yx_put_u8(&source,')')))goto done;
     }
     if(!yx_put_u8(&source,0))goto done;

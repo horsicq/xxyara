@@ -175,6 +175,15 @@ static bool yx_composed_module_wasm(yx_module_program *p, const int *roots,
     }
     order[main]=(yx_wasm_function){main,wrappers+1};
     qsort(order,total,sizeof(*order),yx_compare_wasm_functions);
+    /* WasmModuleBuilder::new makes the pattern-match helper before any rule
+     * function, so it precedes a rule chunk of its size (a global rule that
+     * is one bare pattern). */
+    for(size_t i=0;context->presence&&i<total;++i)if(order[i].created==chunks) {
+        for(;i>0&&order[i-1].instructions==order[i].instructions;--i) {
+            yx_wasm_function swapped=order[i-1];order[i-1]=order[i];order[i]=swapped;
+        }
+        break;
+    }
     for(size_t i=0;i<total;++i)indices[order[i].created]=import_count+i;
     if(context->presence) {
         static const uint8_t helper[]={1,1,0x7f,0x20,0,0x41,3,0x76,0x23,0,0x6a,0x2d,0,0,0x41,1,0x20,0,0x41,8,0x70,0x22,1,0x74,0x71,0x20,1,0x76,0x0b};

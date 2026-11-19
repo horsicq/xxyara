@@ -1117,10 +1117,24 @@ static yx_ser_result yx_encode_fast_regex(const YRX_RULES *rules, bool vba_order
      * piece, but Hir::is_alternation_literal (lib/src/re/hir.rs) is false
      * for them: c_regexp compiles them with FastVM instead of
      * c_alternation_literal. */
-    if (parsed && pattern->kind == YX_PATTERN_REGEX && p->count == 1 && p->pieces[0].kind == 7) {
-        int literal = yx_tv_alternation_literal(pattern);
-        if (literal < 0) { yx_fast_program_destroy(p); return YX_SER_NO_MEMORY; }
-        if (!literal) p->force_regexp = true;
+    if (parsed && (pattern->kind == YX_PATTERN_REGEX || pattern->kind == YX_PATTERN_HEX) && p->count == 1 && p->pieces[0].kind == 7) {
+        if (pattern->kind == YX_PATTERN_REGEX) {
+            int literal = yx_tv_alternation_literal(pattern);
+            if (literal < 0) { yx_fast_program_destroy(p); return YX_SER_NO_MEMORY; }
+            if (!literal) p->force_regexp = true;
+        } else {
+            size_t j, k;
+            for (j = 0; j < p->pieces[0].alternative_count; ++j) {
+                const yx_fast_literal *literal = &p->pieces[0].alternatives[j];
+                for (k = 0; k < literal->length; ++k) {
+                    if (literal->mask[k] != 255) {
+                        p->force_regexp = true;
+                        break;
+                    }
+                }
+                if (p->force_regexp) break;
+            }
+        }
     }
     if (parsed && (!vba_order || yx_reorder_pattern_wasm(wasm,sizeof(wasm),true))) {
         result = yx_fast_masked_encode(p,rule,pattern,wasm,sizeof(wasm),data,length);
@@ -1361,7 +1375,7 @@ static yx_ser_result yx_decode_fast_regex(const uint8_t *data, size_t length, yx
     } else if (forward) goto done;
     if (!yx_fast_read_sequence(p,e.code,e.code_length,&at) || at != e.code_length) goto done;
     /* A regexp archived as one FastVM alternation piece (yx_encode_fast_regex). */
-    if (e.pattern_kind == YX_PATTERN_REGEX && p->count == 1 && p->pieces[0].kind == 7) p->force_regexp = true;
+    if ((e.pattern_kind == YX_PATTERN_REGEX || e.pattern_kind == YX_PATTERN_HEX) && p->count == 1 && p->pieces[0].kind == 7) p->force_regexp = true;
     if (!yx_fast_compile(p) ||
         !yx_fast_source(p,e.pattern_kind == YX_PATTERN_HEX,&source,&dotall) ||
         ((e.flags & 1u) && !yx_fast_widen_atoms(p,e.ascii_wide))) goto done;

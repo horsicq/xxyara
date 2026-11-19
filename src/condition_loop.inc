@@ -266,6 +266,8 @@ static bool yx_loop_compile(yx_loop_builder *builder, const yx_node *node,
 {
     size_t jump;
     if (!node || depth >= YX_LOOP_MAX_DEPTH) return false;
+    /* A folded operator is a constant of the general evaluator. */
+    if (node->fold_state) return false;
     ++builder->nodes;
     switch (node->kind) {
     case N_INTEGER: return yx_loop_emit(builder, YX_LOOP_CONST, node);
@@ -298,7 +300,9 @@ static bool yx_loop_compile(yx_loop_builder *builder, const yx_node *node,
             (node->filter != FILTER_NONE && node->filter != FILTER_AT &&
              node->filter != FILTER_IN)) return false;
         index = yx_eval_pattern_index(node, builder->context, SIZE_MAX);
-        list = yx_matches(builder->context, index);
+        /* Compiling reads no match: only running the operand searches. */
+        list = builder->context->patterns && index < builder->context->pattern_count ?
+            &builder->context->patterns[index] : NULL;
         if (!list || (!list->matches && list->count)) return false;
         if ((node->kind == N_OFFSET || node->kind == N_LENGTH) && node->a &&
             !yx_loop_compile(builder, node->a, depth + 1)) return false;

@@ -434,6 +434,19 @@ static yx_ser_result yx_decode_rule_expressions(const uint8_t *data, size_t leng
         if(!yx_integer_expr_print(&trees[i],roots[i],&source,0,false,0)||!yx_put_u8(&source,0)) {
             free(source.data);status=YX_SER_NO_MEMORY;goto done;
         }
+        /* The constant base names the patterns whose operands folded away in
+         * ` and (true or $a)` terms after its `false`: they stay patterns of
+         * the rule under the decoded condition. */
+        char *kept=decoded[i].runtime_integer_condition;
+        if(kept&&!strncmp(kept,"false and (true or ",19)) {
+            yx_writer whole={0};
+            bool ok=yx_put_u8(&whole,'(')&&yx_put_bytes(&whole,source.data,source.used-1)&&yx_put_u8(&whole,')')&&
+                yx_put_bytes(&whole,kept+5,strlen(kept+5)+1);
+            free(source.data);
+            if(!ok){free(whole.data);status=YX_SER_NO_MEMORY;goto done;}
+            source=whole;
+        }
+        free(kept);
         decoded[i].runtime_integer_condition=(char *)source.data;
         decoded[i].runtime_integer_import_profile=profile;
     }

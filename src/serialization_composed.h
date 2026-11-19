@@ -67,6 +67,8 @@ static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,cons
     for(size_t id=0;ok&&id<physical;++id)anchor[id]=true;
     for(size_t n=0;ok&&n<p->count;++n) {
         const yx_module_node *node=&p->nodes[n];
+        /* anchor_patterns (ast2ir.rs) walks the folded IR. */
+        if(node->folded_away)continue;
         /* Patterns of a `for .. of` set cannot be anchored. */
         if(node->op==YX_MP_FOR_OF)for(size_t m=0;m<node->length;++m) {
             uint32_t id=((const uint32_t *)node->bytes)[m];
@@ -203,7 +205,7 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
 {
     size_t begin,end,count=0,logical=0,*firsts=NULL,*counts=NULL,*ids=NULL,*namespaces=NULL,*metadata_starts=NULL;
     size_t *names=NULL,*mapping=NULL,*body_starts=NULL,*body_ends=NULL;
-    uint8_t *kinds=NULL;bool *private_patterns=NULL,*private_rules=NULL,*global_rules=NULL;
+    uint8_t *kinds=NULL;bool *private_patterns=NULL,*private_rules=NULL,*global_rules=NULL,*referenced=NULL,*tracked=NULL;
     yx_physical_pattern_options *options=NULL;uint64_t *limits=NULL;yx_writer *header_storage=NULL;
     yx_physical_archive *a=calloc(1,sizeof(*a));yx_ser_rule *decoded=NULL;YRX_RULES *loaded=NULL;
     yx_module_program *p=calloc(1,sizeof(*p));yx_module_pattern_schema schema={0};yx_module_patterns c={0};
@@ -217,7 +219,8 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
     if(logical_capacity>SIZE_MAX/sizeof(*names))goto done;
     names=calloc(logical_capacity?logical_capacity:1,sizeof(*names));mapping=calloc(logical_capacity?logical_capacity:1,sizeof(*mapping));
     kinds=calloc(logical_capacity?logical_capacity:1,sizeof(*kinds));private_patterns=calloc(logical_capacity?logical_capacity:1,sizeof(*private_patterns));
-    if(!names||!mapping||!kinds||!private_patterns){status=YX_SER_NO_MEMORY;goto done;}
+    referenced=calloc(logical_capacity?logical_capacity:1,sizeof(*referenced));tracked=calloc(logical_capacity?logical_capacity:1,sizeof(*tracked));
+    if(!names||!mapping||!kinds||!private_patterns||!referenced||!tracked){status=YX_SER_NO_MEMORY;goto done;}
     yx_reader r={data,length,begin,false,false};uint64_t n,width;uint8_t flag;
     if(!yx_get_uint(&r,&n)||!n||n>length/8||n>SIZE_MAX/sizeof(YRX_RULE))goto done;
     count=(size_t)n;
@@ -370,11 +373,11 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
                     const yx_module_node *loop=yx_module_pattern_owner(p,node);
                     if(!loop||loop<p->nodes+start)goto done;
                 } else if(node->op>=YX_MP_PRESENT&&node->op<=YX_MP_COUNT_IN) {
-                    bool owned=false;for(size_t k=0;k<counts[id];++k)owned|=node->integer==(int64_t)mapping[firsts[id]+k];if(!owned)goto done;
+                    bool owned=false;for(size_t k=0;k<counts[id];++k)if(node->integer==(int64_t)mapping[firsts[id]+k])owned=referenced[firsts[id]+k]=true;if(!owned)goto done;
                 }
                 if(node->op==YX_MP_OF||node->op==YX_MP_FOR_OF)for(size_t m=0;m<node->length;++m) {
                     bool owned=false;uint32_t pattern=((const uint32_t *)node->bytes)[m];
-                    for(size_t k=0;k<counts[id];++k)owned|=pattern==mapping[firsts[id]+k];if(!owned)goto done;
+                    for(size_t k=0;k<counts[id];++k)if(pattern==mapping[firsts[id]+k])owned=referenced[firsts[id]+k]=true;if(!owned)goto done;
                 }
             }
             roots[id]=root;
@@ -410,7 +413,9 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
         bool valid=yx_module_print(p,roots[i],&text,0);
         for(size_t j=0;valid&&j<counts[i];++j) {
             size_t k=firsts[i]+j;bool duplicate=false;for(size_t q=firsts[i];q<k;++q)duplicate|=mapping[q]==mapping[k];
-            if(duplicate)valid=yx_tr_text(&text," and (true or ")&&yx_tr_text(&text,a->names[names[k]])&&yx_put_u8(&text,')');
+            /* A pattern whose operands IR::and / IR::or folded away is still
+             * a pattern of the rule: name it where it folds away again. */
+            if(duplicate||!referenced[k])valid=yx_tr_text(&text," and (true or ")&&yx_tr_text(&text,a->names[names[k]])&&yx_put_u8(&text,')');
         }
         if(!valid||!yx_put_u8(&text,0)){free(text.data);goto done;}
         decoded[i].runtime_integer_condition=(char *)text.data;decoded[i].runtime_integer_import_profile=profile;
@@ -422,7 +427,23 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
     if(!options||!limits||!header_storage){status=YX_SER_NO_MEMORY;goto done;}
     if(a->physical)memcpy(limits,a->limits,a->physical*sizeof(*limits));
     bool options_ok=yx_composed_options(p,&source,roots,options,header_storage);if(a->physical)memcpy(a->limits,limits,a->physical*sizeof(*limits));
+    /* disallow_fast_scan (ast2ir.rs) also runs for an operand that is folded
+     * away afterwards (`($a at 0 and false) or $b`): the archive then tracks
+     * every match of a pattern that the remaining operands would limit.
+     * The decoded condition says so in a term that folds away again. */
+    for(size_t k=0;options_ok&&k<logical;++k)
+        if(mapping[k]<a->physical&&!a->limits[mapping[k]]&&options[k].limit){tracked[k]=true;options[k].limit=0;}
     if(!options_ok||!yx_physical_rules_options_equal(a,options))goto done;
+    for(size_t i=0;i<count;++i) {
+        yx_writer text={0};bool any=false,valid=true;
+        for(size_t j=0;j<counts[i];++j)any|=tracked[firsts[i]+j];
+        if(!any)continue;
+        valid=yx_tr_text(&text,decoded[i].runtime_integer_condition);
+        for(size_t j=0;valid&&j<counts[i];++j)if(tracked[firsts[i]+j])
+            valid=yx_tr_text(&text," and (true or ")&&yx_tr_text(&text,a->names[names[firsts[i]+j]])&&yx_tr_text(&text," in (0..1))");
+        if(!valid||!yx_put_u8(&text,0)){free(text.data);status=YX_SER_NO_MEMORY;goto done;}
+        free(decoded[i].runtime_integer_condition);decoded[i].runtime_integer_condition=(char *)text.data;
+    }
     for(size_t i=0;i<count;++i)if(counts[i]) {
         yx_writer declarations={0};bool valid=true;
         decoded[i].runtime_literal_prefilters=calloc(counts[i],sizeof(*decoded[i].runtime_literal_prefilters));
@@ -450,7 +471,7 @@ done:
     if(a){yx_physical_destroy(a);free(a);}yx_ser_rules_destroy(decoded,decoded?count:0);yrx_rules_destroy(loaded);yx_module_program_free(p);yx_module_pattern_schema_free(&schema);yx_archive_globals_destroy(globals,global_count);
     if(header_storage)for(size_t i=0;i<count;++i)free(header_storage[i].data);
     free(c.helper_calls);free(c.regexes);free(header_storage);
-    free(names);free(mapping);free(kinds);free(private_patterns);free(options);free(limits);
+    free(names);free(mapping);free(kinds);free(private_patterns);free(referenced);free(tracked);free(options);free(limits);
     free(firsts);free(counts);free(ids);free(namespaces);free(metadata_starts);free(private_rules);free(global_rules);free(source_rules);free(roots);free(body_starts);free(body_ends);
     free(base);free(canonical);free(wasm);free(shifted);free(metadata.data);free(fake_metadata.data);return status;
 }

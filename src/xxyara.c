@@ -2197,7 +2197,9 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
         };
         const char *a_line_start, *b_line_start;
         if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                                  code, left_start)) return true;
+                                  code, left_start) ||
+            yx_warning_suppressed((const uint8_t *)source, source_length,
+                                  code, right_start)) return true;
         if (compiler->warning_count >= compiler->max_warnings) return true;
         line = yx_snippet_line_of(source, left_start, &a_line_start);
         top_column = yx_diagnostic_columns(line_start, source + left_start) + 1;
@@ -2231,7 +2233,9 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
             right_line_start, right_line_end);
     if (compiler->warning_count >= compiler->max_warnings) return true;
     if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                              code, left_start)) return true;
+                              code, left_start) ||
+        yx_warning_suppressed((const uint8_t *)source, source_length,
+                              code, right_start)) return true;
     for (const char *at = source; at < line_start; ++at)
         if (*at == '\n') ++line;
     right_line = line;
@@ -6413,6 +6417,22 @@ static int yx_compiler_two_label_error(YRX_COMPILER *compiler,
                                         source + first_end);
     second_width = yx_diagnostic_columns(source + second_start,
                                          source + second_end);
+    if (memchr(source + first_start, '\n', first_end - first_start) ||
+        memchr(source + second_start, '\n', second_end - second_start)) {
+        yx_snippet_label labels[2];
+        labels[0].start = first_start;
+        labels[0].end = first_end;
+        labels[0].text = first_label;
+        labels[0].primary = true;
+        labels[1].start = second_start;
+        labels[1].end = second_end;
+        labels[1].text = second_label;
+        labels[1].primary = true;
+        text = yx_diagnostic_snippet("error", code, title, source, origin,
+                                     labels, 2, first_line, first_column);
+        if (!text) goto done;
+        goto json;
+    }
     if (!first_width || !second_width || first_column > INT_MAX ||
         second_column > INT_MAX || first_width > INT_MAX ||
         second_width > INT_MAX ||
@@ -6486,6 +6506,7 @@ static int yx_compiler_two_label_error(YRX_COMPILER *compiler,
             first_label, (int)digits, second_line, second_source_line,
             (int)digits + 1, "", second_marker, second_label)) goto done;
     }
+json:
     quoted_first = yx_json_quoted(first_label);
     quoted_second = yx_json_quoted(second_label);
     quoted_type = yx_json_quoted(type);
@@ -7114,8 +7135,12 @@ int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
     char title[512], label[160], replacement[96];
     char *text, *json, **grown;
     if (compiler->warning_count >= compiler->max_warnings) return 1;
+    /* A suppressed span must hold the whole label (Warnings::add). */
     if (yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                              "consecutive_jumps", start)) return 1;
+                              "consecutive_jumps", start) &&
+        (end <= start + 1 ||
+         yx_warning_suppressed((const uint8_t *)source, strlen(source),
+                               "consecutive_jumps", end - 1))) return 1;
     for (size_t i = 0; i < start; ++i)
         if (source[i] == '\n') { ++line; line_start = source + i + 1; }
     /* Jumps may continue on later lines; the patch shows each of them. */
@@ -12907,6 +12932,8 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner,
     /* Earlier rules of the current rule's namespace, extended as rules are
      * evaluated: their results are final once evaluated. */
     size_t visible_count = 0, visible_upto = 0, visible_namespace = SIZE_MAX;
+    size_t skipped_namespace = SIZE_MAX;
+    bool pattern_search = false;
     /* The scan's part of every rule's context; the loop below only sets the
      * rule's patterns and visible rules. Nothing the loop runs changes the
      * scanner fields read here. */
@@ -12997,6 +13024,7 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner,
         size_t *pattern_ids = scratch->pattern_ids;
         bool matched = false;
 
+        context.pattern_search = &pattern_search;
         if (!rule->condition) {
             result = yx_fail(YRX_SCAN_ERROR, "rule has no compiled condition");
             goto done;
@@ -13031,7 +13059,16 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner,
 #ifdef XXYARA_ENABLE_PROFILING
         uint64_t condition_started = yx_profile_now_ns();
 #endif
+        /* A false global rule ends its namespace (wasm/builder.rs,
+         * emit_rule_into_current_func returns from the rules function and the
+         * namespace block): the rules declared after it are not evaluated. */
+        if (skipped_namespace == rule->namespace_index) {
+            rule->matched = false;
+            continue;
+        }
         bool evaluated = yx_condition_evaluate(rule->condition, &context, &matched);
+        if (evaluated && rule->is_global && !matched)
+            skipped_namespace = rule->namespace_index;
 #ifdef XXYARA_ENABLE_PROFILING
         yx_profile_add_elapsed(&scanner->rule_profiles[i].condition_nanoseconds,
                                condition_started);
@@ -13059,6 +13096,13 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner,
                 rule->matched = false;
         }
     }
+    /* The generated code searches for the patterns before the first
+     * pattern operand it evaluates (emit.rs,
+     * emit_lazy_call_to_search_for_patterns): when no condition read one,
+     * no pattern has matches. */
+    for (i = 0; !pattern_search && i < count; ++i)
+        for (j = 0; j < scanner->views[i].pattern_count; ++j)
+            scanner->views[i].patterns[j].match_count = 0;
     if (!yx_scanner_report_matches(scanner, count))
         result = yx_fail(YRX_SCAN_ERROR, "out of memory");
 done:

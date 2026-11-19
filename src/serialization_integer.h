@@ -182,7 +182,12 @@ static bool yx_integer_archive_literal(yx_bool_parser *parser, int64_t *value, b
     }
     for (;;) {
         unsigned char c = *parser->at;
-        unsigned digit = c >= '0' && c <= '9' ? c - '0' :
+        unsigned digit;
+        if (c == '_' && digits) {
+            ++parser->at;
+            continue;
+        }
+        digit = c >= '0' && c <= '9' ? c - '0' :
             base == 16 && c >= 'a' && c <= 'f' ? c - 'a' + 10 :
             base == 16 && c >= 'A' && c <= 'F' ? c - 'A' + 10 : 255;
         if (digit >= base) break;
@@ -1958,16 +1963,27 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                 free(expected.data);if(!matched)return -1;marker=0x7f;
             } else if (marker == 0x21 && used >= 2 && end-start >= 6 &&
                        !memcmp(reader->data+start,"\x21\x01\x22\x00\x20\x01",6)) {
-                const yx_integer_expr_node *left=&YX_INTEGER_NODES(tree)[stack[used-2]],
+                yx_integer_expr_node *left=&YX_INTEGER_NODES(tree)[stack[used-2]],
                     *right=&YX_INTEGER_NODES(tree)[stack[used-1]];
                 bool matched=false;
-                for(uint8_t comparison=0x51;comparison<=0x59;++comparison) {
-                    if(comparison>0x52&&!(comparison&1))continue;
-                    yx_writer expected={0};reader->at=start;
-                    matched=yx_integer_comparison_emit(&expected,comparison,left->unsigned_value,right->unsigned_value,
-                        yx_integer_expr_non_negative(left),yx_integer_expr_non_negative(right))&&
-                        yx_integer_wasm_bytes(reader,end,expected.data,expected.used);
-                    free(expected.data);if(matched){marker=comparison;break;}
+                int m;
+                for(m=0;m<2&&!matched;++m) {
+                    bool l_uns=(m==0), r_uns=(m==1);
+                    uint8_t comparison;
+                    for(comparison=0x51;comparison<=0x59;++comparison) {
+                        if(comparison>0x52&&!(comparison&1))continue;
+                        yx_writer expected={0};reader->at=start;
+                        matched=yx_integer_comparison_emit(&expected,comparison,l_uns,r_uns,
+                            l_uns||yx_integer_expr_non_negative(left),r_uns||yx_integer_expr_non_negative(right))&&
+                            yx_integer_wasm_bytes(reader,end,expected.data,expected.used);
+                        free(expected.data);
+                        if(matched) {
+                            marker=comparison;
+                            left->unsigned_value=l_uns;
+                            right->unsigned_value=r_uns;
+                            break;
+                        }
+                    }
                 }
                 if(!matched)return -1;
                 mixed_comparison=true;

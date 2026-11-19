@@ -59,10 +59,16 @@ static bool yx_expect_uint(yx_reader *r, uint64_t expected);
 enum yx_module_op { YX_ME_INT, YX_ME_FLOAT, YX_ME_STRING, YX_ME_BOOL,
     YX_ME_FILESIZE, YX_ME_LOOKUP, YX_ME_INDEX, YX_ME_CALL, YX_ME_COMPARE,
     YX_ME_NOT, YX_ME_AND, YX_ME_OR, YX_ME_ARITH, YX_ME_READ, YX_ME_BIND, YX_ME_VARIABLE, YX_ME_LOOP, YX_ME_LENGTH, YX_ME_MEMBER, YX_ME_GROUP,
-    YX_ME_DEFINED };
+    YX_ME_DEFINED,
+    /* Expr::Minus of a float (args[0]); a `/regexp/` argument of a module
+     * function (type 5; bytes hold the delimited text with its flags). */
+    YX_ME_NEGATE, YX_ME_REGEX };
 typedef struct yx_module_node {
     uint8_t op, type, argc, comparison;
     bool constant, unsigned_value;
+    /* An operand of an `and` / `or` that IR::and / IR::or folded to a
+     * constant: it is not in the IR that anchors patterns and limits `#a`. */
+    bool folded_away;
     int args[8];
     int64_t integer;
     double real;
@@ -87,6 +93,17 @@ typedef struct yx_module_program {
     bool memory, filesize, divisor, failed, no_match, two_locals;
     yx_literal *literals;
     size_t literal_count, literal_capacity;
+    /* The archive's regexp pool (RegexpId order) that regexp arguments are
+     * interned in: the codec's own, or NULL when it has none. */
+    yx_literal **regexes;
+    size_t *regex_count, *regex_capacity;
+    /* `shifts`: the codec's function builder numbers a shift's i64_tmp_b
+     * (local 1, or the only local when nothing uses i64_tmp_a: yx_module_wasm);
+     * `shift`: the expression has one. */
+    bool shifts, shift;
+    /* The quantity of the `for <expr>` / `for <expr>%` loop whose prefix
+     * is being written (kind 3 or 4, else 0), and where it goes. */
+    uint8_t loop_kind; int loop_quantity; size_t loop_split;
     yx_archive_binding *bindings;
     size_t binding_count, binding_capacity;
     uint8_t slot_types[YX_ARCHIVE_MAX_VARS];
@@ -123,6 +140,32 @@ static const yx_archive_module_schema *yx_archive_schema(const char *name)
     for (size_t i = 0; i < sizeof(yx_archive_module_schemas)/sizeof(yx_archive_module_schemas[0]); ++i)
         if (!strcmp(name, yx_archive_module_schemas[i].name)) return &yx_archive_module_schemas[i];
     return NULL;
+}
+/* An enum value of the vt module (`vt.NetError.NET_ERROR_TIMED_OUT`): the
+ * schema's integer constants, as upstream builds them from vt.proto. Enum
+ * and message names start with a capital letter, fields do not. */
+bool yx_ser_vt_enum_constant(const char *name, uint64_t *value)
+{
+    if (!name || strncmp(name, "vt.", 3) || name[3] < 'A' || name[3] > 'Z') return false;
+    for (size_t i = 0; i < sizeof(yx_archive_fields_vt) / sizeof(yx_archive_fields_vt[0]); ++i) {
+        const yx_archive_module_field *field = &yx_archive_fields_vt[i];
+        if (field->kind == 3 && field->state == 0 && !strcmp(name, field->path)) {
+            if (value) *value = (uint64_t)field->integer;
+            return true;
+        }
+    }
+    return false;
+}
+/* Whether the first `length` bytes of `path` name an enum or a message of
+ * the vt module that enum values hang from (`vt.Domain.Permutation`). */
+bool yx_ser_vt_enum_scope(const char *path, size_t length)
+{
+    if (!path || length < 4 || strncmp(path, "vt.", 3) || path[3] < 'A' || path[3] > 'Z') return false;
+    for (size_t i = 0; i < sizeof(yx_archive_fields_vt) / sizeof(yx_archive_fields_vt[0]); ++i) {
+        const yx_archive_module_field *field = &yx_archive_fields_vt[i];
+        if (field->kind == 6 && strlen(field->path) == length && !memcmp(path, field->path, length)) return true;
+    }
+    return false;
 }
 /* The key and value types of a map field (serialization_modules_maps.h). */
 static const yx_archive_module_map *yx_module_map_types(const yx_archive_module_field *field)
@@ -206,6 +249,20 @@ static int yx_module_arithmetic_node(yx_module_program *p, uint8_t operation, in
     yx_module_node *n = &p->nodes[index];
     n->args[0] = left; n->args[1] = right; n->comparison = operation;
     n->unsigned_value = !real && (a->unsigned_value || b->unsigned_value);
+    if (operation == 0x86 || operation == 0x87) {
+        /* IR::shl and IR::shr (ir/mod.rs): the result has the signedness of
+         * the left operand; constants fold unless the amount is negative. */
+        n->unsigned_value = a->unsigned_value;
+        if (!a->constant || !b->constant || (!b->unsigned_value && b->integer < 0)) return index;
+        n->constant = true;
+        /* The amount is not negative here: as an i128 it is 64 or more
+         * exactly when its bits are, whatever its signedness. */
+        if ((uint64_t)b->integer >= 64) n->integer = 0;
+        else if (operation == 0x86) n->integer = yx_integer_signed_bits((uint64_t)a->integer << b->integer);
+        else if (a->unsigned_value) n->integer = yx_integer_signed_bits((uint64_t)a->integer >> b->integer);
+        else n->integer = a->integer < 0 ? ~(~a->integer >> b->integer) : a->integer >> b->integer;
+        return index;
+    }
     if (!a->constant || !b->constant) return index;
     n->constant = true;
     if (real) {
@@ -221,7 +278,7 @@ static int yx_module_arithmetic_node(yx_module_program *p, uint8_t operation, in
         else if (operation == 0x7d) bits = u - v;
         else if (operation == 0x7e) bits = u * v;
         else if (operation == 0x7f || operation == 0x81) {
-            if (!v) return -1;
+            if (!v) { n->constant = false; return index; }
             bits = operation == 0x7f ? u / v : u % v;
         } else if (operation == 0x83) bits = u & v;
         else if (operation == 0x84) bits = u | v;
@@ -240,7 +297,7 @@ static int yx_module_arithmetic_node(yx_module_program *p, uint8_t operation, in
             (x < 0 && y > 0 && x < INT64_MIN / y) || (x < 0 && y < 0 && x < INT64_MAX / y)) return -1;
         n->integer = x * y;
     } else if (operation == 0x7f || operation == 0x81) {
-        if (!y || (x == INT64_MIN && y == -1)) return -1;
+        if (!y || (x == INT64_MIN && y == -1)) { n->constant = false; return index; }
         n->integer = operation == 0x7f ? x / y : x % y;
     } else if (operation == 0x83) n->integer = x & y;
     else if (operation == 0x84) n->integer = x | y;
@@ -250,7 +307,7 @@ static int yx_module_arithmetic_node(yx_module_program *p, uint8_t operation, in
 }
 static uint8_t yx_module_wasm_type(uint8_t type)
 {
-    return type == 1 ? 0x7f : type == 2 ? 0x7c : 0x7e;
+    return type == 1 || type == 5 ? 0x7f : type == 2 ? 0x7c : 0x7e;
 }
 /* TypeValue::cast_to_bool of a constant operand (IR::and/or folding): 1 or 0,
  * -1 when the operand is not a constant. */
@@ -320,6 +377,60 @@ done:
     free(values);
     return body;
 }
+static int yx_module_primary(yx_module_program *, unsigned);
+static int yx_module_parse_operators(yx_module_program *, size_t, int, unsigned, unsigned);
+/* quantifier_from_ast for `for <quantifier> x in <array or map>`: 0xc4 any,
+ * 0xc5 all, 0xc6 none, 0xc7 an integer expression (Quantifier::Expr) and
+ * 0xc8 a term followed by `%` (Quantifier::Percentage), whose node is
+ * *quantity. 0 when there is no quantifier. */
+static uint8_t yx_module_for_quantifier(yx_module_program *p, unsigned depth, int *quantity)
+{
+    uint8_t kind = 0xc8;
+    int term;
+    size_t first = p->count;
+    *quantity = -1;
+    if (yx_bool_keyword(&p->parser, "any")) return 0xc4;
+    if (yx_bool_keyword(&p->parser, "all")) return 0xc5;
+    if (yx_bool_keyword(&p->parser, "none")) return 0xc6;
+    term = yx_module_primary(p, depth + 1);
+    if (term < 0) return 0;
+    /* A term and `%`, or the expression that the term starts. */
+    if (!yx_module_take(p, '%')) {
+        kind = 0xc7; term = yx_module_parse_operators(p, first, term, 4, depth + 1);
+    }
+    if (term < 0 || p->nodes[term].type != 3) return 0;
+    *quantity = term;
+    return kind;
+}
+/* `/regexp/flags` as the argument of a module function (YX_ME_REGEX): the
+ * delimited text with its flags is what upstream's regexp pool interns
+ * (emit.rs: TypeValue::Regexp). */
+static int yx_module_regex(yx_module_program *p)
+{
+    const unsigned char *start = p->parser.at, *at = start + 1;
+    bool escaped = false, in_class = false, closed = false;
+    size_t size;
+    int n;
+    while (*at && !closed) {
+        unsigned char ch = *at++;
+        if (escaped) { escaped = false; continue; }
+        if (ch == '\\') escaped = true;
+        else if (ch == '[') in_class = true;
+        else if (ch == ']') in_class = false;
+        else if (ch == '/' && !in_class) closed = true;
+    }
+    if (!closed || at == start + 2) return -1;
+    while (*at == 'i' || *at == 's') ++at;
+    if (isalnum(*at) || *at == '_') return -1;
+    size = (size_t)(at - start);
+    n = yx_module_node_new(p, YX_ME_REGEX, 5);
+    if (n < 0) return -1;
+    if (!(p->nodes[n].bytes = malloc(size))) { p->failed = true; return -1; }
+    memcpy(p->nodes[n].bytes, start, size);
+    p->nodes[n].length = size;
+    p->parser.at = at;
+    return n;
+}
 static int yx_module_primary(yx_module_program *p, unsigned depth)
 {
     const unsigned char *start;
@@ -332,8 +443,8 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         if (extension >= 0 || p->parser.at != saved) return extension;
     }
     if (yx_bool_keyword(&p->parser, "for")) {
-        uint8_t quantifier = yx_bool_keyword(&p->parser, "any") ? 0xc4 :
-            yx_bool_keyword(&p->parser, "all") ? 0xc5 : yx_bool_keyword(&p->parser, "none") ? 0xc6 : 0;
+        int quantity = -1;
+        uint8_t quantifier = yx_module_for_quantifier(p, depth, &quantity);
         const unsigned char *name, *value_name = NULL; size_t length, value_length = 0, first = p->binding_count;
         if (!quantifier || !yx_archive_bindings_reserve(&p->bindings, &p->binding_capacity, first + 7) || !yx_with_identifier(&p->parser, &name, &length))
             return -1;
@@ -375,6 +486,7 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         if (loop >= 0) {
             p->nodes[loop].integer = (int64_t)first; p->nodes[loop].comparison = quantifier;
             p->nodes[loop].args[0] = array; p->nodes[loop].args[1] = body;
+            p->nodes[loop].args[2] = quantity;
         }
         return loop;
     }
@@ -427,11 +539,13 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         p->nodes[n].bytes = bytes.data; p->nodes[n].length = bytes.used;
         return n;
     }
+    if (*p->parser.at == '/') return yx_module_regex(p);
     start = p->parser.at;
     if (*start == '~' || (*start == '-' && !(start[1] >= '0' && start[1] <= '9'))) {
         /* IR::minus and IR::bitwise_not (ir/mod.rs) fold a constant operand. Otherwise Expr::Minus of an
          * integer is `i64.const 0; operand; i64.sub` and Expr::BitwiseNot is `operand; i64.const -1; i64.xor`
-         * (emit.rs:504, :516): the bytes of `0 - x` and `x ^ -1`. A float Expr::Minus is not modeled. */
+         * (emit.rs:504, :516): the bytes of `0 - x` and `x ^ -1`. A float Expr::Minus is the operand
+         * and `f64.neg` (YX_ME_NEGATE). */
         bool invert = *start == '~';
         ++p->parser.at;
         int operand = yx_module_primary(p, depth + 1);
@@ -440,6 +554,10 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         if (value->constant && value->type == 2 && !invert) {
             double real = -value->real;
             n = yx_module_node_new(p, YX_ME_FLOAT, 2); if (n >= 0) p->nodes[n].real = real;
+            return n;
+        }
+        if (value->type == 2 && !invert) {
+            n = yx_module_node_new(p, YX_ME_NEGATE, 2); if (n >= 0) p->nodes[n].args[0] = operand;
             return n;
         }
         if (value->type != 3) return -1;
@@ -535,8 +653,8 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
             path[path_length - 4] = 0;
             for (size_t i = 0; i < p->schema->field_count; ++i) {
                 const yx_archive_module_field *field = &p->schema->fields[i];
-                if (field->kind != 7 || strcmp(path, field->path)) continue;
-                int array = yx_module_node_new(p, base < 0 ? YX_ME_LOOKUP : YX_ME_MEMBER, 7);
+                if ((field->kind != 7 && field->kind != 8) || strcmp(path, field->path)) continue;
+                int array = yx_module_node_new(p, base < 0 ? YX_ME_LOOKUP : YX_ME_MEMBER, field->kind);
                 if (array < 0) return -1;
                 p->nodes[array].field = field; p->nodes[array].args[0] = base;
                 n = yx_module_node_new(p, YX_ME_LENGTH, 3);
@@ -611,7 +729,7 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
             const yx_archive_module_field *member_field = NULL;
             for (size_t i = 0; i < p->schema->field_count && !member_field; ++i)
                 if (!strcmp(expanded, p->schema->fields[i].path)) member_field = &p->schema->fields[i];
-            if (!member_field || (length_call && member_field->kind != 7)) return -1;
+            if (!member_field || (length_call && member_field->kind != 7 && member_field->kind != 8)) return -1;
             n = yx_module_node_new(p, YX_ME_MEMBER, member_field->kind);
             if (n < 0) return -1;
             p->nodes[n].args[0] = index; p->nodes[n].field = member_field;
@@ -629,8 +747,15 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
 static int yx_module_parse(yx_module_program *p, unsigned minimum, unsigned depth)
 {
     if (!depth && !yx_module_nodes_for_input(p, strlen((const char *)p->parser.at))) return -1;
+    size_t first = p->count;
     int left = yx_module_primary(p, depth + 1);
     if (left < 0) return -1;
+    return yx_module_parse_operators(p, first, left, minimum, depth);
+}
+/* The operators that follow the operand `left`, by precedence; `first` is the
+ * index of the first node made for that operand. */
+static int yx_module_parse_operators(yx_module_program *p, size_t first, int left, unsigned minimum, unsigned depth)
+{
     for (;;) {
         const unsigned char *save = p->parser.at;
         unsigned precedence = 0; uint8_t op = YX_ME_COMPARE, comparison = 0;
@@ -642,6 +767,10 @@ static int yx_module_parse(yx_module_program *p, unsigned minimum, unsigned dept
         else if (!strncmp((const char *)p->parser.at, "!=", 2)) { precedence = 3; comparison = 1; p->parser.at += 2; }
         else if (!strncmp((const char *)p->parser.at, "<=", 2)) { precedence = 3; comparison = 4; p->parser.at += 2; }
         else if (!strncmp((const char *)p->parser.at, ">=", 2)) { precedence = 3; comparison = 5; p->parser.at += 2; }
+        else if (!strncmp((const char *)p->parser.at, "<<", 2) || !strncmp((const char *)p->parser.at, ">>", 2)) {
+            op = YX_ME_ARITH; comparison = *p->parser.at == '<' ? 0x86 : 0x87; p->parser.at += 2;
+            precedence = yx_integer_expr_precedence(comparison) + 3;
+        }
         else if (*p->parser.at == '<') { precedence = 3; comparison = 2; ++p->parser.at; }
         else if (*p->parser.at == '>') { precedence = 3; comparison = 3; ++p->parser.at; }
         else if (*p->parser.at == '+' || *p->parser.at == '-' || *p->parser.at == '*' ||
@@ -671,16 +800,29 @@ static int yx_module_parse(yx_module_program *p, unsigned minimum, unsigned dept
          * metadata remains independent of the surviving expression. */
         if (op == YX_ME_AND || op == YX_ME_OR) {
             int absorbing = op == YX_ME_OR;
-            int folded = yx_module_constant_truth(&p->nodes[left]) == absorbing ? left :
-                yx_module_constant_truth(&p->nodes[right]) == absorbing ? right : -1;
+            int t_left = yx_module_constant_truth(&p->nodes[left]);
+            int t_right = yx_module_constant_truth(&p->nodes[right]);
+            int folded = t_left == absorbing ? left : t_right == absorbing ? right : -1;
             if (folded >= 0) {
+                /* Every node made for the operands so far, in order. */
+                for (size_t dead = first; dead < p->count; ++dead)
+                    p->nodes[dead].folded_away = dead != (size_t)folded;
                 /* The folded result is a Boolean constant. */
                 if (p->nodes[folded].op != YX_ME_BOOL) {
                     int n = yx_module_node_new(p, YX_ME_BOOL, 1);
                     if (n < 0) return -1;
-                    p->nodes[n].integer = absorbing; folded = n;
+                    p->nodes[n].integer = absorbing;
+                    p->nodes[n].constant = true;
+                    folded = n;
                 }
                 left = folded; continue;
+            }
+            if (t_left >= 0 && t_right >= 0) {
+                int n = yx_module_node_new(p, YX_ME_BOOL, 1);
+                if (n < 0) return -1;
+                p->nodes[n].integer = (op == YX_ME_AND) ? (t_left && t_right) : (t_left || t_right);
+                p->nodes[n].constant = true;
+                left = n; continue;
             }
         }
         int n = yx_module_node_new(p, op, 1);
@@ -776,10 +918,11 @@ static bool yx_module_definite_value(const yx_module_program *p,int index,unsign
     if(n->op==YX_ME_MEMBER)return n->type>4&&yx_module_definite_value(p,n->args[0],depth+1);
     if(n->op==YX_ME_CALL) {
         if(!n->signature||n->signature->undefined)return false;
-        for(size_t i=0;i<n->argc;++i)if(!yx_module_definite_value(p,n->args[i],depth+1))return false;
+        for(size_t i=0;i<n->argc;++i)
+            if(n->signature->args[i]!=5&&!yx_module_definite_value(p,n->args[i],depth+1))return false;
         return true;
     }
-    if(n->op==YX_ME_LENGTH||n->op==YX_ME_NOT||n->op==YX_ME_GROUP)
+    if(n->op==YX_ME_LENGTH||n->op==YX_ME_NOT||n->op==YX_ME_GROUP||n->op==YX_ME_NEGATE)
         return yx_module_definite_value(p,n->args[0],depth+1);
     if(n->op==YX_ME_AND||n->op==YX_ME_OR||n->op==YX_ME_DEFINED)return true;
     if(n->op==YX_ME_COMPARE||n->op==YX_ME_ARITH) {
@@ -868,6 +1011,21 @@ static bool yx_module_loop_catch_rewrite(yx_module_program *,yx_writer *,size_t)
 static int yx_module_loop_catch_decode(yx_reader *,size_t,yx_module_program *,unsigned);
 static bool yx_module_body_escapes(const uint8_t *,size_t,bool *);
 static bool yx_module_shift_wide_locals(uint8_t *,size_t,int);
+/* emit_for's quantifier code, shared with `for .. in (a..b)`
+ * (serialization_module_patterns.h). */
+static bool yx_module_for_tail(uint8_t,bool,yx_writer *,int64_t,int64_t,int64_t,int64_t,int64_t);
+static bool yx_module_quantity_emit(yx_module_program *,yx_writer *,uint8_t,int,int64_t,int64_t,int64_t,unsigned);
+static bool yx_module_quantity_decode(yx_reader *,size_t,yx_module_program *,unsigned,int64_t,int64_t,int64_t,
+                                      uint8_t *,int *);
+/* emit_for: set_var(max_count) and set_var(count, 0) of an expression or
+ * percentage quantifier follow `i = 0`, before the loop (frame: n, i,
+ * max_count, count at `slot`). Nothing for `any`, `all` and `none`. */
+static bool yx_module_loop_quantity(yx_module_program *p, yx_writer *w, int64_t slot)
+{
+    uint8_t kind = p->loop_kind; int quantity = p->loop_quantity;
+    p->loop_kind = 0; p->loop_split = w->used;
+    return !kind || yx_module_quantity_emit(p, w, kind, quantity, slot, slot + 2, slot + 3, 0);
+}
 /* `catching`: the body's block is the loop's void catch_undef (structure
  * elements whose body can be undefined) instead of a result block. */
 static bool yx_module_loop_prefix(yx_module_program *p, yx_writer *w, int64_t slot, uint8_t type, bool catching)
@@ -880,6 +1038,7 @@ static bool yx_module_loop_prefix(yx_module_program *p, yx_writer *w, int64_t sl
         yx_module_store_value(w, 3) && yx_module_load_variable(w, slot, 3) &&
         yx_put_bytes(w, empty, sizeof(empty)) && yx_put_sleb_i64(w, (slot + 1) * 8) &&
         yx_put_u8(w, 0x42) && yx_put_u8(w, 0) && yx_module_store_value(w, 3) &&
+        yx_module_loop_quantity(p, w, slot) &&
         yx_put_u8(w, 3) && yx_put_u8(w, 0x40) && yx_put_u8(w, 0x41) && yx_put_sleb_i64(w, (slot + 5) * 8) &&
         yx_module_load_variable(w, slot + 4, 3) && yx_module_load_variable(w, slot + 1, 3) &&
         yx_module_call(p, w, "yara_x::wasm", yx_module_index_name(type), pair, 2, yx_module_wasm_type(type), true) &&
@@ -916,6 +1075,7 @@ static bool yx_module_map_loop_prefix(yx_module_program *p, yx_writer *w, int64_
         yx_module_store_value(w, 3) && yx_module_load_variable(w, slot, 3) &&
         yx_put_bytes(w, empty, sizeof(empty)) && yx_put_sleb_i64(w, (slot + 1) * 8) &&
         yx_put_u8(w, 0x42) && yx_put_u8(w, 0) && yx_module_store_value(w, 3) &&
+        yx_module_loop_quantity(p, w, slot) &&
         yx_put_u8(w, 3) && yx_put_u8(w, 0x40) &&
         yx_module_load_variable(w, slot + 4, 3) && yx_module_load_variable(w, slot + 1, 3) &&
         yx_module_call_pair(p, w, name) &&
@@ -936,6 +1096,20 @@ static bool yx_module_arithmetic(yx_module_program *p, int index, yx_writer *w, 
         return n->type == 2 ? yx_put_u8(w, 0x44) && yx_put_float(w, n->real) :
             yx_put_u8(w, 0x42) && yx_put_sleb_i64(w, n->integer);
     const yx_module_node *a = &p->nodes[n->args[0]], *b = &p->nodes[n->args[1]];
+    if (n->comparison == 0x86 || n->comparison == 0x87) {
+        /* emit_shift_op (emit.rs:146): the amount goes through i64_tmp_b,
+         * and an amount of 64 or more gives 0. */
+        if (!p->shifts) return false;
+        /* The decoder tells an unsigned literal from a signed one by its
+         * sign bit only: an unsigned constant below 2^63 that selects
+         * `i64.lt_u` or `i64.shr_u` could not be read back. */
+        if ((b->constant && b->unsigned_value && b->integer >= 0) ||
+            (n->comparison == 0x87 && a->constant && a->unsigned_value && a->integer >= 0)) return false;
+        p->shift = true;
+        return yx_module_arithmetic(p, n->args[0], w, 0, depth + 1, false) &&
+            yx_module_arithmetic(p, n->args[1], w, 0, depth + 1, false) &&
+            yx_integer_shift_v12_emit(w, n->comparison, a->unsigned_value, b->unsigned_value, 1);
+    }
     bool real = n->type == 2 || (chain && float_chain);
     bool left_chain = a->op == YX_ME_ARITH && a->comparison == n->comparison &&
         (n->comparison == 0x7c || n->comparison == 0x7d || n->comparison == 0x7e);
@@ -1055,6 +1229,8 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
     if (n->op >= 32) return p->emit_primary && p->emit_primary(p, index, w, depth);
     static const uint8_t pair64[] = {0x7e,0x7e}, lookup_args[] = {0x7e,0x7f};
     if (n->op == YX_ME_ARITH) return yx_module_arithmetic(p, index, w, 0, depth + 1, false);
+    /* Expr::Minus of a float (emit.rs:504): the operand and `f64.neg`. */
+    if (n->op == YX_ME_NEGATE) return yx_module_emit(p, n->args[0], w, depth + 1) && yx_put_u8(w, 0x9a);
     if (n->op == YX_ME_INT) return yx_put_u8(w, 0x42) && yx_put_sleb_i64(w, n->integer);
     if (n->op == YX_ME_FLOAT) return yx_put_u8(w, 0x44) && yx_put_float(w, n->real);
     if (n->op == YX_ME_BOOL) return yx_put_u8(w, 0x41) && yx_put_u8(w, n->integer != 0);
@@ -1073,6 +1249,15 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
     if (n->op == YX_ME_LOOP) {
         static const uint8_t types[] = {3,2,1,4,6};
         const yx_archive_module_field *field = p->nodes[n->args[0]].field;
+        /* Quantifier::Expr and ::Percentage count the true iterations
+         * (emit_for): kinds 3 and 4 of yx_module_for_tail. */
+        uint8_t counted = n->comparison == 0xc7 ? 3 : n->comparison == 0xc8 ? 4 : 0;
+        /* A percentage that can be negative is replaced at run time
+         * (emit.rs:2460, TypeValue::is_non_negative). The schema does not
+         * keep the width of a module's integer fields, which decides that:
+         * a percentage is a constant, `filesize` or an integer read here. */
+        if (counted == 4 && !p->nodes[n->args[2]].constant && p->nodes[n->args[2]].op != YX_ME_FILESIZE &&
+            p->nodes[n->args[2]].op != YX_ME_READ) return false;
         if (field && field->kind == 8) {
             const yx_archive_module_map *map = yx_module_map_types(field);
             if (!yx_module_map_by_index_name(map) || n->integer < 0 || n->integer > YX_ARCHIVE_MAX_VARS - 7) return false;
@@ -1083,6 +1268,7 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
             bool escapes = false;
             bool ok = yx_put_u8(w, 0x41) && yx_put_sleb_i64(w, (n->integer + 4) * 8) &&
                 yx_module_emit(p, n->args[0], w, depth + 1) && yx_module_store_value(w, 3) &&
+                (p->loop_kind = counted, p->loop_quantity = n->args[2], true) &&
                 yx_module_map_loop_prefix(p, w, n->integer, map, false);
             size_t body_start = w->used >= 2 ? w->used - 2 : 0;
             int saved = p->undefined_slot; p->undefined_slot = -1;
@@ -1096,15 +1282,20 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
             if (escapes) {
                 w->data[body_start + 1] = 0x40;
                 return yx_module_loop_catch_rewrite(p, w, body_start) &&
-                    yx_module_loop_catch_tail(w, n->integer, n->comparison);
+                    (counted ? yx_module_for_tail(counted, true, w, n->integer, n->integer + 1, n->integer + 2,
+                                                  n->integer + 3, -1) :
+                               yx_module_loop_catch_tail(w, n->integer, n->comparison));
             }
-            return yx_module_loop_tail(w, n->integer, n->comparison);
+            return counted ? yx_module_for_tail(counted, false, w, n->integer, n->integer + 1, n->integer + 2,
+                                                n->integer + 3, -1) :
+                yx_module_loop_tail(w, n->integer, n->comparison);
         }
         if (!field || field->element > 4 || n->integer < 0 || n->integer > YX_ARCHIVE_MAX_VARS - 7) return false;
         p->memory = true;
         uint8_t element = types[field->element];
         bool ok = yx_put_u8(w, 0x41) && yx_put_sleb_i64(w, (n->integer + 4) * 8) &&
             yx_module_emit(p, n->args[0], w, depth + 1) && yx_module_store_value(w, 3) &&
+            (p->loop_kind = counted, p->loop_quantity = n->args[2], true) &&
             yx_module_loop_prefix(p, w, n->integer, element, element == 6);
         int saved = p->undefined_slot; p->undefined_slot = -1;
         bool saved_defined = p->slot_defined[n->integer + 5];
@@ -1121,9 +1312,11 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
         if(!ok||!yx_module_body_escapes(w->data+body_start+2,w->used-body_start-2,&escapes)||
            !yx_put_u8(w,0x0b))return false;
         if(escapes){w->data[body_start+1]=0x40;return yx_module_loop_catch_rewrite(p,w,body_start)&&
-            yx_module_loop_catch_tail(w,n->integer,n->comparison);}
+            (counted?yx_module_for_tail(counted,true,w,n->integer,n->integer+1,n->integer+2,n->integer+3,-1):
+                yx_module_loop_catch_tail(w,n->integer,n->comparison));}
         w->data[body_start+1]=0x7f;
-        return yx_module_loop_tail(w,n->integer,n->comparison);
+        return counted?yx_module_for_tail(counted,false,w,n->integer,n->integer+1,n->integer+2,n->integer+3,-1):
+            yx_module_loop_tail(w,n->integer,n->comparison);
     }
     if (n->op == YX_ME_BIND) {
         if (n->integer < 0 || n->integer >= YX_ARCHIVE_MAX_VARS) return false;
@@ -1144,7 +1337,8 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
     if (n->op == YX_ME_LENGTH) {
         const uint8_t arg = 0x7e;
         return yx_module_emit(p, n->args[0], w, depth + 1) &&
-            yx_module_call(p, w, "yara_x::wasm", "Array::len@array:i@i", &arg, 1, 0x7e, false);
+            yx_module_call(p, w, "yara_x::wasm", p->nodes[n->args[0]].type == 8 ? "Map::len@map:i@i" :
+                "Array::len@array:i@i", &arg, 1, 0x7e, false);
     }
     if (n->op == YX_ME_LOOKUP || n->op == YX_ME_MEMBER) {
         const yx_archive_module_field *field = n->field;
@@ -1185,6 +1379,15 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
         snprintf(module, sizeof(module), "yara_x::modules::%.*s", (int)(separator-sig->path),sig->path);
         for (size_t i = 0; i < sig->argc; ++i) {
             args[i] = yx_module_wasm_type(sig->args[i]);
+            if (sig->args[i] == 5) {
+                /* TypeValue::Regexp (emit.rs:345): the RegexpId in the regexp pool. */
+                const yx_module_node *re = &p->nodes[n->args[i]];
+                size_t id;
+                if (re->type != 5 || !re->bytes || !p->regexes ||
+                    !yx_intern_literal(re->bytes, re->length, p->regexes, p->regex_count, p->regex_capacity, &id) ||
+                    id > INT32_MAX || !yx_put_u8(w, 0x41) || !yx_put_sleb_i64(w, (int64_t)id)) return false;
+                continue;
+            }
             if (!yx_module_emit(p, n->args[i], w, depth + 1) ||
                 (sig->args[i] == 2 && p->nodes[n->args[i]].type == 3 &&
                  !yx_put_u8(w, p->nodes[n->args[i]].unsigned_value ? 0xba : 0xb9))) return false;
@@ -1256,7 +1459,17 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
         if (a->type == 1 || b->type == 1) {
             const yx_module_node *constant = a->type == 1 ? b : a;
             int expression = a->type == 1 ? n->args[0] : n->args[1];
-            if (n->comparison > 1 || constant->op != YX_ME_INT || (constant->integer != 0 && constant->integer != 1)) return false;
+            if (n->comparison == 0 && constant->type == 3 &&
+                !(constant->constant && (constant->integer == 0 || constant->integer == 1))) {
+                /* Only `==` takes a Boolean; 0 and 1 rewrite it (ast2ir.rs:585). Otherwise emit_operands
+                 * promotes the Boolean (i64.extend_i32_u), which emit_int_comparison takes as non-negative. */
+                return yx_module_emit(p, n->args[0], w, depth + 1) && (a->type != 1 || yx_put_u8(w, 0xad)) &&
+                    yx_module_emit(p, n->args[1], w, depth + 1) && (b->type != 1 || yx_put_u8(w, 0xad)) &&
+                    yx_integer_comparison_emit(w, 0x51, a->unsigned_value, b->unsigned_value,
+                        a->type == 1 || yx_module_non_negative(a), b->type == 1 || yx_module_non_negative(b));
+            }
+            if (n->comparison > 1 || !constant->constant || constant->type != 3 ||
+                (constant->integer != 0 && constant->integer != 1)) return false;
             return yx_module_boolean(p, expression, w, depth + 1) &&
                 ((constant->integer != 0) != (n->comparison != 0) || yx_put_u8(w, 0x45));
         }
@@ -1314,6 +1527,12 @@ static bool yx_module_wasm(yx_module_program *p, int root, uint8_t **data, size_
     memset(unique, 0, sizeof(unique));
     p->undefined_slot = -1;
     bool ok = yx_module_root_boolean(p, root, &expression);
+    /* A shift wrote i64_tmp_b as local 1. walrus keeps the used locals only:
+     * it is the only local unless something uses i64_tmp_a. */
+    if (ok && p->shift) {
+        if (p->filesize || p->divisor || p->two_locals) p->two_locals = true;
+        else ok = yx_module_shift_wide_locals(expression.data, expression.used, -1);
+    }
     int match = ok ? yx_module_import_add(p, "yara_x::wasm", "rule_match@rule_id:i@", &match_arg, 1, 0, false) : -1;
     if(p->no_match&&yx_module_import_add(p,"yara_x::wasm","rule_no_match@rule_id:i@",&match_arg,1,0,false)<0)ok=false;
     if (!ok || match < 0 || p->import_count > YX_MODULE_IMPORTS) { ok = false; goto done; }
@@ -1365,8 +1584,8 @@ static bool yx_module_wasm(yx_module_program *p, int root, uint8_t **data, size_
     if (ok) {
         static const uint8_t suffix[] = {0x0b,0x45,0x04,0x40,0x05,0x41,0x00,0x10};
         static const uint8_t tail[] = {0x0b,0x41,0x00,0x0b};
-        ok = yx_put_u8(&body, p->filesize || p->divisor || p->two_locals ? 1 : 0) &&
-            (!(p->filesize || p->divisor || p->two_locals) ||
+        ok = yx_put_u8(&body, p->filesize || p->divisor || p->two_locals || p->shift ? 1 : 0) &&
+            (!(p->filesize || p->divisor || p->two_locals || p->shift) ||
                 (yx_put_u8(&body, p->two_locals ? 2 : 1) && yx_put_u8(&body, 0x7e))) &&
             yx_put_u8(&body, 2) && yx_put_u8(&body, 0x7f) &&
             yx_put_bytes(&body, expression.data, expression.used) && yx_put_bytes(&body, suffix, sizeof(suffix)) &&
@@ -1413,6 +1632,9 @@ static yx_ser_result yx_encode_module_expression_profile(const YRX_RULES *rules,
     if (!p) return YX_SER_NO_MEMORY;
     p->schema = schema; p->profile = profile; p->parser.at = (const unsigned char *)rule->condition_text;
     p->capi_import_order = !rules->archive_cli && profile == 0;
+    yx_literal *regexes = NULL; size_t regex_count = 0, regex_capacity = 0;
+    p->regexes = &regexes; p->regex_count = &regex_count; p->regex_capacity = &regex_capacity;
+    p->shifts = true;
     int root = yx_module_parse(p, 1, 0);
     yx_bool_skip_space(&p->parser);
     if (root < 0 || *p->parser.at || p->failed) goto done;
@@ -1428,7 +1650,10 @@ static yx_ser_result yx_encode_module_expression_profile(const YRX_RULES *rules,
         !yx_intern_ident(rule->identifier, &pool, &count, &capacity, &rule_id)) goto memory;
     if (!yx_put_bytes(&out, magic, sizeof(magic)) || !yx_put_uint(&out, count)) goto memory;
     for (size_t i = 0; i < count; ++i) if (!yx_put_string(&out, pool[i])) goto memory;
-    if (!yx_put_u8(&out, 0) || !yx_put_u8(&out, 0) || !yx_put_uint(&out, p->literal_count)) goto memory;
+    if (!yx_put_uint(&out, regex_count)) goto memory;
+    for (size_t i = 0; i < regex_count; ++i)
+        if (!yx_put_uint(&out, regexes[i].length) || !yx_put_bytes(&out, regexes[i].data, regexes[i].length)) goto memory;
+    if (!yx_put_u8(&out, 0) || !yx_put_uint(&out, p->literal_count)) goto memory;
     for (size_t i = 0; i < p->literal_count; ++i)
         if (!yx_put_uint(&out, p->literals[i].length) || !yx_put_bytes(&out, p->literals[i].data, p->literals[i].length)) goto memory;
     if (!yx_put_uint(&out, wasm_length) || !yx_put_bytes(&out, wasm, wasm_length) ||
@@ -1447,7 +1672,7 @@ static yx_ser_result yx_encode_module_expression_profile(const YRX_RULES *rules,
 memory:
     result = YX_SER_NO_MEMORY;
 done:
-    free(out.data); free(wasm); free(pool); yx_module_program_free(p);
+    free(out.data); free(wasm); free(pool); free(regexes); yx_module_program_free(p);
     return result;
 }
 
@@ -1461,6 +1686,19 @@ static bool yx_module_decode_string(yx_module_program *p, int node)
     if (!n->bytes) return false;
     if (literal->length) memcpy(n->bytes, literal->data, literal->length);
     n->length = literal->length; n->op = YX_ME_STRING; n->type = 4;
+    return true;
+}
+/* A regexp argument: the RegexpId (`i32.const`) becomes the pool's text. */
+static bool yx_module_decode_regex(yx_module_program *p, int node)
+{
+    yx_module_node *n = &p->nodes[node];
+    if (n->op != YX_ME_BOOL || n->bytes || !p->regexes || n->integer < 0 ||
+        (uint64_t)n->integer >= *p->regex_count) return false;
+    const yx_literal *text = &(*p->regexes)[n->integer];
+    n->bytes = malloc(text->length ? text->length : 1);
+    if (!n->bytes) { p->failed = true; return false; }
+    if (text->length) memcpy(n->bytes, text->data, text->length);
+    n->length = text->length; n->op = YX_ME_REGEX; n->type = 5; n->constant = false; n->integer = 0;
     return true;
 }
 static bool yx_module_decode_header(yx_reader *r, yx_module_program *p, size_t *body_end)
@@ -1570,16 +1808,30 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
     /* A body has a void catch block or a result block, depending on whether
      * it can be undefined. */
     bool forms = true, catching = false, matched = false;
-    size_t prefix_start = r->at;
+    size_t prefix_start = r->at, prefix_count = p->count;
+    /* The quantity of an expression or percentage quantifier, where
+     * yx_module_loop_quantity writes it. */
+    uint8_t counted = 0; int quantity = -1;
     for (unsigned form = 0; form < (forms ? 2u : 1u) && !matched; ++form) {
         yx_writer expected = {0};
         r->at = prefix_start;
         catching = form != 0;
+        p->loop_kind = 0; counted = 0; quantity = -1;
         matched = yx_module_store_value(&expected, 3) &&
             (map ? yx_module_map_loop_prefix(p, &expected, slot, map, catching) :
                    yx_module_loop_prefix(p, &expected, slot, type, catching)) &&
-            yx_integer_wasm_bytes(r, end, expected.data, expected.used);
+            p->loop_split <= expected.used && yx_integer_wasm_bytes(r, end, expected.data, p->loop_split);
+        if (matched) {
+            size_t split = p->loop_split;
+            if (!yx_module_quantity_decode(r, end, p, depth, slot, slot + 2, slot + 3, &counted, &quantity)) counted = 0;
+            matched = !p->failed && yx_integer_wasm_bytes(r, end, expected.data + split, expected.used - split);
+        }
         free(expected.data);
+        if (!matched) {
+            for (size_t i = prefix_count; i < p->count; ++i) free(p->nodes[i].bytes);
+            p->count = prefix_count;
+            if (p->failed) return -1;
+        }
     }
     if (!matched) return -1;
     p->slot_types[slot + 5] = map ? map->key : type;
@@ -1594,16 +1846,17 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
     int body = catching?yx_module_loop_catch_decode(r,end,p,depth+1):yx_module_decode_block(r, end, p, depth + 1);
     p->undefined_slot = saved;
     if (body < 0) return -1;
-    for (uint8_t quantifier = 0xc4; quantifier <= 0xc6; ++quantifier) {
+    for (uint8_t quantifier = counted ? 0xc7 : 0xc4; quantifier <= (counted ? 0xc7 : 0xc6); ++quantifier) {
         size_t start = r->at; yx_writer expected = {0};
-        matched = (catching?yx_module_loop_catch_tail(&expected,slot,quantifier):
+        matched = (counted ? yx_module_for_tail(counted, catching, &expected, slot, slot + 1, slot + 2, slot + 3, -1) :
+            catching?yx_module_loop_catch_tail(&expected,slot,quantifier):
             yx_module_loop_tail(&expected, slot, quantifier)) && yx_integer_wasm_bytes(r, end, expected.data, expected.used);
         free(expected.data);
         if (matched) {
             int node = yx_module_node_new(p, YX_ME_LOOP, 1);
             if (node >= 0) {
-                p->nodes[node].integer = slot; p->nodes[node].comparison = quantifier;
-                p->nodes[node].args[0] = array; p->nodes[node].args[1] = body;
+                p->nodes[node].integer = slot; p->nodes[node].comparison = counted == 4 ? 0xc8 : quantifier;
+                p->nodes[node].args[0] = array; p->nodes[node].args[1] = body; p->nodes[node].args[2] = quantity;
             }
             return node;
         }
@@ -1797,7 +2050,11 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
         } else
         if (marker == 0x41 || marker == 0x42) {
             int64_t value;
-            if (!yx_get_sleb_i64(r, &value) || (marker == 0x41 && !p->decode_call && value != 0 && value != 1)) return -1;
+            /* An attempted loop prefix moved the reader. A larger `i32.const` is
+             * the RegexpId of a function's argument (yx_module_decode_regex). */
+            r->at = start + 1;
+            if (!yx_get_sleb_i64(r, &value) || (marker == 0x41 && !p->decode_call && value != 0 && value != 1 &&
+                    !(p->regexes && value > 0 && (uint64_t)value < *p->regex_count))) return -1;
             if (marker == 0x42 && value == -1 && p->schema && p->memory && r->at < end && r->data[r->at] == 0x41)
                 node = yx_module_decode_lookup(r, end, p, -1);
             else {
@@ -1883,20 +2140,48 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             node=yx_module_arithmetic_node(p,0x7f,left,right);
         } else if (marker == 0x21 && used >= 2 && end-start >= 6 &&
                    !memcmp(r->data+start,"\x21\x01\x22\x00\x20\x01",6)) {
-            const yx_module_node *left=&p->nodes[stack[used-2]],*right=&p->nodes[stack[used-1]];
             static const uint8_t ops[]={0x51,0x52,0x53,0x55,0x57,0x59};
-            bool matched=false;uint8_t comparison;
-            for(comparison=0;comparison<6;++comparison) {
-                yx_writer expected={0};r->at=start;
-                matched=yx_integer_comparison_emit(&expected,ops[comparison],left->unsigned_value,right->unsigned_value,
-                    yx_module_non_negative(left),yx_module_non_negative(right))&&
-                    yx_integer_wasm_bytes(r,end,expected.data,expected.used);
-                free(expected.data);if(matched)break;
+            yx_module_node *left=&p->nodes[stack[used-2]],*right=&p->nodes[stack[used-1]];
+            bool matched=false;uint8_t comparison = 0;
+            int m;
+            for(m=0;m<2&&!matched;++m) {
+                bool l_uns=(m==0), r_uns=(m==1);
+                for(comparison=0;comparison<6;++comparison) {
+                    yx_writer expected={0};r->at=start;
+                    matched=yx_integer_comparison_emit(&expected,ops[comparison],l_uns,r_uns,
+                        l_uns||yx_module_non_negative(left),r_uns||yx_module_non_negative(right))&&
+                        yx_integer_wasm_bytes(r,end,expected.data,expected.used);
+                    free(expected.data);
+                    if(matched) {
+                        left->unsigned_value=l_uns;
+                        right->unsigned_value=r_uns;
+                        break;
+                    }
+                }
             }
             if(!matched)return -1;
             node=yx_module_node_new(p,YX_ME_COMPARE,1);
             if(node>=0) {p->nodes[node].args[1]=stack[--used];p->nodes[node].args[0]=stack[--used];
                 p->nodes[node].comparison=comparison;}
+        } else if (marker == 0x9a) {
+            if (!used || p->nodes[stack[used - 1]].type != 2) return -1;
+            node = yx_module_node_new(p, YX_ME_NEGATE, 2);
+            if (node >= 0) p->nodes[node].args[0] = stack[--used];
+        } else if (marker == 0x22 && used >= 2 && end - start >= 3 && r->data[start + 1] <= 1 &&
+                   r->data[start + 2] >= 0x86 && r->data[start + 2] <= 0x88) {
+            /* emit_shift_op, through either number of i64_tmp_b. */
+            yx_module_node *left = &p->nodes[stack[used - 2]], *right = &p->nodes[stack[used - 1]];
+            uint8_t operation = r->data[start + 2] == 0x86 ? 0x86 : 0x87;
+            /* `i64.shr_u` and the amount's `i64.lt_u` tell that a literal is unsigned. */
+            if (r->data[start + 2] == 0x88 && left->op == YX_ME_INT && left->integer < 0) left->unsigned_value = true;
+            if (end - start >= 11 && r->data[start + 10] == 0x54 && right->op == YX_ME_INT && right->integer < 0)
+                right->unsigned_value = true;
+            yx_writer expected = {0}; r->at = start;
+            bool matched = yx_integer_shift_v12_emit(&expected, operation, left->unsigned_value, right->unsigned_value,
+                    r->data[start + 1]) && yx_integer_wasm_bytes(r, end, expected.data, expected.used);
+            free(expected.data); if (!matched) return -1;
+            int shift = stack[--used], value = stack[--used];
+            node = yx_module_arithmetic_node(p, operation, value, shift);
         } else if (marker == 0x22) {
             r->at = start;
             if (used < 2 || !yx_integer_wasm_guard(r, end, 0x22, p->undefined_slot) ||
@@ -1950,8 +2235,9 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                 if (used < 2 || !yx_module_decode_string(p, stack[used - 1]) || !yx_module_decode_string(p, stack[used - 2])) return -1;
                 node = yx_module_node_new(p, YX_ME_COMPARE, 1);
                 if (node >= 0) { p->nodes[node].args[1] = stack[--used]; p->nodes[node].args[0] = stack[--used]; p->nodes[node].comparison = (uint8_t)comparison; }
-            } else if (!strcmp(entry->module, "yara_x::wasm") && !strcmp(entry->name, "Array::len@array:i@i")) {
-                if (!used || p->nodes[stack[used - 1]].type != 7) return -1;
+            } else if (!strcmp(entry->module, "yara_x::wasm") &&
+                       (!strcmp(entry->name, "Array::len@array:i@i") || !strcmp(entry->name, "Map::len@map:i@i"))) {
+                if (!used || p->nodes[stack[used - 1]].type != (entry->name[0] == 'A' ? 7 : 8)) return -1;
                 node = yx_module_node_new(p, YX_ME_LENGTH, 3);
                 if (node >= 0) p->nodes[node].args[0] = stack[--used];
             } else if (!strcmp(entry->module, "yara_x::wasm") && !strncmp(entry->name, "map_lookup_", 11) &&
@@ -1985,7 +2271,8 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                 if (sig) {
                     if (used < sig->argc || (sig->undefined && !yx_integer_wasm_guard(r, end, 0x10, p->undefined_slot))) return -1;
                     for (size_t i = 0; i < sig->argc; ++i)
-                        if (sig->args[i] == 4 && !yx_module_decode_string(p, stack[used - sig->argc + i])) return -1;
+                        if ((sig->args[i] == 4 && !yx_module_decode_string(p, stack[used - sig->argc + i])) ||
+                            (sig->args[i] == 5 && !yx_module_decode_regex(p, stack[used - sig->argc + i]))) return -1;
                     node = yx_module_node_new(p, YX_ME_CALL, sig->result);
                     if (node >= 0) { p->nodes[node].signature = sig; p->nodes[node].argc = sig->argc; used -= sig->argc; memcpy(p->nodes[node].args, stack + used, sig->argc * sizeof(*stack)); }
                 } else {
@@ -2031,12 +2318,21 @@ static bool yx_module_print(const yx_module_program *p, int index, yx_writer *ou
     }
     if (n->op == YX_ME_LOOP) {
         const yx_archive_module_field *field = p->nodes[n->args[0]].field;
+        bool counted = n->comparison == 0xc7 || n->comparison == 0xc8;
+        if (counted) {
+            bool plain = p->nodes[n->args[2]].op == YX_ME_INT;
+            if (!yx_put_bytes(out, "for ", 4) || (!plain && !yx_put_u8(out, '(')) ||
+                !yx_module_print(p, n->args[2], out, depth + 1) || (!plain && !yx_put_u8(out, ')')) ||
+                (n->comparison == 0xc8 && !yx_put_u8(out, '%'))) return false;
+        }
         if (field && field->kind == 8)
-            snprintf(number, sizeof(number), "for %s v%" PRId64 ", v%" PRId64 " in ",
-                n->comparison == 0xc4 ? "any" : n->comparison == 0xc5 ? "all" : "none", n->integer + 5, n->integer + 6);
+            snprintf(number, sizeof(number), "%s v%" PRId64 ", v%" PRId64 " in ",
+                counted ? "" : n->comparison == 0xc4 ? "for any" : n->comparison == 0xc5 ? "for all" : "for none",
+                n->integer + 5, n->integer + 6);
         else
-            snprintf(number, sizeof(number), "for %s v%" PRId64 " in ",
-                n->comparison == 0xc4 ? "any" : n->comparison == 0xc5 ? "all" : "none", n->integer + 5);
+            snprintf(number, sizeof(number), "%s v%" PRId64 " in ",
+                counted ? "" : n->comparison == 0xc4 ? "for any" : n->comparison == 0xc5 ? "for all" : "for none",
+                n->integer + 5);
         return yx_put_bytes(out, number, strlen(number)) && yx_module_print(p, n->args[0], out, depth + 1) &&
             yx_put_bytes(out, ": (", 3) && yx_module_print(p, n->args[1], out, depth + 1) && yx_put_u8(out, ')');
     }
@@ -2055,6 +2351,9 @@ static bool yx_module_print(const yx_module_program *p, int index, yx_writer *ou
     }
     if (n->op == YX_ME_LENGTH)
         return yx_module_print(p, n->args[0], out, depth + 1) && yx_put_bytes(out, ".len()", 6);
+    if (n->op == YX_ME_NEGATE)
+        return yx_put_bytes(out, "-(", 2) && yx_module_print(p, n->args[0], out, depth + 1) && yx_put_u8(out, ')');
+    if (n->op == YX_ME_REGEX) return n->bytes && yx_put_bytes(out, n->bytes, n->length);
     if (n->op == YX_ME_MEMBER) {
         const yx_module_node *base = &p->nodes[n->args[0]];
         if (!base->field || !n->field) return false;
@@ -2114,13 +2413,23 @@ static yx_ser_result yx_decode_module_expression(const uint8_t *data, size_t len
     uint64_t count, size, imports, module_id = 0, namespace_variant, namespace_id, rule_id;
     const uint8_t *wasm; size_t wasm_length;
     uint8_t private_rule;
+    yx_literal *regexes = NULL; size_t regex_count = 0;
     if (length < sizeof(magic) || memcmp(data, magic, sizeof(magic))) return YX_SER_UNSUPPORTED;
     r.at = sizeof(magic);
     if (!yx_get_uint(&r, &count) || count < 1 || count > 4 || count > length - r.at) goto done;
     pool_count = (size_t)count; pool = calloc(pool_count, sizeof(*pool)); p = calloc(1, sizeof(*p));
     if (!pool || !p) { result = YX_SER_NO_MEMORY; goto done; }
     for (size_t i = 0; i < pool_count; ++i) if (!yx_get_string(&r, &pool[i])) goto done;
-    if (!yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) || !yx_get_uint(&r, &count) || count > length - r.at) goto done;
+    if (!yx_get_uint(&r, &count) || count > length - r.at) goto done;
+    regex_count = (size_t)count;
+    regexes = calloc(regex_count ? regex_count : 1, sizeof(*regexes));
+    if (!regexes) { result = YX_SER_NO_MEMORY; goto done; }
+    for (size_t i = 0; i < regex_count; ++i) {
+        if (!yx_get_uint(&r, &size) || size > length - r.at) goto done;
+        regexes[i] = (yx_literal){data + r.at,(size_t)size}; r.at += (size_t)size;
+    }
+    p->regexes = &regexes; p->regex_count = &regex_count; p->regex_capacity = &regex_count;
+    if (!yx_expect_uint(&r, 0) || !yx_get_uint(&r, &count) || count > length - r.at) goto done;
     p->literal_count = (size_t)count;
     p->literals = calloc(p->literal_count ? p->literal_count : 1, sizeof(*p->literals));
     if (!p->literals) { result = YX_SER_NO_MEMORY; goto done; }
@@ -2170,6 +2479,6 @@ static yx_ser_result yx_decode_module_expression(const uint8_t *data, size_t len
 done:
     if (decoded) yx_ser_rules_destroy(decoded, 1);
     if (pool) for (size_t i = 0; i < pool_count; ++i) free(pool[i]);
-    free(pool); free(source.data); free(canonical); yx_module_program_free(p);
+    free(pool); free(source.data); free(canonical); free(regexes); yx_module_program_free(p);
     return result;
 }

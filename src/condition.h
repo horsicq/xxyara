@@ -142,6 +142,10 @@ typedef struct yx_eval_context {
     size_t dex_output_data_size;
     /* The scanner's deadline also covers nested condition loops. */
     yx_scan_deadline *deadline;
+    /* Optional. Set when the evaluation reads a pattern's matches: there
+     * YARA-X's code calls search_for_patterns (emit.rs,
+     * emit_lazy_call_to_search_for_patterns). */
+    bool *pattern_search;
     /* Optional scanner-owned scratch. Evaluations reuse its instruction and
      * name-table storage, while temporary module/string results are reset. */
     yx_eval_string_arena *string_arena;
@@ -177,6 +181,15 @@ typedef bool (*yx_condition_zero_quantifier_callback)(size_t quantifier_start,
     size_t quantifier_end, size_t end, void *user);
 bool yx_condition_visit_zero_quantifiers(const yx_condition *condition,
     yx_condition_zero_quantifier_callback callback, void *user);
+/* Every `of` expression anchored with `at` whose quantifier asks for two or
+ * more of its patterns (YARA-X's potentially unsatisfiable expression): the
+ * quantifier's span and the anchor's, from `at` to the end of its
+ * expression. */
+typedef bool (*yx_condition_anchored_quantifier_callback)(size_t quantifier_start,
+    size_t quantifier_end, size_t anchor_start, size_t anchor_end, void *user);
+bool yx_condition_visit_anchored_quantifiers(const yx_condition *condition,
+    const char *const *pattern_names, size_t pattern_count,
+    yx_condition_anchored_quantifier_callback callback, void *user);
 /* YARA-X's unintended_pattern_in_set: in each conjunctive branch of the
  * condition, a pattern a wildcard set item includes that the branch also
  * uses explicitly or through a more specific set. The set item, then both
@@ -211,6 +224,11 @@ bool yx_condition_pattern_requires_all_matches(const yx_condition *condition,
 bool yx_condition_pattern_nonanchorable(const yx_condition *condition,
                                         const char *pattern_name,
                                         bool fixed_at);
+/* The condition with every constant that decides an `and` / `or` (and every
+ * `not` of constants) spelled `true` or `false`, as YARA-X's IR has them
+ * once folded: `$a or 1` gives `$a or true`. NULL when nothing changes;
+ * the caller frees the text. */
+char *yx_condition_folded_text(const char *expression);
 /* A simple `at` condition can only observe this pattern at one fixed offset. */
 bool yx_condition_pattern_fixed_at(const yx_condition *condition,
                                    const char *pattern_name, size_t *offset);
