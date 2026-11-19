@@ -48,6 +48,9 @@ typedef struct yx_module_patterns {
     /* Decoding: the name the printed conditions give each logical pattern
      * (the reconstructed patterns have placeholder identifiers), or NULL. */
     const char *const *anchor_names;
+    /* yx_module_pattern_wasm_sized: the helper goes first whatever the
+     * rule's size. */
+    bool helper_tie;
 } yx_module_patterns;
 static bool yx_module_pattern_relocate_helper(yx_writer *body,const size_t *offsets,size_t count,size_t id)
 {
@@ -1698,7 +1701,7 @@ static bool yx_module_pattern_wasm(yx_module_program *p, int root, uint8_t **dat
             true;
         uint64_t instructions=0;
         if(ok)ok=yx_rule_expression_instructions(&body,&instructions);
-        bool first=c->presence&&instructions<15;
+        bool first=c->presence&&(instructions<15||c->helper_tie);
         if(ok&&first!=c->helper_first){c->helper_first=first;free(expression.data);free(types.data);free(imports.data);free(body.data);free(code.data);free(wasm.data);return yx_module_pattern_wasm(p,root,data,length);}
         static const uint8_t helper[]={29,1,1,0x7f,0x20,0,0x41,3,0x76,0x23,0,0x6a,0x2d,0,0,0x41,1,0x20,0,0x41,8,0x70,0x22,1,0x74,0x71,0x20,1,0x76,0x0b};
         ok=ok&&yx_put_u8(&code,c->presence?4:3)&&( !c->helper_first||yx_put_bytes(&code,helper,sizeof(helper)))&&yx_put_uleb(&code,body.used)&&yx_put_bytes(&code,body.data,body.used)&&(!c->presence||c->helper_first||yx_put_bytes(&code,helper,sizeof(helper)));
@@ -1722,6 +1725,29 @@ done:
     free(functions.data); free(expression.data); free(types.data); free(imports.data); free(body.data); free(code.data);
     if (!ok) { free(wasm.data); return false; }
     *data = wasm.data; *length = wasm.used; return true;
+}
+static bool yx_v12_wasm(const uint8_t *data,size_t length,unsigned profile,yx_writer *out);
+/* walrus defines the pattern-match helper before the rule function and
+ * sorts the functions by size, keeping that order for equal sizes. The
+ * lowering (yx_v12_wasm) sorts the same way, stably: the two orders of the
+ * module lower differently exactly when the sizes are equal, and then the
+ * helper goes first. */
+static bool yx_module_pattern_wasm_sized(yx_module_program *p,int root,uint8_t **data,size_t *length)
+{
+    yx_module_patterns *c=p->extension;uint8_t *tie=NULL;size_t tie_length=0;bool differ=false;
+    if(!yx_module_pattern_wasm(p,root,data,length))return false;
+    if(!c->presence||c->helper_first)return true;
+    c->helper_tie=true;
+    if(yx_module_pattern_wasm(p,root,&tie,&tie_length)) {
+        yx_writer mine={0},other={0};
+        differ=yx_v12_wasm(*data,*length,0,&mine)&&yx_v12_wasm(tie,tie_length,0,&other)&&
+            (mine.used!=other.used||memcmp(mine.data,other.data,mine.used));
+        free(mine.data);free(other.data);
+    }
+    c->helper_tie=false;
+    if(differ){free(*data);*data=tie;*length=tie_length;return true;}
+    free(tie);free(*data);*data=NULL;
+    return yx_module_pattern_wasm(p,root,data,length);
 }
 
 static void yx_module_pattern_bounds(const yx_module_program *p,int root,yx_pattern_filesize_bounds *bounds,unsigned depth)
@@ -1750,9 +1776,49 @@ static void yx_module_pattern_apply_bounds(yx_module_program *p,int root)
     if(bounds.lower_kind==2&&bounds.upper_kind==2)return;
     for(size_t i=0;i<c->archive->logical;++i)if(c->archive->kinds[i]){size_t physical=c->archive->mapping[i];c->archive->bounded[physical]=true;c->archive->bounds[physical]=bounds;}
 }
+/* The parents yx_module_pattern_limits asks about for each `#a`, indexed in
+ * one pass over the nodes instead of one pass per `#a` (quadratic in a large
+ * composed program): the first GROUP over a node, the first comparison of it
+ * with another node, whether a Boolean context holds it and whether it is a
+ * limit root. -1 / false when there is none. */
+typedef struct { int *group,*compare; bool *boolean,*root; } yx_module_limit_index;
+static void yx_module_limit_index_free(yx_module_limit_index *x){free(x->group);free(x->compare);free(x->boolean);free(x->root);memset(x,0,sizeof(*x));}
+static bool yx_module_limit_index_build(const yx_module_program *p,const yx_module_patterns *c,yx_module_limit_index *x)
+{
+    size_t count=p->count?p->count:1;
+    memset(x,0,sizeof(*x));
+    x->group=malloc(count*sizeof(*x->group));x->compare=malloc(count*sizeof(*x->compare));
+    x->boolean=calloc(count,sizeof(*x->boolean));x->root=calloc(count,sizeof(*x->root));
+    if(!x->group||!x->compare||!x->boolean||!x->root){yx_module_limit_index_free(x);return false;}
+    for(size_t i=0;i<p->count;++i){x->group[i]=-1;x->compare[i]=-1;}
+    for(size_t j=p->count;j-->0;) {
+        const yx_module_node *parent=&p->nodes[j];
+        int a=parent->args[0],b=parent->args[1];
+        if(parent->op==YX_ME_GROUP&&a>=0&&(size_t)a<p->count&&(int)j!=a)x->group[a]=(int)j;
+        if(parent->op==YX_ME_COMPARE&&a!=b&&parent->comparison<=5) {
+            if(a>=0&&(size_t)a<p->count)x->compare[a]=(int)j;
+            if(b>=0&&(size_t)b<p->count)x->compare[b]=(int)j;
+        }
+        if(parent->op==YX_ME_AND||parent->op==YX_ME_OR) {
+            if(a>=0&&(size_t)a<p->count&&(int)j!=a)x->boolean[a]=true;
+            if(b>=0&&(size_t)b<p->count&&(int)j!=b)x->boolean[b]=true;
+        }
+        if(parent->op==YX_ME_NOT&&a>=0&&(size_t)a<p->count&&(int)j!=a)x->boolean[a]=true;
+        if((parent->op==YX_ME_BIND||parent->op==YX_ME_LOOP)&&b!=a&&b>=0&&(size_t)b<p->count&&(int)j!=b)x->boolean[b]=true;
+    }
+    for(size_t j=0;j<c->limit_root_count;++j) {
+        int root=c->limit_roots[j];
+        if(root>=0&&(size_t)root<p->count)x->root[root]=true;
+    }
+    return true;
+}
 static bool yx_module_pattern_limits(yx_module_program *p)
 {
     yx_module_patterns *c=p->extension;
+    yx_module_limit_index index={0};
+    bool indexed=false,has_count=false;
+    for(size_t i=0;i<p->count&&!has_count;++i)has_count=p->nodes[i].op==YX_MP_COUNT;
+    if(has_count)indexed=yx_module_limit_index_build(p,c,&index);
     for(size_t i=0;i<c->archive->physical;++i)c->archive->limits[i]=1;
     for(size_t i=0;i<p->count;++i) {
         const yx_module_node *n=&p->nodes[i];
@@ -1760,7 +1826,7 @@ static bool yx_module_pattern_limits(yx_module_program *p)
         if(n->op==YX_MP_OF&&(n->comparison>>4))
             for(size_t k=0;k<n->length;++k) {
                 uint32_t id=((const uint32_t *)n->bytes)[k];
-                if(id>=c->archive->physical)return false;
+                if(id>=c->archive->physical){yx_module_limit_index_free(&index);return false;}
                 c->archive->limits[id]=0;
             }
         if(n->op<YX_MP_COUNT||n->op>YX_MP_COUNT_IN)continue;
@@ -1771,7 +1837,11 @@ static bool yx_module_pattern_limits(yx_module_program *p)
         /* IR::required_matches_for_count: the root and the Boolean contexts
          * (`and`, `or`, `not`, the body of a `with` or a `for .. in`) need
          * one match. Parentheses are not IR nodes. */
-        if(n->op==YX_MP_COUNT) {
+        if(n->op==YX_MP_COUNT&&indexed) {
+            int operand=(int)i;
+            while(index.group[operand]>=0)operand=index.group[operand];
+            limit=index.root[operand]||index.boolean[operand];
+        } else if(n->op==YX_MP_COUNT) {
             int operand=(int)i;
             for(bool climbed=true;climbed;) {
                 climbed=false;
@@ -1787,7 +1857,7 @@ static bool yx_module_pattern_limits(yx_module_program *p)
                    ((parent->op==YX_ME_BIND||parent->op==YX_ME_LOOP)&&parent->args[1]==operand&&parent->args[0]!=operand))limit=1;
             }
         }
-        if(n->op==YX_MP_COUNT&&!limit)for(size_t j=0;j<p->count;++j) {
+        if(n->op==YX_MP_COUNT&&!limit)for(size_t j=indexed?(index.compare[i]<0?p->count:(size_t)index.compare[i]):0;j<p->count;++j) {
             const yx_module_node *parent=&p->nodes[j];
             static const uint8_t ops[]={0x51,0x52,0x53,0x55,0x57,0x59};
             if(parent->op!=YX_ME_COMPARE||(parent->args[0]!=(int)i&&parent->args[1]!=(int)i)||
@@ -1804,14 +1874,15 @@ static bool yx_module_pattern_limits(yx_module_program *p)
         const yx_module_node *loop=yx_module_pattern_owner(p,n);
         const uint32_t *ids=loop?(const uint32_t *)loop->bytes:NULL;
         size_t count=loop?loop->length:1;
-        if(!loop&&(n->integer<0||(uint64_t)n->integer>=c->archive->physical))return false;
+        if(!loop&&(n->integer<0||(uint64_t)n->integer>=c->archive->physical)){yx_module_limit_index_free(&index);return false;}
         for(size_t k=0;k<count;++k) {
             uint64_t id=ids?ids[k]:(uint64_t)n->integer;
-            if(id>=c->archive->physical)return false;
+            if(id>=c->archive->physical){yx_module_limit_index_free(&index);return false;}
             uint64_t *old=&c->archive->limits[id];
             if(!limit)*old=0;else if(*old&&limit>*old)*old=limit;
         }
     }
+    yx_module_limit_index_free(&index);
     return true;
 }
 /* Derive the same contiguous prefix constraints from the typed condition AST
@@ -1968,7 +2039,7 @@ static yx_ser_result yx_encode_module_patterns_profile(const YRX_RULES *rules,ui
     int root=yx_module_parse(p,1,0);yx_bool_skip_space(&p->parser);
     c.limit_roots=&root;c.limit_root_count=1;
     if(root<0||*p->parser.at||p->failed||!yx_module_pattern_limits(p)||
-       !yx_module_pattern_wasm(p,root,&wasm,&wasm_length)||!yx_physical_pool_reserve(a,p->literal_count))goto done;
+       !yx_module_pattern_wasm_sized(p,root,&wasm,&wasm_length)||!yx_physical_pool_reserve(a,p->literal_count))goto done;
     for(size_t i=0;i<p->count;++i)if(p->nodes[i].op==YX_MP_AT||(p->nodes[i].op==YX_MP_OF&&(p->nodes[i].comparison>>4)))goto done;
     yx_module_pattern_apply_bounds(p,root);
     yx_physical_header header={0};if(!yx_module_header(p,root,rules,&root,0,&header_storage,&header))goto done;
@@ -2095,7 +2166,21 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     yx_reader wr={a->wasm,a->wasm_length,0,false,false};size_t body_end;
     if(!yx_module_pattern_decode_header_mode(&wr,p,&body_end,false))goto done;
     int root=yx_module_decode_block(&wr,body_end,p,0);
-    if(root<0||!yx_module_print(p,root,&source,0))goto done;
+    /* The terms below go inside the body of a `with` condition: a `with`
+     * whose body is constant has a constant type value, and IR::and / IR::or
+     * would fold it away with its declarations (their calls run). */
+    int with_body=root;bool with_root=root>=0&&p->nodes[root].op==YX_ME_BIND;
+    if(with_root) {
+        for(bool first=true;p->nodes[with_body].op==YX_ME_BIND;first=false) {
+            const yx_module_node *bind=&p->nodes[with_body];char number[48];
+            snprintf(number,sizeof(number),first?"with v%" PRId64 "=":", v%" PRId64 "=",bind->integer);
+            if(bind->args[1]<0||(size_t)bind->args[1]>=p->count||!yx_tr_text(&source,number)||
+               !yx_module_print(p,bind->args[0],&source,1))goto done;
+            with_body=bind->args[1];
+        }
+        if(!yx_tr_text(&source,": (("))goto done;
+    }
+    if(root<0||!yx_module_print(p,with_body,&source,0)||(with_root&&!yx_put_u8(&source,')')))goto done;
     /* Folding can remove every pattern operand while its private physical
      * patterns remain in the archive. Retain syntactic references when the
      * runtime compiler reconstructs the source, without evaluating them. */
@@ -2125,7 +2210,7 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
         if((duplicate||!read)&&(!yx_tr_text(&source," and (true or ")||!yx_tr_text(&source,a->names[a->name_ids[i]])||
                        !yx_put_u8(&source,')')))goto done;
     }
-    if(!yx_put_u8(&source,0))goto done;
+    if((with_root&&!yx_put_u8(&source,')'))||!yx_put_u8(&source,0))goto done;
     uint8_t profile=4;bool found=false;
     for(unsigned frontend=0;frontend<2&&!found;++frontend)for(profile=0;profile<4;++profile) {
         p->profile=profile;p->capi_import_order=frontend==0&&profile==0;free(wasm);wasm=NULL;
@@ -2133,8 +2218,27 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
         if(!yx_module_pattern_schema_build(&expected,&source_rules,profile)){yx_module_pattern_schema_free(&expected);goto done;}
         bool same=a->globals_length==expected.dynamic.globals.used&&!memcmp(a->globals,expected.dynamic.globals.data,a->globals_length);
         yx_module_pattern_schema_free(&expected);
-        if(same&&yx_module_pattern_wasm(p,root,&wasm,&wasm_length)&&wasm_length==a->wasm_length&&
+        if(same&&yx_module_pattern_wasm_sized(p,root,&wasm,&wasm_length)&&wasm_length==a->wasm_length&&
            !memcmp(wasm,a->wasm,wasm_length)&&c.regex_count==a->regexp_count){found=true;break;}
+    }
+    /* The restored module can order the rule function and the pattern
+     * helper either way when both lower to the archive's module (the
+     * lowering sorts functions by size, as walrus does): compare the
+     * lowered modules. */
+    for(unsigned frontend=0;frontend<2&&!found;++frontend)for(profile=0;profile<4&&!found;++profile) {
+        p->profile=profile;p->capi_import_order=frontend==0&&profile==0;free(wasm);wasm=NULL;
+        yx_module_pattern_schema expected={0};
+        if(!yx_module_pattern_schema_build(&expected,&source_rules,profile)){yx_module_pattern_schema_free(&expected);goto done;}
+        bool same=a->globals_length==expected.dynamic.globals.used&&!memcmp(a->globals,expected.dynamic.globals.data,a->globals_length);
+        yx_module_pattern_schema_free(&expected);
+        if(!same||!yx_module_pattern_wasm(p,root,&wasm,&wasm_length)||c.regex_count!=a->regexp_count)continue;
+        for(unsigned lowering=0;lowering<4&&!found;++lowering) {
+            yx_writer mine={0},archived={0};unsigned flags=(lowering&1?4u:0u)|(lowering&2?256u:0u);
+            found=yx_v12_wasm(wasm,wasm_length,flags,&mine)&&yx_v12_wasm(a->wasm,a->wasm_length,flags,&archived)&&
+                mine.used==archived.used&&!memcmp(mine.data,archived.data,mine.used);
+            free(mine.data);free(archived.data);
+        }
+        if(found)break;
     }
     if(!found)goto done;
     for(size_t i=0;i<p->count;++i)if(p->nodes[i].op==YX_MP_AT||(p->nodes[i].op==YX_MP_OF&&(p->nodes[i].comparison>>4)))goto done;

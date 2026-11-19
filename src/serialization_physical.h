@@ -943,6 +943,7 @@ done:
     free(old_names);free(old_pool);free(pool_map);free(used);
     return ok;
 }
+static bool yx_unanchored_pattern_terms_archive(const yx_physical_archive *a,yx_integer_expr *tree,int *root);
 static bool yx_physical_condition(const yx_physical_archive *a,char **condition,uint8_t *profile_out)
 {
     yx_integer_expr *tree=calloc(1,sizeof(*tree));yx_pattern_expression_context c={0};
@@ -961,6 +962,7 @@ static bool yx_physical_condition(const yx_physical_archive *a,char **condition,
        !yx_get_u8(&r,&marker)||marker!=0x7e))||!yx_rule_expression_byte(&r,2)||!yx_rule_expression_byte(&r,0x7f))goto done;
     int root=yx_integer_wasm_block(&r,body_end,tree,0,-1);
     if(root<0||!c.saw_pattern||c.pattern_count>a->physical)goto done;
+    if(!yx_unanchored_pattern_terms_archive(a,tree,&root))goto done;
     if(!yx_pattern_expression_scope_fixup(tree,&root,&c))goto done;
     uint8_t profile=4;int original_root=root;
     /* Static inverses retain the private OR form without a final guard.

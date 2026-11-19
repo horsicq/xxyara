@@ -464,6 +464,16 @@ static int yx_module_constant_truth(const yx_module_node *n)
     if (n->type == 4) return n->length != 0;
     return -1;
 }
+/* The same for an operand of IR::and / IR::or: a `with` has the type value
+ * of its body (Expr::With), so a constant body makes it a constant operand
+ * whose declarations never run. */
+static int yx_module_operand_truth(const yx_module_program *p, int index)
+{
+    for (size_t steps = 0; index >= 0 && (size_t)index < p->count && p->nodes[index].op == YX_ME_BIND &&
+         steps < p->count; ++steps)
+        index = p->nodes[index].args[1];
+    return index < 0 || (size_t)index >= p->count ? -1 : yx_module_constant_truth(&p->nodes[index]);
+}
 static bool yx_module_take(yx_module_program *p, unsigned char c)
 {
     yx_bool_skip_space(&p->parser);
@@ -490,7 +500,16 @@ static int yx_module_parse_with(yx_module_program *p, unsigned depth)
     if (!values) return -1;
     do {
         const unsigned char *name; size_t length;
-        if (!yx_archive_bindings_reserve(&p->bindings, &p->binding_capacity, p->binding_count + 1) || !yx_with_identifier(&p->parser, &name, &length) || !yx_module_take(p, '=')) goto done;
+        if (!yx_archive_bindings_reserve(&p->bindings, &p->binding_capacity, p->binding_count + 1)) goto done;
+        /* A `?` item (yx_condition_alias_free_text): a slot of the
+         * statement's frame that holds no variable. Such items follow the
+         * declared variables. */
+        if (yx_module_take(p, '?')) {
+            memset(&p->bindings[p->binding_count], 0, sizeof(p->bindings[0]));
+            ++p->binding_count;
+            continue;
+        }
+        if (!yx_with_identifier(&p->parser, &name, &length) || !yx_module_take(p, '=')) goto done;
         int value = yx_module_parse(p, 1, depth + 1);
         /* Scalars, structures, arrays and maps (indexed, measured by
          * `.len()` or iterated by `for .. in <name>`). */
@@ -968,6 +987,14 @@ static int yx_module_parse_operators(yx_module_program *p, size_t first, int lef
         int right = yx_module_parse(p, precedence + 1, depth + 1);
         if (right < 0) return -1;
         if (op == YX_ME_ARITH) {
+            /* IR::fold_div / IR::fold_rem fold a `\` / `%` chain (one n-ary
+             * operation, groups included) only when every operand is
+             * constant: a constant prefix of `20 \ 2 \ filesize` divides at
+             * run time. */
+            if ((comparison == 0x7f || comparison == 0x81) && !p->nodes[right].constant)
+                for (int link = left; link >= 0 && p->nodes[link].op == YX_ME_ARITH &&
+                     p->nodes[link].comparison == comparison && p->nodes[link].constant; link = p->nodes[link].args[0])
+                    p->nodes[link].constant = false;
             left = yx_module_arithmetic_node(p, comparison, left, right);
             if (left < 0) return -1;
             continue;
@@ -977,8 +1004,8 @@ static int yx_module_parse_operators(yx_module_program *p, size_t first, int lef
          * metadata remains independent of the surviving expression. */
         if (op == YX_ME_AND || op == YX_ME_OR) {
             int absorbing = op == YX_ME_OR;
-            int t_left = yx_module_constant_truth(&p->nodes[left]);
-            int t_right = yx_module_constant_truth(&p->nodes[right]);
+            int t_left = yx_module_operand_truth(p, left);
+            int t_right = yx_module_operand_truth(p, right);
             int folded = t_left == absorbing ? left : t_right == absorbing ? right : -1;
             if (folded >= 0) {
                 /* Every node made for the operands so far, in order. */
@@ -1371,7 +1398,7 @@ static bool yx_module_boolean_operands(yx_module_program *p, int index, uint8_t 
     if (depth > 128) return false;
     /* IR::and/or drop neutral constants; the plain module codec has no
      * one-operand form and leaves such conditions to the composed codec. */
-    if(yx_module_constant_truth(n)==(op==YX_ME_AND?1:0))return p->boolean_scope!=NULL;
+    if(yx_module_operand_truth(p,index)==(op==YX_ME_AND?1:0))return p->boolean_scope!=NULL;
     if (flatten && n->op == op) {
         size_t count;
         int *items = yx_module_left_chain(p, index, op, &count);
@@ -1624,8 +1651,8 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
         {
             const yx_module_node *left=&p->nodes[n->args[0]],*right=&p->nodes[n->args[1]];
             int neutral=n->op==YX_ME_AND?1:0,child=-1;
-            if(yx_module_constant_truth(left)==neutral)child=n->args[1];
-            else if(yx_module_constant_truth(right)==neutral)child=n->args[0];
+            if(yx_module_operand_truth(p,n->args[0])==neutral)child=n->args[1];
+            else if(yx_module_operand_truth(p,n->args[1])==neutral)child=n->args[0];
             if(child>=0&&!p->boolean_scope){p->undefined_slot=saved;return false;}
             if(child>=0) {
                 p->boolean_scope(p,true);
@@ -2373,6 +2400,17 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             } else { op = YX_ME_OR; guard = yx_integer_or_guard; length = sizeof(yx_integer_or_guard); }
             r->at = start;
             if ((join_op && join_op != op) || !yx_integer_wasm_bytes(r, end, guard, length)) return -1;
+            /* A first operand that is a block of the same operator is an
+             * operand of its own: the AST's n-ary operation had a constant
+             * before it that IR::and / IR::or dropped. Restore it, as the
+             * source `true and (A and B) and C` parses. */
+            if (joined < 0 && p->nodes[stack[0]].op == op) {
+                int neutral = yx_module_node_new(p, YX_ME_BOOL, 1);
+                if (neutral < 0) return -1;
+                p->nodes[neutral].integer = op == YX_ME_AND; p->nodes[neutral].constant = true;
+                node = yx_module_node_new(p, op, 1); if (node < 0) return -1;
+                p->nodes[node].args[0] = neutral; p->nodes[node].args[1] = stack[0]; stack[0] = node;
+            }
             if (joined < 0) joined = stack[0];
             else {
                 node = yx_module_node_new(p, op, 1); if (node < 0) return -1;

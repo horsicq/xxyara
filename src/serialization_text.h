@@ -23,14 +23,18 @@
  * deduplicated physical patterns. The caller supplies compiled condition
  * code and match limits for the deduplicated PatternIds. */
 
-static size_t yx_text_pattern_mapping(const YRX_RULE *rule,size_t map[5],size_t unique[5])
+/* `apart` (or NULL): declarations anchor_patterns never reached, which are
+ * neither anchored nor NonAnchorable and so another Pattern than an equal
+ * declaration it reached (PatternId identity, compiler/mod.rs). */
+static size_t yx_text_pattern_mapping(const YRX_RULE *rule,size_t map[5],size_t unique[5],const bool *apart)
 {
     size_t count=0;
     for(size_t i=0;i<rule->pattern_count;++i) {
         size_t j=0;
         for(;j<count;++j) {
             const YRX_PATTERN *a=&rule->patterns[i],*b=&rule->patterns[unique[j]];
-            if(a->length==b->length&&!memcmp(a->bytes,b->bytes,a->length))break;
+            if(a->length==b->length&&!memcmp(a->bytes,b->bytes,a->length)&&
+               (!apart||apart[i]==apart[unique[j]]))break;
         }
         if(j==count)unique[count++]=i;
         map[i]=j;
@@ -40,7 +44,7 @@ static size_t yx_text_pattern_mapping(const YRX_RULE *rule,size_t map[5],size_t 
 
 static yx_ser_result yx_text_envelope_encode(const YRX_RULE *rule,
     const uint8_t *wasm,size_t wasm_length,const uint64_t limits[5],
-    bool anchored,uint64_t offset,uint8_t **data,size_t *length)
+    bool anchored,uint64_t offset,const bool *apart,uint8_t **data,size_t *length)
 {
     static const uint8_t magic[]={ 'Y','A','R','A','-','X',0,0,12,0,0,0 };
     static const uint8_t globals[]={0,0,1,0};
@@ -55,7 +59,7 @@ static yx_ser_result yx_text_envelope_encode(const YRX_RULE *rule,
     for(size_t i=0;i<rule->pattern_count;++i)
         if(rule->patterns[i].kind!=YX_PATTERN_TEXT||!rule->patterns[i].length||
            (rule->patterns[i].modifiers&~YX_MOD_ASCII))return YX_SER_UNSUPPORTED;
-    size_t physical=yx_text_pattern_mapping(rule,mapping,unique);
+    size_t physical=yx_text_pattern_mapping(rule,mapping,unique,apart);
     if(anchored&&physical!=1)return YX_SER_UNSUPPORTED;
     tags=calloc(rule->tag_count?rule->tag_count:1,sizeof(*tags));
     keys=calloc(rule->metadata_count?rule->metadata_count:1,sizeof(*keys));
@@ -243,7 +247,7 @@ static bool yx_text_envelope_read(const uint8_t *data,size_t length,
     YRX_RULE rule={0};rule.identifier=entry->identifier;rule.namespace_name=entry->namespace_name;rule.is_private=entry->is_private;
     rule.tags=entry->tags;rule.tag_count=entry->tag_count;rule.metadata=entry->metadata;rule.metadata_count=entry->metadata_count;
     rule.patterns=temporary;rule.pattern_count=patterns;
-    if(yx_text_envelope_encode(&rule,*wasm,*wasm_length,limits,anchored,offset,&canonical,&canonical_length)!=YX_SER_SUCCESS||
+    if(yx_text_envelope_encode(&rule,*wasm,*wasm_length,limits,anchored,offset,NULL,&canonical,&canonical_length)!=YX_SER_SUCCESS||
        canonical_length!=length||memcmp(canonical,data,length))goto done;
     entry->single_text_pattern=patterns==1;entry->two_text_patterns=patterns==2;entry->three_text_patterns=patterns==3;
     entry->four_text_patterns=patterns==4;entry->five_text_patterns=patterns==5;

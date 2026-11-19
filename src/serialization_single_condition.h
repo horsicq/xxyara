@@ -68,7 +68,7 @@ static bool yx_physical_single_condition_decode(const yx_physical_archive *a,yx_
         plain.kind=YX_PATTERN_TEXT; plain.identifier=a->names[a->name_ids[0]];
         plain.bytes=(uint8_t *)"a"; plain.length=1;
         r.identifier=a->names[2]; r.namespace_name=a->names[0]; r.patterns=&plain; r.pattern_count=1;
-        bool valid=yx_text_envelope_encode(&r,a->wasm,a->wasm_length,a->limits,false,0,
+        bool valid=yx_text_envelope_encode(&r,a->wasm,a->wasm_length,a->limits,false,0,NULL,
                                            &archive,&archive_length)==YX_SER_SUCCESS &&
             yx_physical_inspect_load(archive,archive_length,&loaded)==YRX_SUCCESS &&
             loaded && loaded->rule_count==1;

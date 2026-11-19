@@ -25,6 +25,7 @@
 #include "condition.h"
 #include "serialization.h"
 #include "syntax_check.h"
+#include "warning_suppression.h"
 #include "xxfclib/regex/xx_regex_unicode16.h"
 
 #include <ctype.h>
@@ -4623,6 +4624,18 @@ static const struct { const char *path; bool help; } yx_module_functions[] = {
     {"string.length", false}, {"string.to_int", false}, {"time.now", true}
 };
 
+bool yx_module_function_path(const char *path, size_t length, bool *help)
+{
+    for (size_t i = 0; i < sizeof(yx_module_functions) /
+                           sizeof(*yx_module_functions); ++i)
+        if (strlen(yx_module_functions[i].path) == length &&
+            !memcmp(yx_module_functions[i].path, path, length)) {
+            if (help) *help = yx_module_functions[i].help;
+            return true;
+        }
+    return false;
+}
+
 static bool yx_diag_token_in(const yx_diag_token *token,
                              const char *const *words, size_t count)
 {
@@ -4672,9 +4685,28 @@ static unsigned yx_function_operand_operator(const yx_diag_token *token,
  * `not`, `defined`, `and`, `or` or a comparison it says `function`, and
  * `and`/`or` also warn non_bool_expr. Other contexts are not modeled.
  * Returns 1 when recorded, 0 when not applicable, -1 on failure. */
+static int yx_function_value_error_at(yx_parser *p, const char *start,
+                                      const char *at, size_t path_length,
+                                      bool help);
+
 static int yx_function_value_error(yx_parser *p, const char *start,
                                    const char *at, const char *path,
                                    size_t path_length)
+{
+    for (size_t i = 0; i < sizeof(yx_module_functions) /
+                           sizeof(*yx_module_functions); ++i)
+        if (strlen(yx_module_functions[i].path) == path_length &&
+            !memcmp(yx_module_functions[i].path, path, path_length))
+            return yx_function_value_error_at(p, start, at, path_length,
+                                              yx_module_functions[i].help);
+    return 0;
+}
+
+/* The same for the `path_length` bytes at `at`, which name a function:
+ * its path, or a `with` name that stands for it. */
+static int yx_function_value_error_at(yx_parser *p, const char *start,
+                                      const char *at, size_t path_length,
+                                      bool help)
 {
     static const char *const logical[] = {"and", "or"};
     static const char *const unary[] = {"not", "defined"};
@@ -4688,18 +4720,10 @@ static int yx_function_value_error(yx_parser *p, const char *start,
     /* The operand types of the operator the function is an operand of. */
     const char *accepted = "`boolean`, `float`, `integer`, or `string`";
     size_t count = 0, first = SIZE_MAX, last = SIZE_MAX, begin, end;
-    bool help = false, found = false, operand, warn = false, boolean = false;
+    bool operand, warn = false, boolean = false;
     char snippet[256];
     int result = 0;
-    for (size_t i = 0; i < sizeof(yx_module_functions) /
-                           sizeof(*yx_module_functions); ++i)
-        if (strlen(yx_module_functions[i].path) == path_length &&
-            !memcmp(yx_module_functions[i].path, path, path_length)) {
-            help = yx_module_functions[i].help;
-            found = true;
-            break;
-        }
-    if (!found || path_length >= sizeof(snippet) - 3) return 0;
+    if (path_length >= sizeof(snippet) - 3) return 0;
     if (!yx_condition_diag_tokens(start, p->at, &tokens, &count)) return -1;
     for (size_t i = 0; i < count; ++i) {
         if (tokens[i].start == at) first = i;
@@ -5474,13 +5498,19 @@ static bool yx_known_function_arguments_error(yx_parser *p,
     const char *path = NULL, *combinations = NULL, *name, *name_end;
     char note[512];
     size_t call_offset = 0;
+    /* The call names the function through a `with` declaration: the name
+     * at the call's offset is the alias. */
+    bool alias = false;
     if (strncmp(detail, prefix, sizeof(prefix) - 1) != 0) return false;
     name = detail + sizeof(prefix) - 1;
     name_end = strchr(name, '\'');
     if (!name_end) return false;
     /* The failing call's offset in the condition, when known. */
-    if (name_end[1] == ' ' && name_end[2] == '@')
-        call_offset = (size_t)strtoull(name_end + 3, NULL, 10);
+    if (name_end[1] == ' ' && name_end[2] == '@') {
+        char *offset_end = NULL;
+        call_offset = (size_t)strtoull(name_end + 3, &offset_end, 10);
+        alias = offset_end && strcmp(offset_end, " alias") == 0;
+    }
     else if (name_end[1]) return false;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); ++i) {
         if (strlen(functions[i].path) == (size_t)(name_end - name) &&
@@ -5500,6 +5530,12 @@ static bool yx_known_function_arguments_error(yx_parser *p,
         const char *part = path;
         size_t open = i;
         if ((size_t)(tokens[i].start - start) < call_offset) continue;
+        if (alias) {
+            if ((size_t)(tokens[i].start - start) != call_offset ||
+                tokens[i].kind != YX_DIAG_WORD) break;
+            part = "";
+            open = i + 1;
+        }
         while (*part && open < count) {
             size_t length = *part == '.' ? 1 : strcspn(part, ".");
             if ((size_t)(tokens[open].end - tokens[open].start) != length ||
@@ -5547,6 +5583,8 @@ static bool yx_unknown_function_condition_error(yx_parser *p,
     if (!end || end[1] || end == quoted) return false;
     length = (size_t)(end - quoted);
     if (memchr(quoted, '.', length)) return false;
+    /* The parser stopped at the `(` of the call. */
+    size_t open_offset = (size_t)strtoull(detail + 8, NULL, 10);
     for (size_t i = 0; !symbol_type && i < rules->rule_count; ++i)
         if (strlen(rules->rules[i].identifier) == length &&
             memcmp(rules->rules[i].identifier, quoted, length) == 0 &&
@@ -5561,11 +5599,25 @@ static bool yx_unknown_function_condition_error(yx_parser *p,
         }
     if (!yx_condition_diag_tokens(start, p->at, &tokens, &count))
         return false;
+    {
+        /* The call the parser stopped at, when the name is called earlier
+         * too (where a `with` declares it). */
+        bool located = false;
+        for (size_t i = 0; i + 1 < count && !located; ++i)
+            located = tokens[i].kind == YX_DIAG_WORD &&
+                (size_t)(tokens[i].end - tokens[i].start) == length &&
+                memcmp(tokens[i].start, quoted, length) == 0 &&
+                yx_diag_token_is(&tokens[i + 1], "(") &&
+                (size_t)(tokens[i + 1].start - start) == open_offset;
+        if (!located) open_offset = SIZE_MAX;
+    }
     for (size_t i = 0; i + 1 < count; ++i) {
         if (tokens[i].kind != YX_DIAG_WORD ||
             (size_t)(tokens[i].end - tokens[i].start) != length ||
             memcmp(tokens[i].start, quoted, length) != 0 ||
             !yx_diag_token_is(&tokens[i + 1], "(")) continue;
+        if (open_offset != SIZE_MAX &&
+            (size_t)(tokens[i + 1].start - start) != open_offset) continue;
         char name[YX_CONDITION_NAME_SIZE];
         if (length >= sizeof(name)) break;
         memcpy(name, quoted, length);
@@ -5613,6 +5665,37 @@ static bool yx_vt_module_value_condition_error(yx_parser *p,
     }
     free(tokens);
     return false;
+}
+
+/* A `with` name that stands for a function, read without a call (E002):
+ * the function value's diagnostics, at the name. */
+static bool yx_function_alias_value_condition_error(yx_parser *p,
+                                                    const char *start,
+                                                    const char *detail)
+{
+    size_t value_start, value_end;
+    char path[YX_CONDITION_NAME_SIZE];
+    bool help = false;
+    int result;
+    if (sscanf(detail, "function alias value span:%zu:%zu:%127s",
+               &value_start, &value_end, path) != 3 ||
+        value_start >= value_end || value_end > (size_t)(p->at - start))
+        return false;
+    /* `valid_on`, the method of a signature, returns a bool. */
+    if (strcmp(path, "valid_on") == 0) help = true;
+    else (void)yx_module_function_path(path, strlen(path), &help);
+    result = yx_function_value_error_at(p, start, start + value_start,
+                                        value_end - value_start, help);
+    if (result < 0) return false;
+    if (!result &&
+        !yx_compiler_wrong_type_error(
+            p->compiler, p->begin, p->origin,
+            (size_t)(start - p->begin) + value_start,
+            (size_t)(start - p->begin) + value_end,
+            "`boolean`, `float`, `integer`, or `string`", "function"))
+        return false;
+    p->recoverable_unknown_identifier = true;
+    return true;
 }
 
 static bool yx_wrong_type_condition_error(yx_parser *p,
@@ -7730,7 +7813,8 @@ static bool yx_test_proto_method_condition_error(yx_parser *p,
         end <= (size_t)(p->at - start)) {
         const char *arguments = strcmp(function, "add") == 0 ?
             "(float, float)\n(integer, integer)" :
-            strcmp(function, "head") == 0 ? "(integer)" :
+            strcmp(function, "head") == 0 ||
+            strcmp(function, "valid_on") == 0 ? "(integer)" :
             strcmp(function, "uppercase") == 0 ||
             strcmp(function, "to_int") == 0 ||
             strcmp(function, "nested_method_with_arg") == 0 ? "(string)" : "()";
@@ -9207,6 +9291,7 @@ condition_failed:
         if (yx_known_function_arguments_error(p, start, detail)) goto validation_failed;
         if (yx_chained_comparison_unknown_identifier_error(
                 p, rule, start, detail)) goto validation_failed;
+        if (yx_function_alias_value_condition_error(p, start, detail)) goto validation_failed;
         if (yx_wrong_type_condition_error(p, start, detail)) goto validation_failed;
         if (yx_hash_digest_integer_comparison_error(p, rule, start, detail))
             goto validation_failed;
@@ -10827,6 +10912,7 @@ YRX_RESULT yx_parse_source(YRX_COMPILER *compiler, const char *source, const cha
     size_t start;
     YRX_RESULT result;
     yx_sc_result syntax;
+    yx_suppression_scope text_scope;
     bool checked;
     if (!compiler || !compiler->rules || !source) return YRX_INVALID_ARGUMENT;
     start = compiler->error_diagnostic_json ?
@@ -10845,11 +10931,15 @@ YRX_RESULT yx_parse_source(YRX_COMPILER *compiler, const char *source, const cha
     /* With syntax errors, YARA-X's parser decides which items are dropped
      * and what is reported for them; the remaining items compile as
      * usual. */
+    /* The diagnostics of this source measure it, find lines in it and
+     * look for suppression comments once instead of once each. */
+    yx_suppression_scope_begin_text(&text_scope, source);
     checked = yx_syntax_check_chunked(source, strlen(source), &syntax);
     result = yx_parse_source_items(compiler, source, origin,
                                    checked && syntax.error_count ? &syntax : NULL);
     if (checked) yx_sc_result_free(&syntax);
     yx_compiler_order_source_diagnostics(compiler, start, origin);
+    yx_suppression_scope_end(&text_scope);
     if (result == YRX_SYNTAX_ERROR) yx_compiler_first_source_error(compiler, start);
     return result;
 }

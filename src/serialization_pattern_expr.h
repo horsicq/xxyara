@@ -739,6 +739,10 @@ static yx_ser_result yx_unconstrain_single_pattern_archive(const uint8_t *data,s
     const yx_integer_expr *tree,int root,uint8_t **out,size_t *out_length);
 static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     const yx_integer_expr *tree,int root,const YRX_RULE *rule);
+static bool yx_unanchored_pattern_terms(const uint8_t *data,size_t length,yx_integer_expr *tree,int *root);
+static bool yx_pattern_ir_marks(const yx_integer_expr *tree,int root,uint8_t *marks,size_t count);
+static yx_ser_result yx_rule_unmarked_patterns(const YRX_RULES *rules,const YRX_RULE *r,const yx_integer_expr *tree,
+    const uint8_t *marks,bool *unmarked);
 static yx_ser_result yx_encode_pattern_expression(const YRX_RULES *rules,uint8_t **data,size_t *length)
 {
     if(!rules||rules->rule_count!=1||rules->import_count||rules->global_count||rules->rules[0].is_global||
@@ -759,9 +763,26 @@ static yx_ser_result yx_encode_pattern_expression(const YRX_RULES *rules,uint8_t
     c.name=pattern->identifier;c.pattern_count=pattern_count;
     c.capi_import_order=!rules->archive_cli&&yx_integer_import_profile()==0;
     for(size_t i=0;i<pattern_count;++i)c.names[i]=pattern[i].identifier;
-    size_t unique[5];yx_text_pattern_mapping(&rules->rules[0],c.mapping,unique);
+    size_t unique[5];yx_text_pattern_mapping(&rules->rules[0],c.mapping,unique,NULL);
     yx_pattern_expression_setup(tree,&c);
     int root=yx_integer_expr_condition(tree,rules->rules[0].condition_text);
+    /* Equal declarations that anchor_patterns marks differently are two
+     * Patterns: map them apart and parse again. */
+    bool apart[5]={false};
+    if(root>=0&&pattern_count>1) {
+        size_t split[5],split_unique[5];uint8_t marks[5];
+        if(!yx_pattern_ir_marks(tree,root,marks,pattern_count)){status=YX_SER_NO_MEMORY;goto done;}
+        if((status=yx_rule_unmarked_patterns(rules,&rules->rules[0],tree,marks,apart))!=YX_SER_SUCCESS)goto done;
+        status=YX_SER_UNSUPPORTED;
+        yx_text_pattern_mapping(&rules->rules[0],split,split_unique,apart);
+        if(memcmp(split,c.mapping,pattern_count*sizeof(*split))) {
+            yx_integer_expr_free(tree);
+            if(!(tree=calloc(1,sizeof(*tree)))){status=YX_SER_NO_MEMORY;goto done;}
+            memcpy(c.mapping,split,sizeof(split));c.saw_pattern=false;
+            yx_pattern_expression_setup(tree,&c);
+            root=yx_integer_expr_condition(tree,rules->rules[0].condition_text);
+        }
+    }
     if(root<0||!c.saw_pattern||!yx_pattern_expression_wasm(tree,root,&c,yx_integer_import_profile(),&wasm,&wasm_length))goto done;
     if(non_text) {
         YRX_RULE adapted=rules->rules[0];YRX_RULES base_rules=*rules;
@@ -781,7 +802,7 @@ static yx_ser_result yx_encode_pattern_expression(const YRX_RULES *rules,uint8_t
         uint64_t first_limit=c.limits[0];
         if(anchored)c.limits[0]=0;
         status=yx_text_envelope_encode(&rules->rules[0],wasm,wasm_length,c.limits,anchored,
-            anchored?(uint64_t)YX_INTEGER_NODES(tree)[YX_INTEGER_NODES(tree)[root].left].value:0,data,length);
+            anchored?(uint64_t)YX_INTEGER_NODES(tree)[YX_INTEGER_NODES(tree)[root].left].value:0,apart,data,length);
         /* The plain envelope takes only unmodified text; other single
          * patterns use the field codec below plus the anchoring pass. */
         if(status!=YX_SER_UNSUPPORTED||pattern_count>1)goto done;
@@ -903,6 +924,7 @@ static yx_ser_result yx_decode_pattern_expression(const uint8_t *data,size_t len
        !yx_get_u8(&r,&marker)||marker!=0x7e))||!yx_rule_expression_byte(&r,2)||!yx_rule_expression_byte(&r,0x7f))goto done;
     int root=yx_integer_wasm_block(&r,body_end,tree,0,-1);
     if(root<0||!c.saw_pattern)goto done;
+    if(!yx_unanchored_pattern_terms(data,length,tree,&root))goto done;
     if(!yx_pattern_expression_scope_fixup(tree,&root,&c))goto done;
     uint8_t profile=4;int original_root=root;
     for(unsigned variant=0;variant<3&&profile==4;++variant) {

@@ -592,7 +592,19 @@ void yx_suppression_scope_begin(yx_suppression_scope *scope,
     scope->table.count = scope->table.capacity = 0;
     scope->state = 0;
     scope->parent = yx_suppress_scopes;
+    scope->text = false;
+    scope->lines = NULL;
+    scope->line_count = 0;
+    scope->line_state = 0;
     yx_suppress_scopes = scope;
+}
+
+void yx_suppression_scope_begin_text(yx_suppression_scope *scope,
+                                     const char *source)
+{
+    yx_suppression_scope_begin(scope, (const uint8_t *)source,
+                               source ? strlen(source) : 0);
+    scope->text = source != NULL;
 }
 
 void yx_suppression_scope_end(yx_suppression_scope *scope)
@@ -602,6 +614,76 @@ void yx_suppression_scope_end(yx_suppression_scope *scope)
     free(scope->table.items);
     scope->table.items = NULL;
     scope->table.count = scope->table.capacity = 0;
+    free(scope->lines);
+    scope->lines = NULL;
+    scope->line_count = 0;
+    scope->line_state = 0;
+}
+
+static yx_suppression_scope *yx_text_scope(const char *source)
+{
+    for (yx_suppression_scope *scope = yx_suppress_scopes; scope;
+         scope = scope->parent)
+        if (scope->text && scope->source == (const uint8_t *)source)
+            return scope;
+    return NULL;
+}
+
+size_t yx_source_text_length(const char *source)
+{
+    yx_suppression_scope *scope = yx_text_scope(source);
+    return scope ? scope->length : strlen(source);
+}
+
+static bool yx_text_scope_lines(yx_suppression_scope *scope)
+{
+    const uint8_t *at, *end;
+    size_t count = 1, used = 0;
+    if (scope->line_state) return scope->line_state == 1;
+    scope->line_state = 2;
+    at = scope->source;
+    end = scope->source + scope->length;
+    while (at < end && (at = (const uint8_t *)memchr(at, '\n',
+                                                     (size_t)(end - at)))) {
+        ++count;
+        ++at;
+    }
+    if (count > SIZE_MAX / sizeof(*scope->lines)) return false;
+    scope->lines = (size_t *)malloc(count * sizeof(*scope->lines));
+    if (!scope->lines) return false;
+    scope->lines[used++] = 0;
+    at = scope->source;
+    while (at < end && (at = (const uint8_t *)memchr(at, '\n',
+                                                     (size_t)(end - at)))) {
+        ++at;
+        scope->lines[used++] = (size_t)(at - scope->source);
+    }
+    scope->line_count = used;
+    scope->line_state = 1;
+    return true;
+}
+
+size_t yx_source_line_of(const char *source, size_t offset,
+                         const char **line_start)
+{
+    yx_suppression_scope *scope = yx_text_scope(source);
+    size_t line = 1;
+    if (scope && offset <= scope->length && yx_text_scope_lines(scope)) {
+        /* The lines starting at or before `offset`: a newline before
+         * `offset` starts a line at or before it. */
+        size_t low = 0, high = scope->line_count;
+        while (low < high) {
+            size_t middle = low + (high - low) / 2;
+            if (scope->lines[middle] <= offset) low = middle + 1;
+            else high = middle;
+        }
+        *line_start = source + scope->lines[low - 1];
+        return low;
+    }
+    *line_start = source;
+    for (size_t i = 0; i < offset; ++i)
+        if (source[i] == '\n') { ++line; *line_start = source + i + 1; }
+    return line;
 }
 
 bool yx_warning_suppressed_span(const uint8_t *source, size_t length,

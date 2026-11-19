@@ -232,6 +232,35 @@ typedef struct yx_node {
     /* Where the `at` of an anchored `of` expression starts, and where an
      * anonymous pattern reference (`$`, `#`, `@`, `!`) starts. */
     size_t keyword_start;
+    /* A `with` declaration whose value is a function (with_expr_from_ast
+     * adds the function to the symbol table and declares no variable): the
+     * declaration's item is a constant placeholder with function_alias set
+     * (1 an integer read function, 2 a module function), alias_value is the
+     * declared expression, and function_alias_used records a lookup of the
+     * name. The parser resolves every use of the name to its function: the
+     * node of a use has function_alias set and no alias_value. A use that
+     * is no call is the function as a value; `operation` then tells what
+     * follows the name (TK_DOT a member, TK_LPAREN a called member, whose
+     * name is set_names[0], TK_LBRACKET a lookup). */
+    uint8_t function_alias;
+    bool function_alias_used;
+    struct yx_node *alias_value;
+    /* Source offsets for yx_condition_alias_free_text: the name of a use,
+     * and for a `with` statement its keyword, its `:`, the `)` of its body
+     * and the end of each declaration's value. */
+    size_t alias_use_start, alias_use_end;
+    /* A member read from the result of a call that is no structure
+     * (`uint8(0).x`, `pe.imphash().x`, also called: `uint8(0).x()`): where
+     * the call ends and the result's type. The validation reports it after
+     * the call's own errors. */
+    size_t result_end;
+    const char *result_type;
+    /* A `with` statement that is the first operand of an `and` (1) or `or`
+     * (2): set by yx_condition_alias_free_text. */
+    uint8_t alias_chain_parent;
+    bool with_spans;
+    size_t with_start, with_colon, with_close;
+    size_t *with_value_ends;
 } yx_node;
 
 struct yx_condition {
@@ -244,6 +273,9 @@ struct yx_condition {
     const yx_node **name_nodes;
     size_t name_node_count;
     bool name_nodes_ready;
+    /* A function named through a `with` declaration is used where a
+     * variable hides the function's own name. */
+    bool alias_name_hidden;
 };
 
 /* The evaluator and the compile-time walkers recurse once per operand of a
@@ -354,6 +386,10 @@ typedef struct {
     size_t fold_import_count;
     const yx_global *fold_globals;
     size_t fold_global_count;
+    /* The `with` and `for` names in scope while parsing, innermost last
+     * (yx_alias_find). */
+    struct yx_alias_binding *aliases;
+    size_t alias_count, alias_capacity;
 } yx_parser;
 
 typedef enum { V_INTEGER, V_FLOAT, V_STRING, V_MAP, V_STRUCT } yx_value_type;
@@ -1473,6 +1509,364 @@ static bool yx_parse_bound_method_arguments(yx_parser *p, yx_node *node)
     return true;
 }
 
+_Thread_local bool yx_condition_frame_markers;
+
+/* A name a `with` or `for` statement declares, as the parser sees it.
+ * kind 0 is a variable (path: the module path it stands for, when its value
+ * is a plain path such as `pe` or `pe.overlay`), 1 an integer read function
+ * and 2 a module function (path: the function). */
+typedef struct yx_alias_binding {
+    const char *name;
+    size_t length;
+    uint8_t kind;
+    char *path;
+    yx_node *item;
+} yx_alias_binding;
+
+/* Module functions: values of type function when referenced without a
+ * call. */
+static bool yx_alias_module_function(const char *path)
+{
+    return path && yx_module_function_path(path, strlen(path), NULL);
+}
+
+static const yx_alias_binding *yx_alias_find(const yx_parser *p,
+                                             const char *name, size_t length)
+{
+    for (size_t i = p->alias_count; i > 0; --i)
+        if (p->aliases[i - 1].length == length &&
+            memcmp(p->aliases[i - 1].name, name, length) == 0)
+            return &p->aliases[i - 1];
+    return NULL;
+}
+
+static void yx_alias_unwind(yx_parser *p, size_t mark)
+{
+    while (p->alias_count > mark) free(p->aliases[--p->alias_count].path);
+}
+
+/* Takes ownership of `path`. */
+static bool yx_alias_push(yx_parser *p, const char *name, size_t length,
+                          uint8_t kind, char *path, yx_node *item)
+{
+    yx_alias_binding *binding;
+    if (p->alias_count == p->alias_capacity) {
+        size_t next = p->alias_capacity ? p->alias_capacity * 2 : 8;
+        yx_alias_binding *grown = next > SIZE_MAX / sizeof(*grown) ? NULL :
+            (yx_alias_binding *)realloc(p->aliases, next * sizeof(*grown));
+        if (!grown) { free(path); yx_fail(p, "out of memory"); return false; }
+        p->aliases = grown;
+        p->alias_capacity = next;
+    }
+    binding = &p->aliases[p->alias_count++];
+    binding->name = name;
+    binding->length = length;
+    binding->kind = kind;
+    binding->path = path;
+    binding->item = item;
+    return true;
+}
+
+/* The variables of a `for .. in` loop hide outer declarations of their
+ * names in the loop's body. */
+static bool yx_alias_bind_loop(yx_parser *p, const yx_node *loop)
+{
+    if (!yx_alias_push(p, loop->name, strlen(loop->name), 0, NULL, NULL))
+        return false;
+    if (loop->map_loop && loop->set_names && loop->set_count)
+        return yx_alias_push(p, loop->set_names[0], strlen(loop->set_names[0]),
+                             0, NULL, NULL);
+    return true;
+}
+
+static void yx_alias_unbind_loop(yx_parser *p, const yx_node *loop)
+{
+    size_t count = loop->map_loop && loop->set_names && loop->set_count ? 2 : 1;
+    yx_alias_unwind(p, p->alias_count >= count ? p->alias_count - count : 0);
+}
+
+/* The module path a plain path expression stands for, through the `with`
+ * variables in scope (`m.entropy` with `m = math`); NULL when it has none. */
+static char *yx_alias_resolved_path(const yx_parser *p, const yx_node *value)
+{
+    const yx_alias_binding *binding;
+    const char *name = value->name, *rest;
+    size_t root, prefix, tail;
+    char *path;
+    if ((value->kind != N_RULE && value->kind != N_MODULE_FIELD) || !name ||
+        value->a || value->b || value->c || value->item_count ||
+        value->call_start != SIZE_MAX || value->operation == TK_LPAREN)
+        return NULL;
+    root = strcspn(name, ".");
+    rest = name + root;
+    binding = yx_alias_find(p, name, root);
+    if (!binding) return yx_copy(name, strlen(name));
+    if (binding->kind || !binding->path) return NULL;
+    prefix = strlen(binding->path);
+    tail = strlen(rest);
+    path = (char *)malloc(prefix + tail + 1);
+    if (!path) return NULL;
+    memcpy(path, binding->path, prefix);
+    memcpy(path + prefix, rest, tail + 1);
+    return path;
+}
+
+/* with_expr_from_ast: a declaration whose value is a function declares no
+ * variable; the name stands for the function in the rest of the statement.
+ * `*value` becomes the declaration's placeholder item. */
+static bool yx_alias_declare(yx_parser *p, const yx_token *variable,
+                             yx_node **value)
+{
+    yx_node *declared = *value, *item;
+    const yx_alias_binding *binding = NULL;
+    uint8_t kind = 0;
+    char *path = NULL;
+    if (declared->kind == N_RULE && declared->name && !declared->function_alias)
+        binding = yx_alias_find(p, declared->name, strlen(declared->name));
+    if (declared->function_alias && !declared->alias_value && declared->name &&
+        (declared->kind == N_RULE || declared->kind == N_MODULE_FIELD) &&
+        declared->operation != TK_DOT && declared->operation != TK_LPAREN &&
+        declared->operation != TK_LBRACKET) {
+        /* An alias of an alias: the parser has resolved the name. */
+        kind = declared->function_alias;
+        path = yx_copy(declared->name, strlen(declared->name));
+        if (!path) { yx_fail(p, "out of memory"); return false; }
+    } else {
+        path = yx_alias_resolved_path(p, declared);
+        if (path && declared->kind == N_RULE && !binding) {
+            yx_token name = {TK_IDENTIFIER, path, strlen(path), 0, 0, false, 0.0};
+            unsigned width;
+            bool signed_read, floating_read, big_endian;
+            if (yx_read_function(&name, &width, &signed_read, &floating_read,
+                                 &big_endian)) kind = 1;
+        } else if (path && declared->kind == N_MODULE_FIELD &&
+                   yx_alias_module_function(path)) kind = 2;
+    }
+    if (!kind)
+        return yx_alias_push(p, variable->begin, variable->length, 0, path, NULL);
+    item = yx_new_node(p, N_INTEGER);
+    if (!item) { free(path); return false; }
+    item->span_start = declared->span_start;
+    item->span_end = declared->span_end;
+    item->function_alias = kind;
+    item->alias_value = declared;
+    *value = item;
+    return yx_alias_push(p, variable->begin, variable->length, kind, path, item);
+}
+
+static yx_node *yx_parse_expr(yx_parser *p, int minimum);
+static const char *yx_call_result_type_name(const yx_node *node);
+
+/* A member read from the result of a call whose type `type` is no
+ * structure (`uint8(0).x`, `uint8(0).x()`: E002 at the call). The member
+ * parses here; the validation reports it after the call's own errors
+ * (yx_validate_node_step). */
+static bool yx_parse_result_member(yx_parser *p, yx_node *node, size_t start,
+                                   const char *type)
+{
+    size_t end = p->previous_token.offset + p->previous_token.length;
+    if (p->token.kind != TK_DOT) return true;
+    while (yx_accept(p, TK_DOT)) {
+        if (p->token.kind != TK_IDENTIFIER) {
+            yx_fail(p, "expected module member name");
+            return false;
+        }
+        yx_next(p);
+    }
+    if (p->token.kind == TK_LPAREN) {
+        yx_next(p);
+        if (!yx_accept(p, TK_RPAREN)) {
+            do {
+                if (!yx_parse_expr(p, 1)) return false;
+            } while (yx_accept(p, TK_COMMA));
+            if (!yx_expect(p, TK_RPAREN, "')' after method arguments"))
+                return false;
+        }
+    }
+    node->span_start = start;
+    node->span_end = end;
+    node->result_end = end;
+    node->result_type = type;
+    return true;
+}
+
+static bool yx_read_result_member(yx_parser *p, yx_node *read, size_t start)
+{
+    return yx_parse_result_member(p, read, start,
+                                  read->floating_read ? "float" : "integer");
+}
+
+/* A use of a name that stands for a function: the node the function's own
+ * name would give, at the place of the alias. */
+static yx_node *yx_parse_alias_use(yx_parser *p, const yx_alias_binding *alias,
+                                   const yx_token *token)
+{
+    yx_node *node;
+    uint8_t kind = alias->kind;
+    char *path = yx_copy(alias->path, strlen(alias->path));
+    if (!path) { yx_fail(p, "out of memory"); return NULL; }
+    if (alias->item) alias->item->function_alias_used = true;
+    {
+        const yx_alias_binding *root = yx_alias_find(p, path, strcspn(path, "."));
+        if (root && !root->kind) p->condition->alias_name_hidden = true;
+    }
+    /* Parsing the arguments can move the bindings: `alias` is not read
+     * after this point. */
+    if (p->token.kind != TK_LPAREN) {
+        node = yx_new_node(p, kind == 1 ? N_RULE : N_MODULE_FIELD);
+        if (!node) { free(path); return NULL; }
+        node->name = path;
+        node->function_alias = kind;
+        node->resolved_module_alias = true;
+        node->module_alias_prefix_length = strlen(path);
+        node->span_start = token->offset;
+        node->span_end = token->offset + token->length;
+        node->alias_use_start = token->offset;
+        node->alias_use_end = token->offset + token->length;
+        /* A function has no members and is no collection: what follows the
+         * name parses, and the validation reports the function's type. */
+        if (p->token.kind == TK_LBRACKET) {
+            node->operation = TK_LBRACKET;
+            yx_next(p);
+            if (!yx_parse_expr(p, 1) ||
+                !yx_expect(p, TK_RBRACKET, "']' after module index"))
+                return NULL;
+        } else if (p->token.kind == TK_DOT) {
+            yx_token member = p->token;
+            size_t members = 0;
+            while (yx_accept(p, TK_DOT)) {
+                member = p->token;
+                if (member.kind != TK_IDENTIFIER) {
+                    yx_fail(p, "expected module member name");
+                    return NULL;
+                }
+                yx_next(p);
+                ++members;
+            }
+            node->operation = TK_DOT;
+            if (p->token.kind == TK_LPAREN) {
+                if (members == 1) {
+                    /* func_call_from_ast looks the called name up in the
+                     * symbol table of the object's type; a function has
+                     * none. */
+                    node->operation = TK_LPAREN;
+                    node->call_member_start = member.offset;
+                    node->call_member_end = member.offset + member.length;
+                    if (!yx_set_add(p, node, member.begin, member.length))
+                        return NULL;
+                }
+                yx_next(p);
+                if (!yx_accept(p, TK_RPAREN)) {
+                    do {
+                        if (!yx_parse_expr(p, 1)) return NULL;
+                    } while (yx_accept(p, TK_COMMA));
+                    if (!yx_expect(p, TK_RPAREN, "')' after method arguments"))
+                        return NULL;
+                }
+            }
+        }
+        return node;
+    }
+    if (kind == 1) {
+        yx_token name = {TK_IDENTIFIER, path, strlen(path), 0, 0, false, 0.0};
+        node = yx_new_node(p, N_READ);
+        if (!node) { free(path); return NULL; }
+        node->name = path;
+        node->function_alias = kind;
+        node->alias_use_start = token->offset;
+        node->alias_use_end = token->offset + token->length;
+        if (!yx_read_function(&name, &node->width, &node->signed_read,
+                              &node->floating_read, &node->big_endian)) {
+            yx_fail(p, "expected an expression");
+            return NULL;
+        }
+        yx_next(p);
+        if (p->token.kind == TK_RPAREN) {
+            node->read_arity_error = true;
+            node->a = yx_new_node(p, N_INTEGER);
+            if (!node->a) return NULL;
+            yx_next(p);
+            if (!yx_read_result_member(p, node, token->offset)) return NULL;
+            return node;
+        }
+        node->a = yx_parse_expr(p, 1);
+        if (!node->a) return NULL;
+        while (yx_accept(p, TK_COMMA)) {
+            node->read_arity_error = true;
+            if (!yx_parse_expr(p, 1)) return NULL;
+        }
+        if (!yx_expect(p, TK_RPAREN, "')' after read offset")) return NULL;
+        if (!yx_read_result_member(p, node, token->offset)) return NULL;
+        return node;
+    }
+    node = yx_new_node(p, N_CALL);
+    if (!node) { free(path); return NULL; }
+    node->name = path;
+    node->function_alias = kind;
+    /* The path is the function's own: no `with` variable renames it. */
+    node->resolved_module_alias = true;
+    node->module_alias_prefix_length = strlen(path);
+    node->call_start = p->token.offset;
+    node->call_member_start = token->offset;
+    node->call_member_end = token->offset + token->length;
+    node->alias_use_start = token->offset;
+    node->alias_use_end = token->offset + token->length;
+    yx_next(p);
+    if (!yx_accept(p, TK_RPAREN)) {
+        for (;;) {
+            yx_node *argument = yx_parse_expr(p, 1);
+            if (!argument || !yx_for_in_add_item(p, node, argument))
+                return NULL;
+            if (!yx_accept(p, TK_COMMA)) break;
+        }
+        if (!yx_expect(p, TK_RPAREN, "')' after module arguments"))
+            return NULL;
+    }
+    if (p->token.kind == TK_DOT) {
+        const char *type = yx_call_result_type_name(node);
+        if (type && strcmp(type, "unknown") != 0 &&
+            strcmp(type, "struct") != 0) {
+            if (!yx_parse_result_member(p, node, token->offset, type))
+                return NULL;
+        }
+    }
+    return node;
+}
+
+/* Where the value of the `with` declaration just parsed ends. */
+static bool yx_with_value_end(yx_parser *p, yx_node *node)
+{
+    size_t *ends = (size_t *)realloc(node->with_value_ends,
+        (node->set_count ? node->set_count : 1) * sizeof(*ends));
+    if (!ends) { yx_fail(p, "out of memory"); return false; }
+    node->with_value_ends = ends;
+    if (node->set_count)
+        ends[node->set_count - 1] = p->previous_token.offset +
+                                    p->previous_token.length;
+    return true;
+}
+
+/* A `?` item of a `with` statement (yx_condition_alias_free_text): a slot
+ * of the statement's frame that holds no variable. */
+static bool yx_with_frame_marker(yx_parser *p, yx_node *node)
+{
+    size_t *starts;
+    yx_node *item;
+    if (!yx_set_add(p, node, "", 0)) return false;
+    starts = (size_t *)realloc(node->set_name_starts,
+                               node->set_count * sizeof(*starts));
+    if (!starts) { yx_fail(p, "out of memory"); return false; }
+    node->set_name_starts = starts;
+    starts[node->set_count - 1] = p->token.offset;
+    item = yx_new_node(p, N_INTEGER);
+    if (!item) return false;
+    item->function_alias = 1;
+    item->function_alias_used = true;
+    item->alias_value = item;
+    yx_next(p);
+    return yx_for_in_add_item(p, node, item) && yx_with_value_end(p, node);
+}
+
 static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
                                 yx_node *quantity)
 {
@@ -1510,7 +1904,9 @@ static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
                                    "':' after map iterable") ||
             !yx_expect(p, TK_LPAREN, "'(' before for-in body"))
             return NULL;
+        if (!yx_alias_bind_loop(p, node)) return NULL;
         node->body = yx_parse_expr(p, 1);
+        yx_alias_unbind_loop(p, node);
         if (node->body) node->frame_end = p->token.offset + p->token.length;
         if (!node->body || !yx_expect(p, TK_RPAREN,
                                       "')' after for-in body"))
@@ -1525,7 +1921,9 @@ static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
             !yx_expect(p, TK_COLON, "':' after array iterable") ||
             !yx_expect(p, TK_LPAREN, "'(' before for-in body"))
             return NULL;
+        if (!yx_alias_bind_loop(p, node)) return NULL;
         node->body = yx_parse_expr(p, 1);
+        yx_alias_unbind_loop(p, node);
         if (node->body) node->frame_end = p->token.offset + p->token.length;
         if (!node->body ||
             !yx_expect(p, TK_RPAREN, "')' after for-in body"))
@@ -1552,7 +1950,9 @@ static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
     if (!yx_expect(p, TK_RPAREN, "')' after for-in iterable") ||
         !yx_expect(p, TK_COLON, "':' after for-in iterable") ||
         !yx_expect(p, TK_LPAREN, "'(' before for-in body")) return NULL;
+    if (!yx_alias_bind_loop(p, node)) return NULL;
     node->body = yx_parse_expr(p, 1);
+    yx_alias_unbind_loop(p, node);
     if (node->body) node->frame_end = p->token.offset + p->token.length;
     if (!node->body || !yx_expect(p, TK_RPAREN, "')' after for-in body"))
         return NULL;
@@ -1562,11 +1962,19 @@ static yx_node *yx_parse_for_in(yx_parser *p, yx_quantifier quantifier,
 static yx_node *yx_parse_with(yx_parser *p)
 {
     yx_node *node = yx_new_node(p, N_WITH);
+    size_t alias_mark = p->alias_count;
     if (!node) return NULL;
+    node->with_start = p->previous_token.offset;
     ++p->with_depth;
     for (;;) {
         yx_token variable = p->token;
         yx_node *value;
+        if (yx_condition_frame_markers && variable.kind == TK_BAD &&
+            variable.length == 1 && *variable.begin == '?') {
+            if (!yx_with_frame_marker(p, node)) return NULL;
+            if (!yx_accept(p, TK_COMMA)) break;
+            continue;
+        }
         if (variable.kind != TK_IDENTIFIER) {
             yx_fail(p, "expected a variable name after 'with'");
             return NULL;
@@ -1584,16 +1992,22 @@ static yx_node *yx_parse_with(yx_parser *p)
         yx_next(p);
         if (!yx_expect(p, TK_ASSIGN, "'=' after with variable")) return NULL;
         value = yx_parse_expr(p, 1);
+        if (value) node->frame_end = value->span_end;
+        if (value && !yx_with_value_end(p, node)) return NULL;
+        if (value && !yx_alias_declare(p, &variable, &value)) return NULL;
         if (!value || !yx_for_in_add_item(p, node, value)) return NULL;
-        node->frame_end = value->span_end;
         if (!yx_accept(p, TK_COMMA)) break;
     }
+    node->with_colon = p->token.offset;
     if (!yx_expect(p, TK_COLON, "':' after with bindings") ||
         !yx_expect(p, TK_LPAREN, "'(' before with body")) return NULL;
     node->body = yx_parse_expr(p, 1);
+    node->with_close = p->token.offset;
+    node->with_spans = node->body != NULL;
     if (!node->body || !yx_expect(p, TK_RPAREN, "')' after with body"))
         return NULL;
     --p->with_depth;
+    yx_alias_unwind(p, alias_mark);
     return node;
 }
 
@@ -3586,7 +4000,12 @@ static yx_node *yx_parse_primary(yx_parser *p)
         bool signed_read = false, floating_read = false, big_endian = false;
         bool read_function = yx_read_function(
             &token, &width, &signed_read, &floating_read, &big_endian);
+        const yx_alias_binding *alias = p->alias_count ?
+            yx_alias_find(p, token.begin, token.length) : NULL;
         yx_next(p);
+        /* A `with` or `for` name hides the read function of that name. */
+        if (alias && alias->kind) return yx_parse_alias_use(p, alias, &token);
+        if (alias) read_function = false;
         if (read_function && p->token.kind == TK_LPAREN) {
             node = yx_new_node(p, N_READ);
             if (!node) return NULL;
@@ -3604,6 +4023,7 @@ static yx_node *yx_parse_primary(yx_parser *p)
                 node->a = yx_new_node(p, N_INTEGER);
                 if (!node->a) return NULL;
                 yx_next(p);
+                if (!yx_read_result_member(p, node, token.offset)) return NULL;
                 return node;
             }
             node->a = yx_parse_expr(p, 1);
@@ -3613,6 +4033,7 @@ static yx_node *yx_parse_primary(yx_parser *p)
                 if (!yx_parse_expr(p, 1)) return NULL;
             }
             if (!yx_expect(p, TK_RPAREN, "')' after read offset")) return NULL;
+            if (!yx_read_result_member(p, node, token.offset)) return NULL;
             return node;
         }
         if (yx_accept(p, TK_DOT)) {
@@ -3845,17 +4266,15 @@ static yx_node *yx_parse_primary(yx_parser *p)
                 const char *type = yx_call_result_type_name(node);
                 if (type && strcmp(type, "unknown") != 0 &&
                     strcmp(type, "struct") != 0) {
-                    yx_fail(p, "wrong type span:%zu:%zu:`struct`:%s",
-                            node->call_member_start,
-                            p->previous_token.offset + p->previous_token.length,
-                            type);
-                    return NULL;
+                    if (!yx_parse_result_member(p, node, token.offset, type))
+                        return NULL;
                 }
             }
             return node;
         }
         if (p->token.kind == TK_LPAREN) {
-            if (!p->with_depth && !(token.length == 11 &&
+            /* A called `for` variable is validated as a call (E002). */
+            if (!p->with_depth && !alias && !(token.length == 11 &&
                 (memcmp(token.begin, "test_proto2", 11) == 0 ||
                  memcmp(token.begin, "test_proto3", 11) == 0))) {
                 yx_fail(p, "unsupported function '%.*s'", (int)token.length,
@@ -4830,13 +5249,13 @@ static int yx_fold_state_node_impl(yx_node *node, yx_fold_state_scope *scope,
     } else return -1;
     if (result < 0) {
         /* IR::and / IR::or drop a constant operand that does not decide
-         * them: a constant `with` among them is never evaluated. */
+         * them: a constant `with` among them is never evaluated, even one
+         * whose folded body names a pattern (yx_folded_text_collect keeps
+         * that one's text). */
         if (node->kind == N_BINARY) {
-            if (left >= 0 && node->a->kind == N_WITH &&
-                yx_fold_state_operand(node->a, left_boolean))
+            if (left >= 0 && node->a->kind == N_WITH)
                 node->a->fold_state = (uint8_t)(left + 1);
-            if (right >= 0 && node->b->kind == N_WITH &&
-                yx_fold_state_operand(node->b, right_boolean))
+            if (right >= 0 && node->b->kind == N_WITH)
                 node->b->fold_state = (uint8_t)(right + 1);
         }
         return -1;
@@ -5058,6 +5477,7 @@ static void yx_folded_text_collect(const yx_node *node, yx_folded_text_spans *sp
     if (!node || spans->failed) return;
     if (node->fold_state &&
         (node->kind == N_UNARY ? yx_folded_text_plain_not(node) :
+         node->kind == N_WITH ? !yx_fold_state_reads_pattern((yx_node *)node) :
          node->kind != N_BINARY ||
          (node->operation != TK_AND && node->operation != TK_OR))) {
         size_t start = node->span_start, end = node->span_end;
@@ -5365,6 +5785,8 @@ yx_condition *yx_condition_compile_diagnostics(const char *expression, char *err
     }
     free(parser.fold_bindings);
     free(parser.fold_virtuals);
+    yx_alias_unwind(&parser, 0);
+    free(parser.aliases);
     if (parser.failed || !condition->root) {
         if (fold_failed && failed) {
             condition->fold_failed = true;
@@ -5375,6 +5797,259 @@ yx_condition *yx_condition_compile_diagnostics(const char *expression, char *err
     yx_condition_record_name_nodes(condition);
     yx_run_deep(condition->depth, yx_fold_state_thunk, condition->root);
     return condition;
+}
+
+/* A `with` declaration whose value is a function, as the rule wrote it (not
+ * a `?` frame item). */
+static bool yx_alias_text_declaration(const yx_node *item)
+{
+    return item && item->alias_value && item->alias_value != item;
+}
+
+/* Every declaration of the statement is a function or a frame item: the
+ * statement declares no variable. */
+static bool yx_alias_text_erasable(const yx_node *node)
+{
+    if (node->kind != N_WITH || !node->item_count) return false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (!node->items[i]->alias_value) return false;
+    return true;
+}
+
+typedef struct {
+    size_t start, end, order;
+    char *text;
+} yx_alias_text_edit;
+
+typedef struct {
+    yx_alias_text_edit *items;
+    size_t count, capacity;
+    bool failed;
+} yx_alias_text_edits;
+
+/* Takes ownership of `text`. */
+static void yx_alias_text_add(yx_alias_text_edits *edits, size_t start,
+                              size_t end, char *text)
+{
+    if (!text) edits->failed = true;
+    if (!edits->failed && edits->count == edits->capacity) {
+        size_t next = edits->capacity ? edits->capacity * 2 : 16;
+        yx_alias_text_edit *grown = (yx_alias_text_edit *)realloc(
+            edits->items, next * sizeof(*grown));
+        if (!grown) edits->failed = true;
+        else { edits->items = grown; edits->capacity = next; }
+    }
+    if (edits->failed) { free(text); return; }
+    edits->items[edits->count].start = start;
+    edits->items[edits->count].end = end;
+    edits->items[edits->count].order = edits->count;
+    edits->items[edits->count].text = text;
+    ++edits->count;
+}
+
+/* In source order; an insertion comes before a replacement that starts at
+ * the same place, and otherwise the edits keep the order they were made in
+ * (innermost statement first). */
+static int yx_alias_text_compare(const void *left, const void *right)
+{
+    const yx_alias_text_edit *a = (const yx_alias_text_edit *)left;
+    const yx_alias_text_edit *b = (const yx_alias_text_edit *)right;
+    bool a_insert = a->start == a->end, b_insert = b->start == b->end;
+    if (a->start != b->start) return a->start < b->start ? -1 : 1;
+    if (a_insert != b_insert) return a_insert ? -1 : 1;
+    return a->order < b->order ? -1 : a->order > b->order ? 1 : 0;
+}
+
+/* `count` frame items, each after a comma (`, ?, ?`) or, with `leading`
+ * false, the first one bare (`?, ?`). */
+static char *yx_alias_text_markers(const char *prefix, size_t count,
+                                   bool leading, const char *suffix)
+{
+    size_t prefix_length = strlen(prefix), suffix_length = strlen(suffix);
+    size_t used = prefix_length;
+    char *text;
+    if (count > (SIZE_MAX - prefix_length - suffix_length - 1) / 3) return NULL;
+    text = (char *)malloc(prefix_length + count * 3 + suffix_length + 1);
+    if (!text) return NULL;
+    memcpy(text, prefix, prefix_length);
+    for (size_t i = 0; i < count; ++i) {
+        if (i || leading) { text[used++] = ','; text[used++] = ' '; }
+        text[used++] = '?';
+    }
+    memcpy(text + used, suffix, suffix_length + 1);
+    return text;
+}
+
+static int yx_alias_text_offset_compare(const void *left, const void *right)
+{
+    size_t a = *(const size_t *)left, b = *(const size_t *)right;
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+int yx_condition_alias_free_text(const char *expression, char **text)
+{
+    yx_condition *condition;
+    yx_parser parser;
+    yx_alias_text_edits edits = {0};
+    /* Where the statements that allocate in the variable stack are, in
+     * source order. */
+    size_t *users = NULL;
+    size_t user_count = 0, length, used = 0, at = 0, covered = 0, extra = 0;
+    bool any = false, unknown_user = false;
+    char *out;
+    char error[64] = "";
+    int result = 0;
+    if (text) *text = NULL;
+    if (!expression || !text || !strstr(expression, "with")) return 0;
+    condition = (yx_condition *)calloc(1, sizeof(*condition));
+    if (!condition) return -2;
+    memset(&parser, 0, sizeof(parser));
+    parser.source = expression;
+    parser.condition = condition;
+    parser.error = error;
+    parser.error_capacity = sizeof(error);
+    yx_next(&parser);
+    condition->root = yx_parse_expr(&parser, 1);
+    if (!parser.failed && parser.token.kind != TK_END)
+        yx_fail(&parser, "unexpected token");
+    yx_alias_unwind(&parser, 0);
+    free(parser.aliases);
+    free(parser.fold_bindings);
+    free(parser.fold_virtuals);
+    if (parser.failed || !condition->root) {
+        /* A text the parser does not read has no declaration to remove;
+         * a parse that ran out of memory says nothing about the text. */
+        if (strstr(error, "out of memory")) result = -2;
+        goto done;
+    }
+    length = strlen(expression);
+    for (const yx_node *node = condition->allocated; node; node = node->next_allocated)
+        if (node->kind == N_WITH)
+            for (size_t i = 0; i < node->item_count && !any; ++i)
+                any = yx_alias_text_declaration(node->items[i]);
+    if (!any) goto done;
+    result = -1;
+    if (condition->alias_name_hidden) goto done;
+    /* What allocates in the variable stack: loops, `of` statements and
+     * `with` statements that declare a variable. A `with` statement that
+     * is the first operand of an `and` / `or` is marked with the operator. */
+    for (yx_node *node = condition->allocated; node; node = node->next_allocated) {
+        bool user = node->kind == N_FOR_IN || node->kind == N_FOR_OF ||
+                    node->kind == N_OF || node->kind == N_OF_EXPR ||
+                    (node->kind == N_WITH && !yx_alias_text_erasable(node));
+        if (node->kind == N_BINARY && node->a && node->a->kind == N_WITH &&
+            (node->operation == TK_AND || node->operation == TK_OR))
+            node->a->alias_chain_parent = node->operation == TK_AND ? 1 : 2;
+        if (!user) continue;
+        if (node->kind == N_WITH ? !node->with_spans :
+            node->span_start == SIZE_MAX) { unknown_user = true; continue; }
+        if (!(user_count & (user_count + 1))) {
+            size_t *grown = (size_t *)realloc(users,
+                (user_count * 2 + 2) * sizeof(*grown));
+            if (!grown) { result = -2; goto done; }
+            users = grown;
+        }
+        users[user_count++] = node->kind == N_WITH ? node->with_start :
+                                                     node->span_start;
+    }
+    if (user_count > 1)
+        qsort(users, user_count, sizeof(*users), yx_alias_text_offset_compare);
+    for (const yx_node *node = condition->allocated; node; node = node->next_allocated) {
+        size_t aliases = 0, last_kept = SIZE_MAX, count;
+        bool frame = unknown_user;
+        if (node->function_alias && !node->alias_value &&
+            node->alias_use_start < node->alias_use_end) {
+            if (node->alias_use_end > length || !node->name) goto done;
+            yx_alias_text_add(&edits, node->alias_use_start, node->alias_use_end,
+                              yx_copy(node->name, strlen(node->name)));
+            continue;
+        }
+        if (node->kind != N_WITH) continue;
+        count = node->item_count;
+        for (size_t i = 0; i < count; ++i) {
+            if (yx_alias_text_declaration(node->items[i])) ++aliases;
+            else if (!node->items[i]->alias_value) last_kept = i;
+            else goto done; /* a frame item next to a declared function */
+        }
+        if (!aliases) continue;
+        if (!node->with_spans || !node->with_value_ends || !node->set_name_starts ||
+            node->set_count != count || node->with_close >= length ||
+            node->with_colon >= node->with_close ||
+            node->with_start >= node->with_colon) goto done;
+        if (!frame && user_count) {
+            /* The first such statement after the `:`. */
+            size_t low = 0, high = user_count;
+            while (low < high) {
+                size_t middle = low + (high - low) / 2;
+                if (users[middle] > node->with_colon) high = middle;
+                else low = middle + 1;
+            }
+            frame = low < user_count && users[low] < node->with_close;
+        }
+        if (last_kept == SIZE_MAX) {
+            /* The statement is its body in parentheses. As the first
+             * operand of an `and` / `or` chain, a body that is a chain of
+             * the same operator stays one operand in the IR, while the
+             * parser joins a parenthesized chain there with the chain it
+             * starts: no text without the statement says that. */
+            if (node->alias_chain_parent) {
+                const yx_node *body = node;
+                while (body && yx_alias_text_erasable(body)) body = body->body;
+                if (body && body->kind == N_BINARY &&
+                    body->operation == (node->alias_chain_parent == 1 ?
+                                        TK_AND : TK_OR)) goto done;
+            }
+            yx_alias_text_add(&edits, node->with_start, node->with_colon + 1,
+                frame ? yx_alias_text_markers("with ", aliases, false, " :") :
+                        yx_copy("", 0));
+            continue;
+        }
+        /* The declared variables keep their order and their slots; the
+         * functions before the last of them go with the comma after them,
+         * those after it with the comma before them. */
+        for (size_t i = 0; i < last_kept; ++i)
+            if (yx_alias_text_declaration(node->items[i]))
+                yx_alias_text_add(&edits, node->set_name_starts[i],
+                                  node->set_name_starts[i + 1], yx_copy("", 0));
+        if (last_kept + 1 < count || frame)
+            yx_alias_text_add(&edits, node->with_value_ends[last_kept],
+                              node->with_value_ends[count - 1],
+                              frame ? yx_alias_text_markers("", aliases, true, "") :
+                                      yx_copy("", 0));
+    }
+    if (edits.failed) { result = -2; goto done; }
+    qsort(edits.items, edits.count, sizeof(*edits.items), yx_alias_text_compare);
+    for (size_t i = 0; i < edits.count; ++i) {
+        if (edits.items[i].start > edits.items[i].end || edits.items[i].end > length)
+            goto done;
+        extra += strlen(edits.items[i].text);
+    }
+    out = (char *)malloc(length + extra + 1);
+    if (!out) { result = -2; goto done; }
+    for (size_t i = 0; i < edits.count; ++i) {
+        const yx_alias_text_edit *edit = &edits.items[i];
+        size_t size = strlen(edit->text);
+        /* An edit inside a removed declaration goes with it. */
+        if (edit->start < covered) {
+            if (edit->end > covered) { free(out); goto done; }
+            continue;
+        }
+        memcpy(out + used, expression + at, edit->start - at);
+        used += edit->start - at;
+        memcpy(out + used, edit->text, size);
+        used += size;
+        at = edit->end;
+        if (edit->end > edit->start) covered = edit->end;
+    }
+    memcpy(out + used, expression + at, length - at + 1);
+    *text = out;
+    result = 1;
+done:
+    for (size_t i = 0; i < edits.count; ++i) free(edits.items[i].text);
+    free(edits.items);
+    free(users);
+    yx_condition_destroy(condition);
+    return result;
 }
 
 /* Folds again with the module constants of the imported modules, once the
@@ -5439,6 +6114,7 @@ void yx_condition_destroy(yx_condition *condition)
         free(node->set_names);
         free(node->set_name_starts);
         free(node->set_name_ends);
+        free(node->with_value_ends);
         free(node->items);
         free(node->deep_index_ends);
         free(node);
@@ -8419,6 +9095,11 @@ static uint64_t yx_wc_with(yx_wc *c, const yx_node *n)
     size_t vars = c->var_count;
     uint64_t cost = 0;
     for (size_t i = 0; i < n->item_count && i < n->set_count; ++i) {
+        /* A function has a slot in the statement's frame and no code. */
+        if (n->items[i]->alias_value) {
+            yx_wc_push_var(c, "", YX_STATIC_FUNCTION, false);
+            continue;
+        }
         yx_wc_info value = yx_wc_info_of(c, n->items[i]);
         bool object = value.type == YX_STATIC_STRUCT ||
                       value.type == YX_STATIC_ARRAY ||
@@ -8588,6 +9269,8 @@ typedef struct yx_scope_name {
     size_t string_length_constraint;
     bool imported_module;
     bool is_unsigned;
+    /* A `with` variable whose value is a rule (a boolean). */
+    bool rule_value;
     const yx_global_object *object;
     const yx_global_array *array;
     const yx_node *module_binding;
@@ -9465,7 +10148,8 @@ static bool yx_wrong_arguments_error(yx_validation *state, const yx_node *call)
 {
     if (state->error && state->error_capacity)
         snprintf(state->error, state->error_capacity,
-                 "wrong arguments for '%s' @%zu", call->name, call->span_start);
+                 "wrong arguments for '%s' @%zu%s", call->name, call->span_start,
+                 call->function_alias ? " alias" : "");
     return false;
 }
 
@@ -9902,7 +10586,7 @@ static bool yx_unknown_global_field_error(yx_validation *state,
     const yx_global_object *object = root ? root->object : NULL;
     const yx_global_array *array = root ? root->array : NULL;
     yx_static_type type = root ? root->type : YX_STATIC_UNKNOWN;
-    size_t cursor = root_length, key = 0;
+    size_t cursor = root_length, key = 0, previous = SIZE_MAX;
     size_t keys = node->kind == N_GLOBAL_DEEP_PATH ? node->deep_index_count :
                   yx_module_node_indices(node);
     while (node->name[cursor]) {
@@ -9918,10 +10602,30 @@ static bool yx_unknown_global_field_error(yx_validation *state,
         size_t end = member + strcspn(node->name + member, ".");
         const yx_global_field *field = type == YX_STATIC_STRUCT && object ?
             yx_global_object_field_n(object, node->name + member, end - member) : NULL;
+        /* A member read from a member that is no structure (`s.name.x`):
+         * E002 on that member (check_type in the field access). */
+        if (!field && previous != SIZE_MAX && node->kind != N_CALL &&
+            type != YX_STATIC_STRUCT && type != YX_STATIC_UNKNOWN &&
+            !(key < keys && cursor == (node->kind == N_GLOBAL_DEEP_PATH ?
+              node->deep_index_ends[key] : node->first_three_index_ends[key])) &&
+            node->span_start != SIZE_MAX && node->span_end != SIZE_MAX &&
+            node->span_start < node->span_end &&
+            state->error && state->error_capacity) {
+            size_t ordinal = 0;
+            for (size_t i = 0; i < previous; ++i)
+                if (node->name[i] == '.') ++ordinal;
+            snprintf(state->error, state->error_capacity,
+                     "module member type:%zu:%zu:%zu:%s:%.*s",
+                     node->span_start, node->span_end, ordinal,
+                     yx_static_type_name(type), (int)(cursor - previous),
+                     node->name + previous);
+            return false;
+        }
         if (!field) return yx_unknown_global_member(state, node, member);
         type = yx_global_static_type(field->type);
         object = field->type == YX_GLOBAL_STRUCT ? field->value.object : NULL;
         array = field->type == YX_GLOBAL_ARRAY ? field->value.array : NULL;
+        previous = member;
         cursor = end;
     }
     return yx_unknown_global_member(state, node,
@@ -10243,6 +10947,211 @@ static bool yx_validate_index_primary(const yx_node *node, size_t index,
 /* Validates one node's own constraints. When validation would continue with
  * the generic children, `*spine` receives the node instead: the caller walks
  * left operands iteratively so long flat operator chains do not recurse. */
+/* A member read from a function, or a lookup in one: a read function
+ * (`uint8.x`, `uint8[0]`) or a function of an imported module
+ * (`pe.is_dll.x`, `pe.is_dll[0]`). The function is no structure and no
+ * array or map (E002 on the function); a called member is looked up in
+ * the global scope, which lacks it (E009, func_call_from_ast). False with
+ * the detail when the node is of that kind. */
+static bool yx_function_member_check(const yx_node *node, yx_validation *state,
+                                     const yx_scope_name *scope)
+{
+    const char *name = node->name;
+    size_t root, length, function_end = 0, last_start = 0;
+    bool indexed, call;
+    if (!name || node->function_alias || node->resolved_module_alias ||
+        node->span_start == SIZE_MAX || node->span_end == SIZE_MAX ||
+        (node->kind != N_MODULE_FIELD && node->kind != N_CALL &&
+         node->kind != N_GLOBAL_INDEXED && node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+         node->kind != N_MODULE_TRIPLE_INDEXED_FIELD)) return true;
+    root = strcspn(name, ".");
+    length = strlen(name);
+    if (yx_scope_find(scope, name, root)) return true;
+    {
+        yx_token token = {TK_IDENTIFIER, name, root, 0, 0, false, 0.0};
+        unsigned width;
+        bool signed_read, floating_read, big_endian;
+        if (yx_read_function(&token, &width, &signed_read, &floating_read,
+                             &big_endian)) {
+            char *copy = yx_copy(name, root);
+            bool known = copy && state->identifier_exists &&
+                         state->identifier_exists(state->user_data, copy);
+            free(copy);
+            if (known) return true;
+            function_end = root;
+        }
+    }
+    if (!function_end) {
+        char *path;
+        /* A module function has a member or a lookup after it only in a
+         * path with a lookup or with more than one dot. */
+        if (!name[root] ||
+            (!yx_module_node_indices(node) && !strchr(name + root + 1, '.')) ||
+            !yx_imported_module_root(state, scope, name, root))
+            return true;
+        path = yx_copy(name, length);
+        if (!path) return true;
+        for (size_t at = root + 1; at <= length && !function_end; ++at) {
+            char saved;
+            if (path[at] && path[at] != '.') continue;
+            saved = path[at];
+            path[at] = '\0';
+            if (yx_alias_module_function(path)) function_end = at;
+            path[at] = saved;
+        }
+        free(path);
+        if (!function_end) return true;
+    }
+    for (size_t at = 0; at < function_end; ++at)
+        if (name[at] == '.') last_start = at + 1;
+    indexed = yx_module_node_indices(node) != 0 || node->kind == N_GLOBAL_INDEXED;
+    if (indexed && (node->kind == N_GLOBAL_INDEXED ||
+                    node->first_three_index_ends[0] == function_end)) {
+        yx_node base = *node;
+        if (node->index_primary_ends[0] == SIZE_MAX ||
+            node->index_primary_ends[0] <= node->span_start) return true;
+        base.span_end = node->index_primary_ends[0];
+        return yx_wrong_type_span_exact(state, &base, "`array` or `map`",
+                                        "function");
+    }
+    /* The function itself, called or read: other checks. */
+    if (function_end == length ||
+        (indexed && node->first_three_index_ends[0] < function_end)) return true;
+    call = node->kind == N_CALL && !strchr(name + function_end + 1, '.') &&
+           node->call_member_start != SIZE_MAX &&
+           node->call_member_start < node->call_member_end;
+    if (call) {
+        if (state->error && state->error_capacity)
+            snprintf(state->error, state->error_capacity,
+                     "unknown identifier span:%zu:%zu:%s",
+                     node->call_member_start, node->call_member_end,
+                     name + function_end + 1);
+        return false;
+    }
+    /* The function's last name in the source: the detail counts the
+     * members of the span (0 is its first word). */
+    if (state->error && state->error_capacity) {
+        size_t ordinal = 0;
+        for (size_t at = 0; at < last_start; ++at)
+            if (name[at] == '.') ++ordinal;
+        snprintf(state->error, state->error_capacity,
+                 "module member type:%zu:%zu:%zu:function:%.*s",
+                 node->span_start, node->span_end, ordinal,
+                 ordinal ? (int)(function_end - last_start) : 1,
+                 ordinal ? name + last_start : "-");
+    }
+    return false;
+}
+
+/* A called member of a value that is no structure, or of a loop or `with`
+ * variable that is a structure of a module (func_call_from_ast looks the
+ * name up in the symbol table of the object's type): a string, an array
+ * and a map have `len()` only (E008 for another name, E004 for arguments);
+ * an integer, a float and a boolean have no symbol table, so the name is
+ * looked up in the global scope (E009); a field of a structure is no
+ * function (E002). A signature's `valid_on` read without a call is a
+ * function value. False with the detail when the node is of that kind. */
+static bool yx_method_member_check(const yx_node *node, yx_validation *state,
+                                   const yx_scope_name *scope)
+{
+    const char *name = node->name, *last, *type = NULL;
+    const yx_scope_name *binding;
+    size_t root;
+    if (!name || node->function_alias || node->resolved_module_alias ||
+        yx_module_node_indices(node) || !state->error || !state->error_capacity ||
+        !(last = strrchr(name, '.'))) return true;
+    root = strcspn(name, ".");
+    binding = yx_scope_find(scope, name, root);
+    if (node->kind == N_MODULE_FIELD) {
+        if (binding && !binding->table && binding->type == YX_STATIC_STRUCT &&
+            binding->object && node->span_start != SIZE_MAX &&
+            node->span_start < node->span_end && node->span_end != SIZE_MAX &&
+            yx_signature_scope_method(binding->object, binding->name, name)) {
+            snprintf(state->error, state->error_capacity,
+                     "function alias value span:%zu:%zu:valid_on",
+                     node->span_start, node->span_end);
+            return false;
+        }
+        return true;
+    }
+    if (node->kind != N_CALL || node->call_member_start == SIZE_MAX ||
+        node->call_member_start >= node->call_member_end ||
+        node->call_start == SIZE_MAX || node->span_end == SIZE_MAX)
+        return true;
+    if (binding) {
+        const yx_global_object *object = binding->object;
+        yx_static_type current = binding->type;
+        size_t cursor = root;
+        if (binding->table || binding->imported_module || binding->module_binding ||
+            current != YX_STATIC_STRUCT || !object ||
+            yx_signature_scope_method(object, binding->name, name)) return true;
+        while (name + cursor < last) {
+            size_t member = cursor + 1;
+            size_t end = member + strcspn(name + member, ".");
+            const yx_global_field *field = current == YX_STATIC_STRUCT && object ?
+                yx_global_object_field_n(object, name + member, end - member) : NULL;
+            if (!field) return true;
+            current = yx_global_static_type(field->type);
+            object = field->type == YX_GLOBAL_STRUCT ? field->value.object : NULL;
+            cursor = end;
+        }
+        if (current == YX_STATIC_STRUCT) {
+            const yx_global_field *field;
+            if (!object) return true;
+            field = yx_global_object_field_n(object, last + 1, strlen(last + 1));
+            if (field) {
+                yx_node function = *node;
+                function.span_start = node->call_member_start;
+                function.span_end = node->call_member_end;
+                return yx_wrong_type_span_exact(state, &function, "`function`",
+                    yx_static_type_name(yx_global_static_type(field->type)));
+            }
+            snprintf(state->error, state->error_capacity,
+                     "test proto unknown field:%zu:%zu:%s",
+                     node->call_member_start, node->call_member_end, last + 1);
+            return false;
+        }
+        type = yx_static_type_name(current);
+    } else {
+        char *receiver;
+        size_t length = strlen(name);
+        if (last == name + root || yx_test_proto_path(name) ||
+            strncmp(name, "vt.", 3) == 0 ||
+            !yx_imported_module_root(state, scope, name, root) ||
+            yx_module_function_path(name, length, NULL)) return true;
+        receiver = yx_copy(name, (size_t)(last - name));
+        if (!receiver) return true;
+        type = yx_mo_schema_path_type_name(receiver, false, NULL);
+        free(receiver);
+    }
+    if (!type) return true;
+    if (strcmp(type, "string") == 0 || strcmp(type, "array") == 0 ||
+        strcmp(type, "map") == 0) {
+        if (strcmp(last + 1, "len") != 0) {
+            snprintf(state->error, state->error_capacity,
+                     "test proto unknown field:%zu:%zu:%s",
+                     node->call_member_start, node->call_member_end, last + 1);
+            return false;
+        }
+        if (node->item_count && node->call_start < node->span_end) {
+            snprintf(state->error, state->error_capacity,
+                     "test proto arguments:%zu:%zu:len",
+                     node->call_start, node->span_end);
+            return false;
+        }
+        return true;
+    }
+    if (strcmp(type, "integer") == 0 || strcmp(type, "float") == 0 ||
+        strcmp(type, "boolean") == 0) {
+        snprintf(state->error, state->error_capacity,
+                 "unknown identifier span:%zu:%zu:%s",
+                 node->call_member_start, node->call_member_end, last + 1);
+        return false;
+    }
+    return true;
+}
+
 static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                                   bool inside_for_of,
                                   const yx_scope_name *scope,
@@ -10253,6 +11162,60 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
     bool feature_operands_checked = false;
     *spine = NULL;
     if (!node) return true;
+    /* A name that stands for a function (a `with` declaration), read
+     * without a call: a value of type function, at the name. */
+    if (node->function_alias && !node->alias_value && node->name &&
+        (node->kind == N_RULE || node->kind == N_MODULE_FIELD)) {
+        if (node->operation == TK_DOT)
+            return yx_wrong_type_span_exact(state, node, "`struct`", "function");
+        if (node->operation == TK_LBRACKET)
+            return yx_wrong_type_span_exact(state, node, "`array` or `map`",
+                                            "function");
+        if (state->error && state->error_capacity) {
+            if (node->operation == TK_LPAREN && node->set_count)
+                snprintf(state->error, state->error_capacity,
+                         "unknown identifier span:%zu:%zu:%s",
+                         node->call_member_start, node->call_member_end,
+                         node->set_names[0]);
+            else
+                snprintf(state->error, state->error_capacity,
+                         "function alias value span:%zu:%zu:%s",
+                         node->span_start, node->span_end, node->name);
+        }
+        return false;
+    }
+    /* A member of a call's result that is no structure: the call's own
+     * errors (its arguments) come first. */
+    if (node->result_end && node->result_type &&
+        (node->kind == N_READ || node->kind == N_CALL)) {
+        yx_node call = *node;
+        call.result_end = 0;
+        call.cache_self = NULL;
+        if (!yx_validate_node(&call, state, inside_for_of, scope)) return false;
+        if (node->kind == N_CALL && node->call_member_start != SIZE_MAX)
+            call.span_start = node->call_member_start;
+        call.span_end = node->result_end;
+        return yx_wrong_type_span_exact(state, &call, "`struct`",
+                                        node->result_type);
+    }
+    if (!yx_function_member_check(node, state, scope)) return false;
+    if (!yx_method_member_check(node, state, scope)) return false;
+    /* func_call_from_ast: a called `with` or `for` variable that is no
+     * function is E002 on its name. */
+    if (node->kind == N_CALL && node->name && !node->function_alias &&
+        !strchr(node->name, '.') && node->span_start != SIZE_MAX) {
+        const yx_scope_name *callee = yx_scope_find(scope, node->name,
+                                                    strlen(node->name));
+        if (callee && !callee->table && !callee->imported_module &&
+            (callee->type != YX_STATIC_UNKNOWN || callee->rule_value) &&
+            callee->type != YX_STATIC_FUNCTION) {
+            yx_node function = *node;
+            function.span_end = node->span_start + strlen(node->name);
+            return yx_wrong_type_span_exact(state, &function, "`function`",
+                callee->type == YX_STATIC_UNKNOWN ? "boolean" :
+                yx_static_type_name(callee->type));
+        }
+    }
     {
         yx_node alias;
         char *name = NULL;
@@ -10415,6 +11378,17 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         node->name && strchr(node->name, '.')) {
         size_t root_length = (size_t)(strchr(node->name, '.') - node->name);
         const yx_scope_name *root = yx_scope_find(scope, node->name, root_length);
+        /* A lookup in a loop variable that is a structure (`s[0].name`):
+         * the primary is no array or map (E002). */
+        if (root && !root->table && !root->imported_module &&
+            root->type == YX_STATIC_STRUCT && root->object &&
+            node->first_three_index_ends[0] == root_length &&
+            node->span_start != SIZE_MAX) {
+            yx_node base = *node;
+            base.span_end = node->span_start + root_length;
+            return yx_wrong_type_span_exact(state, &base, "`array` or `map`",
+                                            "struct");
+        }
         if (root && root->type == YX_STATIC_ARRAY && root->array &&
             node->first_three_index_ends[0] == root_length &&
             root->array->element_type != YX_GLOBAL_STRUCT) {
@@ -10926,6 +11900,64 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         locals = calloc(node->item_count ? node->item_count : 1, sizeof(*locals));
         if (!locals) return yx_validation_error(state, "out of memory%s", "");
         for (i = 0; i < node->item_count; ++i) {
+            if (node->items[i]->alias_value) {
+                /* A function declares no variable, and the parser has
+                 * resolved every use of the name: the scope entry has no
+                 * name. A module function's path is checked as written;
+                 * the validator knows the function itself only where it is
+                 * called. */
+                const yx_node *declared = node->items[i]->alias_value;
+                if (node->items[i]->function_alias == 2 &&
+                    !declared->function_alias &&
+                    !yx_validate_node(declared, state, inside_for_of, current)) {
+                    if (!state->error || !state->error_capacity ||
+                        (strncmp(state->error, "unsupported module field '", 26) != 0 &&
+                         strncmp(state->error, "module unknown field:", 21) != 0)) {
+                        valid = false;
+                        break;
+                    }
+                    state->error[0] = '\0';
+                }
+                locals[i].name = "";
+                locals[i].type = YX_STATIC_FUNCTION;
+                locals[i].parent = current;
+                current = &locals[i];
+                continue;
+            }
+            /* A method of a signature (`valid_on`), not called: E036. */
+            if (node->items[i]->name && node->items[i]->operation != TK_LPAREN &&
+                (node->items[i]->kind == N_MODULE_FIELD ||
+                 node->items[i]->kind == N_MODULE_INDEXED_FIELD) &&
+                !node->items[i]->implicit_value &&
+                node->items[i]->span_start != SIZE_MAX &&
+                node->items[i]->span_start < node->items[i]->span_end) {
+                yx_node signature_alias;
+                char *signature_name = NULL;
+                const yx_node *signature_node = node->items[i];
+                const char *member;
+                const yx_scope_name *receiver = yx_scope_find(
+                    current, node->items[i]->name,
+                    yx_scope_root_length(node->items[i]->name));
+                if (yx_scoped_module_alias(signature_node, current, &signature_alias,
+                                           &signature_name))
+                    signature_node = &signature_alias;
+                member = yx_signature_member(signature_node->name);
+                if ((member && strcmp(member, "valid_on") == 0 &&
+                     signature_node->operation != TK_LPAREN) ||
+                    (receiver && receiver->type == YX_STATIC_STRUCT &&
+                     receiver->object && node->items[i]->kind == N_MODULE_FIELD &&
+                     yx_signature_scope_method(receiver->object, receiver->name,
+                                               node->items[i]->name))) {
+                    free(signature_name);
+                    if (state->error && state->error_capacity)
+                        snprintf(state->error, state->error_capacity,
+                            "test proto method span:%zu:%zu", node->items[i]->span_start,
+                            node->items[i]->span_end);
+                    valid = false;
+                    break;
+                }
+                free(signature_name);
+            }
             /* Regexp constants are values in declarations. Their parser has
              * already compiled and validated the literal; other positions
              * still pass through the ordinary operand type checks. */
@@ -10953,6 +11985,12 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
             }
             locals[i].name = node->set_names[i];
             locals[i].type = yx_scoped_node_type(node->items[i], current);
+            locals[i].rule_value = locals[i].type == YX_STATIC_UNKNOWN &&
+                node->items[i]->kind == N_RULE && node->items[i]->name &&
+                !yx_scope_find(current, node->items[i]->name,
+                               strlen(node->items[i]->name)) &&
+                state->identifier_exists &&
+                state->identifier_exists(state->user_data, node->items[i]->name);
             if (locals[i].type == YX_STATIC_REGEX) {
                 const yx_node *value = node->items[i];
                 if (value->kind == N_RULE) {
@@ -11087,10 +12125,22 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
             field = yx_global_object_field_path(at->object, at->name,
                                                  node->name, ".value");
             if (!field) continue;
-            if (field->type != YX_GLOBAL_ARRAY)
+            if (field->type != YX_GLOBAL_ARRAY) {
+                /* Expr::Lookup: the primary is no array or map (E002). */
+                yx_static_type actual = yx_global_static_type(field->type);
+                if (node->span_start != SIZE_MAX &&
+                    node->index_primary_ends[0] != SIZE_MAX &&
+                    node->index_primary_ends[0] > node->span_start &&
+                    actual != YX_STATIC_UNKNOWN && actual != YX_STATIC_MAP) {
+                    yx_node primary = *node;
+                    primary.span_end = node->index_primary_ends[0];
+                    return yx_wrong_type_span_exact(state, &primary,
+                        "`array` or `map`", yx_static_type_name(actual));
+                }
                 return yx_validation_error(state,
                                            "global value is not an array: '%s'",
                                            node->name);
+            }
             if (!yx_validate_node(node->a, state, inside_for_of, scope))
                 return false;
             index_type = yx_scoped_node_type(node->a, scope);
@@ -11701,14 +12751,22 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
             const yx_global_field *field;
             if (at->type != YX_STATIC_STRUCT || !at->object) continue;
             if (yx_signature_scope_method(at->object, at->name, node->name)) {
-                if (node->item_count != 1)
-                    return yx_wrong_arguments_error(state, node);
-                if (!yx_validate_node(node->items[0], state, inside_for_of,
+                /* E004 on the arguments, with the method's signature. */
+                bool spans = node->call_start != SIZE_MAX &&
+                             node->span_end != SIZE_MAX &&
+                             node->call_start < node->span_end &&
+                             state->error && state->error_capacity;
+                if (node->item_count == 1 &&
+                    !yx_validate_node(node->items[0], state, inside_for_of,
                                       scope)) return false;
-                return yx_static_accepts(
-                           yx_scoped_node_type(node->items[0], scope),
-                           YX_STATIC_INT) ||
-                       yx_wrong_arguments_error(state, node);
+                if (node->item_count == 1 &&
+                    yx_static_accepts(yx_scoped_node_type(node->items[0], scope),
+                                      YX_STATIC_INT)) return true;
+                if (!spans) return yx_wrong_arguments_error(state, node);
+                snprintf(state->error, state->error_capacity,
+                         "test proto arguments:%zu:%zu:valid_on",
+                         node->call_start, node->span_end);
+                return false;
             }
             field = yx_global_object_field_path(at->object, at->name,
                                                  node->name, ".len");
@@ -13621,6 +14679,9 @@ static bool yx_warn_non_bool_kind(const char *kind, const yx_node *node,
     size_t start, end;
     if (!node || node->span_start == SIZE_MAX || node->span_end == SIZE_MAX ||
         node->span_start >= node->span_end) return true;
+    /* A `with` name read as a function value is no scalar (E002). */
+    if (node->function_alias && !node->alias_value &&
+        (node->kind == N_RULE || node->kind == N_MODULE_FIELD)) return true;
     /* A call's span starts at the called name: `entropy(0, filesize)` in
      * `math.entropy(0, filesize)`, `len()` in `pe.sections.len()`. */
     start = yx_warning_operand_start(node);
@@ -13739,6 +14800,17 @@ static bool yx_visit_type_warnings(const yx_node *node, const yx_scope_name *sco
         const yx_scope_name *current = scope;
         bool ok = true;
         for (size_t i = 0; i < node->item_count && ok; ++i) {
+            if (node->items[i]->alias_value) {
+                /* The declared path reads the names in scope. */
+                yx_mark_scope_use(node->items[i]->alias_value, current);
+                locals[i].name = "";
+                locals[i].type = YX_STATIC_FUNCTION;
+                locals[i].parent = current;
+                locals[i].used = &used[i];
+                used[i] = node->items[i]->function_alias_used;
+                current = &locals[i];
+                continue;
+            }
             ok = yx_visit_type_warnings(node->items[i], current, callback, user, partial);
             locals[i].name = node->set_names[i];
             locals[i].type = yx_warning_expr_type(node->items[i], current);

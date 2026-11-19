@@ -56,11 +56,31 @@ typedef struct yx_suppression_scope {
     yx_suppression_table table;
     int state;                      /* 0 not collected, 1 collected, 2 failed */
     struct yx_suppression_scope *parent;
+    bool text;                      /* length == strlen(source) */
+    size_t *lines;                  /* line start offsets, built on demand */
+    size_t line_count;
+    int line_state;                 /* 0 not built, 1 built, 2 failed */
 } yx_suppression_scope;
 
 void yx_suppression_scope_begin(yx_suppression_scope *scope,
                                 const uint8_t *source, size_t length);
 void yx_suppression_scope_end(yx_suppression_scope *scope);
+
+/* A scope over a NUL-terminated source text: while it is open on this
+ * thread, the questions below about that text (the same pointer) are
+ * answered from one measurement and one line index instead of a scan per
+ * question. The text must not change while its scope is open. */
+void yx_suppression_scope_begin_text(yx_suppression_scope *scope,
+                                     const char *source);
+
+/* strlen(source). */
+size_t yx_source_text_length(const char *source);
+
+/* The 1-based line holding `offset` (1 plus the newlines before it) and,
+ * in *line_start, the start of that line. `offset` is at most the text
+ * length. */
+size_t yx_source_line_of(const char *source, size_t offset,
+                         const char **line_start);
 
 /* The same for a label of which only the start is known. */
 bool yx_warning_suppressed(const uint8_t *source, size_t length,

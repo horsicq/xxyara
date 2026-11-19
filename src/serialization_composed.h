@@ -31,17 +31,47 @@ static bool yx_composed_empty_namespaces(const YRX_RULES *rules)
     }
     return rules->namespace_count-1>previous;
 }
+/* Interning the pool into an empty literal list, in order, gives every
+ * literal its own index exactly when no two are equal: check that once with
+ * a hash table (not one search per literal) and copy the pool. 1 adopted, 0 two
+ * literals are equal (interning would give a different index), -1 not
+ * decided here (the list is not empty, or no memory). */
+static int yx_composed_adopt_pool(yx_module_program *p,const yx_literal *pool,size_t count)
+{
+    size_t *slots,mask=15;yx_literal *copy;int result=1;
+    if(p->literal_count||!count)return -1;
+    while(mask<count*2&&mask<=SIZE_MAX/4)mask=mask*2+1;
+    if(mask>=SIZE_MAX/sizeof(*slots)||count>SIZE_MAX/sizeof(*copy)||!(slots=calloc(mask+1,sizeof(*slots))))return -1;
+    for(size_t i=0;i<count&&result;++i) {
+        uint64_t hash=UINT64_C(1469598103934665603)^(uint64_t)pool[i].length;
+        for(size_t k=0;k<pool[i].length;++k)hash=(hash^pool[i].data[k])*UINT64_C(1099511628211);
+        size_t slot=(size_t)(hash^(hash>>29))&mask;
+        for(;slots[slot];slot=(slot+1)&mask) {
+            const yx_literal *x=&pool[slots[slot]-1];
+            if(x->length==pool[i].length&&(!x->length||memcmp(x->data,pool[i].data,x->length)==0)){result=0;break;}
+        }
+        if(result)slots[slot]=i+1;
+    }
+    free(slots);
+    if(!result)return 0;
+    if(!(copy=realloc(p->literals,count*sizeof(*copy))))return -1;
+    memcpy(copy,pool,count*sizeof(*copy));
+    p->literals=copy;p->literal_count=count;p->literal_capacity=count;
+    return 1;
+}
 static bool yx_composed_parse_rules(yx_module_program *p,yx_module_patterns *c,const YRX_RULES *rules,int *roots)
 {
     c->prior=(yx_global_rules_context){rules->rules,rules->rule_count,0};c->rule_scope=true;c->logical_start=0;
     c->namespace_count=rules->namespace_count;
+    yx_global_rules_index(&c->prior);
     for(size_t i=0;i<rules->rule_count;++i) {
         c->prior.current=i;c->logical_count=rules->rules[i].pattern_count;
         p->parser.at=(const unsigned char *)rules->rules[i].condition_text;
         roots[i]=yx_module_parse(p,1,0);yx_bool_skip_space(&p->parser);
-        if(roots[i]<0||*p->parser.at||p->failed)return false;
+        if(roots[i]<0||*p->parser.at||p->failed){yx_global_rules_index_free(&c->prior);return false;}
         c->logical_start+=c->logical_count;
     }
+    yx_global_rules_index_free(&c->prior);
     return true;
 }
 static void yx_composed_bounds(const yx_module_program *p,int root,const int *roots,size_t current,yx_pattern_filesize_bounds *bounds,unsigned depth)
@@ -123,6 +153,7 @@ static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,cons
                 size_t at=0;
                 o->anchored=yx_condition_pattern_fixed_at(anchors,anchor_name,&at);
                 if(o->anchored)o->offset=at;
+                else o->unmarked=!yx_condition_pattern_nonanchorable(anchors,anchor_name,false);
             }
         }
         yx_condition_destroy(anchors);
@@ -203,9 +234,14 @@ static yx_ser_result yx_encode_composed_rules_mode(const YRX_RULES *rules,uint8_
     status=YX_SER_UNSUPPORTED;dry=p;p=calloc(1,sizeof(*p));if(!p){status=YX_SER_NO_MEMORY;goto done;}
     free(c.helper_calls);free(c.regexes);c=(yx_module_patterns){.archive=assembly.archive};yx_module_pattern_setup(p,&c);
     p->schema=&schema.dynamic.schema;p->profile=profile;p->capi_import_order=!rules->archive_cli&&profile==0;
+    switch(yx_composed_adopt_pool(p,assembly.archive->pool,assembly.archive->pool_count)) {
+    case 0: goto done;
+    case 1: break;
+    default:
     for(size_t i=0;i<assembly.archive->pool_count;++i) {
         size_t id;
         if(!yx_intern_literal(assembly.archive->pool[i].data,assembly.archive->pool[i].length,&p->literals,&p->literal_count,&p->literal_capacity,&id)||id!=i)goto done;
+    }
     }
     if(!yx_composed_parse_rules(p,&c,rules,roots)||!yx_composed_module_wasm(p,roots,rules->rule_count,&wasm,&wasm_length)||!yx_physical_pool_reserve(assembly.archive,p->literal_count))goto done;
     assembly.archive->pool_count=p->literal_count;if(p->literal_count)memcpy(assembly.archive->pool,p->literals,p->literal_count*sizeof(*p->literals));

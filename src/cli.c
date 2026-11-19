@@ -33600,9 +33600,17 @@ static bool yx_cli_source_contains(const uint8_t *source, size_t length,
                                     const char *needle)
 {
     size_t wanted = strlen(needle);
+    const uint8_t *at = source, *last;
     if (wanted > length) return false;
-    for (size_t i = 0; i <= length - wanted; ++i)
-        if (memcmp(source + i, needle, wanted) == 0) return true;
+    if (!wanted) return true;
+    /* Only where the first byte matches. */
+    last = source + (length - wanted);
+    while (at <= last &&
+           (at = (const uint8_t *)memchr(at, (unsigned char)needle[0],
+                                         (size_t)(last - at) + 1)) != NULL) {
+        if (memcmp(at, needle, wanted) == 0) return true;
+        ++at;
+    }
     return false;
 }
 
@@ -35447,6 +35455,9 @@ static bool yx_cli_emit_included_imports(
                                 warning_count, patches);
 }
 
+static bool yx_cli_import_keyword_in(const uint8_t *source, size_t length,
+                                     size_t from, size_t to);
+
 /* Scan, compile and fix warnings report the source-level duplicate imports
  * of each top-level source before that source's core warnings (the compiler
  * reports them while compiling its imports), and those of an included file
@@ -35490,6 +35501,16 @@ static bool yx_cli_emit_warnings_with_imports(
         bool interleave = import_enabled && !core_import && origin;
         bool origin_read = false;
         size_t import_from = 0;
+        /* Read the source once: a range without an `import` keyword needs
+         * no reread and relex (once per warning otherwise). */
+        if (interleave) {
+            origin_read = true;
+            if (!yx_cli_read_file(origin, &origin_source, &origin_length)) {
+                free(origin_source);
+                origin_source = NULL;
+                origin_length = 0;
+            }
+        }
         if (import_enabled && !core_import && !marked)
             for (size_t i = 0; i < top_files.count; ++i) {
                 if (!yx_fix_patch_imports(top_files.items[i], true, false,
@@ -35527,6 +35548,8 @@ static bool yx_cli_emit_warnings_with_imports(
                         SIZE_MAX;
                 }
                 if (until > import_from &&
+                    yx_cli_import_keyword_in(origin_source, origin_length,
+                                             import_from, until) &&
                     !yx_fix_patch_imports_range(origin, true, false,
                                                 import_from, until,
                                                 &import_count, patches))
@@ -35611,14 +35634,18 @@ static size_t yx_cli_include_position(const uint8_t *source, size_t length,
 
 /* A duplicate import is reported at its `import` keyword: a source range
  * without that word has none, and the file need not be read and lexed again
- * for it (once per warning otherwise). */
+ * for it (once per warning otherwise). The lexer's `import` token stands
+ * between characters that cannot continue an identifier (`pe.imports` is
+ * not one). */
 static bool yx_cli_import_keyword_in(const uint8_t *source, size_t length,
                                      size_t from, size_t to)
 {
     if (!source) return true;
     if (to > length) to = length;
     for (size_t at = from; at + 6 <= length && at < to; ++at)
-        if (source[at] == 'i' && memcmp(source + at, "import", 6) == 0)
+        if (source[at] == 'i' && memcmp(source + at, "import", 6) == 0 &&
+            (at == 0 || !yx_dep_is_ident_cont(source[at - 1])) &&
+            (at + 6 == length || !yx_dep_is_ident_cont(source[at + 6])))
             return true;
     return false;
 }
@@ -35683,12 +35710,69 @@ static bool yx_cli_emit_ordered_warnings(
     return true;
 }
 
+static int yx_cli_size_compare(const void *a, const void *b)
+{
+    size_t x = *(const size_t *)a, y = *(const size_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The declaration starts of the compiled patterns of rules declared in
+ * `path`, sorted (one pass over the rules instead of one per pattern).
+ * False when out of memory. */
+static bool yx_cli_compiled_pattern_starts(const YRX_COMPILER *compiler,
+                                           const char *path, size_t **starts,
+                                           size_t *count)
+{
+    size_t total = 0, used = 0;
+    *starts = NULL;
+    *count = 0;
+    if (!compiler->rules) return true;
+    for (size_t r = 0; r < compiler->rules->rule_count; ++r) {
+        const YRX_RULE *rule = &compiler->rules->rules[r];
+        if (rule->declaration_origin &&
+            strcmp(rule->declaration_origin, path) == 0)
+            total += rule->pattern_count;
+    }
+    if (!total) return true;
+    if (total > SIZE_MAX / sizeof(**starts)) return false;
+    *starts = (size_t *)malloc(total * sizeof(**starts));
+    if (!*starts) return false;
+    for (size_t r = 0; r < compiler->rules->rule_count; ++r) {
+        const YRX_RULE *rule = &compiler->rules->rules[r];
+        if (!rule->declaration_origin ||
+            strcmp(rule->declaration_origin, path) != 0)
+            continue;
+        for (size_t p = 0; p < rule->pattern_count; ++p)
+            (*starts)[used++] = rule->patterns[p].declaration_start;
+    }
+    qsort(*starts, used, sizeof(**starts), yx_cli_size_compare);
+    *count = used;
+    return true;
+}
+
+static bool yx_cli_size_sorted_contains(const size_t *items, size_t count,
+                                        size_t value)
+{
+    size_t low = 0, high = count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (items[middle] < value) low = middle + 1;
+        else high = middle;
+    }
+    return low < count && items[low] == value;
+}
+
 static bool yx_cli_check_text_hex_compiled(
     const char *path, const uint8_t *source, size_t length,
     const YRX_COMPILER *compiler, size_t *count,
     size_t *core_warning_count, size_t *duplicate_warning_count,
     size_t *included_import_warning_count, size_t *import_warning_count)
 {
+    yx_suppression_scope suppressions;
+    size_t *compiled_starts = NULL, compiled_start_count = 0;
+    size_t *core_hex_starts = NULL, core_hex_start_count = 0;
+    bool compiled_starts_known = false, core_hex_starts_known = false;
+    bool compiled_starts_tried = false, core_hex_starts_tried = false;
     yx_dep_tokens tokens = {0};
     yx_cli_hex_error *semantic_errors = NULL;
     yx_cli_core_warning *core_warnings = NULL;
@@ -35705,6 +35789,8 @@ static bool yx_cli_check_text_hex_compiled(
     if (core_warning_count) *core_warning_count = 0;
     if (duplicate_warning_count) *duplicate_warning_count = 0;
     if (included_import_warning_count) *included_import_warning_count = 0;
+    /* One scan of the suppression comments for all patterns. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     if (!yx_dep_lex(source, length, &tokens)) goto done;
     if (compiler &&
         !yx_cli_hex_errors(compiler, path, &semantic_errors,
@@ -35747,7 +35833,16 @@ static bool yx_cli_check_text_hex_compiled(
         if (compiler) {
             bool compiled = false;
             size_t declaration_start = (size_t)(pattern->text - source);
-            if (compiler->rules)
+            /* Built at the first hex pattern. */
+            if (!compiled_starts_tried) {
+                compiled_starts_tried = true;
+                compiled_starts_known = yx_cli_compiled_pattern_starts(
+                    compiler, path, &compiled_starts, &compiled_start_count);
+            }
+            if (compiled_starts_known)
+                compiled = yx_cli_size_sorted_contains(
+                    compiled_starts, compiled_start_count, declaration_start);
+            else if (compiler->rules)
                 for (size_t r = 0; r < compiler->rules->rule_count; ++r) {
                     const YRX_RULE *rule = &compiler->rules->rules[r];
                     if (!rule->declaration_origin ||
@@ -35766,6 +35861,28 @@ static bool yx_cli_check_text_hex_compiled(
         if (close == tokens.count) break;
         start = (size_t)(tokens.items[i + 2].text - source);
         end = (size_t)(tokens.items[close].text - source) + 1;
+        /* The starts of the core text_as_hex warnings, sorted at the first
+         * hex pattern that reaches this point. */
+        if (!core_hex_starts_tried) {
+            core_hex_starts_tried = true;
+            if (core_warnings_length &&
+                core_warnings_length <= SIZE_MAX / sizeof(*core_hex_starts) &&
+                (core_hex_starts = (size_t *)malloc(
+                     core_warnings_length * sizeof(*core_hex_starts)))) {
+                for (size_t k = 0; k < core_warnings_length; ++k)
+                    if (core_warnings[k].code &&
+                        strcmp(core_warnings[k].code, "text_as_hex") == 0)
+                        core_hex_starts[core_hex_start_count++] =
+                            core_warnings[k].start;
+                qsort(core_hex_starts, core_hex_start_count,
+                      sizeof(*core_hex_starts), yx_cli_size_compare);
+                core_hex_starts_known = true;
+            }
+        }
+        if (core_hex_starts_known)
+            from_core = yx_cli_size_sorted_contains(
+                core_hex_starts, core_hex_start_count, start);
+        else
         for (size_t warning = 0; warning < core_warnings_length; ++warning)
             if (core_warnings[warning].start == start &&
                 core_warnings[warning].code &&
@@ -35795,7 +35912,9 @@ static bool yx_cli_check_text_hex_compiled(
                 ++next_core_warning;
             }
             if (import_cursor && start > import_from) {
-                if (!yx_fix_patch_imports_range(path, true, false,
+                if (yx_cli_import_keyword_in(source, length, import_from,
+                                             start) &&
+                    !yx_fix_patch_imports_range(path, true, false,
                                                 import_from, start,
                                                 import_warning_count, NULL))
                     goto done;
@@ -35839,6 +35958,9 @@ done:
     free(core_warnings);
     free(semantic_errors);
     free(tokens.items);
+    free(compiled_starts);
+    free(core_hex_starts);
+    yx_suppression_scope_end(&suppressions);
     return ok;
 }
 
@@ -36629,9 +36751,57 @@ static bool yx_fix_report_rows(const char *report, yx_fmt_buffer *minus,
  * show a tab as one space; so does a replacement copied from the source
  * (`get_snippet` reads the report cache), as `fix warnings` writes it. A
  * report whose rows do not match the source proposes no patch. */
+/* The last source file yx_fix_core_patch read and where its lines start:
+ * the warnings of one file read and walk it once instead of once each. */
+typedef struct yx_fix_source_cache {
+    char *origin;
+    uint8_t *source;
+    size_t length;
+    size_t *lines, line_count;
+} yx_fix_source_cache;
+
+static void yx_fix_source_cache_clear(yx_fix_source_cache *cache)
+{
+    free(cache->origin);
+    free(cache->source);
+    free(cache->lines);
+    memset(cache, 0, sizeof(*cache));
+}
+
+/* The source of `origin` from the cache, read on a miss. False when it
+ * cannot be read (or indexed). */
+static bool yx_fix_source_cache_get(yx_fix_source_cache *cache,
+                                    const char *origin)
+{
+    size_t count = 1, used = 0, origin_length;
+    if (cache->origin && strcmp(cache->origin, origin) == 0) return true;
+    yx_fix_source_cache_clear(cache);
+    if (!yx_cli_read_file(origin, &cache->source, &cache->length)) {
+        yx_fix_source_cache_clear(cache);
+        return false;
+    }
+    for (size_t at = 0; at < cache->length; ++at)
+        if (cache->source[at] == '\n') ++count;
+    origin_length = strlen(origin);
+    cache->origin = (char *)malloc(origin_length + 1);
+    cache->lines = count <= SIZE_MAX / sizeof(*cache->lines) ?
+        (size_t *)malloc(count * sizeof(*cache->lines)) : NULL;
+    if (!cache->origin || !cache->lines) {
+        yx_fix_source_cache_clear(cache);
+        return false;
+    }
+    memcpy(cache->origin, origin, origin_length + 1);
+    cache->lines[used++] = 0;
+    for (size_t at = 0; at < cache->length; ++at)
+        if (cache->source[at] == '\n') cache->lines[used++] = at + 1;
+    cache->line_count = used;
+    return true;
+}
+
 static bool yx_fix_core_patch(const char *code, const char *report,
                               const yx_fix_label *labels,
-                              size_t label_count, yx_fix_patches *patches)
+                              size_t label_count, yx_fix_patches *patches,
+                              yx_fix_source_cache *cache)
 {
     size_t index = strcmp(code, "unsatisfiable_expr") == 0 ? 1 : 0;
     bool quantifier = strcmp(code, "ambiguous_expr") == 0;
@@ -36639,24 +36809,37 @@ static bool yx_fix_core_patch(const char *code, const char *report,
     size_t minus_rows = 0, plus_rows = 0, first_line = 0, line = 1;
     size_t line_start = 0, length = 0, start, end, prefix, suffix;
     uint8_t *source = NULL;
+    const uint8_t *text;
     bool ok = false;
     if (index >= label_count || !labels[index].found) return true;
     if (!yx_fix_report_rows(report, &minus, &minus_rows, &plus, &plus_rows,
                             &first_line)) goto done;
     ok = true;
-    if ((!minus_rows && !plus_rows) ||
-        !yx_cli_read_file(labels[index].origin, &source, &length)) goto done;
-    while (line < first_line) {
-        const uint8_t *newline = (const uint8_t *)memchr(
-            source + line_start, '\n', length - line_start);
-        if (!newline) goto done;
-        line_start = (size_t)(newline - source) + 1;
-        ++line;
+    if (!minus_rows && !plus_rows) goto done;
+    if (cache && yx_fix_source_cache_get(cache, labels[index].origin)) {
+        /* Line `first_line` starts after newline first_line - 1. */
+        text = cache->source;
+        length = cache->length;
+        if (first_line > 1) {
+            if (first_line - 1 >= cache->line_count) goto done;
+            line_start = cache->lines[first_line - 1];
+        }
+    } else {
+        if (!yx_cli_read_file(labels[index].origin, &source, &length))
+            goto done;
+        text = source;
+        while (line < first_line) {
+            const uint8_t *newline = (const uint8_t *)memchr(
+                source + line_start, '\n', length - line_start);
+            if (!newline) goto done;
+            line_start = (size_t)(newline - source) + 1;
+            ++line;
+        }
     }
     if (!first_line) goto done;
     /* The original lines as rendered; a lone `~` row splits one line. */
     for (size_t at = line_start; at < length; ++at) {
-        uint8_t ch = source[at];
+        uint8_t ch = text[at];
         if (minus_rows ? shown.length == minus.length :
                          ch == '\n' || ch == '\r') break;
         if (!yx_fmt_char(&shown, ch == '\t' ? ' ' : (char)ch)) {
@@ -36706,6 +36889,8 @@ static bool yx_fix_core_patches(const YRX_BUFFER *warnings_json,
                                 bool disable_all, yx_fix_patches *patches)
 {
     xx_json json;
+    yx_fix_source_cache cache = {0};
+    bool ok;
     if (disable_all || !warnings_json || !warnings_json->length) return true;
     xx_json_init(&json, warnings_json->data, warnings_json->length);
     if (!xx_json_array_begin(&json)) return false;
@@ -36719,15 +36904,20 @@ static bool yx_fix_core_patches(const YRX_BUFFER *warnings_json,
             if (valid && code && report &&
                 !yx_cli_warning_disabled(code, disabled))
                 valid = yx_fix_core_patch(code, report, labels, label_count,
-                                          patches);
+                                          patches, &cache);
             for (size_t i = 0; i < label_count; ++i)
                 xx_str_free(labels[i].origin);
             xx_str_free(code);
             xx_str_free(report);
-            if (!valid) return false;
+            if (!valid) {
+                yx_fix_source_cache_clear(&cache);
+                return false;
+            }
         } while (xx_json_more(&json));
     }
-    return xx_json_array_end(&json);
+    ok = xx_json_array_end(&json);
+    yx_fix_source_cache_clear(&cache);
+    return ok;
 }
 
 /* Rust's `str` order: bytes, then length. */

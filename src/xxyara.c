@@ -1201,7 +1201,7 @@ static char *yx_diagnostic_text_source(const char *level, const char *code,
     const char *line_start = source;
     const char *line_end;
     size_t line = 1, column, marker_column, gutter_digits = 1;
-    size_t source_length = strlen(source);
+    size_t source_length = yx_source_text_length(source);
     size_t width, line_length, note_length;
     char *marks, *text, *cropped_line = NULL;
     char *rendered_title, *rendered_line;
@@ -1213,9 +1213,7 @@ static char *yx_diagnostic_text_source(const char *level, const char *code,
     int needed;
     if (start > source_length) start = source_length;
     if (end > source_length) end = source_length;
-    for (size_t i = 0; i < start; ++i) {
-        if (source[i] == '\n') { ++line; line_start = source + i + 1; }
-    }
+    line = yx_source_line_of(source, start, &line_start);
     line_end = strchr(line_start, '\n');
     if (!line_end) line_end = source + source_length;
     /* The reference treats CRLF as one line ending in rendered excerpts.
@@ -1474,15 +1472,14 @@ static char *yx_diagnostic_json(const char *type, const char *code,
     char *quoted_note = note ? yx_json_quoted(note) : NULL;
     char *quoted_level = yx_json_quoted(level);
     const char *line_start = source;
-    size_t line = 1, column, source_length = strlen(source);
+    size_t line = 1, column, source_length = yx_source_text_length(source);
     const char *footer = note ?
         "[{\"level\":\"note\",\"text\":%s}]" : "[]";
     char *footer_json = NULL;
     char *json = NULL;
     int needed;
     if (start > source_length) start = source_length;
-    for (size_t i = 0; i < start; ++i)
-        if (source[i] == '\n') { ++line; line_start = source + i + 1; }
+    line = yx_source_line_of(source, start, &line_start);
     column = yx_diagnostic_columns(line_start, source + start) + 1;
     if (text && strchr(text, '\r') && !visible_text) goto done;
     if (!quoted_type || !quoted_code || !quoted_title ||
@@ -1529,7 +1526,7 @@ static bool yx_compiler_warning(YRX_COMPILER *compiler, const char *type,
     char *text, *json, **grown;
     if (compiler->warning_count >= compiler->max_warnings) return true;
     if (source && yx_warning_suppressed_span((const uint8_t *)source,
-                                             strlen(source), code, start,
+                                             yx_source_text_length(source), code, start,
                                              end))
         return true;
     if (compiler->warning_count >= compiler->max_warnings) return true;
@@ -2213,11 +2210,7 @@ static bool yx_snippet_add(yx_snippet_line *lines, size_t *count, size_t capacit
 static size_t yx_snippet_line_of(const char *source, size_t offset,
                                  const char **line_start)
 {
-    size_t line = 1;
-    *line_start = source;
-    for (size_t i = 0; i < offset; ++i)
-        if (source[i] == '\n') { ++line; *line_start = source + i + 1; }
-    return line;
+    return yx_source_line_of(source, offset, line_start);
 }
 
 /* The report text of `labels` (at most 4): title, location and snippet.
@@ -2474,7 +2467,7 @@ static const char *yx_snippet_line_start(const char *source, size_t number)
 static bool yx_snippet_margin_applies(const char *source,
                                       const size_t *offsets, size_t count)
 {
-    size_t length = strlen(source);
+    size_t length = yx_source_text_length(source);
     bool applies = false;
     for (size_t i = 0; i < count; ++i) {
         size_t at = offsets[i] < length ? offsets[i] : length;
@@ -2595,7 +2588,7 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
     char **grown;
     bool ok = false;
     if (!compiler || !source || !a_label || !b_label) return false;
-    source_length = strlen(source);
+    source_length = yx_source_text_length(source);
     if (a_start >= a_end || b_start >= b_end ||
         a_end > source_length || b_end > source_length) return false;
     if (a_start < b_start) {
@@ -2664,8 +2657,11 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
         yx_warning_suppressed_span((const uint8_t *)source, source_length,
                                    code, right_start, right_end))
         return true;
-    for (const char *at = source; at < line_start; ++at)
-        if (*at == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        line = yx_source_line_of(source, (size_t)(line_start - source),
+                                 &ignored_line_start);
+    }
     right_line = line;
     if (right_line_start)
         for (const char *at = line_start; at < right_line_start; ++at)
@@ -2945,10 +2941,10 @@ int yx_compiler_duplicate_pattern_value_warning(
     bool ok = false;
     if (!compiler || !identifier || !source) return false;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+    if (yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "duplicate_pattern_value",
                                    duplicate_start, duplicate_end) ||
-        yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+        yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "duplicate_pattern_value",
                                    existing_start, existing_end))
         return true;
@@ -3003,11 +2999,14 @@ int yx_compiler_duplicate_import_warning(
     line_start = source + duplicate_start;
     while (line_start > source && line_start[-1] != '\n') --line_start;
     line_end = strchr(source + duplicate_start, '\n');
-    if (!line_end) line_end = source + strlen(source);
+    if (!line_end) line_end = source + yx_source_text_length(source);
     display_end = yx_diagnostic_display_line_end(line_start, line_end);
     if (source + duplicate_end > display_end) { ok = true; goto done; }
-    for (const char *at = source; at < line_start; ++at)
-        if (*at == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        line = yx_source_line_of(source, (size_t)(line_start - source),
+                                 &ignored_line_start);
+    }
     for (size_t n = line; n >= 10; n /= 10) ++digits;
     rest_length = (size_t)(display_end - line_start) -
                   (duplicate_end - duplicate_start);
@@ -3079,7 +3078,7 @@ int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler,
     char *text = NULL, *json = NULL, **grown;
     bool ok = false;
     if (!compiler || !source) return false;
-    source_length = strlen(source);
+    source_length = yx_source_text_length(source);
     if (start >= source_length || end > source_length ||
         quantifier_end <= start || quantifier_end > end) return false;
     if (compiler->warning_count >= compiler->max_warnings) return true;
@@ -3091,8 +3090,11 @@ int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler,
     line_end = strchr(line_start, '\n');
     if (!line_end) line_end = source + source_length;
     line_end = yx_diagnostic_display_line_end(line_start, line_end);
-    for (const char *at = source; at < line_start; ++at)
-        if (*at == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        line = yx_source_line_of(source, (size_t)(line_start - source),
+                                 &ignored_line_start);
+    }
     for (size_t n = line; n >= 10; n /= 10) ++digits;
     if (digits > INT_MAX - 1 || line_end - line_start > INT_MAX)
         goto done;
@@ -3276,6 +3278,226 @@ static bool yx_same_slow_pattern(const YRX_PATTERN *first,
                                   first->hex_atom_count, 0);
 }
 
+/* The patterns of the compiler's rules by a hash that equal patterns
+ * (yx_same_slow_pattern) share, extended as rules are appended: a slow
+ * pattern looks at its candidates instead of at every earlier pattern. */
+typedef struct yx_slow_pattern_entry {
+    uint64_t hash;
+    size_t rule, pattern, next;          /* next: entry index + 1, 0 ends */
+} yx_slow_pattern_entry;
+typedef struct yx_slow_pattern_table {
+    yx_slow_pattern_entry *entries;
+    size_t count, capacity;
+    size_t *heads, head_count;           /* entry index + 1 per bucket */
+} yx_slow_pattern_table;
+struct yx_slow_pattern_cache {
+    const YRX_RULES *rules;
+    size_t scanned;
+    const YRX_PATTERN *last;             /* patterns of rules[scanned - 1] */
+    yx_slow_pattern_table table;
+    /* The rule being compiled: its first `current_indexed` patterns, valid
+     * while `current_patterns` is set (cleared at each rule's first
+     * pattern by yx_compiler_slow_pattern_warning). */
+    const YRX_PATTERN *current_patterns;
+    size_t current_count, current_indexed;
+    yx_slow_pattern_table current;
+};
+
+static void yx_slow_pattern_table_free(yx_slow_pattern_table *table)
+{
+    free(table->entries);
+    free(table->heads);
+    memset(table, 0, sizeof(*table));
+}
+
+static void yx_slow_pattern_table_clear(yx_slow_pattern_table *table)
+{
+    table->count = 0;
+    if (table->heads)
+        memset(table->heads, 0, table->head_count * sizeof(*table->heads));
+}
+
+static void yx_slow_pattern_cache_free(struct yx_slow_pattern_cache *cache)
+{
+    if (!cache) return;
+    yx_slow_pattern_table_free(&cache->table);
+    yx_slow_pattern_table_free(&cache->current);
+    free(cache);
+}
+
+static uint64_t yx_slow_hash_mix(uint64_t hash, uint64_t value)
+{
+    hash ^= value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+    return hash * UINT64_C(0xff51afd7ed558ccd);
+}
+
+static uint64_t yx_slow_hex_hash(const yx_hex_atom *atoms, size_t count,
+                                 unsigned depth, uint64_t hash)
+{
+    if (depth > 32) return hash;
+    for (size_t i = 0; i < count; ++i) {
+        hash = yx_slow_hash_mix(hash, (uint64_t)atoms[i].kind);
+        hash = yx_slow_hash_mix(hash, atoms[i].value |
+                                ((uint64_t)atoms[i].mask << 8) |
+                                ((uint64_t)atoms[i].negated << 16));
+        hash = yx_slow_hash_mix(hash, atoms[i].minimum |
+                                ((uint64_t)atoms[i].maximum << 32));
+        hash = yx_slow_hash_mix(hash, (uint64_t)atoms[i].branch_count);
+        for (size_t branch = 0; branch < atoms[i].branch_count; ++branch) {
+            const yx_hex_sequence *sequence = &atoms[i].branches[branch];
+            hash = yx_slow_hash_mix(hash, (uint64_t)sequence->count);
+            hash = yx_slow_hex_hash(sequence->atoms, sequence->count,
+                                    depth + 1, hash);
+        }
+    }
+    return hash;
+}
+
+/* False for a pattern that yx_same_slow_pattern finds equal to none. */
+static bool yx_slow_pattern_hash(const YRX_PATTERN *pattern, uint64_t *hash)
+{
+    unsigned modifiers = pattern->modifiers;
+    if (pattern->kind == YX_PATTERN_TEXT) return false;
+    if (pattern->kind == YX_PATTERN_REGEX && !pattern->regexp) return false;
+    if (!(modifiers & (YX_MOD_ASCII | YX_MOD_WIDE))) modifiers |= YX_MOD_ASCII;
+    *hash = yx_slow_hash_mix(yx_slow_hash_mix(0, (uint64_t)pattern->kind),
+                             (uint64_t)modifiers);
+    if (pattern->kind == YX_PATTERN_REGEX) {
+        for (const unsigned char *at = (const unsigned char *)pattern->regexp;
+             *at; ++at)
+            *hash = (*hash ^ *at) * UINT64_C(1099511628211);
+        return true;
+    }
+    *hash = yx_slow_hash_mix(*hash, (uint64_t)pattern->hex_atom_count);
+    *hash = yx_slow_hex_hash(pattern->hex_atoms, pattern->hex_atom_count, 0,
+                             *hash);
+    return true;
+}
+
+static bool yx_slow_pattern_table_rehash(yx_slow_pattern_table *table,
+                                         size_t head_count)
+{
+    size_t *heads;
+    if (head_count > SIZE_MAX / sizeof(*heads)) return false;
+    heads = (size_t *)calloc(head_count, sizeof(*heads));
+    if (!heads) return false;
+    for (size_t i = 0; i < table->count; ++i) {
+        size_t bucket = (size_t)table->entries[i].hash & (head_count - 1);
+        table->entries[i].next = heads[bucket];
+        heads[bucket] = i + 1;
+    }
+    free(table->heads);
+    table->heads = heads;
+    table->head_count = head_count;
+    return true;
+}
+
+static bool yx_slow_pattern_table_add(yx_slow_pattern_table *table,
+                                      uint64_t hash, size_t rule,
+                                      size_t pattern)
+{
+    size_t bucket;
+    if (table->count == table->capacity) {
+        size_t capacity = table->capacity ? table->capacity * 2 : 256;
+        yx_slow_pattern_entry *grown;
+        if (capacity <= table->capacity ||
+            capacity > SIZE_MAX / sizeof(*grown)) return false;
+        grown = (yx_slow_pattern_entry *)realloc(
+            table->entries, capacity * sizeof(*grown));
+        if (!grown) return false;
+        table->entries = grown;
+        table->capacity = capacity;
+    }
+    if ((table->count + 1) * 2 > table->head_count &&
+        !yx_slow_pattern_table_rehash(
+            table, table->head_count ? table->head_count * 2 : 512))
+        return false;
+    bucket = (size_t)hash & (table->head_count - 1);
+    table->entries[table->count] = (yx_slow_pattern_entry){
+        hash, rule, pattern, table->heads[bucket]};
+    table->heads[bucket] = ++table->count;
+    return true;
+}
+
+/* Brings the cache up to the compiler's rules, starting over when the
+ * rule list no longer extends what was scanned. */
+static bool yx_slow_pattern_cache_update(struct yx_slow_pattern_cache *cache,
+                                         const YRX_RULES *rules)
+{
+    if (cache->rules != rules || rules->rule_count < cache->scanned ||
+        (cache->scanned &&
+         rules->rules[cache->scanned - 1].patterns != cache->last)) {
+        cache->rules = rules;
+        cache->scanned = 0;
+        cache->last = NULL;
+        yx_slow_pattern_table_clear(&cache->table);
+    }
+    for (; cache->scanned < rules->rule_count; ++cache->scanned) {
+        const YRX_RULE *rule = &rules->rules[cache->scanned];
+        for (size_t j = 0; j < rule->pattern_count; ++j) {
+            uint64_t hash;
+            if (!yx_slow_pattern_hash(&rule->patterns[j], &hash)) continue;
+            if (!yx_slow_pattern_table_add(&cache->table, hash,
+                                           cache->scanned, j)) return false;
+        }
+        cache->last = rule->patterns;
+    }
+    return true;
+}
+
+/* Brings the current-rule table up to the patterns of `rule` before
+ * index `limit`, starting over for another rule. */
+static bool yx_slow_pattern_cache_current(struct yx_slow_pattern_cache *cache,
+                                          const YRX_RULE *rule, size_t limit)
+{
+    if (cache->current_patterns != rule->patterns ||
+        cache->current_count != rule->pattern_count) {
+        cache->current_patterns = rule->patterns;
+        cache->current_count = rule->pattern_count;
+        cache->current_indexed = 0;
+        yx_slow_pattern_table_clear(&cache->current);
+    }
+    for (; cache->current_indexed < limit; ++cache->current_indexed) {
+        uint64_t hash;
+        if (!yx_slow_pattern_hash(&rule->patterns[cache->current_indexed],
+                                  &hash)) continue;
+        if (!yx_slow_pattern_table_add(&cache->current, hash, 0,
+                                       cache->current_indexed)) {
+            cache->current_patterns = NULL;
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Whether an earlier declaration `earlier->patterns[j]` equal to `pattern`
+ * has the same anchor offset and match limit. */
+static bool yx_slow_pattern_same_use(const YRX_RULE *earlier, size_t j,
+                                     const YRX_PATTERN *pattern,
+                                     bool current_fixed, size_t current_offset,
+                                     bool current_all, bool current_counted,
+                                     size_t current_count)
+{
+    size_t earlier_offset = SIZE_MAX, earlier_count = 0;
+    bool earlier_fixed, earlier_all, earlier_counted;
+    if (!yx_same_slow_pattern(&earlier->patterns[j], pattern)) return false;
+    earlier_fixed = yx_condition_pattern_fixed_at(
+        earlier->condition, earlier->patterns[j].identifier,
+        &earlier_offset);
+    earlier_all = yx_condition_pattern_requires_all_matches(
+        earlier->condition, earlier->patterns[j].identifier);
+    earlier_counted = yx_condition_pattern_fast_count(
+        earlier->condition, earlier->patterns[j].identifier,
+        &earlier_count);
+    if (earlier_counted && earlier_count <= 1)
+        earlier_counted = earlier_all = false;
+    return current_fixed == earlier_fixed &&
+           (!current_fixed || current_offset == earlier_offset) &&
+           current_all == earlier_all &&
+           current_counted == earlier_counted &&
+           (!current_counted || current_count == earlier_count);
+}
+
 /* Compiler::c_rule reuses the PatternId of an equal pattern declared
  * earlier in the rule or in a rule added before, and only a new PatternId
  * reaches c_regexp. Equality includes the anchor offset and the fast-scan
@@ -3291,9 +3513,86 @@ static bool yx_previously_compiled_slow_pattern(
         rule->condition, pattern->identifier);
     bool current_counted = yx_condition_pattern_fast_count(
         rule->condition, pattern->identifier, &current_count);
+    struct yx_slow_pattern_cache *cache = NULL;
+    uint64_t hash = 0;
+    bool hashed;
     /* A one-match limit is the default limit of a bare `$a`. */
     if (current_counted && current_count <= 1) current_counted = current_all = false;
-    for (size_t r = 0; r <= (compiler->rules ? compiler->rules->rule_count : 0); ++r) {
+    hashed = yx_slow_pattern_hash(pattern, &hash);
+    if (!hashed) return false;
+    if (compiler->rules) {
+        YRX_COMPILER *owner = (YRX_COMPILER *)compiler;
+        if (!owner->slow_pattern_cache)
+            owner->slow_pattern_cache = (struct yx_slow_pattern_cache *)
+                calloc(1, sizeof(*owner->slow_pattern_cache));
+        cache = owner->slow_pattern_cache;
+        if (cache && !yx_slow_pattern_cache_update(cache, compiler->rules)) {
+            /* Without memory: drop the index, search every rule. */
+            yx_slow_pattern_cache_free(cache);
+            owner->slow_pattern_cache = cache = NULL;
+        }
+    }
+    /* The rules' candidates in the index (a declaration at or after
+     * `pattern` in its own pattern list does not count), then the earlier
+     * patterns of `rule` itself; the order does not change the answer. */
+    for (size_t at = cache && cache->table.head_count ?
+             cache->table.heads[(size_t)hash & (cache->table.head_count - 1)] : 0;
+         at; at = cache->table.entries[at - 1].next) {
+        const yx_slow_pattern_entry *entry = &cache->table.entries[at - 1];
+        const YRX_RULE *earlier;
+        size_t j = entry->pattern, earlier_offset = SIZE_MAX, earlier_count = 0;
+        bool earlier_fixed, earlier_all, earlier_counted;
+        if (entry->hash != hash || entry->rule >= compiler->rules->rule_count)
+            continue;
+        earlier = &compiler->rules->rules[entry->rule];
+        if (j >= earlier->pattern_count) continue;
+        if ((uintptr_t)pattern >= (uintptr_t)earlier->patterns &&
+            (uintptr_t)pattern < (uintptr_t)(earlier->patterns + earlier->pattern_count) &&
+            j >= (size_t)(pattern - earlier->patterns)) continue;
+        if (!yx_same_slow_pattern(&earlier->patterns[j], pattern)) continue;
+        earlier_fixed = yx_condition_pattern_fixed_at(
+            earlier->condition, earlier->patterns[j].identifier,
+            &earlier_offset);
+        earlier_all = yx_condition_pattern_requires_all_matches(
+            earlier->condition, earlier->patterns[j].identifier);
+        earlier_counted = yx_condition_pattern_fast_count(
+            earlier->condition, earlier->patterns[j].identifier,
+            &earlier_count);
+        if (earlier_counted && earlier_count <= 1)
+            earlier_counted = earlier_all = false;
+        if (current_fixed == earlier_fixed &&
+            (!current_fixed || current_offset == earlier_offset) &&
+            current_all == earlier_all &&
+            current_counted == earlier_counted &&
+            (!current_counted || current_count == earlier_count))
+            return true;
+    }
+    /* The earlier patterns of `rule` itself: those before `pattern` when it
+     * is one of them, else all. */
+    if (cache) {
+        size_t limit = rule->pattern_count;
+        if ((uintptr_t)pattern >= (uintptr_t)rule->patterns &&
+            (uintptr_t)pattern < (uintptr_t)(rule->patterns + rule->pattern_count))
+            limit = (size_t)(pattern - rule->patterns);
+        if (yx_slow_pattern_cache_current(cache, rule, limit)) {
+            for (size_t at = cache->current.head_count ?
+                     cache->current.heads[(size_t)hash &
+                                          (cache->current.head_count - 1)] : 0;
+                 at; at = cache->current.entries[at - 1].next) {
+                const yx_slow_pattern_entry *entry =
+                    &cache->current.entries[at - 1];
+                if (entry->hash != hash || entry->pattern >= limit) continue;
+                if (yx_slow_pattern_same_use(rule, entry->pattern, pattern,
+                                             current_fixed, current_offset,
+                                             current_all, current_counted,
+                                             current_count))
+                    return true;
+            }
+            return false;
+        }
+    }
+    for (size_t r = cache ? compiler->rules->rule_count : 0;
+         r <= (compiler->rules ? compiler->rules->rule_count : 0); ++r) {
         const YRX_RULE *earlier = compiler->rules && r < compiler->rules->rule_count ?
                                   &compiler->rules->rules[r] : rule;
         for (size_t j = 0; j < earlier->pattern_count; ++j) {
@@ -3334,6 +3633,11 @@ int yx_compiler_slow_pattern_warning(YRX_COMPILER *compiler,
     uint8_t *calls = NULL;
     bool literal_slow = false;
     int result = 1;
+    /* Each rule's patterns are checked from its first one: the current-rule
+     * index of yx_previously_compiled_slow_pattern starts over there. */
+    if (compiler && compiler->slow_pattern_cache && rule && pattern &&
+        pattern == rule->patterns)
+        compiler->slow_pattern_cache->current_patterns = NULL;
     if (!rule->condition || !source || !pattern ||
         pattern->literal_end <= pattern->literal_start) return 1;
     /* Rules rebuilt from a compiled archive discard their warnings
@@ -3450,7 +3754,7 @@ static int yx_compiler_redundant_case_modifier_warning_source(
     char *text = NULL, *json = NULL, *quoted_text = NULL;
     char *quoted_origin = NULL, **grown;
     if (!compiler || !source) return 0;
-    source_length = strlen(source);
+    source_length = yx_source_text_length(source);
     if (suffix_start >= source_length || nocase_start > nocase_end ||
         nocase_end > source_length || suffix_start >= nocase_start ||
         source[suffix_start] != 'i' ||
@@ -3464,8 +3768,7 @@ static int yx_compiler_redundant_case_modifier_warning_source(
         yx_warning_suppressed_span((const uint8_t *)source, source_length,
                                    "redundant_modifier", nocase_start,
                                    nocase_end)) return 1;
-    for (size_t i = 0; i < suffix_start; ++i)
-        if (source[i] == '\n') { ++first_line; first_start = source + i + 1; }
+    first_line = yx_source_line_of(source, suffix_start, &first_start);
     last_line = first_line;
     last_start = first_start;
     for (size_t i = suffix_start; i < nocase_start; ++i)
@@ -3679,14 +3982,13 @@ static bool yx_compiler_deprecated_field_warning(
         "don't use" : "this field is deprecated";
     char *text, *json, **grown, *rendered_line = NULL;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+    if (yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "deprecated_field", start, end))
         return true;
-    for (size_t i = 0; i < start; ++i)
-        if (source[i] == '\n') { ++line; line_start = source + i + 1; }
+    line = yx_source_line_of(source, start, &line_start);
     for (size_t n = line; n >= 10; n /= 10) ++digits;
     line_end = strchr(line_start, '\n');
-    if (!line_end) line_end = source + strlen(source);
+    if (!line_end) line_end = source + yx_source_text_length(source);
     /* The patch lines end before a CRLF's CR, as the snippet does. */
     if (line_end > source + end && line_end[-1] == '\r') --line_end;
     if (source + end > line_end) return false;
@@ -3761,8 +4063,11 @@ static bool yx_compiler_warning_patch(YRX_COMPILER *compiler,
     if (!tail) return false;
     while (line_start > source && line_start[-1] != '\n') --line_start;
     while (*line_end && *line_end != '\n') ++line_end;
-    for (const char *at = source; at < line_start; ++at)
-        if (*at == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        line = yx_source_line_of(source, (size_t)(line_start - source),
+                                 &ignored_line_start);
+    }
     end_line = line;
     for (const char *at = line_start; at < line_end; ++at)
         if (*at == '\n') ++end_line;
@@ -3930,7 +4235,7 @@ int yx_compiler_excess_quantifier_warning(YRX_COMPILER *compiler,
                                           size_t raised, int64_t required,
                                           size_t available)
 {
-    size_t count = compiler->warning_count, length = strlen(source);
+    size_t count = compiler->warning_count, length = yx_source_text_length(source);
     char note[160];
     if (start >= end || end > length) return 0;
     snprintf(note, sizeof(note), "the expression requires %" PRId64
@@ -3947,7 +4252,7 @@ int yx_compiler_type_warning(YRX_COMPILER *compiler,
     size_t start, size_t end, size_t other_start, size_t other_end,
     const char *type)
 {
-    size_t count = compiler->warning_count, length = strlen(source);
+    size_t count = compiler->warning_count, length = yx_source_text_length(source);
     bool ok;
     if (start >= end || end > length || other_end > length) return 0;
     if (strcmp(kind, "non_bool_expr") == 0 ||
@@ -5921,21 +6226,13 @@ int yx_compiler_duplicate_pattern_error(YRX_COMPILER *compiler,
     char *quoted_text = NULL;
     bool ok = false;
     int needed;
-    size_t source_length = strlen(source);
+    size_t source_length = yx_source_text_length(source);
     if (existing_start >= duplicate_start ||
         existing_end > source_length || duplicate_end > source_length ||
         existing_start >= existing_end || duplicate_start >= duplicate_end)
         return 0;
-    for (size_t i = 0; i < existing_start; ++i)
-        if (source[i] == '\n') {
-            ++existing_line;
-            existing_line_start = source + i + 1;
-        }
-    for (size_t i = 0; i < duplicate_start; ++i)
-        if (source[i] == '\n') {
-            ++duplicate_line;
-            duplicate_line_start = source + i + 1;
-        }
+    existing_line = yx_source_line_of(source, existing_start, &existing_line_start);
+    duplicate_line = yx_source_line_of(source, duplicate_start, &duplicate_line_start);
     existing_column = yx_diagnostic_columns(existing_line_start,
                                              source + existing_start) + 1;
     duplicate_column = yx_diagnostic_columns(duplicate_line_start,
@@ -6097,8 +6394,12 @@ int yx_compiler_unknown_identifier_error(YRX_COMPILER *compiler,
         size_t line = 1, digits = 1;
         int help_length;
         /* The help's gutter is as wide as the diagnostic's. */
-        for (size_t i = 0; i < start && source[i]; ++i)
-            if (source[i] == '\n') ++line;
+        {
+            const char *ignored_line_start;
+            size_t known = yx_source_text_length(source);
+            line = yx_source_line_of(source, start < known ? start : known,
+                                  &ignored_line_start);
+        }
         for (size_t n = line; n >= 10; n /= 10) ++digits;
         if (digits > 32) digits = 32;
         help_length = snprintf(help, sizeof(help),
@@ -6238,8 +6539,11 @@ int yx_compiler_entrypoint_unsupported_error(YRX_COMPILER *compiler,
     bool ok = false;
     if (end - start != sizeof("entrypoint") - 1) return 0;
     while (line_start > source && line_start[-1] != '\n') --line_start;
-    for (const char *at = source; at < line_start; ++at)
-        if (*at == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        line = yx_source_line_of(source, (size_t)(line_start - source),
+                                 &ignored_line_start);
+    }
     for (size_t n = line; n >= 10; n /= 10) ++digits;
     if (digits > INT_MAX - 1) return 0;
     original = yx_rule_diagnostic_middle_line(source, line);
@@ -6723,16 +7027,14 @@ int yx_compiler_invalid_modifier_combination_error(
     char *text = NULL, *json = NULL;
     bool ok = false;
 
-    for (size_t i = 0; i < first_start; ++i)
-        if (source[i] == '\n') { ++first_line; line_start = source + i + 1; }
+    first_line = yx_source_line_of(source, first_start, &line_start);
     first_column = yx_diagnostic_columns(line_start, source + first_start) + 1;
     line_start = source;
-    for (size_t i = 0; i < second_start; ++i)
-        if (source[i] == '\n') { ++second_line; line_start = source + i + 1; }
+    second_line = yx_source_line_of(source, second_start, &line_start);
     second_column = yx_diagnostic_columns(line_start, source + second_start) + 1;
     line = first_line < second_line ? first_line : second_line;
     line_end = strchr(line_start, '\n');
-    if (!line_end) line_end = source + strlen(source);
+    if (!line_end) line_end = source + yx_source_text_length(source);
     for (size_t n = line; n >= 10; n /= 10) ++digits;
     if (first_start <= second_start) {
         left_name = first; left_start = first_start; left_end = first_end;
@@ -6755,8 +7057,8 @@ int yx_compiler_invalid_modifier_combination_error(
         --right_line_start;
     left_line_end = strchr(left_line_start, '\n');
     right_line_end = strchr(right_line_start, '\n');
-    if (!left_line_end) left_line_end = source + strlen(source);
-    if (!right_line_end) right_line_end = source + strlen(source);
+    if (!left_line_end) left_line_end = source + yx_source_text_length(source);
+    if (!right_line_end) right_line_end = source + yx_source_text_length(source);
     line_end = yx_diagnostic_display_line_end(line_start, line_end);
     left_line_end = yx_diagnostic_display_line_end(left_line_start,
                                                    left_line_end);
@@ -6976,8 +7278,12 @@ int yx_compiler_wrong_arguments_error(YRX_COMPILER *compiler,
     const char *label = "wrong arguments in this call";
     size_t line = 1, digits = 1, indent, note_length, breaks = 0;
     char *rendered_note, *text, *diagnostic;
-    for (size_t i = 0; i < start && source[i]; ++i)
-        if (source[i] == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        size_t known = yx_source_text_length(source);
+        line = yx_source_line_of(source, start < known ? start : known,
+                              &ignored_line_start);
+    }
     for (size_t value = line; value >= 10; value /= 10) ++digits;
     indent = digits + 9;
     note_length = strlen(note);
@@ -7045,20 +7351,12 @@ static int yx_compiler_two_label_error(YRX_COMPILER *compiler,
                   !memchr(source + first_start, '\n',
                           (first_end > second_end ? first_end : second_end) -
                           first_start);
-    size_t source_length = strlen(source);
+    size_t source_length = yx_source_text_length(source);
     if (first_start > first_end || second_start > second_end ||
         first_end > source_length || second_end > source_length ||
         (first_start >= second_start && !stacked)) return 0;
-    for (size_t i = 0; i < first_start; ++i)
-        if (source[i] == '\n') {
-            ++first_line;
-            first_line_start = source + i + 1;
-        }
-    for (size_t i = 0; i < second_start; ++i)
-        if (source[i] == '\n') {
-            ++second_line;
-            second_line_start = source + i + 1;
-        }
+    first_line = yx_source_line_of(source, first_start, &first_line_start);
+    second_line = yx_source_line_of(source, second_start, &second_line_start);
     first_column = yx_diagnostic_columns(first_line_start,
                                           source + first_start) + 1;
     second_column = yx_diagnostic_columns(second_line_start,
@@ -7330,7 +7628,7 @@ static char *yx_lossy_source_utf8(const char *source, size_t *first_invalid,
                                   size_t *escapes_before)
 {
     static const char replacement[] = "\xef\xbf\xbd";
-    size_t length = strlen(source), used = 0, escape_at = 0;
+    size_t length = yx_source_text_length(source), used = 0, escape_at = 0;
     const unsigned char *bytes = (const unsigned char *)source;
     char *result;
     if (length > (SIZE_MAX - 1) / 3) return NULL;
@@ -7612,7 +7910,7 @@ int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler,
      * span check below reads the source before that). */
     if (compiler->warning_count >= compiler->max_warnings)
         return 1;
-    source_length = strlen(source);
+    source_length = yx_source_text_length(source);
     if (end > source_length)
         return 1;
     literal = pattern->bytes;
@@ -7680,11 +7978,7 @@ int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler,
     if (!text) goto failure;
     used = strlen(text);
     capacity = used + 1;
-    for (size_t i = 0; i < start; ++i)
-        if (source[i] == '\n') {
-            ++first_line;
-            first_line_start = source + i + 1;
-        }
+    first_line = yx_source_line_of(source, start, &first_line_start);
     last_line = first_line;
     last_line_start = first_line_start;
     for (size_t i = start; i < end; ++i)
@@ -7790,11 +8084,10 @@ int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
     char title[512], label[160], replacement[96];
     char *text, *json, **grown;
     if (compiler->warning_count >= compiler->max_warnings) return 1;
-    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+    if (yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "consecutive_jumps", start, end))
         return 1;
-    for (size_t i = 0; i < start; ++i)
-        if (source[i] == '\n') { ++line; line_start = source + i + 1; }
+    line = yx_source_line_of(source, start, &line_start);
     /* Jumps may continue on later lines; the patch shows each of them. */
     last_line = line;
     last_start = line_start;
@@ -7802,7 +8095,7 @@ int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
         if (source[i] == '\n') { ++last_line; last_start = source + i + 1; }
     for (size_t n = last_line; n >= 10; n /= 10) ++digits;
     last_end = strchr(last_start, '\n');
-    if (!last_end) last_end = source + strlen(source);
+    if (!last_end) last_end = source + yx_source_text_length(source);
     last_end = yx_diagnostic_display_line_end(last_start, last_end);
     if (source + end > last_end) return 0;
     prefix = (size_t)((source + start) - line_start);
@@ -7840,7 +8133,7 @@ int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
     at = line_start;
     for (size_t number = line; number <= last_line; ++number) {
         line_end = strchr(at, '\n');
-        if (!line_end) line_end = source + strlen(source);
+        if (!line_end) line_end = source + yx_source_text_length(source);
         line_end = yx_diagnostic_display_line_end(at, line_end);
         if ((size_t)(line_end - at) > INT_MAX ||
             !yx_diagnostic_append(&text, &used, &capacity, "\n%*zu - %.*s",
@@ -8068,10 +8361,14 @@ int yx_compiler_skip_ignored_rule(YRX_COMPILER *compiler,
                          compiler->rules->import_namespace_indices[i] ==
                              compiler->current_namespace_index))
                         imported = true;
-                for (size_t i = 0; i < compiler->rules->rule_count && !declared; ++i)
-                    declared = !strcmp(compiler->rules->rules[i].identifier, name);
-                for (size_t i = 0; i < compiler->rules->global_count && !declared; ++i)
-                    declared = !strcmp(compiler->rules->globals[i].name, name);
+                /* Only an ignored module asks whether a rule or global has
+                 * the name (a search of every rule per call otherwise). */
+                if (policy && policy->ignored && !imported) {
+                    for (size_t i = 0; i < compiler->rules->rule_count && !declared; ++i)
+                        declared = !strcmp(compiler->rules->rules[i].identifier, name);
+                    for (size_t i = 0; i < compiler->rules->global_count && !declared; ++i)
+                        declared = !strcmp(compiler->rules->globals[i].name, name);
+                }
                 if (policy && policy->ignored && !imported && !declared)
                     module = policy->name;
             }
@@ -10157,8 +10454,12 @@ static YRX_RESULT yx_include_circular_error(YRX_COMPILER *compiler,
     /* YARA-X stores each dependency indented by two spaces per level; the
      * renderer aligns the continuation lines with the text after
      * `= note: `, whose column depends on the line-number gutter. */
-    for (size_t i = 0; i < start && source[i]; ++i)
-        if (source[i] == '\n') ++line;
+    {
+        const char *ignored_line_start;
+        size_t known = yx_source_text_length(source);
+        line = yx_source_line_of(source, start < known ? start : known,
+                              &ignored_line_start);
+    }
     for (size_t n = line; n >= 10; n /= 10) ++gutter_digits;
     indent = gutter_digits + 9;
     for (size_t i = 0; i < compiler->include_depth; ++i) {
@@ -10334,7 +10635,7 @@ YRX_RESULT yx_include_source(YRX_COMPILER *compiler, const char *filename,
             /* One scan for the suppression comments of this source. */
             yx_suppression_scope suppressions;
             yx_suppression_scope_begin(&suppressions, (const uint8_t *)source,
-                                       strlen(source));
+                                       yx_source_text_length(source));
             result = yx_parse_source(compiler, source,
                                      origin_path ? origin_path : path);
             yx_suppression_scope_end(&suppressions);
@@ -13671,6 +13972,7 @@ void yrx_compiler_destroy(YRX_COMPILER *compiler)
                     compiler->redefined_global_symbol_count);
     yx_free_rules(compiler->rules);
     yx_rule_name_cache_free(compiler->rule_name_cache);
+    yx_slow_pattern_cache_free(compiler->slow_pattern_cache);
     free(compiler->current_namespace);
     free(compiler);
 }
@@ -13739,7 +14041,7 @@ YRX_RESULT yrx_compiler_add_source_with_origin(YRX_COMPILER *compiler,
         /* One scan for the suppression comments of this source. */
         yx_suppression_scope suppressions;
         yx_suppression_scope_begin(&suppressions, (const uint8_t *)source,
-                                   strlen(source));
+                                   yx_source_text_length(source));
         result = yx_parse_source(compiler, source, origin ? origin : "line");
         yx_suppression_scope_end(&suppressions);
     }
@@ -14612,6 +14914,8 @@ static YRX_RULES *yx_compiler_build_impl(YRX_COMPILER *compiler,
     compiler->global_rules_scanned = compiler->global_rule_count = 0;
     yx_rule_name_cache_free(compiler->rule_name_cache);
     compiler->rule_name_cache = NULL;
+    yx_slow_pattern_cache_free(compiler->slow_pattern_cache);
+    compiler->slow_pattern_cache = NULL;
     yx_attach_archived_regexps(rules);
     if (!yx_inspect_depth) yx_build_archived_programs(rules);
     if (!yx_inspect_depth) yx_build_regexp_programs(rules);

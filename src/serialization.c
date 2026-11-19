@@ -19963,6 +19963,45 @@ yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data,
 {
     YRX_RULES spelled;
     bool failed;
+    /* A `with` declaration whose value is a function declares no variable
+     * (with_expr_from_ast): the codecs encode the condition that names the
+     * functions themselves. */
+    if (rules && rules->rules && !rules->serialized_prefix) {
+        YRX_RULE *copies = NULL;
+        yx_ser_result status = YX_SER_SUCCESS;
+        for (size_t i = 0; status == YX_SER_SUCCESS && i < rules->rule_count; ++i) {
+            char *direct = NULL;
+            int rewritten = rules->rules[i].condition_text ?
+                yx_condition_alias_free_text(rules->rules[i].condition_text, &direct) : 0;
+            if (rewritten == -1) status = YX_SER_UNSUPPORTED;
+            else if (rewritten < 0) status = YX_SER_NO_MEMORY;
+            if (rewritten != 1) continue;
+            if (!copies) {
+                if (!(copies = malloc(rules->rule_count * sizeof(*copies)))) {
+                    free(direct);
+                    return YX_SER_NO_MEMORY;
+                }
+                memcpy(copies, rules->rules, rules->rule_count * sizeof(*copies));
+            }
+            copies[i].condition_text = direct;
+        }
+        if (copies) {
+            if (status == YX_SER_SUCCESS) {
+                YRX_RULES normalized = *rules;
+                bool markers = yx_condition_frame_markers;
+                normalized.rules = copies;
+                yx_condition_frame_markers = true;
+                status = yx_ser_encode(&normalized, data, length);
+                yx_condition_frame_markers = markers;
+            }
+            for (size_t i = 0; i < rules->rule_count; ++i)
+                if (copies[i].condition_text != rules->rules[i].condition_text)
+                    free(copies[i].condition_text);
+            free(copies);
+            return status;
+        }
+        if (status != YX_SER_SUCCESS) return status;
+    }
     /* The IR holds a folded integer as a constant, whatever its source: the
      * codecs encode the condition with those constants as literals. A text
      * no codec takes that way is encoded as it is written. */

@@ -253,6 +253,22 @@ char *yx_condition_folded_text(const char *expression);
  * literal: constant arithmetic (`1 + 2`), a `with` variable declared as a
  * constant, a module constant and arithmetic over those, as Expr::Const has
  * them. NULL when nothing changes; the caller frees the text. */
+/* The condition without the `with` declarations whose value is a function
+ * (with_expr_from_ast declares no variable for them): every use of such a
+ * name is the function's own name and the declaration is gone. A statement
+ * that declares nothing else is its body in parentheses; no such text
+ * exists where the parser would join the body's operands with the `and` /
+ * `or` chain the statement starts (-1). Where a
+ * statement's frame matters (a loop, an `of` or a `with` variable inside
+ * it), the slots of the removed declarations stay as `?` items at the end
+ * of the declarations (`with x = 1, ? : (..)`, `with ? : (..)`), which only
+ * yx_condition_frame_markers lets the parsers read.
+ * Returns 0 when the condition has no such declaration, 1 with the new
+ * text in *text (the caller frees it), -1 when the text cannot be written
+ * that way and -2 when out of memory. */
+int yx_condition_alias_free_text(const char *expression, char **text);
+/* Set while the archive codecs read conditions with `?` frame items. */
+extern _Thread_local bool yx_condition_frame_markers;
 char *yx_condition_literal_text(const char *expression,
                                 const char *const *imports, size_t import_count,
                                 const yx_global *globals, size_t global_count);

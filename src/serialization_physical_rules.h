@@ -27,6 +27,10 @@ typedef struct yx_physical_pattern_options {
     bool anchored;
     yx_pattern_filesize_bounds bounds;
     yx_physical_header header;
+    /* Neither anchored nor PatternFlags::NonAnchorable: anchor_patterns
+     * (ast2ir.rs) never reached the pattern (`true or $b`). The flag is part
+     * of the Pattern a PatternId stands for. */
+    bool unmarked;
 } yx_physical_pattern_options;
 typedef struct yx_physical_rules {
     yx_physical_archive *archive;
@@ -215,7 +219,7 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules,
             }
             size_t bucket=(size_t)hash&(bucket_count-1);
             for(size_t k=heads[bucket];k!=SIZE_MAX;k=chain[k])
-                if(hashes[k]==hash&&options[k].limit==options[index].limit&&options[k].anchored==options[index].anchored&&(!options[index].anchored||options[k].offset==options[index].offset)&&yx_physical_rule_bounds_equal(&options[k].bounds,&options[index].bounds)&&yx_physical_header_equal(&options[k].header,&options[index].header)&&a->pattern_private[k]==a->pattern_private[index]&&widths[k]==widths[index]&&!memcmp(parts[k],parts[index],widths[index])){duplicate=k;break;}
+                if(hashes[k]==hash&&options[k].limit==options[index].limit&&options[k].anchored==options[index].anchored&&options[k].unmarked==options[index].unmarked&&(!options[index].anchored||options[k].offset==options[index].offset)&&yx_physical_rule_bounds_equal(&options[k].bounds,&options[index].bounds)&&yx_physical_header_equal(&options[k].header,&options[index].header)&&a->pattern_private[k]==a->pattern_private[index]&&widths[k]==widths[index]&&!memcmp(parts[k],parts[index],widths[index])){duplicate=k;break;}
             hashes[index]=hash;chain[index]=SIZE_MAX;
             if(heads[bucket]==SIZE_MAX)heads[bucket]=index;else chain[tails[bucket]]=index;
             tails[bucket]=index;
@@ -224,7 +228,7 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules,
                 if(!yx_physical_read(parts[index],widths[index],part)||part->logical!=1||part->physical!=1)goto done;
                 if(hashed) {
                     const yx_physical_pattern_options *o=&options[index];bool text=p->kind==YX_PATTERN_TEXT;
-                    yx_pattern_hash_state state={o->anchored,!o->anchored,o->offset,
+                    yx_pattern_hash_state state={o->anchored,!o->anchored&&!o->unmarked,o->offset,
                         text?2:o->bounds.lower_kind,text?2:o->bounds.upper_kind,o->bounds.lower,o->bounds.upper,
                         text?0:o->header.kind,o->header.bytes,o->header.length,o->limit};
                     hashed=yx_pattern_fx_hash(p,&state,&a->pattern_hashes[a->physical]);

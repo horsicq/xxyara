@@ -168,6 +168,126 @@ static bool yx_anchor_uses(const yx_integer_expr *tree,int index,int64_t pattern
     return n->extra<0||n->extra==n->left||n->extra==n->right||
            yx_anchor_uses(tree,n->extra,pattern,top,anchor,blocked,depth+1);
 }
+/* anchor_patterns (ast2ir.rs) walks the folded IR: a pattern whose every
+ * use sits under a folded `and` / `or` / `not` is neither anchored nor
+ * NonAnchorable. marks[p] (p < count): 1 when the tree names the pattern,
+ * 2 more when the walk reaches it. One pass over the nodes, one walk with
+ * an explicit stack (left-nested chains are long). */
+static bool yx_pattern_ir_marks(const yx_integer_expr *tree,int root,uint8_t *marks,size_t count)
+{
+    size_t used=0;int *stack;uint8_t *seen;
+    memset(marks,0,count);
+    for(size_t n=0;n<tree->count;++n) {
+        const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
+        if(node->op>=0xd1&&node->op<=0xd7&&node->value>=0&&(uint64_t)node->value<count)marks[node->value]|=1;
+    }
+    if(root<0||(size_t)root>=tree->count)return true;
+    stack=malloc(tree->count*sizeof(*stack));seen=calloc(tree->count,1);
+    if(!stack||!seen){free(stack);free(seen);return false;}
+    stack[used++]=root;seen[root]=1;
+    while(used) {
+        const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[stack[--used]];
+        int next[3];
+        if(n->constant&&(n->op==0xa0||n->op==0xa1||n->op==0xa2))continue;
+        if(n->op>=0xd1&&n->op<=0xd7&&n->value>=0&&(uint64_t)n->value<count)marks[n->value]|=2;
+        next[0]=n->left;next[1]=n->right;next[2]=n->extra;
+        for(int k=0;k<3;++k)
+            if(next[k]>=0&&(size_t)next[k]<tree->count&&!seen[next[k]]){seen[next[k]]=1;stack[used++]=next[k];}
+    }
+    free(stack);free(seen);return true;
+}
+/* Every pattern of a rule, pattern sets, counts, offsets and anchors
+ * included: the condition's own anchor_patterns port (condition.c) leaves a
+ * pattern neither anchored nor NonAnchorable exactly when the walk does not
+ * reach it. Asked only when the tree has a folded `and` / `or` / `not` with
+ * operands or does not reach some pattern directly (a set, or an operand a
+ * one-operand root dropped); unmarked[] is all false otherwise. A condition
+ * that does not compile or fold here is YX_SER_UNSUPPORTED (the archive
+ * would be a guess), a failed allocation YX_SER_NO_MEMORY. */
+static yx_ser_result yx_rule_unmarked_patterns(const YRX_RULES *rules,const YRX_RULE *r,const yx_integer_expr *tree,
+    const uint8_t *marks,bool *unmarked)
+{
+    bool folded=false;yx_condition *condition;const char **names;yx_ser_result status=YX_SER_SUCCESS;
+    for(size_t j=0;j<r->pattern_count;++j)unmarked[j]=false;
+    for(size_t n=0;!folded&&n<tree->count;++n) {
+        const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
+        folded=node->constant&&(node->op==0xa0||node->op==0xa1||node->op==0xa2)&&node->left>=0;
+    }
+    for(size_t j=0;!folded&&j<r->pattern_count;++j)folded=!(marks[j]&2);
+    if(!folded||!r->pattern_count)return YX_SER_SUCCESS;
+    if(!r->condition_text||!(condition=yx_condition_compile(r->condition_text,NULL,0)))return YX_SER_UNSUPPORTED;
+    names=malloc(r->pattern_count*sizeof(*names));
+    if(!names)status=YX_SER_NO_MEMORY;
+    else {
+        for(size_t j=0;j<r->pattern_count;++j)names[j]=r->patterns[j].identifier;
+        yx_condition_bind_pattern_sets(condition,names,r->pattern_count);
+        if(!yx_condition_fold_modules(condition,(const char *const *)rules->imports,rules->import_count,
+                                      rules->globals,rules->global_count,NULL,0))status=YX_SER_UNSUPPORTED;
+        else for(size_t j=0;j<r->pattern_count;++j) {
+            size_t at=0;
+            unmarked[j]=!yx_condition_pattern_fixed_at(condition,names[j],&at)&&
+                !yx_condition_pattern_nonanchorable(condition,names[j],false);
+        }
+        free((void *)names);
+    }
+    yx_condition_destroy(condition);
+    if(status!=YX_SER_SUCCESS)for(size_t j=0;j<r->pattern_count;++j)unmarked[j]=false;
+    return status;
+}
+/* anchor_patterns for every pattern p < count at once: yx_anchor_top_level
+ * and yx_anchor_uses with per-pattern state, one walk each. anchored[p] and
+ * offset[p] are what yx_pattern_anchor_offset gives for p; false only when
+ * out of memory (a tree deeper than the walks anchors nothing, as there). */
+static void yx_anchor_top_level_all(const yx_integer_expr *tree,int index,size_t count,int64_t *top,unsigned depth)
+{
+    if(index<0||depth>4096)return;
+    const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+    while(n->op==0xc0&&!n->constant) {
+        if(n->right<0||++depth>4096)return;
+        n=&YX_INTEGER_NODES(tree)[n->right];
+    }
+    if(n->constant)return;
+    if(n->op==0xa0||n->op==0xd8) {
+        yx_anchor_top_level_all(tree,n->left,count,top,depth+1);
+        if(n->right!=n->left)yx_anchor_top_level_all(tree,n->right,count,top,depth+1);
+    } else if(n->op==0xd5&&n->value>=0&&(uint64_t)n->value<count&&n->left>=0&&
+              YX_INTEGER_NODES(tree)[n->left].constant&&!YX_INTEGER_NODES(tree)[n->left].floating&&
+              YX_INTEGER_NODES(tree)[n->left].value>=0)
+        top[n->value]=YX_INTEGER_NODES(tree)[n->left].value;
+}
+static bool yx_anchor_uses_all(const yx_integer_expr *tree,int index,size_t count,const int64_t *top,
+    int64_t *anchor,bool *blocked,unsigned depth)
+{
+    if(index<0)return true;
+    if(depth>4096)return false;
+    const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+    if(n->constant&&(n->op==0xa0||n->op==0xa1||n->op==0xa2))return true;
+    if(n->op>=0xd1&&n->op<=0xd7&&n->value>=0&&(uint64_t)n->value<count) {
+        size_t p=(size_t)n->value;
+        if(n->op==0xd5) {
+            const yx_integer_expr_node *at=n->left>=0?&YX_INTEGER_NODES(tree)[n->left]:NULL;
+            if(!at||!at->constant||at->floating||at->value<0)blocked[p]=true;
+            else if(anchor[p]>=0&&anchor[p]!=at->value)blocked[p]=true;
+            else anchor[p]=at->value;
+        } else if(n->op!=0xd1||top[p]<0)blocked[p]=true;
+    }
+    if(!yx_anchor_uses_all(tree,n->left,count,top,anchor,blocked,depth+1))return false;
+    if(n->right!=n->left&&!yx_anchor_uses_all(tree,n->right,count,top,anchor,blocked,depth+1))return false;
+    return n->extra<0||n->extra==n->left||n->extra==n->right||
+           yx_anchor_uses_all(tree,n->extra,count,top,anchor,blocked,depth+1);
+}
+static bool yx_pattern_anchor_offsets(const yx_integer_expr *tree,int root,size_t count,bool *anchored,uint64_t *offset)
+{
+    int64_t *top=malloc((count?count:1)*sizeof(*top)),*anchor=malloc((count?count:1)*sizeof(*anchor));
+    bool *blocked=calloc(count?count:1,sizeof(*blocked)),walked;
+    if(!top||!anchor||!blocked){free(top);free(anchor);free(blocked);return false;}
+    for(size_t p=0;p<count;++p){top[p]=-1;anchor[p]=-1;anchored[p]=false;offset[p]=0;}
+    yx_anchor_top_level_all(tree,root,count,top,0);
+    walked=yx_anchor_uses_all(tree,root,count,top,anchor,blocked,0);
+    for(size_t p=0;walked&&p<count;++p)
+        if(!blocked[p]&&anchor[p]>=0){anchored[p]=true;offset[p]=(uint64_t)anchor[p];}
+    free(top);free(anchor);free(blocked);return true;
+}
 static bool yx_pattern_anchor_offset(const yx_integer_expr *tree,int root,int64_t pattern,
     uint64_t *offset)
 {
@@ -333,5 +453,79 @@ static yx_ser_result yx_unconstrain_single_pattern_archive(const uint8_t *data,s
     status=yx_physical_write(&a,out,out_length);
 done:
     yx_physical_destroy(&a);return status;
+}
+/* Wraps each `$p at K` (constant K) that find_top_level_anchors reaches
+ * (`and`, a one-operand `and`, the body of a `with`) in a one-operand `or`. */
+static bool yx_unanchor_top_level_terms(yx_integer_expr *tree,int index,int parent,int64_t pattern,int *root,
+    unsigned depth)
+{
+    const yx_integer_expr_node *n;
+    if(index<0||depth>4096)return index<0;
+    n=&YX_INTEGER_NODES(tree)[index];
+    while(n->op==0xc0&&!n->constant) {
+        if(n->right<0||++depth>4096)return n->right<0;
+        parent=index;index=n->right;n=&YX_INTEGER_NODES(tree)[index];
+    }
+    if(n->constant)return true;
+    if(n->op==0xa0||n->op==0xd8) {
+        int left=n->left,right=n->right;
+        return yx_unanchor_top_level_terms(tree,left,index,pattern,root,depth+1)&&
+            (right==left||yx_unanchor_top_level_terms(tree,right,index,pattern,root,depth+1));
+    }
+    if(n->op==0xd5&&n->value==pattern&&n->left>=0&&YX_INTEGER_NODES(tree)[n->left].constant&&
+       !YX_INTEGER_NODES(tree)[n->left].floating&&YX_INTEGER_NODES(tree)[n->left].value>=0) {
+        int wrapper=yx_integer_expr_node_new(tree,0xd9,index,index,0);
+        if(wrapper<0)return false;
+        if(parent<0)*root=wrapper;
+        else {
+            yx_integer_expr_node *p=&YX_INTEGER_NODES(tree)[parent];
+            if(p->left==index)p->left=wrapper;
+            if(p->right==index)p->right=wrapper;
+            if(p->extra==index)p->extra=wrapper;
+        }
+    }
+    return true;
+}
+/* Reader: IR::or keeps a one-operand `or` (`false or $a at 5`), and
+ * find_top_level_anchors does not descend into it; when its operand raises
+ * no `undefined` the module has no block for it, only a lazy-search scope
+ * that a one-operand `and` (which it does descend into) explains as well.
+ * The archive tells them apart: a pattern whose frames are all plain
+ * literals and that the decoded tree would anchor (yx_pattern_anchor_offset)
+ * but the archive leaves unanchored had its top-level `at` term under a
+ * one-operand `or`. The caller's scope fixup and canonical code comparison
+ * verify the tree. Returns false only when the tree cannot grow. */
+static bool yx_unanchored_pattern_terms_archive(const yx_physical_archive *a,yx_integer_expr *tree,int *root)
+{
+    /* Only a pattern with an `at` term can be anchored: one pass over the
+     * frames and one anchor analysis of the tree for all patterns. */
+    bool ok=true,any=false,*anchored=NULL;uint8_t *state;uint64_t *offset=NULL;
+    if(*root<0)return true;
+    for(size_t n=0;!any&&n<tree->count;++n)any=YX_INTEGER_NODES(tree)[n].op==0xd5;
+    if(!any||!a->physical)return true;
+    state=calloc(a->physical,1);anchored=calloc(a->physical,sizeof(*anchored));offset=calloc(a->physical,sizeof(*offset));
+    if(!state||!anchored||!offset||!yx_pattern_anchor_offsets(tree,*root,a->physical,anchored,offset)) {
+        free(state);free(anchored);free(offset);return false;
+    }
+    /* 1: has frames, 2: a frame is not a plain literal, 4: anchored */
+    for(size_t i=0;i<a->frame_count;++i) {
+        size_t p=a->frames[i].pattern;
+        if(p>=a->physical)continue;
+        state[p]|=1;
+        if(a->frames[i].frame.variant!=0||(a->frames[i].frame.flags&2))state[p]|=2;
+        if(a->frames[i].anchored)state[p]|=4;
+    }
+    /* Wrapping one pattern's `at` terms leaves the other patterns' analysis
+     * as it was: those terms name that pattern alone (a constant offset). */
+    for(size_t p=0;ok&&p<a->physical;++p)
+        if(state[p]==1&&anchored[p])ok=yx_unanchor_top_level_terms(tree,*root,-1,(int64_t)p,root,0);
+    free(state);free(anchored);free(offset);return ok;
+}
+static bool yx_unanchored_pattern_terms(const uint8_t *data,size_t length,yx_integer_expr *tree,int *root)
+{
+    yx_physical_archive a;bool ok;
+    if(*root<0||!yx_physical_read(data,length,&a))return true;
+    ok=yx_unanchored_pattern_terms_archive(&a,tree,root);
+    yx_physical_destroy(&a);return ok;
 }
 #endif

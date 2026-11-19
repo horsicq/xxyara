@@ -353,12 +353,12 @@ static yx_ser_result yx_encode_pattern_set(const YRX_RULES *rules,uint8_t **data
     }
     for(size_t i=0;i<r->pattern_count;++i)if(r->patterns[i].kind!=YX_PATTERN_TEXT||
         (r->patterns[i].modifiers&~YX_MOD_ASCII))return YX_SER_UNSUPPORTED;
-    size_t mapping[5],unique[5];yx_text_pattern_mapping(r,mapping,unique);
+    size_t mapping[5],unique[5];yx_text_pattern_mapping(r,mapping,unique,NULL);
     uint8_t *wasm=NULL;size_t wasm_length=0;uint64_t limits[5]={1,1,1,1,1};
     if(!(loop_form?yx_pattern_set_loop_wasm(mapping,r->pattern_count,loop,yx_integer_import_profile(),&wasm,&wasm_length):
          yx_pattern_set_wasm(mapping,r->pattern_count,for_any,required,yx_integer_import_profile(),&wasm,&wasm_length)))
         return YX_SER_NO_MEMORY;
-    yx_ser_result result=yx_text_envelope_encode(r,wasm,wasm_length,limits,false,0,data,length);
+    yx_ser_result result=yx_text_envelope_encode(r,wasm,wasm_length,limits,false,0,NULL,data,length);
     free(wasm);return result;
 }
 static yx_ser_result yx_decode_pattern_set(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *count)

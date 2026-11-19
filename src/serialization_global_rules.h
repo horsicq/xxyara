@@ -30,7 +30,43 @@ static bool yx_global_rules_schema_build(yx_archive_globals_schema *out,
 typedef struct {
     const YRX_RULE *rules;
     size_t count, current;
+    /* Optional: the first rule of each (namespace, identifier), as index + 1
+     * in an open-addressed table of name_mask + 1 slots (NULL: search the
+     * rules one by one). */
+    size_t *names, name_mask;
 } yx_global_rules_context;
+
+static size_t yx_global_rule_hash(size_t namespace_index, const unsigned char *name, size_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603) ^ (uint64_t)namespace_index;
+    for (size_t i = 0; i < length; ++i) hash = (hash ^ name[i]) * UINT64_C(1099511628211);
+    return (size_t)(hash ^ (hash >> 29));
+}
+static void yx_global_rules_index_free(yx_global_rules_context *c)
+{
+    free(c->names); c->names = NULL; c->name_mask = 0;
+}
+/* Builds the name table of c->rules; without memory the search stays linear. */
+static void yx_global_rules_index(yx_global_rules_context *c)
+{
+    size_t slots = 16;
+    c->names = NULL; c->name_mask = 0;
+    for (size_t i = 0; i < c->count; ++i) if (!c->rules[i].identifier) return;
+    while (slots < c->count * 2 && slots <= SIZE_MAX / 4) slots *= 2;
+    if (slots > SIZE_MAX / sizeof(*c->names)) return;
+    c->names = calloc(slots, sizeof(*c->names));
+    if (!c->names) return;
+    c->name_mask = slots - 1;
+    for (size_t i = 0; i < c->count; ++i) {
+        const char *name = c->rules[i].identifier;
+        size_t length = strlen(name), slot = yx_global_rule_hash(c->rules[i].namespace_index, (const unsigned char *)name, length) & c->name_mask;
+        for (; c->names[slot]; slot = (slot + 1) & c->name_mask) {
+            const YRX_RULE *seen = &c->rules[c->names[slot] - 1];
+            if (seen->namespace_index == c->rules[i].namespace_index && strcmp(seen->identifier, name) == 0) break;
+        }
+        if (!c->names[slot]) c->names[slot] = i + 1;
+    }
+}
 
 static int yx_global_rule_primary(yx_module_program *p, unsigned depth)
 {
@@ -45,6 +81,22 @@ static int yx_global_rule_primary(yx_module_program *p, unsigned depth)
             p->parser.at = save;
             return -1;
         }
+    /* The first rule of that namespace and name, when it precedes this one. */
+    if (c->names && c->current < c->count) {
+        size_t space = c->rules[c->current].namespace_index;
+        size_t slot = yx_global_rule_hash(space, name, length) & c->name_mask;
+        for (; c->names[slot]; slot = (slot + 1) & c->name_mask) {
+            size_t i = c->names[slot] - 1;
+            if (c->rules[i].namespace_index != space || strlen(c->rules[i].identifier) != length ||
+                memcmp(name, c->rules[i].identifier, length)) continue;
+            if (i >= c->current) break;
+            int n = yx_module_node_new(p, YX_GLOBAL_RULE_REFERENCE, 1);
+            if (n >= 0) p->nodes[n].integer = (int64_t)i;
+            return n;
+        }
+        p->parser.at = save;
+        return -1;
+    }
     for (size_t i = 0; i < c->current; ++i)
         if (c->current<c->count&&
             c->rules[i].namespace_index==c->rules[c->current].namespace_index&&

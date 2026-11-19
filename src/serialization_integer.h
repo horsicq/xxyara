@@ -79,6 +79,11 @@ typedef struct yx_integer_expr_node {
     uint64_t wide_low, wide_high;
     /* Decoding: the lazy pattern-search call preceded this pattern node. */
     bool guarded;
+    /* An `and` / `or` that is the first operand of a chain of its own
+     * operator yet not part of it: the constant before it in the AST's n-ary
+     * operation was dropped (`(true and (A and B)) and C` is And{And{A,B},C},
+     * IR::and). It keeps its own block. */
+    bool group;
     int64_t value;
     double real;
 } yx_integer_expr_node;
@@ -321,6 +326,17 @@ static bool yx_integer_wide_step(bool *negative, uint64_t *low, uint64_t *high,
         (*high == (UINT64_C(1) << 63) && (!*negative || *low != 0)));
 }
 
+/* Expr::With has the type value of its body: the body behind a chain of
+ * `with` declarations (a constant there makes the `with` a constant operand
+ * of IR::and / IR::or, its declarations never run). */
+static const yx_integer_expr_node *yx_integer_with_value(const yx_integer_expr *tree, int index)
+{
+    const yx_integer_expr_node *n = &YX_INTEGER_NODES(tree)[index];
+    for (size_t steps = 0; n->op == 0xc0 && !n->constant && n->right >= 0 &&
+         (size_t)n->right < tree->count && steps < tree->count; ++steps)
+        n = &YX_INTEGER_NODES(tree)[n->right];
+    return n;
+}
 static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
                                      int left, int right, int64_t value)
 {
@@ -335,7 +351,7 @@ static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
     node = &YX_INTEGER_NODES(tree)[index];
     node->op = op; node->left = left; node->right = right; node->extra = -1;
     node->constant = op == 0x41 || op == 0x42 || op == 0x44; node->value = value;
-    node->wide = false; node->guarded = false;
+    node->wide = false; node->guarded = false; node->group = false;
     node->floating = op == 0x44 || (left >= 0 && right >= 0 &&
         !yx_integer_expr_boolean(op) && (YX_INTEGER_NODES(tree)[left].floating || YX_INTEGER_NODES(tree)[right].floating));
     node->unsigned_value = op == 0xb6 || op == 0xbb ||
@@ -345,6 +361,13 @@ static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
     /* A chain result outside i64 is only the left operand of the next link
      * of its own operator. */
     if (right >= 0 && right != left && YX_INTEGER_NODES(tree)[right].wide) goto unsupported;
+    /* A link that is not constant: IR::fold_arithmetic folds nothing of the
+     * chain (`MAX + 1 + filesize`), whose links wrap at run time. */
+    if (left >= 0 && YX_INTEGER_NODES(tree)[left].wide && op == YX_INTEGER_NODES(tree)[left].op &&
+        right >= 0 && right != left && !node->floating && !node->unsigned_value &&
+        !YX_INTEGER_NODES(tree)[right].constant && !YX_INTEGER_NODES(tree)[right].floating)
+        for (int link = left; link >= 0 && YX_INTEGER_NODES(tree)[link].wide; link = YX_INTEGER_NODES(tree)[link].left)
+            YX_INTEGER_NODES(tree)[link].wide = false;
     if (left >= 0 && YX_INTEGER_NODES(tree)[left].wide) {
         const yx_integer_expr_node *a = &YX_INTEGER_NODES(tree)[left];
         bool negative = a->wide_negative, operand_negative;
@@ -378,7 +401,7 @@ static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
     if ((op == 0x7f || op == 0x81) && !node->floating) tree->has_divisor = true;
     if (op >= 0xb0 && op < 0xc0) tree->read_mask |= (uint16_t)(1u << (op - 0xb0));
     if (op == 0xa0 || op == 0xa1) {
-        const yx_integer_expr_node *a = &YX_INTEGER_NODES(tree)[left], *b = &YX_INTEGER_NODES(tree)[right];
+        const yx_integer_expr_node *a = yx_integer_with_value(tree, left), *b = yx_integer_with_value(tree, right);
         bool absorbing = op == 0xa1;
         if ((a->constant && yx_integer_expr_boolean(a->op) && !!a->value == absorbing) ||
             (b->constant && yx_integer_expr_boolean(b->op) && !!b->value == absorbing)) {
@@ -629,8 +652,21 @@ static int yx_integer_expr_with(yx_integer_expr *tree, unsigned depth)
         const unsigned char *name;
         size_t length;
         if (!yx_archive_bindings_reserve(&tree->bindings, &tree->binding_capacity,
-                tree->binding_count + 1) ||
-            !yx_with_identifier(&tree->parser, &name, &length)) goto done;
+                tree->binding_count + 1)) goto done;
+        /* A `?` item (yx_condition_alias_free_text): a slot of the
+         * statement's frame that holds no variable. Such items follow the
+         * declared variables. */
+        yx_bool_skip_space(&tree->parser);
+        if (*tree->parser.at == '?') {
+            ++tree->parser.at;
+            memset(&tree->bindings[tree->binding_count], 0, sizeof(tree->bindings[0]));
+            ++tree->binding_count;
+            yx_bool_skip_space(&tree->parser);
+            if (*tree->parser.at != ',') break;
+            ++tree->parser.at;
+            continue;
+        }
+        if (!yx_with_identifier(&tree->parser, &name, &length)) goto done;
         yx_bool_skip_space(&tree->parser);
         if (*tree->parser.at++ != '=') goto done;
         int left = yx_integer_expr_parse(tree, 1, depth + 1);
@@ -813,10 +849,10 @@ static bool yx_integer_fold_identity_chains(yx_integer_expr *tree)
             at = YX_INTEGER_NODES(tree)[at].left;
         }
         if (!ok) break;
-        if (!yx_integer_identity_constant(&YX_INTEGER_NODES(tree)[at], identity)) kept[operands++] = at;
+        if (!yx_integer_identity_constant(yx_integer_with_value(tree, at), identity)) kept[operands++] = at;
         for (size_t link = links; link-- > 0;) {
             int right = YX_INTEGER_NODES(tree)[chain[link]].right;
-            if (!yx_integer_identity_constant(&YX_INTEGER_NODES(tree)[right], identity)) kept[operands++] = right;
+            if (!yx_integer_identity_constant(yx_integer_with_value(tree, right), identity)) kept[operands++] = right;
         }
         if (operands == links + 1 || !operands) continue;
         if (operands == 1) {
@@ -825,6 +861,8 @@ static bool yx_integer_fold_identity_chains(yx_integer_expr *tree)
         } else {
             /* The last links of the chain carry the operands that stay. */
             int left = kept[0];
+            if (YX_INTEGER_NODES(tree)[left].op == op && !YX_INTEGER_NODES(tree)[left].constant)
+                YX_INTEGER_NODES(tree)[left].group = true;
             for (size_t k = 1; k < operands; ++k) {
                 int link = chain[operands - 1 - k];
                 YX_INTEGER_NODES(tree)[link].left = left;
@@ -1255,13 +1293,13 @@ static bool yx_integer_boolean_operands(const yx_integer_expr *tree, int index,
 {
     const yx_integer_expr_node *node = &YX_INTEGER_NODES(tree)[index];
     if (depth > 256) return false;
-    if (flatten && node->op == op && !node->constant) {
+    if (flatten && node->op == op && !node->constant && !node->group) {
         if (tree->count > SIZE_MAX / sizeof(int)) return false;
         int *operands = malloc(tree->count * sizeof(*operands));
         size_t used = 0;
         bool ok = false;
         if (!operands) return false;
-        while (node->op == op && !node->constant) {
+        while (node->op == op && !node->constant && !node->group) {
             if (node->left < 0 || node->right < 0 || (size_t)node->left >= tree->count ||
                 (size_t)node->right >= tree->count || used >= tree->count) goto operands_done;
             operands[used++] = node->right;
@@ -1698,6 +1736,15 @@ static bool yx_integer_expr_print(const yx_integer_expr *tree, int index,
     }
     op = yx_integer_expr_operator(node->op);
     if (!op) return false;
+    /* A group keeps the constant the IR dropped, which keeps it out of the
+     * enclosing chain when the source is parsed again. */
+    if (node->group && (node->op == 0xa0 || node->op == 0xa1)) {
+        unsigned own = node->op == 0xa1 ? 1 : 2;
+        return yx_put_bytes(writer, node->op == 0xa0 ? "true and (" : "false or (", 10) &&
+            yx_integer_expr_print(tree, node->left, writer, own, false, depth + 1) &&
+            yx_put_bytes(writer, op, strlen(op)) &&
+            yx_integer_expr_print(tree, node->right, writer, own, true, depth + 1) && yx_put_u8(writer, ')');
+    }
     typedef struct { int index; unsigned precedence; bool grouped; } yx_integer_print_frame;
     if (tree->count > SIZE_MAX / sizeof(yx_integer_print_frame)) return false;
     yx_integer_print_frame *frames = malloc(tree->count * sizeof(*frames));
@@ -1713,7 +1760,7 @@ static bool yx_integer_expr_print(const yx_integer_expr *tree, int index,
         index = node->left; node = &YX_INTEGER_NODES(tree)[index];
         parent = precedence; right = false;
         op = yx_integer_expr_operator(node->op);
-        if (!op) break;
+        if (!op || node->group) break;
         precedence = node->op == 0xa1 ? 1 : node->op == 0xa0 ? 2 :
             yx_integer_expr_boolean(node->op) ? 3 : yx_integer_expr_precedence(node->op) + 3;
     }
@@ -2233,6 +2280,10 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
             if ((join_op && join_op != op) || guard_length > end - start ||
                 memcmp(reader->data + start, guard, guard_length)) return -1;
             reader->at = start + guard_length;
+            /* A first operand that is a block of the same operator is an
+             * operand of its own (group). */
+            if (joined < 0 && YX_INTEGER_NODES(tree)[stack[0]].op == op && !YX_INTEGER_NODES(tree)[stack[0]].constant)
+                YX_INTEGER_NODES(tree)[stack[0]].group = true;
             joined = joined < 0 ? stack[0] : yx_integer_expr_node_new(tree, op, joined, stack[0], 0);
             if (joined < 0) return -1;
             join_op = op; used = 0;

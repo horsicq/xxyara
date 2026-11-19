@@ -121,6 +121,13 @@ static bool yx_multi_pattern_wasm_list(yx_tree_list *trees,int *roots,yx_multi_p
         memset(c->used,0,sizeof(c->used));c->presence=c->unlimited=c->search_emitted=false;c->match_limit=1;c->scope_depth=0;
         t->has_filesize=t->has_shift=t->has_divisor=t->has_memory=t->has_loop=false;t->read_mask=0;t->small_shift=true;
         bool analyzed=yx_integer_expr_resources(t,roots[i],0,0);
+        /* disallow_fast_scan (ast2ir.rs) also runs in an operand IR::and /
+         * IR::or fold away afterwards, which the walk above skips. */
+        for(size_t n=0;n<t->count;++n) {
+            const yx_integer_expr_node *leaf=&YX_INTEGER_NODES(t)[n];
+            if(leaf->op>=0xd3&&leaf->op<=0xd7&&leaf->value>=0&&(uint64_t)leaf->value<scratch_count)
+                scratch_limits[leaf->value]=0;
+        }
         for(size_t n=0;n<t->count;++n) {
             const yx_integer_expr_node *leaf=&YX_INTEGER_NODES(t)[n];
             if(leaf->op<0xd1||leaf->op>0xd7||leaf->value<0||(uint64_t)leaf->value>=physical)continue;
@@ -344,9 +351,17 @@ static yx_ser_result yx_encode_multi_patterns(const YRX_RULES *rules,uint8_t **d
         for(size_t j=0;j<r->pattern_count;++j)yx_pattern_names(c)[j]=r->patterns[j].identifier,yx_pattern_mapping(c)[j]=j;
         yx_multi_pattern_setup(&trees[i],&contexts[i]);roots[i]=yx_integer_expr_condition(&trees[i],r->condition_text);
         if(roots[i]<0||!yx_integer_expr_resources(&trees[i],roots[i],0,0))goto done;
+        for(size_t n=0;n<trees[i].count;++n) {
+            const yx_integer_expr_node *leaf=&YX_INTEGER_NODES(&trees[i])[n];
+            if(leaf->op>=0xd3&&leaf->op<=0xd7&&leaf->value>=0&&(uint64_t)leaf->value<yx_pattern_capacity(c))
+                yx_pattern_limits(c)[leaf->value]=0;
+        }
         bounds[i]=(yx_pattern_filesize_bounds){2,2,0,0};yx_multi_pattern_bounds_visit(&trees[i],roots[i],bounds,&bounds[i],0);
         for(size_t j=0;j<r->pattern_count;++j)patterns[j]=&r->patterns[j];
         if(!yx_header_integer(&trees[i],roots[i],patterns,r->pattern_count,headers,i,&header_storage[i],&headers[i]))goto done;
+        size_t first_option=logical;
+        uint8_t *marks=calloc(r->pattern_count?r->pattern_count:1,1);
+        if(!marks||!yx_pattern_ir_marks(&trees[i],roots[i],marks,r->pattern_count)){free(marks);status=YX_SER_NO_MEMORY;goto done;}
         for(size_t j=0;j<r->pattern_count;++j) {
             yx_physical_pattern_options *option=&options[logical++];
             *option=(yx_physical_pattern_options){.limit=yx_pattern_limits(c)[j],.bounds=r->patterns[j].kind==YX_PATTERN_TEXT?(yx_pattern_filesize_bounds){2,2,0,0}:bounds[i]};
@@ -355,6 +370,16 @@ static yx_ser_result yx_encode_multi_patterns(const YRX_RULES *rules,uint8_t **d
             uint64_t anchor_offset=0;
             option->anchored=yx_pattern_anchor_offset(&trees[i],roots[i],(int64_t)j,&anchor_offset);
             if(option->anchored)option->offset=anchor_offset;
+        }
+        {
+            bool *unmarked=calloc(r->pattern_count?r->pattern_count:1,sizeof(*unmarked));
+            if(!unmarked){free(marks);status=YX_SER_NO_MEMORY;goto done;}
+            status=yx_rule_unmarked_patterns(rules,r,&trees[i],marks,unmarked);
+            for(size_t j=0;j<r->pattern_count;++j)
+                options[first_option+j].unmarked=unmarked[j]&&!options[first_option+j].anchored;
+            free(unmarked);free(marks);
+            if(status!=YX_SER_SUCCESS)goto done;
+            status=YX_SER_UNSUPPORTED;
         }
     }
     status=yx_physical_rules_build(rules,options,&assembly);if(status!=YX_SER_SUCCESS)goto done;

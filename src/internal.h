@@ -371,6 +371,8 @@ struct YRX_COMPILER {
     YRX_RULES *rules;
     /* Earlier rule names for type warnings; see yx_rule_name_cache. */
     struct yx_rule_name_cache *rule_name_cache;
+    /* Earlier patterns by slow-warning equality; see xxyara.c. */
+    struct yx_slow_pattern_cache *slow_pattern_cache;
     /* A duplicate definition replaces runtime values but not compiler symbols. */
     yx_global *redefined_global_symbols;
     size_t redefined_global_symbol_count;
@@ -523,6 +525,9 @@ void yx_compiler_first_source_error(YRX_COMPILER *compiler, size_t start);
 /* Relaxed regexp syntax (YRX_RELAXED_RE_SYNTAX) for the condition being
  * compiled, and the normalization it applies to a regexp body. */
 extern _Thread_local bool yx_condition_relaxed_regexps;
+/* Module functions (parser.c): values of type function when referenced
+ * without a call. *help: a signature takes no arguments or returns a bool. */
+bool yx_module_function_path(const char *path, size_t length, bool *help);
 extern _Thread_local bool yx_deserialize_error_detail;
 char *yx_normalize_regexp_braces(const char *body, bool relaxed);
 void yx_compiler_order_source_diagnostics(YRX_COMPILER *compiler,
