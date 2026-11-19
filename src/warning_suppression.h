@@ -26,8 +26,43 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* A suppression comment applies to the code on its own line, the following
- * pattern, or the following complete rule. */
+/* A suppression comment applies to the code before it on its line or, with
+ * no code before it, to the pattern definition or rule declaration that
+ * starts next, or else to the next line of code. A warning is suppressed
+ * when one such span holds one whole label of it. */
+bool yx_warning_suppressed_span(const uint8_t *source, size_t length,
+                                const char *code, size_t label_start,
+                                size_t label_end);
+
+/* One id named by a `suppress:` comment (offsets of the id in the source)
+ * and the code that comment covers. */
+typedef struct yx_suppression {
+    size_t id_start, id_end;
+    size_t start, end;
+} yx_suppression;
+
+typedef struct yx_suppression_table {
+    yx_suppression *items;
+    size_t count, capacity;
+} yx_suppression_table;
+
+/* While a scope is open on this thread, the questions about its source
+ * (the same pointer and length) share one scan of that source, made at
+ * the first question. Scopes nest and end in reverse order; the source
+ * must not change or move while its scope is open. */
+typedef struct yx_suppression_scope {
+    const uint8_t *source;
+    size_t length;
+    yx_suppression_table table;
+    int state;                      /* 0 not collected, 1 collected, 2 failed */
+    struct yx_suppression_scope *parent;
+} yx_suppression_scope;
+
+void yx_suppression_scope_begin(yx_suppression_scope *scope,
+                                const uint8_t *source, size_t length);
+void yx_suppression_scope_end(yx_suppression_scope *scope);
+
+/* The same for a label of which only the start is known. */
 bool yx_warning_suppressed(const uint8_t *source, size_t length,
                            const char *code, size_t warning_start);
 

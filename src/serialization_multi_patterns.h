@@ -119,7 +119,7 @@ static bool yx_multi_pattern_wasm_list(yx_tree_list *trees,int *roots,yx_multi_p
         memcpy(scratch_mapping,yx_pattern_mapping(c),used_slots*sizeof(*scratch_mapping));
         c->extra_names=scratch_names;c->extra_mapping=scratch_mapping;c->extra_limits=scratch_limits;c->capacity=scratch_count;
         memset(c->used,0,sizeof(c->used));c->presence=c->unlimited=c->search_emitted=false;c->match_limit=1;c->scope_depth=0;
-        t->has_filesize=t->has_shift=t->has_divisor=t->has_memory=t->has_loop=false;t->read_mask=0;
+        t->has_filesize=t->has_shift=t->has_divisor=t->has_memory=t->has_loop=false;t->read_mask=0;t->small_shift=true;
         bool analyzed=yx_integer_expr_resources(t,roots[i],0,0);
         for(size_t n=0;n<t->count;++n) {
             const yx_integer_expr_node *leaf=&YX_INTEGER_NODES(t)[n];
@@ -186,15 +186,24 @@ scratch_failed:
         for(size_t chunk=0;chunk<chunks;++chunk) {
             yx_writer *body=&bodies[chunk];body->used=0;
             size_t first=firsts[chunk],last=lasts[chunk];
-            bool locals=false,shift=false;
+            bool locals=false,shift=false,first_local=false,loop=false;
             for(size_t i=first;i<last;++i) {
                 const yx_integer_expr *t=yx_tree_list_open(trees,i);
                 if(!t)goto done;
                 locals|=t->has_filesize||t->has_shift||t->has_divisor||t->has_loop;
                 shift|=t->has_shift||t->has_loop;
+                loop|=t->has_loop;
+                /* i64_tmp_a: see yx_rule_expressions_wasm. */
+                first_local|=t->has_filesize||t->has_divisor||t->has_loop||(t->has_shift&&!t->small_shift);
                 if(!yx_tree_list_close(trees,i))goto done;
             }
-            if(!yx_put_u8(body,locals?1:0)||(locals&&(!yx_put_u8(body,shift?2:1)||!yx_put_u8(body,0x7e))))goto done;
+            if(first_local)for(size_t i=first;i<last;++i) {
+                yx_integer_expr *t=yx_tree_list_open(trees,i);
+                if(!t)goto done;
+                t->small_shift=false;
+                if(!yx_tree_list_close(trees,i))goto done;
+            }
+            if(!yx_put_u8(body,locals?1:0)||(locals&&(!yx_put_u8(body,loop||(shift&&first_local)?2:1)||!yx_put_u8(body,0x7e))))goto done;
             for(size_t i=first;i<last;++i) {
                 yx_integer_expr *t=yx_tree_list_open(trees,i);
                 bool emitted=t&&yx_multi_pattern_emit_rule(t,roots[i],&contexts[i].pattern,
@@ -342,16 +351,10 @@ static yx_ser_result yx_encode_multi_patterns(const YRX_RULES *rules,uint8_t **d
             yx_physical_pattern_options *option=&options[logical++];
             *option=(yx_physical_pattern_options){.limit=yx_pattern_limits(c)[j],.bounds=r->patterns[j].kind==YX_PATTERN_TEXT?(yx_pattern_filesize_bounds){2,2,0,0}:bounds[i]};
             if(r->patterns[j].kind!=YX_PATTERN_TEXT)option->header=headers[i];
-            bool used=false,anchored=true;
-            for(size_t n=0;n<trees[i].count;++n) {
-                const yx_integer_expr_node *node=&YX_INTEGER_NODES(&trees[i])[n];
-                if(node->op<0xd1||node->op>0xd7||node->value!=(int64_t)j)continue;
-                if(node->op!=0xd5||node->left<0||!YX_INTEGER_NODES(&trees[i])[node->left].constant||YX_INTEGER_NODES(&trees[i])[node->left].value<0)anchored=false;
-                else if(used&&option->offset!=(uint64_t)YX_INTEGER_NODES(&trees[i])[node->left].value)anchored=false;
-                else option->offset=(uint64_t)YX_INTEGER_NODES(&trees[i])[node->left].value;
-                used=true;
-            }
-            option->anchored=used&&anchored;
+            /* anchor_patterns (ast2ir.rs), as for a single rule. */
+            uint64_t anchor_offset=0;
+            option->anchored=yx_pattern_anchor_offset(&trees[i],roots[i],(int64_t)j,&anchor_offset);
+            if(option->anchored)option->offset=anchor_offset;
         }
     }
     status=yx_physical_rules_build(rules,options,&assembly);if(status!=YX_SER_SUCCESS)goto done;
@@ -568,6 +571,7 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
             c.pattern.capacity=a->physical;
             yx_multi_pattern_setup(t,&c);wr.at+=2;
             int root=yx_integer_wasm_block(&wr,body_end,t,0,-1);int64_t id;
+            if(root>=0&&!yx_pattern_expression_scope_fixup(t,&root,&c.pattern))root=-1;
             static const uint8_t suffix[]={0x45,4,0x40,5,0x41};
             bool valid=root>=0&&yx_integer_wasm_bytes(&wr,body_end,suffix,sizeof(suffix))&&
                 yx_get_sleb_i64(&wr,&id)&&id>=0&&(uint64_t)id<count&&roots[id]<0&&
@@ -649,15 +653,8 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
             if(!yx_physical_header_equal(&header,&a->headers[p]))goto done;
             bool bounded=expected.lower_kind!=2||expected.upper_kind!=2;
             if(a->bounded[p]!=bounded||(bounded&&!yx_physical_rule_bounds_equal(&expected,&a->bounds[p])))goto done;
-            bool used=false,anchored=true;uint64_t offset=0;
-            for(size_t n=0;n<tree->count;++n) {
-                const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
-                if(node->op<0xd1||node->op>0xd7||node->value!=(int64_t)p)continue;
-                if(node->op!=0xd5||node->left<0||!YX_INTEGER_NODES(tree)[node->left].constant||YX_INTEGER_NODES(tree)[node->left].value<0)anchored=false;
-                else if(used&&offset!=(uint64_t)YX_INTEGER_NODES(tree)[node->left].value)anchored=false;
-                else offset=(uint64_t)YX_INTEGER_NODES(tree)[node->left].value;
-                used=true;
-            }
+            uint64_t offset=0;
+            bool used=true,anchored=yx_pattern_anchor_offset(tree,roots[i],(int64_t)p,&offset);
             for(size_t q=frame_first[p];q<frame_first[p+1];++q) {
                 const yx_physical_frame *frame=&a->frames[frame_list[q]];
                 bool required=used&&anchored&&frame->frame.variant==0;

@@ -19963,6 +19963,38 @@ yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data,
 {
     YRX_RULES spelled;
     bool failed;
+    /* The IR holds a folded integer as a constant, whatever its source: the
+     * codecs encode the condition with those constants as literals. A text
+     * no codec takes that way is encoded as it is written. */
+    if (rules && rules->rules && !rules->serialized_prefix) {
+        YRX_RULE *copies = NULL;
+        for (size_t i = 0; i < rules->rule_count; ++i) {
+            char *literal = rules->rules[i].condition_text ?
+                yx_condition_literal_text(rules->rules[i].condition_text,
+                    (const char *const *)rules->imports, rules->import_count,
+                    rules->globals, rules->global_count) : NULL;
+            if (!literal) continue;
+            if (!copies) {
+                if (!(copies = malloc(rules->rule_count * sizeof(*copies)))) {
+                    free(literal);
+                    return YX_SER_NO_MEMORY;
+                }
+                memcpy(copies, rules->rules, rules->rule_count * sizeof(*copies));
+            }
+            copies[i].condition_text = literal;
+        }
+        if (copies) {
+            YRX_RULES normalized = *rules;
+            yx_ser_result status;
+            normalized.rules = copies;
+            status = yx_ser_encode(&normalized, data, length);
+            for (size_t i = 0; i < rules->rule_count; ++i)
+                if (copies[i].condition_text != rules->rules[i].condition_text)
+                    free(copies[i].condition_text);
+            free(copies);
+            if (status != YX_SER_UNSUPPORTED) return status;
+        }
+    }
     if (yx_ser_spellings(rules, &spelled, &failed)) {
         yx_ser_result status = yx_ser_encode_impl(&spelled, data, length, false);
         yx_ser_spellings_free(rules, &spelled);
@@ -20618,6 +20650,11 @@ static yx_ser_result yx_wasm_integer_read(const uint8_t *wasm,
         !yx_expect_bytes(&r, other_functions,
                          sizeof(other_functions)) ||
         r.at != length)
+        return YX_SER_UNSUPPORTED;
+    /* An unsigned comparison (a literal above INT64_MAX) belongs to the
+     * typed expression codec. */
+    if (opcode != 0x51 && opcode != 0x52 && opcode != 0x53 &&
+        opcode != 0x55 && opcode != 0x57 && opcode != 0x59)
         return YX_SER_UNSUPPORTED;
     shape.integer_read_comparison = true;
     shape.integer_read_type = type;

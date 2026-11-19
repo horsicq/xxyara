@@ -92,6 +92,11 @@ typedef struct yx_pattern_expression_context {
     uint64_t match_limit, limits[5];
     bool search_scopes[257];
     unsigned scope_depth;
+    /* Decoding (yx_pattern_expression_scope_fixup): the pattern nodes whose
+     * lazy-search call the scopes of the decoded tree do not explain. */
+    bool fixup;
+    int *fixups;
+    size_t fixup_count, fixup_capacity;
 } yx_pattern_expression_context;
 
 /* Small single-pattern adapters keep inline storage. Composition reserves
@@ -270,14 +275,24 @@ static bool yx_pattern_expression_resources(yx_integer_expr *tree,int index,void
     else {
         c->used[yx_pattern_expression_symbol(op)]=true;
         bool bounded=false;uint64_t pattern_limit=1;
-        if(op==0xd2)for(size_t n=0;n<tree->count;++n) {
+        /* IR::required_matches_for_count (ir/mod.rs): the count on either
+         * side of a comparison with a constant integer. */
+        /* The root, and the Boolean contexts (`and`, `or`, `not`, the body
+         * of a `with` or of a `for .. in`): one match tells `#a != 0`. */
+        if(op==0xd2&&index>=0&&(size_t)index+1==tree->count){pattern_limit=1;bounded=true;}
+        if(op==0xd2&&!bounded)for(size_t n=0;n<tree->count;++n) {
             const yx_integer_expr_node *parent=&YX_INTEGER_NODES(tree)[n];
-            if(parent->left!=index||parent->op<0x51||parent->op>0x59||parent->right<0)continue;
-            const yx_integer_expr_node *bound=&YX_INTEGER_NODES(tree)[parent->right];
-            if(!bound->constant||bound->floating||bound->value<0||bound->value>UINT32_MAX)continue;
-            uint64_t limit=(uint64_t)bound->value+((parent->op==0x59||parent->op==0x53)?0:1);
-            if(!limit)limit=1;
-            if(limit>UINT32_MAX)break;
+            if(((parent->op>=0xa0&&parent->op<=0xa2)&&(parent->left==index||parent->right==index))||
+               ((parent->op==0xd8||parent->op==0xd9)&&parent->left==index)||
+               (parent->op==0xc0&&parent->right==index&&parent->left!=index)||
+               (parent->op>=0xc4&&parent->op<=0xc6&&parent->extra==index)){pattern_limit=1;bounded=true;break;}
+            if((parent->left!=index&&parent->right!=index)||parent->op<0x51||parent->op>0x59||
+               parent->left<0||parent->right<0||parent->left==parent->right)continue;
+            bool count_first=parent->left==index;
+            const yx_integer_expr_node *bound=&YX_INTEGER_NODES(tree)[count_first?parent->right:parent->left];
+            uint64_t limit;
+            if(!bound->constant||bound->floating||
+               !yx_count_required_matches(bound->value,bound->unsigned_value,parent->op,count_first,&limit))break;
             if(limit>c->match_limit)c->match_limit=limit;
             pattern_limit=limit;bounded=true;break;
         }
@@ -289,22 +304,30 @@ static bool yx_pattern_expression_resources(yx_integer_expr *tree,int index,void
     return true;
 }
 
+static void yx_pattern_expression_boolean_scope(void *user,bool enter);
 static bool yx_pattern_expression_emit(const yx_integer_expr *tree,int index,yx_writer *w,
                                           unsigned depth,int slot,bool boolean,void *user)
 {
     yx_pattern_expression_context *c=user;const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[index];
-    if(node->op==0xd8||node->op==0xd9)
-        return yx_put_u8(w,2)&&yx_put_u8(w,0x7f)&&
+    if(node->op==0xd8||node->op==0xd9) {
+        /* A one-operand And / Or (IR::and, IR::or keep it): emit_expr pushes
+         * a lazy-search scope for it like for any other (emit.rs). */
+        bool ok;
+        yx_pattern_expression_boolean_scope(c,true);
+        ok=yx_put_u8(w,2)&&yx_put_u8(w,0x7f)&&
             (node->op!=0xd9||(yx_put_u8(w,2)&&yx_put_u8(w,0x7f)))&&
             yx_integer_boolean_emit(tree,node->left,w,depth+1)&&yx_put_u8(w,0x0b)&&
             (node->op!=0xd9||yx_put_u8(w,0x0b));
+        yx_pattern_expression_boolean_scope(c,false);
+        return ok;
+    }
     if(node->op==0xda) {
         const yx_pattern_of_set *set=&c->of_sets[node->value>>4];unsigned kind=(unsigned)(node->value&3);
         if(!c->search_emitted) {
             if(!yx_put_u8(w,0x23)||!yx_put_u8(w,c->search_global)||!yx_put_u8(w,4)||!yx_put_u8(w,0x40)||
                !yx_put_u8(w,5)||!yx_put_u8(w,0x10)||!yx_put_uleb(w,c->ids[1])||!yx_put_u8(w,0x0b))return false;
             c->search_emitted=true;
-        }
+        } else if(c->fixup&&node->guarded&&c->fixup_count<c->fixup_capacity)c->fixups[c->fixup_count++]=index;
         if(kind==3) {
             if(!yx_put_u8(w,0x41)||!yx_put_sleb_i64(w,set->start[0])||!yx_put_u8(w,0x41)||
                !yx_put_sleb_i64(w,set->end[0])||!yx_integer_expr_emit(tree,node->left,w,0,depth+1,slot,false)||
@@ -331,7 +354,7 @@ static bool yx_pattern_expression_emit(const yx_integer_expr *tree,int index,yx_
         if(!yx_put_u8(w,0x23)||!yx_put_u8(w,c->search_global)||!yx_put_u8(w,4)||!yx_put_u8(w,0x40)||
            !yx_put_u8(w,5)||!yx_put_u8(w,0x10)||!yx_put_uleb(w,c->ids[1])||!yx_put_u8(w,0x0b))return false;
         c->search_emitted=true;
-    }
+    } else if(c->fixup&&node->guarded&&c->fixup_count<c->fixup_capacity)c->fixups[c->fixup_count++]=index;
     if(!yx_put_u8(w,0x41)||!yx_put_sleb_i64(w,node->value))return false;
     if(node->left>=0&&!yx_integer_expr_emit(tree,node->left,w,0,depth+1,slot,false))return false;
     if((node->op==0xd6||node->op==0xd7)&&!yx_integer_expr_emit(tree,node->right,w,0,depth+1,slot,false))return false;
@@ -345,8 +368,10 @@ static bool yx_pattern_expression_emit(const yx_integer_expr *tree,int index,yx_
 static bool yx_pattern_expression_print(const yx_integer_expr *tree,int index,yx_writer *w,void *user)
 {
     yx_pattern_expression_context *c=user;const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
-    if(n->op==0xd8||n->op==0xd9)return yx_put_u8(w,'(')&&yx_integer_expr_print(tree,n->left,w,0,false,0)&&
-        yx_put_bytes(w,n->op==0xd8?" and true)":" or false)",10);
+    /* The constant first: a one-operand node inside another stays apart
+     * (a left-nested chain is one operation). */
+    if(n->op==0xd8||n->op==0xd9)return yx_put_bytes(w,n->op==0xd8?"(true and ":"(false or ",10)&&
+        yx_integer_expr_print(tree,n->left,w,0,false,0)&&yx_put_u8(w,')');
     if(n->op==0xda) {
         const yx_pattern_of_set *set=&c->of_sets[n->value>>4];unsigned kind=(unsigned)(n->value&3);bool first=true;
         if(kind==3?!yx_integer_expr_print(tree,n->left,w,0,false,0):!yx_put_bytes(w,kind?"all":"any",3))return false;
@@ -422,7 +447,72 @@ static int yx_pattern_expression_decode_of(yx_reader *r,size_t end,yx_integer_ex
     return yx_integer_expr_node_new(tree,0xda,quantity,-1,yx_pattern_of_value(&set,c->of_set_count++,kind));
 }
 
+static int yx_pattern_expression_decode_node(yx_reader *r,size_t end,yx_integer_expr *tree,void *user);
 static int yx_pattern_expression_decode(yx_reader *r,size_t end,yx_integer_expr *tree,void *user)
+{
+    yx_pattern_expression_context *c=user;
+    uint8_t guard[]={0x23,c->search_global,4,0x40,5,0x10,c->ids[1],0x0b};
+    bool guarded=r->at<=end&&end-r->at>=sizeof(guard)&&end<=r->length&&!memcmp(r->data+r->at,guard,sizeof(guard));
+    int node=yx_pattern_expression_decode_node(r,end,tree,user);
+    if(node>=0&&guarded)YX_INTEGER_NODES(tree)[node].guarded=true;
+    return node;
+}
+
+/* A one-operand `and` / `or` whose operand raises no `undefined` leaves no
+ * block in the module, only its lazy-search scope: the search call before a
+ * pattern that an enclosing scope already searched for. Emitting the decoded
+ * tree finds those patterns; each one's Boolean term gets the one-operand
+ * node (0xd8) that explains its call. */
+static bool yx_pattern_expression_scope_fixup(yx_integer_expr *tree,int *root,yx_pattern_expression_context *c)
+{
+    size_t count=tree->count;yx_writer scratch={0};int *parents=NULL;bool ok=true;
+    if(*root<0||!count)return true;
+    c->fixups=malloc(count*sizeof(*c->fixups));
+    if(!c->fixups)return false;
+    c->fixup_capacity=count;c->fixup_count=0;c->fixup=true;
+    c->search_emitted=false;c->scope_depth=0;
+    (void)yx_integer_boolean_emit(tree,*root,&scratch,0);
+    c->fixup=false;c->search_emitted=false;c->scope_depth=0;free(scratch.data);
+    if(c->fixup_count) {
+        parents=malloc(count*sizeof(*parents));
+        if(!parents)ok=false;
+        for(size_t n=0;ok&&n<count;++n)parents[n]=-1;
+        for(size_t n=0;ok&&n<count;++n) {
+            const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
+            if(node->constant)continue;
+            if(node->left>=0&&(size_t)node->left<count&&(size_t)node->left!=n)parents[node->left]=(int)n;
+            if(node->right>=0&&(size_t)node->right<count&&(size_t)node->right!=n)parents[node->right]=(int)n;
+            if(node->extra>=0&&(size_t)node->extra<count&&(size_t)node->extra!=n)parents[node->extra]=(int)n;
+        }
+    }
+    for(size_t f=0;ok&&f<c->fixup_count;++f) {
+        int term=c->fixups[f],wrapper;
+        /* Up to the Boolean term: an operand of `and`, `or`, `not`, the body
+         * of a loop or of a `with`, or the condition itself. */
+        for(unsigned depth=0;depth<4096;++depth) {
+            int parent=parents[term];uint8_t op;
+            if(parent<0)break;
+            op=YX_INTEGER_NODES(tree)[parent].op;
+            if(op==0xa0||op==0xa1||op==0xa2||op==0xd8||op==0xd9||
+               ((op>=0xc4&&op<=0xc6)&&YX_INTEGER_NODES(tree)[parent].extra==term)||
+               (op==0xc0&&YX_INTEGER_NODES(tree)[parent].right==term))break;
+            term=parent;
+        }
+        if(YX_INTEGER_NODES(tree)[term].op==0xd8)continue;
+        wrapper=yx_integer_expr_node_new(tree,0xd8,term,term,0);
+        if(wrapper<0){ok=false;break;}
+        if(parents[term]>=0) {
+            yx_integer_expr_node *parent=&YX_INTEGER_NODES(tree)[parents[term]];
+            if(parent->left==term)parent->left=wrapper;
+            if(parent->right==term)parent->right=wrapper;
+            if(parent->extra==term)parent->extra=wrapper;
+        } else if(*root==term)*root=wrapper;
+    }
+    free(parents);free(c->fixups);c->fixups=NULL;c->fixup_count=c->fixup_capacity=0;
+    return ok;
+}
+
+static int yx_pattern_expression_decode_node(yx_reader *r,size_t end,yx_integer_expr *tree,void *user)
 {
     yx_pattern_expression_context *c=user;yx_reader saved=*r;size_t count=tree->count;
     uint8_t guard[]={0x23,c->search_global,4,0x40,5,0x10,c->ids[1],0x0b};
@@ -672,15 +762,6 @@ static yx_ser_result yx_encode_pattern_expression(const YRX_RULES *rules,uint8_t
     size_t unique[5];yx_text_pattern_mapping(&rules->rules[0],c.mapping,unique);
     yx_pattern_expression_setup(tree,&c);
     int root=yx_integer_expr_condition(tree,rules->rules[0].condition_text);
-    if(root>=0)for(size_t n=0;n<tree->count;++n) {
-        yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
-        if((node->op==0xa0||node->op==0xa1)&&!node->constant) {
-            bool identity=node->op==0xa0;
-            int child=YX_INTEGER_NODES(tree)[node->left].constant&&!!YX_INTEGER_NODES(tree)[node->left].value==identity?node->right:
-                YX_INTEGER_NODES(tree)[node->right].constant&&!!YX_INTEGER_NODES(tree)[node->right].value==identity?node->left:-1;
-            if(child>=0){node->op=identity?0xd8:0xd9;node->left=node->right=child;}
-        }
-    }
     if(root<0||!c.saw_pattern||!yx_pattern_expression_wasm(tree,root,&c,yx_integer_import_profile(),&wasm,&wasm_length))goto done;
     if(non_text) {
         YRX_RULE adapted=rules->rules[0];YRX_RULES base_rules=*rules;
@@ -822,6 +903,7 @@ static yx_ser_result yx_decode_pattern_expression(const uint8_t *data,size_t len
        !yx_get_u8(&r,&marker)||marker!=0x7e))||!yx_rule_expression_byte(&r,2)||!yx_rule_expression_byte(&r,0x7f))goto done;
     int root=yx_integer_wasm_block(&r,body_end,tree,0,-1);
     if(root<0||!c.saw_pattern)goto done;
+    if(!yx_pattern_expression_scope_fixup(tree,&root,&c))goto done;
     uint8_t profile=4;int original_root=root;
     for(unsigned variant=0;variant<3&&profile==4;++variant) {
         root=variant?yx_integer_expr_node_new(tree,variant==1?0xd8:0xd9,original_root,original_root,0):original_root;

@@ -57,6 +57,7 @@ static void yx_composed_bounds(const yx_module_program *p,int root,const int *ro
 static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,const int *roots,yx_physical_pattern_options *options,yx_writer *header_storage)
 {
     yx_module_patterns *c=p->extension;size_t logical=0,physical=c->archive->physical;
+    c->limit_roots=roots;c->limit_root_count=rules->rule_count;
     if(!yx_module_pattern_limits(p))return false;
     /* Uses of each PatternId, in node order (one pass, not one per logical
      * pattern): whether a node uses it and whether every use is `at` the
@@ -97,12 +98,34 @@ static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,cons
         for(size_t g=0;g<=i;++g)if(rules->rules[g].is_global&&rules->rules[g].namespace_index==rules->rules[i].namespace_index)
             yx_composed_bounds(p,roots[g],roots,g,&bounds,0);
         yx_physical_header header={0};if(!yx_module_header(p,roots[i],rules,roots,i,&header_storage[i],&header)){ok=false;break;}
+        /* anchor_patterns (ast2ir.rs) decides per rule: the condition's own
+         * analysis (yx_condition_pattern_fixed_at) is the port of it. The
+         * node scan above remains for a text it cannot parse. */
+        yx_condition *anchors=NULL;
+        if(rules->rules[i].pattern_count&&rules->rules[i].condition_text&&
+           (anchors=yx_condition_compile(rules->rules[i].condition_text,NULL,0))!=NULL) {
+            const char **names=malloc(rules->rules[i].pattern_count*sizeof(*names));
+            if(!names){yx_condition_destroy(anchors);ok=false;break;}
+            for(size_t j=0;j<rules->rules[i].pattern_count;++j)
+                names[j]=c->anchor_names?c->anchor_names[logical+j]:rules->rules[i].patterns[j].identifier;
+            yx_condition_bind_pattern_sets(anchors,names,rules->rules[i].pattern_count);
+            (void)yx_condition_fold_modules(anchors,(const char *const *)rules->imports,rules->import_count,
+                rules->globals,rules->global_count,NULL,0);
+            free((void *)names);
+        }
         for(size_t j=0;j<rules->rules[i].pattern_count;++j,++logical) {
             yx_physical_pattern_options *o=&options[logical];size_t id=c->archive->mapping[logical];
             *o=(yx_physical_pattern_options){.limit=c->archive->limits[id],.bounds=rules->rules[i].patterns[j].kind==YX_PATTERN_TEXT?(yx_pattern_filesize_bounds){2,2,0,0}:bounds};
             if(rules->rules[i].patterns[j].kind!=YX_PATTERN_TEXT)o->header=header;
             if(id<physical){o->offset=offset[id];o->anchored=used[id]&&anchor[id];}
+            const char *anchor_name=c->anchor_names?c->anchor_names[logical]:rules->rules[i].patterns[j].identifier;
+            if(anchors&&anchor_name) {
+                size_t at=0;
+                o->anchored=yx_condition_pattern_fixed_at(anchors,anchor_name,&at);
+                if(o->anchored)o->offset=at;
+            }
         }
+        yx_condition_destroy(anchors);
     }
     free(used);free(anchor);free(offset);
     return ok;
@@ -116,7 +139,7 @@ static bool yx_composed_condition_literals(yx_module_program *p,yx_module_patter
     assembly->condition_literals=calloc(count,sizeof(*assembly->condition_literals));
     assembly->condition_literal_counts=calloc(count,sizeof(*assembly->condition_literal_counts));
     if(!assembly->condition_literals||!assembly->condition_literal_counts)return false;
-    assembly->condition_rule_count=count;
+    assembly->condition_rule_count=count;p->shifts=true;
     bool ok=true;
     for(size_t i=0;ok&&i<count;++i) {
         yx_writer scratch={0};
@@ -426,7 +449,16 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
     options=calloc(logical?logical:1,sizeof(*options));limits=calloc(a->physical?a->physical:1,sizeof(*limits));
     if(!options||!limits||!header_storage){status=YX_SER_NO_MEMORY;goto done;}
     if(a->physical)memcpy(limits,a->limits,a->physical*sizeof(*limits));
+    /* The anchors are those of the decoded conditions, which name the
+     * patterns as the archive does. */
+    const char **anchor_names=malloc((logical?logical:1)*sizeof(*anchor_names));
+    if(!anchor_names){status=YX_SER_NO_MEMORY;goto done;}
+    for(size_t k=0;k<logical;++k)anchor_names[k]=a->names[names[k]];
+    c.anchor_names=anchor_names;
+    for(size_t i=0;i<count;++i)if(!source_rules[i].condition_text)source_rules[i].condition_text=decoded[i].runtime_integer_condition;
     bool options_ok=yx_composed_options(p,&source,roots,options,header_storage);if(a->physical)memcpy(a->limits,limits,a->physical*sizeof(*limits));
+    for(size_t i=0;i<count;++i)if(source_rules[i].condition_text==decoded[i].runtime_integer_condition)source_rules[i].condition_text=NULL;
+    c.anchor_names=NULL;free((void *)anchor_names);
     /* disallow_fast_scan (ast2ir.rs) also runs for an operand that is folded
      * away afterwards (`($a at 0 and false) or $b`): the archive then tracks
      * every match of a pattern that the remaining operands would limit.

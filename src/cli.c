@@ -2546,8 +2546,13 @@ static const char *yx_cli_errno_text(int code, char *buffer, size_t size)
 static void yx_cli_walk_error(const char *path)
 {
 #ifdef _WIN32
-    fprintf(stderr, "error: can't open `%s`: %s\n", path,
-            yx_os_error_text(yx_os_error_last()));
+    unsigned long error = yx_os_error_last();
+    /* walk.rs: a --scan-list path whose metadata reads is not a file. */
+    if (yx_cli_kind(path, false) == YX_CLI_PATH_DIRECTORY)
+        fprintf(stderr, "error: `%s` is not a file\n", path);
+    else
+        fprintf(stderr, "error: can't open `%s`: %s\n", path,
+                yx_os_error_text(error));
 #else
     int saved_errno = errno;
     char text[256];
@@ -2923,6 +2928,10 @@ static void yx_cli_json_string(const uint8_t *bytes, size_t length)
             fputs("\\r", stdout);
         } else if (c == '\t') {
             fputs("\\t", stdout);
+        } else if (c == '\b') {
+            fputs("\\b", stdout);    /* serde_json's short escapes */
+        } else if (c == '\f') {
+            fputs("\\f", stdout);
         } else if (c < 0x20) {
             printf("\\u%04x", (unsigned)c);
         } else {
@@ -3187,7 +3196,9 @@ static bool yx_cli_float_text(double value, yx_cli_format format,
     return true;
 }
 
-static void yx_cli_meta_value(const YRX_METADATA *meta, yx_cli_format format)
+/* indent: the column of a pretty JSON bytes array's closing bracket. */
+static void yx_cli_meta_value_at(const YRX_METADATA *meta,
+                                 yx_cli_format format, int indent)
 {
     size_t i;
     switch (meta->value_type) {
@@ -3215,10 +3226,10 @@ static void yx_cli_meta_value(const YRX_METADATA *meta, yx_cli_format format)
             } else if (format == YX_CLI_JSON && meta->value.bytes.length) {
                 fputs("[\n", stdout);
                 for (i = 0; i < meta->value.bytes.length; ++i) {
-                    fputs(i ? ",\n          " : "          ", stdout);
-                    printf("%u", (unsigned)meta->value.bytes.data[i]);
+                    printf(i ? ",\n%*s%u" : "%*s%u", indent + 2, "",
+                           (unsigned)meta->value.bytes.data[i]);
                 }
-                fputs("\n        ]", stdout);
+                printf("\n%*s]", indent, "");
             } else {
                 putchar('[');
                 for (i = 0; i < meta->value.bytes.length; ++i) {
@@ -3230,6 +3241,11 @@ static void yx_cli_meta_value(const YRX_METADATA *meta, yx_cli_format format)
             break;
         default: fputs("null", stdout); break;
     }
+}
+
+static void yx_cli_meta_value(const YRX_METADATA *meta, yx_cli_format format)
+{
+    yx_cli_meta_value_at(meta, format, 8);
 }
 
 static void yx_cli_text_meta(const YRX_METADATA *meta, void *user_data)
@@ -3307,7 +3323,8 @@ static void yx_cli_json_meta_value(const YRX_METADATA *meta,
                values->identifier) != 0) return;
     if (values->count > 1)
         fputs(values->printed ? ",\n          " : "\n          ", stdout);
-    yx_cli_meta_value(meta, YX_CLI_JSON);
+    /* serde_json's pretty printer nests a grouped key's arrays a level deeper. */
+    yx_cli_meta_value_at(meta, YX_CLI_JSON, values->count > 1 ? 10 : 8);
     ++values->printed;
 }
 
@@ -3659,6 +3676,7 @@ static int yx_cli_scan_file(YRX_SCANNER *scanner, const YRX_RULES *rules,
     int status = 0;
     bool map_failed = false;
     unsigned long load_error = 0;
+    (void)rules;
     if (options->skip_larger && yx_cli_is_larger(path, options->max_file_size))
         return 0;
     if (yx_cli_kind(path, false) == YX_CLI_PATH_OTHER) {
@@ -3729,8 +3747,11 @@ static int yx_cli_scan_file(YRX_SCANNER *scanner, const YRX_RULES *rules,
     if (result == YRX_SUCCESS && !options->negate)
         for (size_t i = 0; i < scan.matched_count; ++i)
             yx_cli_emit_rule(&scan, scan.matched[i].rule);
+    /* scan.rs: non_matching_rules() yields rules bound to the scan, whose
+     * patterns carry the matches found. */
     if (result == YRX_SUCCESS && options->negate)
-        result = yrx_rules_iter(rules, yx_cli_on_unmatched, &scan);
+        result = xxyara_scanner_iter_non_matching_rules(
+            scanner, yx_cli_on_unmatched, &scan);
     if (options->count) {
         if (options->format == YX_CLI_JSON) {
             if (json_counts &&
@@ -33630,6 +33651,9 @@ static bool yx_cli_check_potentially_slow_loops(const char *path,
                 yx_dep_is_ident_start(source[j + 1])) dynamic = true;
         if (!dynamic || bounded) continue;
         if (memchr(source + start, '\n', end - start)) continue;
+        if (yx_warning_suppressed_span(source, length,
+                                       "potentially_slow_loop", start, end))
+            continue;
         yx_cli_potentially_slow_loop_warning(path, source, length,
                                               start, end);
         ++*count;
@@ -33660,6 +33684,10 @@ static bool yx_cli_check_ambiguous_expr(const char *path,
         /* `for 0 of them : (..)` does not warn (for_of_expr_from_ast). */
         if (i && yx_dep_equal(&tokens.items[i - 1], "for")) continue;
         offset = (size_t)(tokens.items[i].text - source);
+        if (yx_warning_suppressed_span(
+                source, length, "ambiguous_expr", offset,
+                (size_t)(tokens.items[i + 2].text - source) +
+                    tokens.items[i + 2].length)) continue;
         yx_fix_ambiguous_warning(path, source, length, offset);
         ++*count;
     }
@@ -35002,12 +35030,15 @@ static bool yx_fix_patch_jumps(const char *path, bool enabled,
                                yx_fix_patches *patches)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, copied = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i + 3 < tokens.count; ++i) {
         size_t close, j;
         const yx_dep_token *pattern = &tokens.items[i];
@@ -35078,6 +35109,7 @@ static bool yx_fix_patch_jumps(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -35577,6 +35609,20 @@ static size_t yx_cli_include_position(const uint8_t *source, size_t length,
     return position;
 }
 
+/* A duplicate import is reported at its `import` keyword: a source range
+ * without that word has none, and the file need not be read and lexed again
+ * for it (once per warning otherwise). */
+static bool yx_cli_import_keyword_in(const uint8_t *source, size_t length,
+                                     size_t from, size_t to)
+{
+    if (!source) return true;
+    if (to > length) to = length;
+    for (size_t at = from; at + 6 <= length && at < to; ++at)
+        if (source[at] == 'i' && memcmp(source + at, "import", 6) == 0)
+            return true;
+    return false;
+}
+
 static bool yx_cli_emit_ordered_warnings(
     const char *path, const uint8_t *source, size_t length,
     const yx_cli_core_warning *core, size_t core_count, size_t *next_core,
@@ -35603,7 +35649,9 @@ static bool yx_cli_emit_ordered_warnings(
                 position = yx_cli_include_position(source, length,
                                                    core[*next_core].origin);
             if (position > *import_from) {
-                if (!yx_fix_patch_imports_range(path, true, false,
+                if (yx_cli_import_keyword_in(source, length, *import_from,
+                                             position) &&
+                    !yx_fix_patch_imports_range(path, true, false,
                                                 *import_from, position,
                                                 import_count, NULL))
                     return false;
@@ -35727,7 +35775,8 @@ static bool yx_cli_check_text_hex_compiled(
             }
         if (!memchr(source + start, '\n', end - start) &&
             !from_core &&
-            !yx_warning_suppressed(source, length, "text_as_hex", start) &&
+            !yx_warning_suppressed_span(source, length, "text_as_hex", start,
+                                        end) &&
             yx_fix_hex_as_text(source, start, end, &literal)) {
             if (core_warning_count && duplicate_warning_count) {
                 if (!yx_cli_emit_ordered_warnings(path, source, length,
@@ -35837,8 +35886,12 @@ static bool yx_cli_emit_source_warnings(
     for (size_t i = 0; i < files.count; ++i) {
         uint8_t *source = NULL;
         size_t length = 0, count = 0;
+        yx_suppression_scope suppressions;
         if (!yx_cli_read_file(files.items[i], &source, &length)) goto done;
+        /* One scan for the suppression comments of the file. */
+        yx_suppression_scope_begin(&suppressions, source, length);
         ok = check(files.items[i], source, length, &count);
+        yx_suppression_scope_end(&suppressions);
         free(source);
         if (!ok) goto done;
     }
@@ -35855,12 +35908,15 @@ static bool yx_fix_patch_text_hex(const char *path, bool enabled,
                                   yx_fix_patches *patches)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, copied = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i + 3 < tokens.count; ++i) {
         size_t start, end, close;
         yx_fmt_buffer literal = {0};
@@ -35875,7 +35931,8 @@ static bool yx_fix_patch_text_hex(const char *path, bool enabled,
         start = (size_t)(tokens.items[i + 2].text - source);
         end = (size_t)(tokens.items[close].text - source) + 1;
         if (start < copied || memchr(source + start, '\n', end - start) ||
-            yx_warning_suppressed(source, length, "text_as_hex", start) ||
+            yx_warning_suppressed_span(source, length, "text_as_hex", start,
+                                       end) ||
             !yx_fix_hex_as_text(source, start, end, &literal)) {
             free(literal.data);
             i = close;
@@ -35898,6 +35955,7 @@ static bool yx_fix_patch_text_hex(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -35916,79 +35974,6 @@ static bool yx_fix_decimal_token(const yx_dep_token *token, size_t *value)
     }
     *value = result;
     return true;
-}
-
-static bool yx_fix_warning_id_in_comment(const uint8_t *source,
-                                          size_t begin, size_t end,
-                                          const char *warning_id)
-{
-    size_t id_length = strlen(warning_id);
-    for (size_t i = begin; i + 9 <= end; ++i) {
-        if (memcmp(source + i, "suppress:", 9) != 0) continue;
-        i += 9;
-        while (i < end) {
-            size_t start;
-            while (i < end && (source[i] == ' ' || source[i] == '\t' ||
-                               source[i] == '\r' || source[i] == '\n' ||
-                               source[i] == ',')) ++i;
-            start = i;
-            while (i < end && yx_dep_is_ident_cont(source[i])) ++i;
-            if (i - start == id_length &&
-                memcmp(source + start, warning_id, id_length) == 0)
-                return true;
-            if (start == i || (i < end && source[i] != ',' &&
-                               source[i] != ' ' && source[i] != '\t' &&
-                               source[i] != '\r' && source[i] != '\n')) break;
-        }
-    }
-    return false;
-}
-
-/* The lexer omits comments, so a gap between its tokens contains only
- * whitespace and comments. A standalone comment applies to the next code
- * span; a trailing comment applies to the current line. */
-static bool yx_fix_comment_suppresses(const uint8_t *source, size_t begin,
-                                      size_t end, const char *warning_id,
-                                      bool standalone)
-{
-    size_t i = begin;
-    while (i + 1 < end) {
-        size_t comment_end, line_start;
-        bool line_comment;
-        if (source[i] != '/' ||
-            (source[i + 1] != '/' && source[i + 1] != '*')) {
-            ++i;
-            continue;
-        }
-        line_comment = source[i + 1] == '/';
-        comment_end = i + 2;
-        if (line_comment) {
-            while (comment_end < end && source[comment_end] != '\n')
-                ++comment_end;
-        } else {
-            while (comment_end + 1 < end &&
-                   !(source[comment_end] == '*' &&
-                     source[comment_end + 1] == '/')) ++comment_end;
-            comment_end = comment_end + 1 < end ? comment_end + 2 : end;
-        }
-        line_start = i;
-        while (line_start > 0 && source[line_start - 1] != '\n')
-            --line_start;
-        if (standalone) {
-            for (size_t j = line_start; j < i; ++j) {
-                if (source[j] != ' ' && source[j] != '\t' &&
-                    source[j] != '\r') {
-                    line_start = SIZE_MAX;
-                    break;
-                }
-            }
-        }
-        if ((!standalone || line_start != SIZE_MAX) &&
-            yx_fix_warning_id_in_comment(source, i + 2, comment_end,
-                                          warning_id)) return true;
-        i = comment_end;
-    }
-    return false;
 }
 
 static bool yx_fix_read_integer_range(const yx_dep_token *name,
@@ -36115,12 +36100,15 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
                                               yx_fix_patches *patches)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled || warning_from_core) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i + 1 < tokens.count; ++i) {
         size_t prefix = i, close, literal_index, func_start, func_end;
         size_t literal_start, literal_end, left_start, left_end;
@@ -36217,6 +36205,10 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
             yx_cli_warning_line_at(source, length, right_start).number !=
             yx_cli_warning_line_at(source, length, left_start).number)
             continue;
+        if (yx_warning_suppressed_span(source, length, "unsatisfiable_expr",
+                                       left_start, left_end) ||
+            yx_warning_suppressed_span(source, length, "unsatisfiable_expr",
+                                       right_start, right_end)) continue;
         yx_fix_unsat_pair_warning(path, source, length, left_start, left_end,
                                    right_start, right_end,
                                    literal_left ? literal_message :
@@ -36246,6 +36238,7 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -36344,6 +36337,7 @@ static bool yx_fix_warn_too_many_iterations(const char *path, bool enabled,
                                               size_t *warnings)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, depth = 0;
     yx_dep_tokens tokens = {0};
     yx_fix_loop_frame *frames = NULL;
@@ -36351,12 +36345,14 @@ static bool yx_fix_warn_too_many_iterations(const char *path, bool enabled,
     if (!enabled || warning_from_core) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     frames = (yx_fix_loop_frame *)calloc(tokens.count ? tokens.count : 1,
                                          sizeof(*frames));
     if (!frames) goto done;
     for (size_t i = 0; i + 7 < tokens.count; ++i) {
         size_t in = tokens.count, range_close, body_close, range_begin;
-        size_t range_end, first, end, rule_begin = SIZE_MAX;
+        size_t range_end, first, end;
         uint64_t iterations, multiplier;
         while (depth && frames[depth - 1].body_close < i) --depth;
         if (!yx_dep_equal(&tokens.items[i], "for")) continue;
@@ -36382,43 +36378,11 @@ static bool yx_fix_warn_too_many_iterations(const char *path, bool enabled,
                          (uint64_t)INT64_MAX :
                          multiplier * iterations;
             if (multiplier > 1000000) {
-                size_t rule_start = 0, rule_prev_end = 0, prev_end;
-                size_t next_start, line_end;
                 first = (size_t)(tokens.items[i].text - source);
                 end = (size_t)(tokens.items[body_close].text - source) + 1;
-                for (size_t k = i; k > 0; --k) {
-                    if (yx_dep_equal(&tokens.items[k - 1], "rule")) {
-                        rule_begin = k - 1;
-                        break;
-                    }
-                }
-                if (rule_begin != SIZE_MAX) {
-                    rule_start = (size_t)(tokens.items[rule_begin].text -
-                                           source);
-                    if (rule_begin)
-                        rule_prev_end =
-                            (size_t)(tokens.items[rule_begin - 1].text -
-                                     source) + tokens.items[rule_begin - 1].length;
-                }
-                prev_end = i ? (size_t)(tokens.items[i - 1].text - source) +
-                                 tokens.items[i - 1].length : 0;
-                next_start = body_close + 1 < tokens.count ?
-                    (size_t)(tokens.items[body_close + 1].text - source) :
-                    length;
-                line_end = end;
-                while (line_end < length && source[line_end] != '\n')
-                    ++line_end;
-                if (next_start > line_end) next_start = line_end;
-                if (!((rule_begin != SIZE_MAX &&
-                       yx_fix_comment_suppresses(source, rule_prev_end,
-                                                  rule_start,
-                                                  "too_many_iterations",
-                                                  true)) ||
-                      yx_fix_comment_suppresses(source, prev_end, first,
-                                                 "too_many_iterations", true) ||
-                      yx_fix_comment_suppresses(source, end, next_start,
-                                                 "too_many_iterations",
-                                                 false))) {
+                if (!yx_warning_suppressed_span(source, length,
+                                                "too_many_iterations",
+                                                first, end)) {
                     yx_fix_too_many_iterations_warning(path, source, length,
                                                          first, end, multiplier);
                     ++*warnings;
@@ -36429,6 +36393,7 @@ static bool yx_fix_warn_too_many_iterations(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(frames);
     free(tokens.items);
     free(source);
@@ -36896,12 +36861,15 @@ static bool yx_fix_warn_redundant_modifier(const char *path, bool enabled,
                                             size_t *warnings)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled || warning_from_core) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 2; i + 1 < tokens.count; ++i) {
         const yx_dep_token *pattern = &tokens.items[i - 2];
         const yx_dep_token *regex = &tokens.items[i];
@@ -36924,12 +36892,19 @@ static bool yx_fix_warn_redundant_modifier(const char *path, bool enabled,
         if (suffix >= modifier_at ||
             memchr(source + suffix, '\n', modifier_at - suffix) ||
             memchr(source + suffix, '\r', modifier_at - suffix)) continue;
+        if (yx_warning_suppressed_span(source, length, "redundant_modifier",
+                                       suffix, suffix + 1) ||
+            yx_warning_suppressed_span(source, length, "redundant_modifier",
+                                       modifier_at,
+                                       modifier_at + modifier->length))
+            continue;
         yx_fix_redundant_warning(path, source, length, suffix,
                                   modifier_at, modifier->length);
         ++*warnings;
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -37048,13 +37023,19 @@ static bool yx_fix_warn_invariant_of(const char *path, bool enabled,
                                       size_t *warnings)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, pattern_count = 0;
     size_t rule_begin = 0, condition_begin = 0;
     yx_dep_tokens tokens = {0};
     bool in_condition = false, ok = false;
+    /* The compiler reports every such expression from the parsed condition
+     * (condition.c, yx_condition_visit_excess_quantifiers). */
+    enabled = false;
     if (!enabled) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i < tokens.count; ++i) {
         size_t required, start, end;
         if (yx_dep_equal(&tokens.items[i], "rule")) {
@@ -37107,8 +37088,8 @@ static bool yx_fix_warn_invariant_of(const char *path, bool enabled,
                 !memchr(source + start, '\r', end - start) &&
                 !yx_cli_core_warning_at(core_warnings, "invariant_expr",
                                         path, start, end) &&
-                !yx_warning_suppressed(source, length,
-                                       "invariant_expr", start)) {
+                !yx_warning_suppressed_span(source, length,
+                                            "invariant_expr", start, end)) {
                 yx_fix_invariant_of_warning(path, source, length, start,
                                             end, required, available);
                 ++*warnings;
@@ -37136,8 +37117,9 @@ static bool yx_fix_warn_invariant_of(const char *path, bool enabled,
                 memchr(source + start, '\r', end - start) ||
                 yx_cli_core_warning_at(core_warnings, "invariant_expr",
                                        path, start, end) ||
-                yx_warning_suppressed(source, length,
-                                      "invariant_expr", start)) continue;
+                yx_warning_suppressed_span(source, length,
+                                           "invariant_expr", start, end))
+                continue;
             yx_fix_invariant_of_warning(path, source, length, start, end,
                                         required, available);
             ++*warnings;
@@ -37145,6 +37127,7 @@ static bool yx_fix_warn_invariant_of(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -37202,12 +37185,15 @@ static bool yx_fix_warn_global_rule(const char *path, bool enabled,
                                      size_t *warnings)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, *globals = NULL, global_count = 0;
     yx_dep_tokens tokens = {0};
     bool in_condition = false, ok = false;
     if (!enabled || warning_from_core) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     /* Name tokens of `global rule NAME` declarations, sorted by name and
      * then position, so each condition identifier is one binary search. */
     if (tokens.count) {
@@ -37239,7 +37225,9 @@ static bool yx_fix_warn_global_rule(const char *path, bool enabled,
         start = (size_t)(token->text - source);
         end = start + token->length;
         if (!memchr(source + start, '\n', end - start) &&
-            !memchr(source + start, '\r', end - start)) {
+            !memchr(source + start, '\r', end - start) &&
+            !yx_warning_suppressed_span(source, length, "global_rule_misuse",
+                                        start, end)) {
             yx_fix_global_rule_warning(path, source, length,
                                         start, end);
             ++*warnings;
@@ -37247,6 +37235,7 @@ static bool yx_fix_warn_global_rule(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(globals);
     free(source);
     free(tokens.items);
@@ -37331,12 +37320,15 @@ static bool yx_fix_patch_imports_range(const char *path, bool enabled,
                                        yx_fix_patches *patches)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0, copied = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i + 1 < tokens.count; ++i) {
         const yx_dep_token *first = NULL, *duplicate;
         size_t first_start, first_end, duplicate_start, duplicate_end;
@@ -37491,6 +37483,7 @@ static bool yx_fix_patch_imports_range(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;
@@ -37501,19 +37494,26 @@ static bool yx_fix_patch_zeros(const char *path, bool enabled,
                                size_t *warnings, yx_fix_patches *patches)
 {
     uint8_t *source = NULL;
+    yx_suppression_scope suppressions = {0};
     size_t length = 0;
     yx_dep_tokens tokens = {0};
     bool ok = false;
     if (!enabled) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
+    /* One scan for the suppression comments of the file. */
+    yx_suppression_scope_begin(&suppressions, source, length);
     for (size_t i = 0; i + 2 < tokens.count; ++i) {
         size_t offset;
         if (!yx_dep_equal(&tokens.items[i], "0") ||
             !yx_dep_equal(&tokens.items[i + 1], "of") ||
             !yx_dep_equal(&tokens.items[i + 2], "them")) continue;
         offset = (size_t)(tokens.items[i].text - source);
-        if (!warning_from_core) {
+        if (!warning_from_core &&
+            !yx_warning_suppressed_span(
+                source, length, "ambiguous_expr", offset,
+                (size_t)(tokens.items[i + 2].text - source) +
+                    tokens.items[i + 2].length)) {
             yx_fix_ambiguous_warning(path, source, length, offset);
             ++*warnings;
             /* The quantifier `0` becomes `none`. */
@@ -37524,6 +37524,7 @@ static bool yx_fix_patch_zeros(const char *path, bool enabled,
     }
     ok = true;
 done:
+    yx_suppression_scope_end(&suppressions);
     free(source);
     free(tokens.items);
     return ok;

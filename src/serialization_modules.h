@@ -66,6 +66,9 @@ enum yx_module_op { YX_ME_INT, YX_ME_FLOAT, YX_ME_STRING, YX_ME_BOOL,
 typedef struct yx_module_node {
     uint8_t op, type, argc, comparison;
     bool constant, unsigned_value;
+    /* The TypeValue variant of a module field's integer (3..10: Int8..Int64,
+     * Uint8..Uint64; yx_archive_field_integer_kind), 0 for any other node. */
+    uint8_t integer_kind;
     /* An operand of an `and` / `or` that IR::and / IR::or folded to a
      * constant: it is not in the IR that anchors patterns and limits `#a`. */
     bool folded_away;
@@ -108,6 +111,11 @@ typedef struct yx_module_program {
     size_t binding_count, binding_capacity;
     uint8_t slot_types[YX_ARCHIVE_MAX_VARS];
     bool slot_unsigned[YX_ARCHIVE_MAX_VARS];
+    uint8_t slot_integer_kinds[YX_ARCHIVE_MAX_VARS];
+    /* Decoding: 1 + the node bound to each `with` slot (0: none). */
+    int slot_values[YX_ARCHIVE_MAX_VARS];
+    /* The variable nodes decoded for each slot since its binding (saturating). */
+    uint8_t slot_uses[YX_ARCHIVE_MAX_VARS];
     bool slot_defined[YX_ARCHIVE_MAX_VARS];
     const yx_archive_module_field *slot_fields[YX_ARCHIVE_MAX_VARS];
     int undefined_slot;
@@ -140,6 +148,132 @@ static const yx_archive_module_schema *yx_archive_schema(const char *name)
     for (size_t i = 0; i < sizeof(yx_archive_module_schemas)/sizeof(yx_archive_module_schemas[0]); ++i)
         if (!strcmp(name, yx_archive_module_schemas[i].name)) return &yx_archive_module_schemas[i];
     return NULL;
+}
+/* The module schemas record every field as "integer". The width and the
+ * signedness that emit.rs asks for (TypeValue::is_unsigned, is_non_negative)
+ * are in the module's serialized root structure (types/mod.rs TypeValue:
+ * 3..6 Int8..Int64, 7..10 Uint8..Uint64), which this walks by field name. */
+static bool yx_schema_skip_type(yx_reader *r, unsigned depth);
+static bool yx_schema_skip_blob(yx_reader *r)
+{
+    uint64_t n;
+    if (!yx_get_uint(r, &n) || n > r->length - r->at) return false;
+    r->at += (size_t)n;
+    return true;
+}
+static bool yx_schema_skip_optional_blob(yx_reader *r)
+{
+    uint8_t present;
+    return yx_get_u8(r, &present) && present <= 1 && (!present || yx_schema_skip_blob(r));
+}
+/* A Struct: its fields up to the one called `name` (the reader is left at
+ * that field's type and *found is set), or the whole structure. */
+static bool yx_schema_struct(yx_reader *r, const char *name, size_t name_length, bool *found, unsigned depth)
+{
+    uint64_t count, length, number;
+    uint8_t flag;
+    if (depth > 64 || !yx_get_uint(r, &count)) return false;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (!yx_get_uint(r, &length) || length > r->length - r->at) return false;
+        bool match = name && length == name_length && !memcmp(r->data + r->at, name, name_length);
+        r->at += (size_t)length;
+        if (!yx_get_uint(r, &number)) return false;
+        if (match) { *found = true; return true; }
+        if (!yx_schema_skip_type(r, depth + 1)) return false;
+    }
+    return yx_schema_skip_optional_blob(r) && yx_get_u8(r, &flag) && yx_get_u8(r, &flag);
+}
+static bool yx_schema_skip_type(yx_reader *r, unsigned depth)
+{
+    uint64_t kind, state, count, value;
+    uint8_t byte;
+    bool found = false;
+    if (depth > 64 || !yx_get_uint(r, &kind)) return false;
+    if (kind >= 1 && kind <= 11) {
+        if (!yx_get_uint(r, &state) || state > 2) return false;
+        if (state != 2) {
+            if (kind == 1 || kind == 3 || kind == 7) { if (!yx_get_u8(r, &byte)) return false; }
+            else if (kind == 2) { if (r->length - r->at < 8) return false; r->at += 8; }
+            else if (kind == 11) { if (!yx_schema_skip_blob(r)) return false; }
+            else if (!yx_get_uint(r, &value)) return false;
+        }
+        if (kind == 11) {
+            if (!yx_get_u8(r, &byte) || byte > 1) return false;
+            if (byte) {
+                if (!yx_get_uint(r, &count)) return false;
+                for (uint64_t i = 0; i < count; ++i)
+                    if (!yx_get_uint(r, &value) || value > 2 || (value == 2 && !yx_get_uint(r, &value))) return false;
+            }
+        }
+        return true;
+    }
+    if (kind == 0) return true;
+    if (kind == 12) return yx_schema_skip_optional_blob(r);
+    if (kind == 13) return yx_schema_struct(r, NULL, 0, &found, depth + 1);
+    if (kind == 14) {
+        if (!yx_get_uint(r, &state) || state > 4 || !yx_get_uint(r, &count)) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (state == 0) { if (!yx_get_uint(r, &value)) return false; }
+            else if (state == 1) { if (r->length - r->at < 8) return false; r->at += 8; }
+            else if (state == 2) { if (!yx_get_u8(r, &byte)) return false; }
+            else if (state == 3) { if (!yx_schema_skip_blob(r)) return false; }
+            else if (!yx_schema_struct(r, NULL, 0, &found, depth + 1)) return false;
+        }
+        return true;
+    }
+    if (kind == 15) {
+        if (!yx_get_uint(r, &state) || state > 1 || !yx_get_u8(r, &byte) || byte > 1 ||
+            (byte && !yx_schema_skip_type(r, depth + 1)) || !yx_get_uint(r, &count)) return false;
+        for (uint64_t i = 0; i < count; ++i)
+            if ((state ? !yx_schema_skip_blob(r) : !yx_get_uint(r, &value)) || !yx_schema_skip_type(r, depth + 1))
+                return false;
+        return true;
+    }
+    if (kind == 16) {
+        if (!yx_get_uint(r, &count)) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (!yx_schema_skip_blob(r) || !yx_get_uint(r, &value)) return false;
+            for (uint64_t j = 0; j < value; ++j)
+                if (!yx_schema_skip_blob(r) || !yx_schema_skip_type(r, depth + 1)) return false;
+            if (!yx_schema_skip_type(r, depth + 1) || !yx_schema_skip_optional_blob(r)) return false;
+        }
+        return yx_schema_skip_optional_blob(r);
+    }
+    return false;
+}
+/* The TypeValue variant of the field `path` ("pe.sections.raw_data_size":
+ * members of array elements and of map values are reached through the
+ * array's first structure and the map's deputy), 0 when it is not found. */
+static uint8_t yx_archive_field_integer_kind(const char *path)
+{
+    char module[32];
+    const char *dot = path ? strchr(path, '.') : NULL;
+    if (!dot || (size_t)(dot - path) >= sizeof(module)) return 0;
+    memcpy(module, path, (size_t)(dot - path)); module[dot - path] = 0;
+    const yx_archive_module_schema *schema = yx_archive_schema(module);
+    if (!schema || !schema->globals[0]) return 0;
+    yx_reader r = {schema->globals[0], schema->globals_length[0], 0, false, false};
+    const char *name = path;
+    for (unsigned depth = 0; depth < 32; ++depth) {
+        const char *end = strchr(name, '.');
+        size_t length = end ? (size_t)(end - name) : strlen(name);
+        bool found = false;
+        uint64_t kind, variant, count;
+        uint8_t present;
+        if (!yx_schema_struct(&r, name, length, &found, 0) || !found) return 0;
+        size_t type_at = r.at;
+        if (!yx_get_uint(&r, &kind)) return 0;
+        if (!end) return kind <= 16 ? (uint8_t)kind : 0;
+        name = end + 1;
+        if (kind == 14) {
+            if (!yx_get_uint(&r, &variant) || variant != 4 || !yx_get_uint(&r, &count) || !count) return 0;
+        } else if (kind == 15) {
+            if (!yx_get_uint(&r, &variant) || !yx_get_u8(&r, &present) || present != 1 ||
+                !yx_get_uint(&r, &kind) || kind != 13) return 0;
+        } else if (kind != 13) return 0;
+        (void)type_at;
+    }
+    return 0;
 }
 /* An enum value of the vt module (`vt.NetError.NET_ERROR_TIMED_OUT`): the
  * schema's integer constants, as upstream builds them from vt.proto. Enum
@@ -237,6 +371,17 @@ static int yx_module_node_new(yx_module_program *p, uint8_t op, uint8_t type)
     p->nodes[n].op = op; p->nodes[n].type = type;
     p->nodes[n].constant = op == YX_ME_INT || op == YX_ME_FLOAT || op == YX_ME_BOOL || op == YX_ME_STRING;
     return n;
+}
+/* Types a node that reads the scalar integer field `p->nodes[n].field`. */
+static void yx_module_field_typing(yx_module_program *p, int n)
+{
+    yx_module_node *node;
+    if (n < 0) return;
+    node = &p->nodes[n];
+    if (node->type != 3 || !node->field || node->field->kind != 3) return;
+    node->integer_kind = yx_archive_field_integer_kind(node->field->path);
+    if (node->integer_kind < 3 || node->integer_kind > 10) node->integer_kind = 0;
+    node->unsigned_value = node->integer_kind == 10;
 }
 static int yx_module_arithmetic_node(yx_module_program *p, uint8_t operation, int left, int right)
 {
@@ -347,9 +492,10 @@ static int yx_module_parse_with(yx_module_program *p, unsigned depth)
         const unsigned char *name; size_t length;
         if (!yx_archive_bindings_reserve(&p->bindings, &p->binding_capacity, p->binding_count + 1) || !yx_with_identifier(&p->parser, &name, &length) || !yx_module_take(p, '=')) goto done;
         int value = yx_module_parse(p, 1, depth + 1);
-        /* Scalars, structures and maps (iterated by `for k, v in <name>`). */
+        /* Scalars, structures, arrays and maps (indexed, measured by
+         * `.len()` or iterated by `for .. in <name>`). */
         if (value < 0 || p->nodes[value].type < 1 ||
-            (p->nodes[value].type > 4 && p->nodes[value].type != 6 && p->nodes[value].type != 8)) goto done;
+            (p->nodes[value].type > 4 && (p->nodes[value].type < 6 || p->nodes[value].type > 8))) goto done;
         values[count++] = value;
         p->bindings[p->binding_count].name = name; p->bindings[p->binding_count].length = length;
         int variable = value;
@@ -359,6 +505,7 @@ static int yx_module_parse_with(yx_module_program *p, unsigned depth)
             p->nodes[variable].integer = (int64_t)p->binding_count;
             p->nodes[variable].field = p->nodes[value].field;
             p->nodes[variable].unsigned_value = p->nodes[value].unsigned_value;
+            p->nodes[variable].integer_kind = p->nodes[value].integer_kind;
         }
         p->bindings[p->binding_count++].value = variable;
     } while (yx_module_take(p, ','));
@@ -605,9 +752,37 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
     size_t length = (size_t)(p->parser.at - start);
     if (!length || length >= 160) return -1;
     char path[160]; memcpy(path, start, length); path[length] = 0;
+    int bound = -1;
     for (size_t i = p->binding_count; i > 0; --i)
-        if (p->bindings[i - 1].length == length && !memcmp(p->bindings[i - 1].name, path, length))
-            return p->bindings[i - 1].value;
+        if (p->bindings[i - 1].length == length && !memcmp(p->bindings[i - 1].name, path, length)) {
+            /* A `with` variable declared as an array or a map is indexed
+             * like the field it holds. */
+            const yx_module_node *value = &p->nodes[p->bindings[i - 1].value];
+            const unsigned char *next = p->parser.at;
+            while (*next == ' ' || *next == '\t' || *next == '\r' || *next == '\n') ++next;
+            if (*next != '[' || value->op != YX_ME_VARIABLE || (value->type != 7 && value->type != 8) ||
+                !value->field || value->field->kind != value->type) return p->bindings[i - 1].value;
+            bound = p->bindings[i - 1].value;
+            break;
+        }
+    /* `<variable>.len()` of such a variable (Array::len, Map::len). */
+    const unsigned char *call_end = p->parser.at;
+    while (*call_end == ' ' || *call_end == '\t' || *call_end == '\r' || *call_end == '\n') ++call_end;
+    if (*call_end == '(') {
+        ++call_end;
+        while (*call_end == ' ' || *call_end == '\t' || *call_end == '\r' || *call_end == '\n') ++call_end;
+        call_end = *call_end == ')' ? call_end + 1 : NULL;
+    } else call_end = NULL;
+    if (bound < 0 && length > 4 && !memcmp(path + length - 4, ".len", 4) && call_end)
+        for (size_t i = p->binding_count; i > 0; --i)
+            if (p->bindings[i - 1].length == length - 4 && !memcmp(p->bindings[i - 1].name, path, length - 4)) {
+                const yx_module_node *value = &p->nodes[p->bindings[i - 1].value];
+                if (value->op != YX_ME_VARIABLE || (value->type != 7 && value->type != 8)) break;
+                p->parser.at = call_end;
+                n = yx_module_node_new(p, YX_ME_LENGTH, 3);
+                if (n >= 0) p->nodes[n].args[0] = p->bindings[i - 1].value;
+                return n;
+            }
     int base = -1;
     for (size_t i = p->binding_count; i > 0; --i) {
         size_t prefix = p->bindings[i - 1].length;
@@ -680,15 +855,17 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
     }
     if (!p->schema) return -1;
     const yx_archive_module_field *field = NULL;
-    for (size_t i = 0; i < p->schema->field_count; ++i)
+    if (bound >= 0) field = p->nodes[bound].field;
+    else for (size_t i = 0; i < p->schema->field_count; ++i)
         if (!strcmp(path, p->schema->fields[i].path)) { field = &p->schema->fields[i]; break; }
     if (!field) return -1;
-    if (field->state == 0 && field->kind >= 1 && field->kind <= 3) {
+    if (bound >= 0) n = bound;
+    else if (field->state == 0 && field->kind >= 1 && field->kind <= 3) {
         n = yx_module_node_new(p, field->kind == 1 ? YX_ME_BOOL : field->kind == 2 ? YX_ME_FLOAT : YX_ME_INT, field->kind);
         if (n >= 0) { p->nodes[n].integer = field->integer; p->nodes[n].real = field->real; }
     } else {
         n = yx_module_node_new(p, base < 0 ? YX_ME_LOOKUP : YX_ME_MEMBER, field->kind);
-        if (n >= 0) { p->nodes[n].field = field; p->nodes[n].args[0] = base; }
+        if (n >= 0) { p->nodes[n].field = field; p->nodes[n].args[0] = base; yx_module_field_typing(p, n); }
     }
     if (n < 0) return -1;
     if (yx_module_take(p, '[')) {
@@ -732,7 +909,7 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
             if (!member_field || (length_call && member_field->kind != 7 && member_field->kind != 8)) return -1;
             n = yx_module_node_new(p, YX_ME_MEMBER, member_field->kind);
             if (n < 0) return -1;
-            p->nodes[n].args[0] = index; p->nodes[n].field = member_field;
+            p->nodes[n].args[0] = index; p->nodes[n].field = member_field; yx_module_field_typing(p, n);
             if (length_call) {
                 int length = yx_module_node_new(p, YX_ME_LENGTH, 3);
                 if (length >= 0) p->nodes[length].args[0] = n;
@@ -1100,11 +1277,6 @@ static bool yx_module_arithmetic(yx_module_program *p, int index, yx_writer *w, 
         /* emit_shift_op (emit.rs:146): the amount goes through i64_tmp_b,
          * and an amount of 64 or more gives 0. */
         if (!p->shifts) return false;
-        /* The decoder tells an unsigned literal from a signed one by its
-         * sign bit only: an unsigned constant below 2^63 that selects
-         * `i64.lt_u` or `i64.shr_u` could not be read back. */
-        if ((b->constant && b->unsigned_value && b->integer >= 0) ||
-            (n->comparison == 0x87 && a->constant && a->unsigned_value && a->integer >= 0)) return false;
         p->shift = true;
         return yx_module_arithmetic(p, n->args[0], w, 0, depth + 1, false) &&
             yx_module_arithmetic(p, n->args[1], w, 0, depth + 1, false) &&
@@ -1219,6 +1391,7 @@ static bool yx_module_boolean_operands(yx_module_program *p, int index, uint8_t 
 static bool yx_module_non_negative(const yx_module_node *node)
 {
     return node->unsigned_value || (node->constant && node->integer >= 0) ||
+        (node->integer_kind >= 7 && node->integer_kind <= 10) ||
         (node->op == YX_ME_READ && (node->integer <= 2 ||
             (node->integer >= 8 && node->integer <= 10)));
 }
@@ -1253,11 +1426,13 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
          * (emit_for): kinds 3 and 4 of yx_module_for_tail. */
         uint8_t counted = n->comparison == 0xc7 ? 3 : n->comparison == 0xc8 ? 4 : 0;
         /* A percentage that can be negative is replaced at run time
-         * (emit.rs:2460, TypeValue::is_non_negative). The schema does not
-         * keep the width of a module's integer fields, which decides that:
-         * a percentage is a constant, `filesize` or an integer read here. */
+         * (emit.rs:2460, TypeValue::is_non_negative). The width of a module
+         * field comes from the module's serialized structure
+         * (yx_archive_field_integer_kind); the result types of module
+         * functions and of map values are not carried, so a percentage is a
+         * constant, `filesize`, an integer read or a module field here. */
         if (counted == 4 && !p->nodes[n->args[2]].constant && p->nodes[n->args[2]].op != YX_ME_FILESIZE &&
-            p->nodes[n->args[2]].op != YX_ME_READ) return false;
+            p->nodes[n->args[2]].op != YX_ME_READ && !p->nodes[n->args[2]].integer_kind) return false;
         if (field && field->kind == 8) {
             const yx_archive_module_map *map = yx_module_map_types(field);
             if (!yx_module_map_by_index_name(map) || n->integer < 0 || n->integer > YX_ARCHIVE_MAX_VARS - 7) return false;
@@ -1319,19 +1494,46 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
             yx_module_loop_tail(w,n->integer,n->comparison);
     }
     if (n->op == YX_ME_BIND) {
-        if (n->integer < 0 || n->integer >= YX_ARCHIVE_MAX_VARS) return false;
-        uint8_t type = p->nodes[n->args[0]].type;
-        bool direct = yx_module_definite_value(p, n->args[0], 0);
-        bool saved_defined = p->slot_defined[n->integer];
-        int saved = p->undefined_slot; p->undefined_slot = direct ? saved : (int)n->integer; p->memory = true;
-        bool ok = (direct || (yx_put_u8(w, 2) && yx_put_u8(w, 0x40))) &&
-            yx_put_u8(w, 0x41) && yx_put_sleb_i64(w, n->integer * 8) &&
-            yx_module_emit(p, n->args[0], w, depth + 1) && yx_module_store_value(w, type) &&
-            (direct || (yx_integer_clear_variable(w, n->integer) && yx_put_u8(w, 0x0b)));
-        p->undefined_slot = saved;
-        p->slot_defined[n->integer] = direct;
-        ok = ok && yx_module_emit(p, n->args[1], w, depth + 1);
-        p->slot_defined[n->integer] = saved_defined;
+        /* The declarations of a `with` are a chain of nodes, as long as the
+         * variables YARA-X allows (2048): walked here, not by recursion. */
+        bool *saved_defined = NULL; size_t chain = 0, capacity = 0;
+        bool ok = true;
+        int body = index;
+        while (ok && p->nodes[body].op == YX_ME_BIND) {
+            n = &p->nodes[body];
+            if (n->integer < 0 || n->integer >= YX_ARCHIVE_MAX_VARS || n->args[1] < 0 ||
+                (size_t)n->args[1] >= p->count || chain >= YX_ARCHIVE_MAX_VARS) { ok = false; break; }
+            if (chain == capacity) {
+                size_t next = capacity ? capacity * 2 : 16;
+                bool *grown = realloc(saved_defined, next * sizeof(*grown));
+                if (!grown) { ok = false; break; }
+                saved_defined = grown; capacity = next;
+            }
+            uint8_t type = p->nodes[n->args[0]].type;
+            bool direct = yx_module_definite_value(p, n->args[0], 0);
+            saved_defined[chain++] = p->slot_defined[n->integer];
+            int saved = p->undefined_slot; p->undefined_slot = direct ? saved : (int)n->integer; p->memory = true;
+            ok = (direct || (yx_put_u8(w, 2) && yx_put_u8(w, 0x40))) &&
+                yx_put_u8(w, 0x41) && yx_put_sleb_i64(w, n->integer * 8) &&
+                yx_module_emit(p, n->args[0], w, depth + 1) && yx_module_store_value(w, type) &&
+                (direct || (yx_integer_clear_variable(w, n->integer) && yx_put_u8(w, 0x0b)));
+            p->undefined_slot = saved;
+            p->slot_defined[n->integer] = direct;
+            body = n->args[1];
+        }
+        ok = ok && yx_module_emit(p, body, w, depth + 1);
+        /* Each declaration's slot gets back the state it had, innermost first. */
+        if (chain) {
+            int *links = malloc(chain * sizeof(*links));
+            if (!links) ok = false;
+            else {
+                int at = index;
+                for (size_t i = 0; i < chain; ++i) { links[i] = at; at = p->nodes[at].args[1]; }
+                for (size_t i = chain; i-- > 0;) p->slot_defined[p->nodes[links[i]].integer] = saved_defined[i];
+                free(links);
+            }
+        }
+        free(saved_defined);
         return ok;
     }
     if (n->op == YX_ME_LENGTH) {
@@ -1776,7 +1978,7 @@ static int yx_module_decode_lookup(yx_reader *r, size_t end, yx_module_program *
             if (!field) return -1;
             if (field->kind <= 4 && !yx_integer_wasm_guard(r, end, 0x10, p->undefined_slot)) return -1;
             int node = yx_module_node_new(p, base < 0 ? YX_ME_LOOKUP : YX_ME_MEMBER, field->kind);
-            if (node >= 0) { p->nodes[node].field = field; p->nodes[node].args[0] = base; }
+            if (node >= 0) { p->nodes[node].field = field; p->nodes[node].args[0] = base; yx_module_field_typing(p, node); }
             return node;
         }
         if (marker != 0x41 || count == 16 || position != (int64_t)((count - first) * 4) ||
@@ -1885,6 +2087,8 @@ static int yx_module_decode_binding(yx_reader *r, size_t end, yx_module_program 
     if (!valid) return -1;
     p->slot_types[*slot] = type;
     p->slot_unsigned[*slot] = p->nodes[value].unsigned_value;
+    p->slot_integer_kinds[*slot] = p->nodes[value].integer_kind;
+    p->slot_values[*slot] = value + 1; p->slot_uses[*slot] = 0;
     p->slot_fields[*slot] = p->nodes[value].field;
     return value;
 }
@@ -1917,6 +2121,60 @@ static int yx_module_decode_block(yx_reader *r, size_t end, yx_module_program *p
     free(stack);
     return result;
 }
+/* The module-expression form of yx_integer_force_unsigned: marks the literal
+ * that gives `index` the unsigned type an unsigned opcode asks for. */
+static bool yx_module_force_unsigned(yx_module_program *p, int index, bool strict, unsigned depth)
+{
+    yx_module_node *n;
+    if (index < 0 || (size_t)index >= p->count || depth > 128) return false;
+    n = &p->nodes[index];
+    if (n->type != 3) return false;
+    if (n->unsigned_value) return true;
+    if (n->op == YX_ME_INT) {
+        if (strict && n->integer >= 0) return false;
+        n->unsigned_value = true;
+        return true;
+    }
+    if (n->op == YX_ME_VARIABLE) {
+        int64_t slot = n->integer;
+        /* See yx_integer_force_unsigned: a literal above INT64_MAX in the
+         * declaration, from the variable's first use only. */
+        if (!strict || slot < 0 || slot >= YX_ARCHIVE_MAX_VARS || !p->slot_values[slot] || p->slot_uses[slot] != 1 ||
+            (size_t)p->slot_values[slot] > p->count || p->slot_types[slot] != 3 ||
+            !yx_module_force_unsigned(p, p->slot_values[slot] - 1, strict, depth + 1)) return false;
+        p->slot_unsigned[slot] = true;
+        n->unsigned_value = true;
+        return true;
+    }
+    if (n->constant || n->op != YX_ME_ARITH) return false;
+    switch (n->comparison) {
+    case 0x7c: case 0x7d: case 0x7e: case 0x83: case 0x84: case 0x85:
+        if (!yx_module_force_unsigned(p, n->args[0], strict, depth + 1) &&
+            !yx_module_force_unsigned(p, n->args[1], strict, depth + 1)) return false;
+        break;
+    case 0x86:
+        if (!yx_module_force_unsigned(p, n->args[0], strict, depth + 1)) return false;
+        break;
+    default:
+        return false;
+    }
+    n->unsigned_value = true;
+    return true;
+}
+static bool yx_module_make_unsigned(yx_module_program *p, int index)
+{
+    return yx_module_force_unsigned(p, index, true, 0) || yx_module_force_unsigned(p, index, false, 0);
+}
+static bool yx_module_make_either_unsigned(yx_module_program *p, int first, int second)
+{
+    if (p->nodes[first].unsigned_value || p->nodes[second].unsigned_value ||
+        yx_module_force_unsigned(p, first, true, 0) || yx_module_force_unsigned(p, second, true, 0)) return true;
+    /* Then an operand that is itself a literal, then a literal inside one. */
+    if (p->nodes[first].op == YX_ME_INT) return yx_module_force_unsigned(p, first, false, 0);
+    if (p->nodes[second].op == YX_ME_INT) return yx_module_force_unsigned(p, second, false, 0);
+    return yx_module_force_unsigned(p, first, false, 0) || yx_module_force_unsigned(p, second, false, 0);
+}
+static bool yx_module_non_negative(const yx_module_node *node);
 static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_program *p,
                                         unsigned depth, int *stack, size_t stack_capacity,
                                         int *bindings, int *slots, size_t binding_capacity)
@@ -1974,13 +2232,13 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                     size_t saved_count = p->count, saved_guards = p->decoded_guards;
                     int value_node = yx_module_decode_block(&probe, end, p, depth + 1);
                     yx_writer store = {0};
-                    bool direct = value_node >= 0 && (p->nodes[value_node].type<=4||p->nodes[value_node].type==6||
-                                                      p->nodes[value_node].type==8) &&
+                    bool direct = value_node >= 0 && (p->nodes[value_node].type<=4||(p->nodes[value_node].type>=6&&
+                                                      p->nodes[value_node].type<=8)) &&
                         yx_module_definite_value(p, value_node, 0) &&
                         yx_module_store_value(&store, p->nodes[value_node].type) && yx_integer_wasm_bytes(&probe, end, store.data, store.used);
                     free(store.data);
-                    if (direct && p->nodes[value_node].type == 8) {
-                        /* A map stored in a loop frame's item slot is followed
+                    if (direct && (p->nodes[value_node].type == 7 || p->nodes[value_node].type == 8)) {
+                        /* A map or an array stored in a loop frame's item slot is followed
                          * by the loop's prefix (yx_module_map_loop_prefix),
                          * not by the body of a `with`. */
                         yx_writer prefix = {0};
@@ -1996,6 +2254,8 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                         p->slot_types[slot] = p->nodes[value_node].type; p->slot_defined[slot] = true;
                         p->slot_fields[slot] = p->nodes[value_node].field;
                         p->slot_unsigned[slot] = p->nodes[value_node].unsigned_value;
+                        p->slot_integer_kinds[slot] = p->nodes[value_node].integer_kind;
+                        p->slot_values[slot] = value_node + 1; p->slot_uses[slot] = 0;
                         slots[binding_count] = slot; bindings[binding_count++] = value_node;
                         *r = probe; continue;
                     }
@@ -2028,7 +2288,9 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                 if (!matched) continue;
                 node = yx_module_node_new(p, YX_ME_VARIABLE, p->slot_types[slot]);
                 if (node >= 0) { p->nodes[node].integer = slot; p->nodes[node].field = p->slot_fields[slot];
-                    p->nodes[node].unsigned_value = p->slot_unsigned[slot]; }
+                    p->nodes[node].unsigned_value = p->slot_unsigned[slot];
+                    p->nodes[node].integer_kind = p->slot_values[slot] ? p->slot_integer_kinds[slot] : 0;
+                    if (p->slot_uses[slot] < UINT8_MAX) ++p->slot_uses[slot]; }
                 break;
             }
             if (!matched) return -1;
@@ -2074,7 +2336,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             node = yx_module_node_new(p, YX_ME_FILESIZE, 3);
         } else if (marker == 0xb9 || marker == 0xba) {
             if (!used || p->nodes[stack[used - 1]].type != 3) return -1;
-            if (marker == 0xba) p->nodes[stack[used - 1]].unsigned_value = true;
+            if (marker == 0xba && !yx_module_make_unsigned(p, stack[used - 1])) return -1;
             continue;
         } else if (marker == 0xad) {
             if (!used || p->nodes[stack[used - 1]].type != 1) return -1;
@@ -2146,6 +2408,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             int m;
             for(m=0;m<2&&!matched;++m) {
                 bool l_uns=(m==0), r_uns=(m==1);
+                if((l_uns&&right->unsigned_value)||(r_uns&&left->unsigned_value))continue;
                 for(comparison=0;comparison<6;++comparison) {
                     yx_writer expected={0};r->at=start;
                     matched=yx_integer_comparison_emit(&expected,ops[comparison],l_uns,r_uns,
@@ -2153,8 +2416,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                         yx_integer_wasm_bytes(r,end,expected.data,expected.used);
                     free(expected.data);
                     if(matched) {
-                        left->unsigned_value=l_uns;
-                        right->unsigned_value=r_uns;
+                        if(!yx_module_make_unsigned(p,l_uns?stack[used-2]:stack[used-1]))return -1;
                         break;
                     }
                 }
@@ -2173,9 +2435,9 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             yx_module_node *left = &p->nodes[stack[used - 2]], *right = &p->nodes[stack[used - 1]];
             uint8_t operation = r->data[start + 2] == 0x86 ? 0x86 : 0x87;
             /* `i64.shr_u` and the amount's `i64.lt_u` tell that a literal is unsigned. */
-            if (r->data[start + 2] == 0x88 && left->op == YX_ME_INT && left->integer < 0) left->unsigned_value = true;
-            if (end - start >= 11 && r->data[start + 10] == 0x54 && right->op == YX_ME_INT && right->integer < 0)
-                right->unsigned_value = true;
+            if (r->data[start + 2] == 0x88 && !yx_module_make_unsigned(p, stack[used - 2])) return -1;
+            if (end - start >= 11 && r->data[start + 10] == 0x54 && !yx_module_make_unsigned(p, stack[used - 1]))
+                return -1;
             yx_writer expected = {0}; r->at = start;
             bool matched = yx_integer_shift_v12_emit(&expected, operation, left->unsigned_value, right->unsigned_value,
                     r->data[start + 1]) && yx_integer_wasm_bytes(r, end, expected.data, expected.used);
@@ -2186,7 +2448,11 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             r->at = start;
             if (used < 2 || !yx_integer_wasm_guard(r, end, 0x22, p->undefined_slot) ||
                 !yx_get_u8(r, &marker) || (marker != 0x7f && marker != 0x80 && marker != 0x81 && marker != 0x82)) return -1;
-            if(marker==0x80||marker==0x82)--marker;
+            if(marker==0x80||marker==0x82) {
+                /* emit_div / emit_mod: the unsigned opcode when an operand is unsigned. */
+                if(!yx_module_make_either_unsigned(p,stack[used-2],stack[used-1]))return -1;
+                --marker;
+            }
             int right = stack[--used], left = stack[--used];
             node = yx_module_arithmetic_node(p, marker, left, right);
         } else if ((marker >= 0x7c && marker <= 0x7e) || (marker >= 0x83 && marker <= 0x85) ||
@@ -2199,7 +2465,18 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             static const uint8_t integer_ops[] = {0x51,0x52,0x53,0x55,0x57,0x59};
             static const uint8_t float_ops[] = {0x61,0x62,0x63,0x64,0x65,0x66};
             uint8_t comparison;
-            if(marker>=0x54&&marker<=0x5a&&!(marker&1))--marker;
+            if(marker>=0x54&&marker<=0x5a&&!(marker&1)) {
+                /* emit_int_comparison's plain unsigned opcode: both operands
+                 * unsigned, or one unsigned and the other one not negative. */
+                if(used<2)return -1;
+                for(unsigned side=0;side<2;++side) {
+                    int operand=stack[used-2+side];
+                    if(!p->nodes[operand].unsigned_value&&!yx_module_non_negative(&p->nodes[operand])&&
+                       !yx_module_make_unsigned(p,operand))return -1;
+                }
+                if(!yx_module_make_either_unsigned(p,stack[used-1],stack[used-2]))return -1;
+                --marker;
+            }
             for (comparison = 0; comparison < 6; ++comparison)
                 if (integer_ops[comparison] == marker || float_ops[comparison] == marker) break;
             if (marker == 0x46 || marker == 0x47) comparison = (uint8_t)(marker - 0x46);
@@ -2248,7 +2525,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                 const yx_archive_module_field *field = p->nodes[map].field;
                 const yx_archive_module_map *types = yx_module_map_types(field);
                 const char *name = yx_module_map_lookup_name(types);
-                if ((p->nodes[map].op != YX_ME_LOOKUP && p->nodes[map].op != YX_ME_MEMBER) || !name ||
+                if ((p->nodes[map].op != YX_ME_LOOKUP && p->nodes[map].op != YX_ME_MEMBER && p->nodes[map].op != YX_ME_VARIABLE) || !name ||
                     strcmp(entry->name, name) ||
                     (types->key == 4 ? !yx_module_decode_string(p, stack[used - 1]) :
                                        p->nodes[stack[used - 1]].type != 3) ||
@@ -2260,7 +2537,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                 int array = stack[used - 2];
                 const yx_archive_module_field *field = p->nodes[array].field;
                 static const uint8_t types[] = {3,2,1,4,6};
-                if ((p->nodes[array].op != YX_ME_LOOKUP && p->nodes[array].op != YX_ME_MEMBER) || !field || field->kind != 7 || field->element > 4 ||
+                if ((p->nodes[array].op != YX_ME_LOOKUP && p->nodes[array].op != YX_ME_MEMBER && p->nodes[array].op != YX_ME_VARIABLE) || !field || field->kind != 7 || field->element > 4 ||
                     !yx_integer_wasm_guard(r, end, 0x10, p->undefined_slot)) return -1;
                 node = yx_module_node_new(p, YX_ME_INDEX, types[field->element]);
                 if (node >= 0) { p->nodes[node].args[1] = stack[--used]; p->nodes[node].args[0] = stack[--used]; p->nodes[node].field = field; }
@@ -2299,22 +2576,32 @@ static bool yx_module_print(const yx_module_program *p, int index, yx_writer *ou
     if (n->op >= 32) return p->print_primary && p->print_primary(p, index, out, depth);
     char number[80]; const char *text = NULL;
     if (n->op == YX_ME_INT) {
-        if (n->unsigned_value) { snprintf(number, sizeof(number), "%" PRIu64, (uint64_t)n->integer); text = number; }
+        /* An unsigned constant that fits i64 has no literal of its own: the
+         * conjunction folds to it and keeps the type. */
+        if (n->unsigned_value) { snprintf(number, sizeof(number), n->integer < 0 ? "%" PRIu64 :
+            "(18446744073709551615 & %" PRIu64 ")", (uint64_t)n->integer); text = number; }
         else if (n->integer == INT64_MIN) text = "(-9223372036854775807 - 1)";
         else { snprintf(number, sizeof(number), "%" PRId64, n->integer); text = number; }
     } else if (n->op == YX_ME_FLOAT) {
-        snprintf(number, sizeof(number), "%.17g", n->real);
-        if (!strchr(number, '.') && !strchr(number, 'e') && !strchr(number, 'E')) strcat(number, ".0");
-        text = yx_float_special_source(n->real) ? yx_float_special_source(n->real) : number;
+        char real[YX_FLOAT_SOURCE_TEXT];
+        return yx_float_source_text(n->real, real) && yx_put_bytes(out, real, strlen(real));
     } else if (n->op == YX_ME_BOOL) text = n->integer ? "true" : "false";
     else if (n->op == YX_ME_VARIABLE) { snprintf(number, sizeof(number), "v%" PRId64, n->integer); text = number; }
     else if (n->op == YX_ME_FILESIZE) text = "filesize";
     else if (n->op == YX_ME_LOOKUP) text = n->field->path;
     if (text) return yx_put_bytes(out, text, strlen(text));
     if (n->op == YX_ME_BIND) {
-        snprintf(number, sizeof(number), "with v%" PRId64 "=", n->integer);
-        return yx_put_bytes(out, number, strlen(number)) && yx_module_print(p, n->args[0], out, depth + 1) &&
-            yx_put_bytes(out, ": (", 3) && yx_module_print(p, n->args[1], out, depth + 1) && yx_put_u8(out, ')');
+        /* A chain of declarations prints as one `with`: the same variables
+         * in the same slots, without nesting as deep as the chain. */
+        int body = index;
+        for (bool first = true; p->nodes[body].op == YX_ME_BIND; first = false) {
+            n = &p->nodes[body];
+            snprintf(number, sizeof(number), first ? "with v%" PRId64 "=" : ", v%" PRId64 "=", n->integer);
+            if (n->args[1] < 0 || (size_t)n->args[1] >= p->count || !yx_put_bytes(out, number, strlen(number)) ||
+                !yx_module_print(p, n->args[0], out, depth + 1)) return false;
+            body = n->args[1];
+        }
+        return yx_put_bytes(out, ": (", 3) && yx_module_print(p, body, out, depth + 1) && yx_put_u8(out, ')');
     }
     if (n->op == YX_ME_LOOP) {
         const yx_archive_module_field *field = p->nodes[n->args[0]].field;

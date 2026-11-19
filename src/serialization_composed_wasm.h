@@ -73,7 +73,7 @@ static bool yx_composed_module_wasm(yx_module_program *p, const int *roots,
     if(!yx_module_nodes_reserve(p,count))goto done;
     int joined=yx_composed_join_roots(p,roots,count);
     if(joined<0)goto done;
-    p->no_match=false;
+    p->no_match=false;p->shifts=true;
     for(size_t i=0;i<count;++i)p->no_match|=context->prior.rules[i].is_global;
     if(context->archive&&context->archive->logical) {
         if(!yx_module_pattern_wasm(p,joined,&initial,&initial_length))goto done;
@@ -101,7 +101,7 @@ static bool yx_composed_module_wasm(yx_module_program *p, const int *roots,
     }
     if (match == SIZE_MAX) goto done;
     for(size_t i=0;i<count;++i) {
-        yx_writer expression={0};p->filesize=p->divisor=p->i32_local=p->two_locals=false;p->call_count=0;context->helper_call_count=0;
+        yx_writer expression={0};p->filesize=p->divisor=p->i32_local=p->two_locals=p->shift=false;p->shifts=true;p->call_count=0;context->helper_call_count=0;
         bool measured=yx_composed_rule_emit(p,context,roots[i],i,match,no_match,&expression)&&
             p->import_count==import_count&&
             yx_rule_expression_rule_size(&expression,context->search_global,&sizes[i]);
@@ -120,7 +120,7 @@ static bool yx_composed_module_wasm(yx_module_program *p, const int *roots,
     for (size_t chunk = 0; chunk < chunks; ++chunk) {
         yx_writer expression = {0};
         size_t first=firsts[chunk],last=lasts[chunk];
-        p->filesize = p->divisor = p->i32_local = p->two_locals = false;
+        p->filesize = p->divisor = p->i32_local = p->two_locals = p->shift = false;
         p->call_count = 0;
         context->helper_call_count = 0;
         bool emitted = true;
@@ -135,6 +135,13 @@ static bool yx_composed_module_wasm(yx_module_program *p, const int *roots,
         }
         yx_writer *body = &bodies[chunk];
         bool locals = p->filesize || p->divisor || p->two_locals;
+        /* A shift wrote i64_tmp_b as local 1: it is the function's only i64
+         * local unless something uses i64_tmp_a (yx_module_wasm). */
+        if (emitted && p->shift) {
+            if (locals) p->two_locals = true;
+            else emitted = yx_module_shift_wide_locals(expression.data, expression.used, -1);
+            locals = true;
+        }
         /* walrus numbers the i32 temporary before the i64 ones, which the
          * writer numbers from 0. Range bounds and signed division use
          * i64_tmp_b as well. */

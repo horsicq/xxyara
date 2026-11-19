@@ -824,6 +824,18 @@ int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler,
                                        const char *origin,
                                        size_t start, size_t quantifier_end,
                                        size_t end);
+/* invariant_expr of `<n> of <items>` with n above the number of items,
+ * raised at source position `raised`. */
+int yx_compiler_excess_quantifier_warning(YRX_COMPILER *compiler,
+                                          const char *source,
+                                          const char *origin,
+                                          size_t start, size_t end,
+                                          size_t raised, int64_t required,
+                                          size_t available);
+/* Records that the warning added since `count` warnings was raised at
+ * source position `raised`. */
+bool yx_compiler_warning_raised_at(YRX_COMPILER *compiler, size_t count,
+                                   size_t raised);
 int yx_compiler_nonbool_integer_warning(YRX_COMPILER *compiler,
                                         const char *source,
                                         const char *origin,

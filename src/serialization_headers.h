@@ -129,8 +129,15 @@ static inline bool yx_header_integer_visit(const yx_integer_expr *tree,int index
 static void yx_anchor_top_level(const yx_integer_expr *tree,int index,int64_t pattern,
     int64_t *offset,unsigned depth)
 {
-    if(index<0||depth>256)return;
+    if(index<0||depth>4096)return;
     const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+    /* find_top_level_anchors (ir/mod.rs) descends `and` and the body of a
+     * `with`; a folded operator is a constant and has no operands. */
+    while(n->op==0xc0&&!n->constant) {
+        if(n->right<0||++depth>4096)return;
+        n=&YX_INTEGER_NODES(tree)[n->right];
+    }
+    if(n->constant)return;
     if(n->op==0xa0||n->op==0xd8) {
         yx_anchor_top_level(tree,n->left,pattern,offset,depth+1);
         if(n->right!=n->left)yx_anchor_top_level(tree,n->right,pattern,offset,depth+1);
@@ -145,6 +152,9 @@ static bool yx_anchor_uses(const yx_integer_expr *tree,int index,int64_t pattern
     if(index<0)return true;
     if(depth>4096)return false;
     const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+    /* anchor_patterns walks the folded IR: a folded `and` / `or` uses no
+     * pattern. */
+    if(n->constant&&(n->op==0xa0||n->op==0xa1||n->op==0xa2))return true;
     if(n->op>=0xd1&&n->op<=0xd7&&n->value==pattern) {
         if(n->op==0xd5) {
             const yx_integer_expr_node *at=n->left>=0?&YX_INTEGER_NODES(tree)[n->left]:NULL;

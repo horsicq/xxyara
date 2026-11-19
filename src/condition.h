@@ -178,9 +178,29 @@ bool yx_condition_visit_type_warnings(const yx_condition *condition,
  * YARA-X's warning order: the quantifier's span (inside parentheses) and
  * the end of the expression (its last item or anchor). */
 typedef bool (*yx_condition_zero_quantifier_callback)(size_t quantifier_start,
-    size_t quantifier_end, size_t end, void *user);
+    size_t quantifier_end, size_t end, size_t raised, void *user);
 bool yx_condition_visit_zero_quantifiers(const yx_condition *condition,
     yx_condition_zero_quantifier_callback callback, void *user);
+/* Every `of` and `for ... of` expression whose quantifier folds to an
+ * integer above the number of its items (YARA-X's invariant_expr "the
+ * expression requires N matching patterns out of M"): the expression's
+ * span, and `raised`, where its warnings are raised: after its items,
+ * before its anchor. The zero-quantifier callback receives the same point. */
+typedef bool (*yx_condition_excess_quantifier_callback)(size_t start,
+    size_t end, size_t raised, int64_t required, size_t available, void *user);
+/* Both kinds in one walk, each expression's warnings after those of the
+ * expressions inside it, as YARA-X raises them. Either callback may be NULL. */
+bool yx_condition_visit_of_quantifiers(const yx_condition *condition,
+    const char *const *pattern_names, size_t pattern_count,
+    yx_condition_zero_quantifier_callback zero,
+    yx_condition_excess_quantifier_callback excess, void *user);
+/* Every `for ... in` loop over a range with constant bounds or over a tuple
+ * whose iterations, times those of the loops around it, exceed 1,000,000
+ * (YARA-X's too_many_iterations): the loop's span, in source order. */
+typedef bool (*yx_condition_loop_iterations_callback)(size_t start, size_t end,
+    uint64_t iterations, void *user);
+bool yx_condition_visit_loop_iterations(const yx_condition *condition,
+    yx_condition_loop_iterations_callback callback, void *user);
 /* Every `of` expression anchored with `at` whose quantifier asks for two or
  * more of its patterns (YARA-X's potentially unsatisfiable expression): the
  * quantifier's span and the anchor's, from `at` to the end of its
@@ -229,6 +249,27 @@ bool yx_condition_pattern_nonanchorable(const yx_condition *condition,
  * once folded: `$a or 1` gives `$a or true`. NULL when nothing changes;
  * the caller frees the text. */
 char *yx_condition_folded_text(const char *expression);
+/* The condition with every integer the IR builder folds spelled as its
+ * literal: constant arithmetic (`1 + 2`), a `with` variable declared as a
+ * constant, a module constant and arithmetic over those, as Expr::Const has
+ * them. NULL when nothing changes; the caller frees the text. */
+char *yx_condition_literal_text(const char *expression,
+                                const char *const *imports, size_t import_count,
+                                const yx_global *globals, size_t global_count);
+/* Folds the module constants of a compiled condition once its symbols are
+ * known: a path folds only when its root is one of `imports` and no global
+ * has that name. yx_condition_validate does it; a condition compiled from
+ * text alone needs it for constant anchors. False when the folding fails. */
+bool yx_condition_fold_modules(yx_condition *condition,
+                               const char *const *imports, size_t import_count,
+                               const yx_global *globals, size_t global_count,
+                               char *error, size_t error_capacity);
+/* Tells a condition compiled without validation the rule's patterns, for
+ * the number of patterns in each of its pattern sets (the anchoring of
+ * `any of ($a*) at 0` and `2 of (..) at 0` depends on it). */
+void yx_condition_bind_pattern_sets(yx_condition *condition,
+                                    const char *const *pattern_names,
+                                    size_t pattern_count);
 /* A simple `at` condition can only observe this pattern at one fixed offset. */
 bool yx_condition_pattern_fixed_at(const yx_condition *condition,
                                    const char *pattern_name, size_t *offset);
@@ -276,6 +317,13 @@ void yx_condition_drop_absorbed_console_calls(yx_condition *condition);
 /* Whether a module path names a constant (an enumeration item and the
  * like); *floating tells a float constant from an integer one. */
 bool yx_condition_module_constant(const char *path, bool *floating);
+/* The same, with the constant's value (an i64, or `real` for a float). */
+bool yx_condition_module_constant_number(const char *path, uint64_t *value,
+                                         bool *floating, double *real);
+/* The same with the constant's value: *number for a float constant,
+ * *integer (its 64 bits) otherwise. */
+bool yx_condition_module_constant_value(const char *path, bool *floating,
+                                        uint64_t *integer, double *number);
 bool yx_condition_uses_only_pe_locale_fields(const yx_condition *condition);
 bool yx_condition_uses_only_dex_scalar_fields(const yx_condition *condition);
 bool yx_dex_output_root_string_at(const uint8_t *data, size_t size,

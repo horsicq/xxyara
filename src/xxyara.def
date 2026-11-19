@@ -58,3 +58,4 @@ yrx_scanner_set_module_data
 yrx_scanner_set_module_output
 yrx_scanner_set_timeout
 xxyara_scanner_retain_scan_data
+xxyara_scanner_iter_non_matching_rules

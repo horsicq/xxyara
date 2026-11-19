@@ -34,15 +34,6 @@ static yx_ser_result yx_physical_single_condition_encode(const YRX_RULES *rules,
     context.name=p->identifier; context.pattern_count=1; context.names[0]=p->identifier;
     yx_pattern_expression_setup(tree,&context);
     int root=yx_integer_expr_condition(tree,r->condition_text);
-    if (root>=0) for (size_t i=0;i<tree->count;++i) {
-        yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[i];
-        if ((node->op==0xa0 || node->op==0xa1) && !node->constant) {
-            bool identity=node->op==0xa0;
-            int child=YX_INTEGER_NODES(tree)[node->left].constant && !!YX_INTEGER_NODES(tree)[node->left].value==identity ? node->right :
-                YX_INTEGER_NODES(tree)[node->right].constant && !!YX_INTEGER_NODES(tree)[node->right].value==identity ? node->left : -1;
-            if (child>=0) { node->op=identity?0xd8:0xd9; node->left=node->right=child; }
-        }
-    }
     if (root<0) {
         /* Set quantifiers share the ordinary literal's condition program. */
         YRX_PATTERN plain=*p; YRX_RULE adapted=*r; YRX_RULES base=*rules;

@@ -148,6 +148,7 @@ static bool yx_global_rules_wasm(yx_module_program *p, const int *roots, size_t 
     if (!yx_module_nodes_reserve(p, count)) goto done;
     int joined = yx_global_rules_join(p, roots, count);
     if (joined < 0) goto done;
+    p->shifts = true;
     if (!yx_module_wasm(p, joined, &initial, &initial_length)) goto done;
     yx_reader header = {initial, initial_length, 8, false, false};
     for (unsigned i = 0; i < 2; ++i) {
@@ -161,7 +162,7 @@ static bool yx_global_rules_wasm(yx_module_program *p, const int *roots, size_t 
         if (!strcmp(p->imports[i].name, "rule_match@rule_id:i@")) match = (int)i;
     if (match < 0) goto done;
     for(size_t i=0;i<count;++i) {
-        yx_writer expression={0};p->filesize=p->divisor=false;p->call_count=0;
+        yx_writer expression={0};p->filesize=p->divisor=p->two_locals=p->shift=false;p->call_count=0;
         bool measured=yx_global_rules_emit_one(p,roots[i],i,(size_t)match,&expression)&&
             yx_rule_expression_rule_size(&expression,SIZE_MAX,&sizes[i]);
         free(expression.data);if(!measured)goto done;
@@ -174,7 +175,7 @@ static bool yx_global_rules_wasm(yx_module_program *p, const int *roots, size_t 
     for (size_t chunk = 0; chunk < chunks; ++chunk) {
         yx_writer expression = {0};
         size_t first=firsts[chunk],last=lasts[chunk];
-        p->filesize = p->divisor = false; p->call_count = 0; p->undefined_slot = -1;
+        p->filesize = p->divisor = p->two_locals = p->shift = false; p->call_count = 0; p->undefined_slot = -1;
         for (size_t i = first; i < last; ++i) {
             if (!yx_global_rules_emit_one(p,roots[i],i,(size_t)match,&expression)) {
                 free(expression.data); goto done;
@@ -185,9 +186,17 @@ static bool yx_global_rules_wasm(yx_module_program *p, const int *roots, size_t 
             if (at >= expression.used || expression.data[at] >= p->import_count) { free(expression.data); goto done; }
             expression.data[at] = p->imports[expression.data[at]].id;
         }
-        yx_writer *body = &bodies[chunk]; bool locals = p->filesize || p->divisor;
-        bool emitted = yx_put_u8(body, locals ? 1 : 0) &&
-            (!locals || (yx_put_u8(body, 1) && yx_put_u8(body, 0x7e))) &&
+        yx_writer *body = &bodies[chunk]; bool locals = p->filesize || p->divisor || p->two_locals;
+        bool emitted = true;
+        /* A shift wrote i64_tmp_b as local 1: it is the function's only
+         * local unless something uses i64_tmp_a (yx_module_wasm). */
+        if (p->shift) {
+            if (locals) p->two_locals = true;
+            else emitted = yx_module_shift_wide_locals(expression.data, expression.used, -1);
+            locals = true;
+        }
+        emitted = emitted && yx_put_u8(body, locals ? 1 : 0) &&
+            (!locals || (yx_put_u8(body, p->two_locals ? 2 : 1) && yx_put_u8(body, 0x7e))) &&
             yx_put_bytes(body, expression.data, expression.used) && yx_put_u8(body, 0x41) && yx_put_u8(body, 0) && yx_put_u8(body, 0x0b);
         free(expression.data);
         if (!emitted || !yx_rule_expression_instructions(body, &order[chunk].instructions)) goto done;
@@ -389,7 +398,7 @@ static yx_ser_result yx_decode_global_rules(const uint8_t *data, size_t length,
             (groups && (!yx_get_uleb(&wr, &locals) || locals != 1 || !yx_get_u8(&wr, &type) || type != 0x7e))) goto done;
         while (end - wr.at >= 2 && wr.data[wr.at] == 2 && wr.data[wr.at + 1] == 0x7f) {
             wr.at += 2; p->undefined_slot = -1;
-            memset(p->slot_types, 0, sizeof(p->slot_types)); memset(p->slot_fields, 0, sizeof(p->slot_fields));
+            memset(p->slot_types, 0, sizeof(p->slot_types)); memset((void *)p->slot_fields, 0, sizeof(p->slot_fields));
             size_t node_start = p->count;
             int root = yx_module_decode_block(&wr, end, p, 0);
             static const uint8_t suffix[] = {0x45,4,0x40,5,0x41}; int64_t rule; uint64_t call;

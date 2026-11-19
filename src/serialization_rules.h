@@ -211,7 +211,7 @@ static bool yx_rule_expressions_wasm(yx_integer_expr *trees, const int *roots,
     for(size_t i=0;i<count;++i) {
         yx_integer_expr *tree=&trees[i];
         tree->has_filesize=tree->has_shift=tree->has_divisor=tree->has_memory=tree->has_loop=false;
-        tree->read_mask=0;
+        tree->read_mask=0;tree->small_shift=true;
         if(!yx_integer_expr_resources(tree,roots[i],0,0))goto done;
         imports.has_filesize|=tree->has_filesize;imports.has_memory|=tree->has_memory;
         imports.read_mask|=tree->read_mask;
@@ -240,12 +240,20 @@ static bool yx_rule_expressions_wasm(yx_integer_expr *trees, const int *roots,
     total=chunks+2;
     for(size_t chunk=0;chunk<chunks;++chunk) {
         yx_writer *body=&bodies[chunk];size_t first=firsts[chunk],last=lasts[chunk];
-        bool locals=false,shift=false;
+        bool locals=false,shift=false,first_local=false,loop=false;
         for(size_t i=first;i<last;++i) {
             locals|=trees[i].has_filesize||trees[i].has_shift||trees[i].has_divisor||trees[i].has_loop;
             shift|=trees[i].has_shift||trees[i].has_loop;
+            loop|=trees[i].has_loop;
+            /* i64_tmp_a: filesize, divisions, loops, and every use of
+             * i64_tmp_b other than a shift (yx_make_runtime_integer_wasm). */
+            first_local|=trees[i].has_filesize||trees[i].has_divisor||trees[i].has_loop||
+                (trees[i].has_shift&&!trees[i].small_shift);
         }
-        if(!yx_put_u8(body,locals?1:0)||(locals&&(!yx_put_u8(body,shift?2:1)||!yx_put_u8(body,0x7e))))goto done;
+        /* A shift's i64_tmp_b is the function's only local, numbered 0,
+         * unless something in the function uses i64_tmp_a. */
+        if(first_local)for(size_t i=first;i<last;++i)trees[i].small_shift=false;
+        if(!yx_put_u8(body,locals?1:0)||(locals&&(!yx_put_u8(body,loop||(shift&&first_local)?2:1)||!yx_put_u8(body,0x7e))))goto done;
         for(size_t i=first;i<last;++i) {
             trees[i].match_id=imports.match_id;memcpy(trees[i].read_ids,imports.read_ids,sizeof(imports.read_ids));
             if(!yx_rule_expression_emit_one(&trees[i],roots[i],i,imports.match_id,body))goto done;

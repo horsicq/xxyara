@@ -1140,6 +1140,54 @@ static char *yx_compiler_diagnostic_text(const YRX_COMPILER *compiler,
                                      origin, start, end, note);
 }
 
+static size_t yx_snippet_columns(const char *start, const char *end);
+static size_t yx_snippet_whitespace(const char *at, const char *end);
+
+/* True for a line with a character the renderer draws as a control picture,
+ * removes or replaces (yx_diagnostic_render_fragment). */
+static bool yx_diagnostic_line_has_pictures(const char *start, const char *end)
+{
+    for (const char *at = start; at < end; ++at) {
+        unsigned char byte = (unsigned char)*at;
+        if ((byte < 0x20 && byte != '\t') || byte == 0x7f) return true;
+        /* U+200D and the bidirectional controls U+202A..U+202E and
+         * U+2066..U+2069. */
+        if (byte == 0xe2 && end - at >= 3 &&
+            (((unsigned char)at[1] == 0x80 &&
+              ((unsigned char)at[2] == 0x8d ||
+               ((unsigned char)at[2] >= 0xaa && (unsigned char)at[2] <= 0xae))) ||
+             ((unsigned char)at[1] == 0x81 &&
+              (unsigned char)at[2] >= 0xa6 && (unsigned char)at[2] <= 0xa9)))
+            return true;
+    }
+    return false;
+}
+
+/* True for a line with characters outside printable ASCII that the
+ * renderer's margin cuts: wider than the terminal allows, or indented by
+ * more than 26 columns. */
+static bool yx_diagnostic_wide_line_is_cut(const char *start, const char *end)
+{
+    const char *text = start;
+    size_t leading = 0;
+    bool wide = false;
+    /* What the byte-indexed crop of printable ASCII cannot cut: other
+     * scalars and the characters drawn as control pictures (a bare CR is
+     * cut there). */
+    for (const char *at = start; at < end; ++at)
+        if ((unsigned char)*at >= 0x7f ||
+            ((unsigned char)*at < 0x20 && *at != '\t' && *at != '\r'))
+            wide = true;
+    if (!wide) return false;
+    while (text < end) {
+        size_t bytes = yx_snippet_whitespace(text, end);
+        if (!bytes) break;
+        text += bytes;
+        ++leading;
+    }
+    return (text < end && leading > 26) || yx_snippet_columns(start, end) > 126;
+}
+
 /* Every caller is a compiler method; the registry is the compiler's. */
 #define yx_diagnostic_text(...) \
     yx_compiler_diagnostic_text(compiler, __VA_ARGS__)
@@ -1177,6 +1225,14 @@ static char *yx_diagnostic_text_source(const char *level, const char *code,
     column = yx_diagnostic_columns(line_start, source + start) + 1;
     /* A final line break ending the span does not make it multi-line. */
     if (end > start + 1 && memchr(source + start, '\n', end - start - 1))
+        return yx_diagnostic_multiline(level, code, title, label, source,
+                                        origin, start, end, line, column,
+                                        line_start, note);
+    /* The byte-indexed crop below handles printable ASCII. A longer line
+     * with other characters is cut by the general snippet renderer, which
+     * works in display cells. */
+    if (end > start && source + end <= line_end &&
+        yx_diagnostic_wide_line_is_cut(line_start, line_end))
         return yx_diagnostic_multiline(level, code, title, label, source,
                                         origin, start, end, line, column,
                                         line_start, note);
@@ -1472,8 +1528,9 @@ static bool yx_compiler_warning(YRX_COMPILER *compiler, const char *type,
 {
     char *text, *json, **grown;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (source && yx_warning_suppressed((const uint8_t *)source,
-                                        strlen(source), code, start))
+    if (source && yx_warning_suppressed_span((const uint8_t *)source,
+                                             strlen(source), code, start,
+                                             end))
         return true;
     if (compiler->warning_count >= compiler->max_warnings) return true;
     text = yx_diagnostic_text("warning", code, title, label, source,
@@ -1663,23 +1720,220 @@ static size_t yx_snippet_columns(const char *start, const char *end)
     return cells;
 }
 
+/* annotate-snippets' Margin: the window of display columns of the source
+ * lines that fits the terminal. */
+typedef struct {
+    size_t whitespace_left, span_left, span_right, label_right;
+    size_t computed_left, computed_right, column_width;
+} yx_snippet_margin;
+
+static void yx_snippet_margin_compute(yx_snippet_margin *m, size_t max_line_len)
+{
+    m->whitespace_left = m->whitespace_left > 6 ? m->whitespace_left - 6 : 0;
+    m->span_left = m->span_left > 6 ? m->span_left - 6 : 0;
+    m->span_right += 6;
+    m->label_right += 6;
+    /* A lot of leading whitespace (> 20) is trimmed, keeping some padding. */
+    m->computed_left = m->whitespace_left > 20 ? m->whitespace_left - 16 : 0;
+    m->computed_right = max_line_len > m->computed_left ? max_line_len :
+                                                           m->computed_left;
+    if (m->computed_right - m->computed_left <= m->column_width) return;
+    if (m->label_right >= m->whitespace_left &&
+        m->label_right - m->whitespace_left <= m->column_width) {
+        /* The window fits when only whitespace is trimmed. */
+        m->computed_left = m->whitespace_left;
+        m->computed_right = m->computed_left + m->column_width;
+    } else if (m->label_right >= m->span_left &&
+               m->label_right - m->span_left <= m->column_width) {
+        /* The spans and their labels fit. */
+        size_t padding = (m->column_width - (m->label_right - m->span_left)) / 2;
+        m->computed_left = m->span_left > padding ? m->span_left - padding : 0;
+        m->computed_right = m->computed_left + m->column_width;
+    } else if (m->span_right >= m->span_left &&
+               m->span_right - m->span_left <= m->column_width) {
+        /* The spans fit. */
+        size_t padding = (m->column_width - (m->span_right - m->span_left)) / 5 * 2;
+        m->computed_left = m->span_left > padding ? m->span_left - padding : 0;
+        m->computed_right = m->computed_left + m->column_width;
+    } else {
+        /* Mostly give up, but still do not show the full line. */
+        m->computed_left = m->span_left;
+        m->computed_right = m->span_right;
+    }
+}
+
+static size_t yx_snippet_scalar_cells(const char *at, size_t length)
+{
+    return *at == '\t' ? 1 : yx_diagnostic_display_width(at, at + length);
+}
+
+typedef struct {
+    const char *text;
+    size_t length;
+} yx_snippet_slot;
+
+/* The styled buffer holds one scalar per cell whatever its width. */
+static void yx_snippet_slots_put(yx_snippet_slot *slots, size_t *count,
+                                 size_t at, const char *text, const char *end)
+{
+    static const char space[] = " ";
+    while (*count < at) {
+        slots[*count].text = space;
+        slots[(*count)++].length = 1;
+    }
+    while (text < end) {
+        size_t bytes = yx_diagnostic_scalar_length(text, end);
+        slots[at].text = text;
+        slots[at].length = bytes;
+        if (++at > *count) *count = at;
+        text += bytes;
+    }
+}
+
+/* annotate-snippets draws control characters as pictures, drops the zero
+ * width joiner and replaces the bidirectional controls in the source text
+ * it shows: the same for the text of row `row` from `from` on. */
+static bool yx_snippet_row_pictures(yx_snippet_buffer *buffer, size_t row,
+                                    size_t from)
+{
+    char *rendered, *grown;
+    size_t length;
+    if (row >= buffer->count || buffer->lengths[row] <= from ||
+        !yx_diagnostic_line_has_pictures(buffer->rows[row] + from,
+                                         buffer->rows[row] + buffer->lengths[row]))
+        return true;
+    rendered = yx_diagnostic_render_fragment(buffer->rows[row] + from,
+                                             buffer->lengths[row] - from);
+    if (!rendered) return false;
+    length = strlen(rendered);
+    grown = (char *)realloc(buffer->rows[row], from + length + 1);
+    if (!grown) { free(rendered); return false; }
+    memcpy(grown + from, rendered, length + 1);
+    free(rendered);
+    buffer->rows[row] = grown;
+    buffer->lengths[row] = from + length;
+    if (buffer->kept[row]) buffer->kept[row] = from + length;
+    return true;
+}
+
 /* Draws a source line: its number, the separator and the text (tabs as one
- * space) at `code_offset`. */
+ * space) at `code_offset`, cut to the margin's window with "..." where text
+ * was removed (annotate-snippets' draw_line). *left_out receives the number
+ * of display columns removed on the left. */
 static bool yx_snippet_source_row(yx_snippet_buffer *buffer, size_t row,
                                   size_t number, size_t digits,
                                   size_t width_offset, size_t code_offset,
-                                  const char *start, const char *end)
+                                  const char *start, const char *end,
+                                  const yx_snippet_margin *margin,
+                                  size_t *left_out)
 {
+    static const char placeholder[] = "...";
     char prefix[32];
     int length = snprintf(prefix, sizeof(prefix), "%*zu", (int)digits, number);
+    size_t line_len = yx_snippet_columns(start, end);
+    size_t left = margin->computed_left < line_len ? margin->computed_left : line_len;
+    size_t right = (line_len > margin->computed_left ?
+                    line_len - margin->computed_left : 0) <= margin->column_width ||
+                   line_len < margin->computed_right ? line_len : margin->computed_right;
+    size_t skipped = 0, taken = 0, window = right > left ? right - left : 0;
+    size_t width_taken = 0, scalars = 0, count = 0, column = code_offset;
+    const char *code = start, *code_end, *text;
+    yx_snippet_slot *slots;
+    bool ok = true;
     if (length < 0 || !yx_snippet_put(buffer, row, 0, prefix, (size_t)length) ||
         !yx_snippet_putc(buffer, row, width_offset - 2, '|')) return false;
-    if (end > start && !yx_snippet_put(buffer, row, code_offset, start,
-                                       (size_t)(end - start))) return false;
+    /* A scalar that straddles the left edge is skipped whole. */
+    while (code < end && skipped < left) {
+        size_t bytes = yx_diagnostic_scalar_length(code, end);
+        skipped += yx_snippet_scalar_cells(code, bytes);
+        code += bytes;
+    }
+    code_end = code;
+    while (code_end < end) {
+        size_t bytes = yx_diagnostic_scalar_length(code_end, end);
+        taken += yx_snippet_scalar_cells(code_end, bytes);
+        if (taken > window) break;
+        code_end += bytes;
+        ++scalars;
+    }
+    if (skipped > left) left = skipped;
+    if (left_out) *left_out = left;
+    if (margin->computed_left == 0 && line_len <= right) {
+        if (code_end > code) {
+            if (!yx_snippet_put(buffer, row, code_offset, code,
+                                (size_t)(code_end - code))) return false;
+            buffer->kept[row] = code_offset + (size_t)(code_end - code);
+        }
+        for (size_t at = code_offset; at < buffer->lengths[row]; ++at)
+            if (buffer->rows[row][at] == '\t') buffer->rows[row][at] = ' ';
+        return yx_snippet_row_pictures(buffer, row, code_offset);
+    }
+    slots = (yx_snippet_slot *)malloc((scalars + 16) * sizeof(*slots));
+    if (!slots) return false;
+    text = code;
+    if (margin->computed_left > 0) {
+        /* "..." stands for the first scalars covering at least three cells. */
+        while (text < code_end) {
+            size_t bytes = yx_diagnostic_scalar_length(text, code_end);
+            width_taken += yx_snippet_scalar_cells(text, bytes);
+            text += bytes;
+            --scalars;
+            if (width_taken >= 3) break;
+        }
+        yx_snippet_slots_put(slots, &count, 0, placeholder, placeholder + 3);
+    }
+    yx_snippet_slots_put(slots, &count, width_taken, text, code_end);
+    if (line_len > right) {
+        /* "..." overwrites the last scalars covering at least three cells. */
+        const char *cut = code_end;
+        size_t cells = 0, removed = 0, at;
+        while (cut > code && cells < 3) {
+            const char *previous = cut - 1;
+            while (previous > code && ((unsigned char)*previous & 0xc0) == 0x80 &&
+                   cut - previous < 4) --previous;
+            if (previous + yx_diagnostic_scalar_length(previous, cut) != cut)
+                previous = cut - 1;
+            cells += yx_snippet_scalar_cells(previous, (size_t)(cut - previous));
+            cut = previous;
+            ++removed;
+        }
+        at = width_taken + scalars > removed ? width_taken + scalars - removed : 0;
+        yx_snippet_slots_put(slots, &count, at, placeholder, placeholder + 3);
+    }
+    for (size_t i = 0; ok && i < count; ++i) {
+        ok = yx_snippet_put(buffer, row, column, slots[i].text, slots[i].length);
+        column += slots[i].length;
+    }
+    free(slots);
+    if (!ok) return false;
     for (size_t at = code_offset; at < buffer->lengths[row]; ++at)
         if (buffer->rows[row][at] == '\t') buffer->rows[row][at] = ' ';
-    if (end > start) buffer->kept[row] = code_offset + (size_t)(end - start);
-    return true;
+    if (count) buffer->kept[row] = column;
+    return yx_snippet_row_pictures(buffer, row, code_offset);
+}
+
+/* The byte length of the Unicode whitespace scalar at `at`, 0 for others. */
+static size_t yx_snippet_whitespace(const char *at, const char *end)
+{
+    const unsigned char *s = (const unsigned char *)at;
+    size_t available = (size_t)(end - at);
+    if (*s == ' ' || (*s >= 9 && *s <= 13)) return 1;
+    if (available >= 2 && s[0] == 0xc2 && (s[1] == 0x85 || s[1] == 0xa0)) return 2;
+    if (available >= 3) {
+        if (s[0] == 0xe1 && s[1] == 0x9a && s[2] == 0x80) return 3;
+        if (s[0] == 0xe2 && s[1] == 0x80 &&
+            ((s[2] >= 0x80 && s[2] <= 0x8a) || s[2] == 0xa8 || s[2] == 0xa9 ||
+             s[2] == 0xaf)) return 3;
+        if (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) return 3;
+        if (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80) return 3;
+    }
+    return 0;
+}
+
+/* The buffer column of display column `column` of a line cut by `left`. */
+static size_t yx_snippet_x(size_t code_offset, size_t column, size_t left)
+{
+    return code_offset + column > left ? code_offset + column - left : 0;
 }
 
 static bool yx_snippet_overlaps(const yx_snippet_annotation *a,
@@ -1701,18 +1955,54 @@ static bool yx_snippet_takes_space(const yx_snippet_annotation *a)
 
 /* render_source_line: the source row and its annotation rows. *depths
  * receives the depths of the multi-line labels opening or closing here. */
+/* StyledBuffer::replace: "..." takes the place of positions [from, to) of
+ * a row. A source row has one position per scalar, an annotation row one
+ * per byte. A row that does not reach `to` is left alone. */
+static bool yx_snippet_replace(yx_snippet_buffer *buffer, size_t row,
+                               size_t from, size_t to, bool scalars)
+{
+    size_t length, begin = SIZE_MAX, end = SIZE_MAX, position = 0, at = 0;
+    char *text;
+    if (row >= buffer->count || from >= to) return true;
+    length = buffer->lengths[row];
+    text = buffer->rows[row];
+    while (at <= length) {
+        if (position == from) begin = at;
+        if (position == to) { end = at; break; }
+        if (at == length) break;
+        at += scalars ? yx_diagnostic_scalar_length(text + at, text + length) : 1;
+        ++position;
+    }
+    if (begin == SIZE_MAX || end == SIZE_MAX) return true;
+    if (end - begin < 3) {
+        char *grown = (char *)realloc(text, length + 3 - (end - begin) + 1);
+        if (!grown) return false;
+        buffer->rows[row] = text = grown;
+    }
+    memmove(text + begin + 3, text + end, length - end);
+    memcpy(text + begin, "...", 3);
+    buffer->lengths[row] = length - (end - begin) + 3;
+    text[buffer->lengths[row]] = '\0';
+    if (buffer->kept[row] >= end)
+        buffer->kept[row] = buffer->kept[row] - (end - begin) + 3;
+    else if (buffer->kept[row] > begin) buffer->kept[row] = begin + 3;
+    return true;
+}
+
 static bool yx_snippet_render_line(yx_snippet_buffer *buffer,
                                    const yx_snippet_line *line, size_t digits,
                                    size_t width_offset, size_t code_offset,
+                                   const yx_snippet_margin *margin,
                                    size_t *depths, size_t *depth_count)
 {
     yx_snippet_annotation items[8];
     size_t positions[8], count = line->count, line_len = 0, p = 0;
-    size_t row = buffer->count;
+    size_t row = buffer->count, left = 0;
     bool short_start = true, all_lines = true, all_starts = true;
     *depth_count = 0;
     if (!yx_snippet_source_row(buffer, row, line->number, digits, width_offset,
-                               code_offset, line->start, line->end)) return false;
+                               code_offset, line->start, line->end, margin,
+                               &left)) return false;
     /* Sort by start column, rightmost first (stable). */
     for (size_t i = 0; i < count; ++i) {
         size_t j = i;
@@ -1798,7 +2088,7 @@ static bool yx_snippet_render_line(yx_snippet_buffer *buffer,
     for (size_t i = 0; i < count; ++i) {
         const yx_snippet_annotation *annotation = &items[i];
         size_t pos = positions[i] + 1;
-        size_t column = code_offset + annotation->start_col;
+        size_t column = yx_snippet_x(code_offset, annotation->start_col, left);
         if (pos > 1 && (yx_snippet_has_text(annotation) ||
                         yx_snippet_takes_space(annotation))) {
             for (size_t r = row + 1; r <= row + pos; ++r)
@@ -1830,6 +2120,7 @@ static bool yx_snippet_render_line(yx_snippet_buffer *buffer,
             r = row + positions[i] + 2;
             column = annotation->start_col;
         }
+        column = column > left ? column - left : 0;
         if (!yx_snippet_put(buffer, r, code_offset + column, annotation->text,
                             strlen(annotation->text))) return false;
     }
@@ -1837,12 +2128,33 @@ static bool yx_snippet_render_line(yx_snippet_buffer *buffer,
         const yx_snippet_annotation *annotation = &items[i];
         char mark = annotation->primary ? '^' : '-';
         for (size_t x = annotation->start_col; x < annotation->end_col; ++x)
-            if (!yx_snippet_putc(buffer, row + 1, code_offset + x, mark)) return false;
+            if (!yx_snippet_putc(buffer, row + 1,
+                                 yx_snippet_x(code_offset, x, left), mark))
+                return false;
         if (yx_snippet_takes_space(annotation) ||
             (positions[i] && yx_snippet_has_text(annotation)))
             if (!yx_snippet_putc(buffer, row + 1,
-                                 code_offset + annotation->start_col, mark))
+                                 yx_snippet_x(code_offset,
+                                              annotation->start_col, left),
+                                 mark))
                 return false;
+    }
+    /* An underline wider than twice the width left for the code loses its
+     * middle: "..." replaces what lies between its first and last third of
+     * that width, on the underline's row and, at the same positions, on
+     * the source row (annotate-snippets' renderer; rightmost first). */
+    for (size_t i = 0; i < count; ++i) {
+        const yx_snippet_annotation *annotation = &items[i];
+        size_t width = annotation->end_col - annotation->start_col;
+        size_t pad = margin->column_width / 3 > 5 ? margin->column_width / 3 : 5;
+        size_t from, to;
+        if (width <= margin->column_width * 2 || width <= 10) continue;
+        from = yx_snippet_x(code_offset, annotation->start_col, left) + pad;
+        to = yx_snippet_x(code_offset, annotation->end_col, left);
+        to = to > pad ? to - pad : 0;
+        if (!yx_snippet_replace(buffer, row, from, to, true) ||
+            !yx_snippet_replace(buffer, row + 1, from, to, false))
+            return false;
     }
     /* A label opening here keeps its margin bar on the rows below its
      * horizontal line. */
@@ -1908,19 +2220,27 @@ static size_t yx_snippet_line_of(const char *source, size_t offset,
     return line;
 }
 
-/* The report text of `labels` (at most 4): title, location and snippet. */
-static char *yx_diagnostic_snippet(const char *level, const char *code,
-                                   const char *title, const char *source,
-                                   const char *origin,
-                                   const yx_snippet_label *labels,
-                                   size_t label_count, size_t header_line,
-                                   size_t header_column)
+/* The report text of `labels` (at most 4): title, location and snippet.
+ * For a report over several sources each one is a section: `source` then
+ * holds lines `line_base + 1` onwards, the gutter is at least `min_digits`
+ * wide and a `continuation` section starts with its `:::` location. */
+static char *yx_diagnostic_snippet_section(const char *level, const char *code,
+                                           const char *title,
+                                           const char *source,
+                                           const char *origin,
+                                           const yx_snippet_label *labels,
+                                           size_t label_count,
+                                           size_t header_line,
+                                           size_t header_column,
+                                           size_t line_base, size_t min_digits,
+                                           bool continuation)
 {
     yx_snippet_line lines[64];
     size_t line_count = 0, depth[4] = {0}, max_depth = 0, digits = 1;
     size_t start_line[4], end_line[4], width_offset, code_offset;
     const char *start_of[4], *end_of[4];
     yx_snippet_buffer buffer = {0};
+    yx_snippet_margin margin = {0};
     bool open[6] = {0};
     char *text = NULL;
     size_t used = 0, capacity = 0;
@@ -2010,14 +2330,51 @@ static char *yx_diagnostic_snippet(const char *level, const char *code,
         }
     }
     if (!line_count) goto done;
+    for (size_t i = 0; i < line_count; ++i) lines[i].number += line_base;
     for (size_t n = lines[line_count - 1].number; n >= 10; n /= 10) ++digits;
+    if (digits < min_digits) digits = min_digits;
     width_offset = digits + 3;
     code_offset = width_offset + (max_depth ? max_depth + 1 : 0);
+    /* The margin: the leading whitespace shared by the annotated lines, the
+     * leftmost and rightmost annotated columns, the rightmost label end and
+     * the widest annotated line. */
+    {
+        size_t whitespace = SIZE_MAX, max_line_len = 0;
+        margin.span_left = SIZE_MAX;
+        for (size_t i = 0; i < line_count; ++i) {
+            const char *at = lines[i].start;
+            size_t leading = 0, cells = yx_snippet_columns(lines[i].start, lines[i].end);
+            while (at < lines[i].end) {
+                size_t bytes = yx_snippet_whitespace(at, lines[i].end);
+                if (!bytes) break;
+                at += bytes;
+                ++leading;
+            }
+            if (at < lines[i].end && leading < whitespace) whitespace = leading;
+            if (cells > max_line_len) max_line_len = cells;
+            for (size_t k = 0; k < lines[i].count; ++k) {
+                const yx_snippet_annotation *a = &lines[i].items[k];
+                size_t label = a->end_col +
+                    (yx_snippet_has_text(a) ?
+                     yx_diagnostic_display_width(a->text, a->text + strlen(a->text)) + 1 : 0);
+                if (a->start_col < margin.span_left) margin.span_left = a->start_col;
+                if (a->end_col < margin.span_left) margin.span_left = a->end_col;
+                if (a->start_col > margin.span_right) margin.span_right = a->start_col;
+                if (a->end_col > margin.span_right) margin.span_right = a->end_col;
+                if (label > margin.label_right) margin.label_right = label;
+            }
+        }
+        margin.whitespace_left = whitespace == SIZE_MAX ? 0 : whitespace;
+        if (margin.span_left == SIZE_MAX) margin.span_left = 0;
+        margin.column_width = 140 > code_offset ? 140 - code_offset : 0;
+        yx_snippet_margin_compute(&margin, max_line_len);
+    }
     for (size_t i = 0; i < line_count; ++i) {
         size_t first_row = buffer.count, depths[8], depth_count;
         bool closing[6] = {0}, opening[6] = {0};
         if (!yx_snippet_render_line(&buffer, &lines[i], digits, width_offset,
-                                    code_offset, depths, &depth_count)) goto done;
+                                    code_offset, &margin, depths,
+                                    &depth_count)) goto done;
         for (size_t d = 0; d < depth_count; ++d) {
             if (depths[d] >= 6) goto done;
             if (open[depths[d]]) closing[depths[d]] = true;
@@ -2043,7 +2400,8 @@ static char *yx_diagnostic_snippet(const char *level, const char *code,
                 end = yx_diagnostic_display_line_end(start, end);
                 if (!yx_snippet_source_row(&buffer, row, lines[i].number + 1,
                                            digits, width_offset, code_offset,
-                                           start, end)) goto done;
+                                           start, end, &margin, NULL))
+                    goto done;
             }
             if (delta >= 2)
                 for (size_t d = 1; d < 6; ++d)
@@ -2053,11 +2411,23 @@ static char *yx_diagnostic_snippet(const char *level, const char *code,
         }
         for (size_t d = 1; d < 6; ++d) if (opening[d]) open[d] = true;
     }
-    if (!yx_diagnostic_append(&text, &used, &capacity,
-                              "%s[%s]: %s\n%*s--> %s:%zu:%zu\n%*s|",
-                              level, code, title, (int)digits, "",
-                              origin ? origin : "line", header_line,
-                              header_column, (int)digits + 1, "")) goto done;
+    if (continuation) {
+        if (!yx_diagnostic_append(&text, &used, &capacity,
+                                  "%*s::: %s:%zu:%zu\n%*s|", (int)digits, "",
+                                  origin ? origin : "line", header_line,
+                                  header_column, (int)digits + 1, ""))
+            goto done;
+    } else {
+        char *rendered_title = yx_diagnostic_render_fragment(title, strlen(title));
+        bool appended = rendered_title &&
+            yx_diagnostic_append(&text, &used, &capacity,
+                                 "%s[%s]: %s\n%*s--> %s:%zu:%zu\n%*s|",
+                                 level, code, rendered_title, (int)digits, "",
+                                 origin ? origin : "line", header_line,
+                                 header_column, (int)digits + 1, "");
+        free(rendered_title);
+        if (!appended) goto done;
+    }
     for (size_t r = 0; r < buffer.count; ++r) {
         size_t length = buffer.lengths[r];
         while (length > buffer.kept[r] && buffer.rows[r][length - 1] == ' ') --length;
@@ -2074,6 +2444,58 @@ done:
     free(buffer.lengths);
     free(buffer.kept);
     return text;
+}
+
+static char *yx_diagnostic_snippet(const char *level, const char *code,
+                                   const char *title, const char *source,
+                                   const char *origin,
+                                   const yx_snippet_label *labels,
+                                   size_t label_count, size_t header_line,
+                                   size_t header_column)
+{
+    return yx_diagnostic_snippet_section(level, code, title, source, origin,
+                                         labels, label_count, header_line,
+                                         header_column, 0, 1, false);
+}
+
+/* The start of 1-based line `number` of `source`, NULL when it has fewer. */
+static const char *yx_snippet_line_start(const char *source, size_t number)
+{
+    for (size_t n = 1; n < number && source; ++n) {
+        source = strchr(source, '\n');
+        if (source) ++source;
+    }
+    return source;
+}
+
+/* True when a line holding one of `offsets` is long enough, or indented
+ * enough, for the renderer's margin to cut it, or holds characters whose
+ * width is not one cell: such a report is drawn by yx_diagnostic_snippet. */
+static bool yx_snippet_margin_applies(const char *source,
+                                      const size_t *offsets, size_t count)
+{
+    size_t length = strlen(source);
+    bool applies = false;
+    for (size_t i = 0; i < count; ++i) {
+        size_t at = offsets[i] < length ? offsets[i] : length;
+        const char *start = source + at, *end, *text;
+        size_t leading = 0;
+        while (start > source && start[-1] != '\n') --start;
+        end = strchr(source + at, '\n');
+        if (!end) end = source + length;
+        end = yx_diagnostic_display_line_end(start, end);
+        for (text = start; text < end; ++leading) {
+            size_t bytes = yx_snippet_whitespace(text, end);
+            if (!bytes) break;
+            text += bytes;
+        }
+        if ((text < end && leading > 26) ||
+            yx_snippet_columns(start, end) > 126) applies = true;
+        /* Columns are display cells, which the generic renderer counts. */
+        for (text = start; text < end; ++text)
+            if ((unsigned char)*text >= 0x80) applies = true;
+    }
+    return applies;
 }
 
 static char *yx_diagnostic_snippet_one(const char *level, const char *code,
@@ -2189,17 +2611,22 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
     line_end = strchr(line_start, '\n');
     if (!line_end) line_end = source + source_length;
     if (memchr(source + left_start, '\n', left_end - left_start) ||
-        memchr(source + right_start, '\n', right_end - right_start)) {
-        /* A label spanning lines: the general snippet renderer. */
+        memchr(source + right_start, '\n', right_end - right_start) ||
+        yx_snippet_margin_applies(source, (const size_t[]){left_start,
+                                                           right_start}, 2)) {
+        /* A label spanning lines, or a line the margin cuts: the general
+         * snippet renderer. */
         yx_snippet_label labels[2] = {
             {left_start, left_end, left_label, false},
             {right_start, right_end, right_label, false}
         };
         const char *a_line_start, *b_line_start;
-        if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                                  code, left_start) ||
-            yx_warning_suppressed((const uint8_t *)source, source_length,
-                                  code, right_start)) return true;
+        if (yx_warning_suppressed_span((const uint8_t *)source,
+                                       source_length, code, left_start,
+                                       left_end) ||
+            yx_warning_suppressed_span((const uint8_t *)source,
+                                       source_length, code, right_start,
+                                       right_end)) return true;
         if (compiler->warning_count >= compiler->max_warnings) return true;
         line = yx_snippet_line_of(source, left_start, &a_line_start);
         top_column = yx_diagnostic_columns(line_start, source + left_start) + 1;
@@ -2232,10 +2659,11 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
         right_display_end = yx_diagnostic_display_line_end(
             right_line_start, right_line_end);
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                              code, left_start) ||
-        yx_warning_suppressed((const uint8_t *)source, source_length,
-                              code, right_start)) return true;
+    if (yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   code, left_start, left_end) ||
+        yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   code, right_start, right_end))
+        return true;
     for (const char *at = source; at < line_start; ++at)
         if (*at == '\n') ++line;
     right_line = line;
@@ -2517,10 +2945,12 @@ int yx_compiler_duplicate_pattern_value_warning(
     bool ok = false;
     if (!compiler || !identifier || !source) return false;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                              "duplicate_pattern_value", duplicate_start) ||
-        yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                              "duplicate_pattern_value", existing_start))
+    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+                                   "duplicate_pattern_value",
+                                   duplicate_start, duplicate_end) ||
+        yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+                                   "duplicate_pattern_value",
+                                   existing_start, existing_end))
         return true;
     if (!yx_diagnostic_append(&duplicate_label, &duplicate_used,
                               &duplicate_capacity,
@@ -2653,8 +3083,9 @@ int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler,
     if (start >= source_length || end > source_length ||
         quantifier_end <= start || quantifier_end > end) return false;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                              "ambiguous_expr", start)) return true;
+    if (yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   "ambiguous_expr", start, end))
+        return true;
     line_start = source + start;
     while (line_start > source && line_start[-1] != '\n') --line_start;
     line_end = strchr(line_start, '\n');
@@ -3027,10 +3458,12 @@ static int yx_compiler_redundant_case_modifier_warning_source(
         memcmp(source + nocase_start, "nocase", 6) != 0)
         return 0;
     if (compiler->warning_count >= compiler->max_warnings) return 1;
-    if (yx_warning_suppressed((const uint8_t *)source, source_length,
-                              "redundant_modifier", suffix_start) ||
-        yx_warning_suppressed((const uint8_t *)source, source_length,
-                              "redundant_modifier", nocase_start)) return 1;
+    if (yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   "redundant_modifier", suffix_start,
+                                   suffix_start + 1) ||
+        yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   "redundant_modifier", nocase_start,
+                                   nocase_end)) return 1;
     for (size_t i = 0; i < suffix_start; ++i)
         if (source[i] == '\n') { ++first_line; first_start = source + i + 1; }
     last_line = first_line;
@@ -3042,6 +3475,20 @@ static int yx_compiler_redundant_case_modifier_warning_source(
     last_column = yx_diagnostic_columns(last_start,
                                          source + nocase_start) + 1;
     if (last_line == first_line && last_column <= first_column) return 0;
+    if (last_line > first_line + 1) {
+        /* The line between the labels, or `...` for several. */
+        yx_snippet_label labels[2] = {
+            {suffix_start, suffix_start + 1, suffix_label, false},
+            {nocase_start, nocase_end, nocase_label, false}
+        };
+        if (compiler->warning_count >= compiler->max_warnings) return 1;
+        text = yx_diagnostic_snippet("warning", "redundant_modifier", title,
+                                     source, origin, labels, 2, first_line,
+                                     first_column);
+        if (!text) goto failure;
+        used = strlen(text);
+        goto json;
+    }
     for (size_t n = last_line; n >= 10; n /= 10) ++digits;
     if (digits > INT_MAX - 1 || first_column > INT_MAX ||
         last_column > INT_MAX || nocase_end - nocase_start > INT_MAX)
@@ -3102,6 +3549,7 @@ static int yx_compiler_redundant_case_modifier_warning_source(
         }
         line_start = line_end + (*line_end == '\n');
     }
+json:
     if (!yx_diagnostic_normalize_visible_cr(&text)) goto failure;
     quoted_text = yx_json_quoted(text);
     quoted_origin = yx_json_quoted_code_origin(origin);
@@ -3231,8 +3679,9 @@ static bool yx_compiler_deprecated_field_warning(
         "don't use" : "this field is deprecated";
     char *text, *json, **grown, *rendered_line = NULL;
     if (compiler->warning_count >= compiler->max_warnings) return true;
-    if (yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                              "deprecated_field", start)) return true;
+    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+                                   "deprecated_field", start, end))
+        return true;
     for (size_t i = 0; i < start; ++i)
         if (source[i] == '\n') { ++line; line_start = source + i + 1; }
     for (size_t n = line; n >= 10; n /= 10) ++digits;
@@ -3468,6 +3917,31 @@ static bool yx_compiler_note_warning_point(YRX_COMPILER *compiler,
     return true;
 }
 
+bool yx_compiler_warning_raised_at(YRX_COMPILER *compiler, size_t count,
+                                   size_t raised)
+{
+    return yx_compiler_note_warning_point(compiler, count, raised);
+}
+
+int yx_compiler_excess_quantifier_warning(YRX_COMPILER *compiler,
+                                          const char *source,
+                                          const char *origin,
+                                          size_t start, size_t end,
+                                          size_t raised, int64_t required,
+                                          size_t available)
+{
+    size_t count = compiler->warning_count, length = strlen(source);
+    char note[160];
+    if (start >= end || end > length) return 0;
+    snprintf(note, sizeof(note), "the expression requires %" PRId64
+             " matching patterns out of %zu", required, available);
+    if (!yx_compiler_warning(
+            compiler, "InvariantBooleanExpression", "invariant_expr",
+            "invariant boolean expression", "this expression is always false",
+            source, origin, start, end, note)) return 0;
+    return yx_compiler_note_warning_point(compiler, count, raised);
+}
+
 int yx_compiler_type_warning(YRX_COMPILER *compiler,
     const char *source, const char *origin, const char *kind,
     size_t start, size_t end, size_t other_start, size_t other_end,
@@ -3651,6 +4125,21 @@ static const char *yx_warning_skip_index(const char *at)
     return at;
 }
 
+/* White space and comments between the tokens of a member chain. */
+static const char *yx_deprecated_skip_blank(const char *at)
+{
+    for (;;) {
+        while (isspace((unsigned char)*at)) ++at;
+        if (at[0] == '/' && at[1] == '/') {
+            while (*at && *at != '\n') ++at;
+        } else if (at[0] == '/' && at[1] == '*') {
+            at += 2;
+            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
+            if (*at) at += 2;
+        } else return at;
+    }
+}
+
 /* Walks the member chain after a module (or a name bound to one of its
  * structures, starting at `scope`), warning about deprecated fields when
  * `emit` is set. *final_scope and *end receive the scope reached and the
@@ -3666,17 +4155,24 @@ static bool yx_compiler_warn_deprecated_chain(
     while (*at) {
         const char *field_start, *field_end;
         size_t length;
+        bool called;
         *end = at;
-        while (isspace((unsigned char)*at)) ++at;
+        at = yx_deprecated_skip_blank(at);
         if (*at++ != '.') break;
-        while (isspace((unsigned char)*at)) ++at;
+        at = yx_deprecated_skip_blank(at);
         field_start = at;
         if (!isalpha((unsigned char)*at) && *at != '_') break;
         do { ++at; } while (isalnum((unsigned char)*at) || *at == '_');
         field_end = at;
         length = (size_t)(field_end - field_start);
-        for (size_t i = 0; emit && i < sizeof(yx_deprecated_fields) /
-                                       sizeof(yx_deprecated_fields[0]); ++i) {
+        /* A called name is looked up as a function (func_call_from_ast),
+         * not as a field: it raises no deprecation notice. */
+        at = yx_deprecated_skip_blank(at);
+        called = *at == '(';
+        at = field_end;
+        for (size_t i = 0; emit && !called &&
+                           i < sizeof(yx_deprecated_fields) /
+                               sizeof(yx_deprecated_fields[0]); ++i) {
             const yx_deprecated_field *field = &yx_deprecated_fields[i];
             if (scope != field->scope || strcmp(module, field->module) != 0 ||
                 !yx_warning_identifier_is(field_start, length, field->field))
@@ -3954,7 +4450,14 @@ int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
     char *prefix;
     bool ok;
     if (limit <= condition_offset) return 1;
-    if (limit - condition_offset < length) length = limit - condition_offset;
+    if (limit - condition_offset < length) {
+        /* Keep the `(` of a call that the error's label ends before: the
+         * called name is no field read. */
+        size_t next = (size_t)(yx_deprecated_skip_blank(
+            condition + (limit - condition_offset)) - condition);
+        length = next < length && condition[next] == '(' ? next + 1 :
+                                                           limit - condition_offset;
+    }
     if (!(prefix = malloc(length + 1))) return 0;
     memcpy(prefix, condition, length);
     prefix[length] = '\0';
@@ -5087,6 +5590,65 @@ static char *yx_rule_diagnostic_marker(size_t column, size_t length,
     return text;
 }
 
+/* The report of a rule declared in two sources, when the plain form does
+ * not fit: a declaration line the renderer's margin cuts, or line numbers
+ * of different widths (both sections share the gutter of the wider one).
+ * Each section is drawn by the general snippet renderer from the
+ * declaration's line. False when the plain form applies; otherwise *text
+ * is the report, NULL on failure. */
+static bool yx_duplicate_rule_sections(const YRX_RULE *duplicate,
+                                       const YRX_RULE *existing,
+                                       const char *title,
+                                       const char *duplicate_label,
+                                       const char *existing_label,
+                                       const char *duplicate_origin,
+                                       const char *existing_origin,
+                                       size_t duplicate_column,
+                                       size_t existing_column,
+                                       size_t identifier_length, char **text)
+{
+    const YRX_RULE *rules[2] = {duplicate, existing};
+    yx_snippet_label labels[2];
+    size_t digits[2] = {1, 1}, widest;
+    char *first, *second;
+    size_t used = 0, capacity = 0;
+    bool cut = false;
+    *text = NULL;
+    for (size_t i = 0; i < 2; ++i) {
+        const char *line = rules[i]->declaration_line;
+        if (!line || !rules[i]->declaration_column ||
+            !rules[i]->declaration_line_number || strchr(line, '\n') ||
+            strlen(line) < rules[i]->declaration_column - 1 + identifier_length)
+            return false;
+        labels[i].start = rules[i]->declaration_column - 1;
+        labels[i].end = labels[i].start + identifier_length;
+        labels[i].text = i ? existing_label : duplicate_label;
+        labels[i].primary = i == 0;
+        for (size_t n = rules[i]->declaration_line_number; n >= 10; n /= 10)
+            ++digits[i];
+        if (yx_snippet_margin_applies(line, &labels[i].start, 1)) cut = true;
+    }
+    if (!cut && digits[0] == digits[1]) return false;
+    widest = digits[0] > digits[1] ? digits[0] : digits[1];
+    first = yx_diagnostic_snippet_section(
+        "error", "E012", title, duplicate->declaration_line, duplicate_origin,
+        &labels[0], 1, duplicate->declaration_line_number, duplicate_column,
+        duplicate->declaration_line_number - 1, widest, false);
+    second = yx_diagnostic_snippet_section(
+        "error", "E012", title, existing->declaration_line, existing_origin,
+        &labels[1], 1, existing->declaration_line_number, existing_column,
+        existing->declaration_line_number - 1, widest, true);
+    if (first && second &&
+        !yx_diagnostic_append(text, &used, &capacity, "%s\n%*s|\n%s", first,
+                              (int)widest + 1, "", second)) {
+        free(*text);
+        *text = NULL;
+    }
+    free(first);
+    free(second);
+    return true;
+}
+
 int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler,
                                      const YRX_RULE *duplicate,
                                      const YRX_RULE *existing,
@@ -5112,6 +5674,7 @@ int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler,
     char *quoted_title = NULL, *quoted_duplicate_label = NULL;
     char *quoted_existing_label = NULL, *quoted_duplicate_origin = NULL;
     char *quoted_existing_origin = NULL, *quoted_text = NULL;
+    char *sections = NULL;
     size_t text_used = 0, text_capacity = 0;
     size_t json_used = 0, json_capacity = 0;
     size_t digits = 1;
@@ -5164,12 +5727,49 @@ int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler,
     if (!duplicate_text_line || !existing_text_line || !duplicate_marker ||
         !existing_marker) goto done;
 
-    if (!yx_diagnostic_append(&text, &text_used, &text_capacity,
+    /* Lines the renderer's margin cuts are drawn by the general snippet
+     * renderer, from the declarations' offsets in the source. */
+    if (same_source && source && existing_line <= duplicate_line) {
+        const char *existing_start = yx_snippet_line_start(source, existing_line);
+        const char *duplicate_start = yx_snippet_line_start(source, duplicate_line);
+        if (existing_start && duplicate_start &&
+            existing->declaration_column && duplicate->declaration_column &&
+            strlen(existing_start) >= existing->declaration_column - 1 +
+                                      identifier_length &&
+            strlen(duplicate_start) >= duplicate->declaration_column - 1 +
+                                       identifier_length &&
+            !memcmp(existing_start + existing->declaration_column - 1, name,
+                    identifier_length) &&
+            !memcmp(duplicate_start + duplicate->declaration_column - 1, name,
+                    identifier_length)) {
+            yx_snippet_label labels[2];
+            labels[0].start = (size_t)(existing_start - source) +
+                              existing->declaration_column - 1;
+            labels[0].end = labels[0].start + identifier_length;
+            labels[0].text = existing_label;
+            labels[0].primary = false;
+            labels[1].start = (size_t)(duplicate_start - source) +
+                              duplicate->declaration_column - 1;
+            labels[1].end = labels[1].start + identifier_length;
+            labels[1].text = duplicate_label;
+            labels[1].primary = true;
+            if (labels[0].end <= labels[1].start &&
+                yx_snippet_margin_applies(
+                    source, (const size_t[]){labels[0].start,
+                                             labels[1].start}, 2))
+                text = yx_diagnostic_snippet("error", "E012", title, source,
+                                             duplicate_origin, labels, 2,
+                                             duplicate_line, duplicate_column);
+        }
+    }
+    if (text) {
+        /* Drawn above. */
+    } else if (!yx_diagnostic_append(&text, &text_used, &text_capacity,
                               "error[E012]: %s\n%*s--> %s:%zu:%zu\n%*s|\n",
                               title, (int)digits, "", duplicate_origin,
                               duplicate_line, duplicate_column,
                               (int)digits + 1, "")) goto done;
-    if (same_source && existing_line == duplicate_line &&
+    else if (same_source && existing_line == duplicate_line &&
         existing_cell + identifier_length <= duplicate_cell) {
         size_t marks_length = duplicate_cell - 1 + identifier_length;
         char *marks = (char *)malloc(marks_length + 1);
@@ -5213,6 +5813,14 @@ int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler,
                                   duplicate_text_line,
                                   (int)digits + 1, "", duplicate_marker,
                                   duplicate_label)) goto done;
+    } else if (yx_duplicate_rule_sections(
+                   duplicate, existing, title, duplicate_label, existing_label,
+                   duplicate_origin, existing_origin, duplicate_column,
+                   existing_column, identifier_length, &sections)) {
+        /* A line the margin cuts, or line numbers of different widths. */
+        if (!sections) goto done;
+        free(text);
+        text = sections;
     } else {
         if (!yx_diagnostic_append(&text, &text_used, &text_capacity,
                                   "%*zu | %s\n%*s| %s %s\n%*s|\n%*s::: %s:%zu:%zu\n%*s|\n%*zu | %s\n%*s| %s %s",
@@ -5368,12 +5976,25 @@ int yx_compiler_duplicate_pattern_error(YRX_COMPILER *compiler,
                                                  existing_width, '-');
     if (!duplicate_text_line || !existing_text_line ||
         !duplicate_marker || !existing_marker) goto done;
-    if (!yx_diagnostic_append(
+    if (existing_end <= duplicate_start &&
+        yx_snippet_margin_applies(source, (const size_t[]){existing_start,
+                                                           duplicate_start}, 2)) {
+        yx_snippet_label labels[2] = {
+            {existing_start, existing_end, existing_label, false},
+            {duplicate_start, duplicate_end, duplicate_label, true}
+        };
+        text = yx_diagnostic_snippet("error", "E023", title, source, origin,
+                                     labels, 2, duplicate_line,
+                                     duplicate_column);
+    }
+    if (text) {
+        /* Drawn by the general snippet renderer. */
+    } else if (!yx_diagnostic_append(
             &text, &text_used, &text_capacity,
             "error[E023]: %s\n%*s--> %s:%zu:%zu\n%*s|\n",
             title, (int)digits, "", origin ? origin : "line",
             duplicate_line, duplicate_column, (int)digits + 1, "")) goto done;
-    if (existing_line == duplicate_line) {
+    else if (existing_line == duplicate_line) {
         size_t marker_length = duplicate_column - 1 + duplicate_width;
         char *combined = malloc(marker_length + 1);
         if (!combined) goto done;
@@ -6160,7 +6781,36 @@ int yx_compiler_invalid_modifier_combination_error(
              "invalid modifier combination: `%s` `%s`", first, second);
     snprintf(first_label, sizeof(first_label), "`%s` modifier used here", first);
     snprintf(second_label, sizeof(second_label), "`%s` modifier used here", second);
-    if (first_line == second_line &&
+    /* Lines the renderer's margin cuts are drawn by the general snippet
+     * renderer. */
+    if (left_end <= right_start &&
+        yx_snippet_margin_applies(source, (const size_t[]){left_start,
+                                                           right_start}, 2)) {
+        yx_snippet_label labels[2];
+        size_t last_line = first_line > second_line ? first_line : second_line;
+        size_t note_digits = 1;
+        for (size_t n = last_line; n >= 10; n /= 10) ++note_digits;
+        labels[0].start = left_start;
+        labels[0].end = left_end;
+        labels[0].text = left_start == first_start ? first_label : second_label;
+        labels[0].primary = true;
+        labels[1].start = right_start;
+        labels[1].end = right_end;
+        labels[1].text = left_start == first_start ? second_label : first_label;
+        labels[1].primary = true;
+        text = yx_diagnostic_snippet("error", "E019", title, source, origin,
+                                     labels, 2, line, left_column);
+        if (text) {
+            text_used = strlen(text);
+            text_capacity = text_used + 1;
+            if (!yx_diagnostic_append(
+                    &text, &text_used, &text_capacity,
+                    "\n%*s|\n%*s= note: these two modifiers can't be used together",
+                    (int)note_digits + 1, "", (int)note_digits + 1, ""))
+                goto done;
+        }
+    }
+    if (!text && first_line == second_line &&
         !yx_diagnostic_append(&text, &text_used, &text_capacity,
                               "error[E019]: %s\n%*s--> %s:%zu:%zu\n%*s|\n"
                               "%*zu | %.*s\n%*s| %*s%s%*s%s `%s` modifier used here\n"
@@ -6176,7 +6826,7 @@ int yx_compiler_invalid_modifier_combination_error(
                               (int)digits + 1, "", (int)left_column - 1, "",
                               left_name, (int)digits + 1, "",
                               (int)digits + 1, "")) goto done;
-    if (first_line != second_line &&
+    if (!text_used && first_line != second_line &&
         !yx_diagnostic_append(&text, &text_used, &text_capacity,
                               "error[E019]: %s\n%*s--> %s:%zu:%zu\n%*s|\n"
                               "%*zu | %.*s\n%*s| %*s%s `%s` modifier used here\n"
@@ -6417,8 +7067,13 @@ static int yx_compiler_two_label_error(YRX_COMPILER *compiler,
                                         source + first_end);
     second_width = yx_diagnostic_columns(source + second_start,
                                          source + second_end);
+    /* Labels more than a line apart show the line between them, or `...`
+     * for several: the general snippet renderer draws that. */
     if (memchr(source + first_start, '\n', first_end - first_start) ||
-        memchr(source + second_start, '\n', second_end - second_start)) {
+        memchr(source + second_start, '\n', second_end - second_start) ||
+        second_line > first_line + 1 ||
+        yx_snippet_margin_applies(source, (const size_t[]){first_start,
+                                                           second_start}, 2)) {
         yx_snippet_label labels[2];
         labels[0].start = first_start;
         labels[0].end = first_end;
@@ -6989,8 +7644,8 @@ int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler,
             goto not_text;
     }
     if (compiler->warning_count >= compiler->max_warnings ||
-        yx_warning_suppressed((const uint8_t *)source, source_length,
-                              "text_as_hex", start)) {
+        yx_warning_suppressed_span((const uint8_t *)source, source_length,
+                                   "text_as_hex", start, end)) {
         free(owned_literal);
         return 1;
     }
@@ -7135,12 +7790,9 @@ int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
     char title[512], label[160], replacement[96];
     char *text, *json, **grown;
     if (compiler->warning_count >= compiler->max_warnings) return 1;
-    /* A suppressed span must hold the whole label (Warnings::add). */
-    if (yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                              "consecutive_jumps", start) &&
-        (end <= start + 1 ||
-         yx_warning_suppressed((const uint8_t *)source, strlen(source),
-                               "consecutive_jumps", end - 1))) return 1;
+    if (yx_warning_suppressed_span((const uint8_t *)source, strlen(source),
+                                   "consecutive_jumps", start, end))
+        return 1;
     for (size_t i = 0; i < start; ++i)
         if (source[i] == '\n') { ++line; line_start = source + i + 1; }
     /* Jumps may continue on later lines; the patch shows each of them. */
@@ -7633,6 +8285,29 @@ static void yx_inv_arithmetic_skip(yx_inv_arithmetic *parser)
 static yx_inv_number yx_inv_arithmetic_or(yx_inv_arithmetic *parser,
                                              unsigned depth);
 
+/* The compiler whose rule is analysed (yx_compiler_warn_invariant_condition):
+ * a path is a module constant only when its root is an imported module that
+ * no global hides, as CompileContext::lookup resolves it. */
+static _Thread_local const YRX_COMPILER *yx_inv_scope_compiler;
+
+static bool yx_inv_module_imported(const char *path)
+{
+    const YRX_COMPILER *compiler = yx_inv_scope_compiler;
+    size_t root = strcspn(path, ".");
+    bool imported = false;
+    if (!compiler || !compiler->rules) return false;
+    for (size_t i = 0; i < compiler->rules->import_count && !imported; ++i)
+        imported = compiler->rules->imports[i] &&
+                   strlen(compiler->rules->imports[i]) == root &&
+                   memcmp(compiler->rules->imports[i], path, root) == 0;
+    for (size_t i = 0; imported && i < compiler->rules->global_count; ++i) {
+        const char *name = compiler->rules->globals[i].name;
+        if (name && strncmp(name, path, root) == 0 &&
+            (!name[root] || name[root] == '.')) imported = false;
+    }
+    return imported;
+}
+
 static yx_inv_number yx_inv_arithmetic_primary(yx_inv_arithmetic *parser,
                                                   unsigned depth)
 {
@@ -7711,6 +8386,52 @@ static yx_inv_number yx_inv_arithmetic_primary(yx_inv_arithmetic *parser,
         return result;
     }
     begin = parser->at;
+    if (isalpha((unsigned char)*parser->at) || *parser->at == '_') {
+        /* A module constant (`pe.MACHINE_I386`, `math.MEAN_BYTES`): a
+         * dotted path that is neither called nor indexed. */
+        char path[128];
+        const char *cursor = parser->at;
+        size_t length = 0;
+        bool dotted = false, floating_constant = false;
+        uint64_t constant = 0;
+        double number = 0.0;
+        for (;;) {
+            const char *word = cursor;
+            while (cursor < parser->end &&
+                   (isalnum((unsigned char)*cursor) || *cursor == '_')) ++cursor;
+            if (cursor == word || length + (size_t)(cursor - word) + 2 > sizeof(path))
+                return result;
+            memcpy(path + length, word, (size_t)(cursor - word));
+            length += (size_t)(cursor - word);
+            {
+                yx_inv_arithmetic after = {cursor, parser->end};
+                yx_inv_arithmetic_skip(&after);
+                if (after.at >= after.end || *after.at != '.') {
+                    if (after.at < after.end &&
+                        (*after.at == '(' || *after.at == '[')) return result;
+                    break;
+                }
+                after.at++;
+                yx_inv_arithmetic_skip(&after);
+                cursor = after.at;
+            }
+            path[length++] = '.';
+            dotted = true;
+        }
+        path[length] = '\0';
+        if (!dotted || !yx_inv_module_imported(path) ||
+            !yx_condition_module_constant_value(
+                path, &floating_constant, &constant, &number)) return result;
+        parser->at = cursor;
+        result.valid = true;
+        result.known = true;
+        result.type = floating_constant ? YX_INV_NONBOOL_FLOAT :
+                                          YX_INV_NONBOOL_INTEGER;
+        result.integer = constant;
+        result.floating = floating_constant ? number :
+                                             (double)(int64_t)constant;
+        return result;
+    }
     if (parser->end - parser->at >= 2 && parser->at[0] == '0' &&
         (parser->at[1] == 'x' || parser->at[1] == 'X' ||
          parser->at[1] == 'o' || parser->at[1] == 'O')) {
@@ -7828,10 +8549,19 @@ static yx_inv_number yx_inv_arithmetic_multiply(yx_inv_arithmetic *parser,
         if (left.known && right.known) {
             if (left.type == YX_INV_NONBOOL_FLOAT ||
                 right.type == YX_INV_NONBOOL_FLOAT) {
+                /* IR::fold_div: a float division folds, by zero too
+                 * (an infinity or NaN, true as a Boolean). */
                 double divisor = yx_inv_arithmetic_float(right);
-                if (op == '\\' && divisor == 0.0) left.known = false;
-                else left.floating = op == '*' ? chain_value :
-                    yx_inv_arithmetic_float(left) / divisor;
+                double dividend = yx_inv_arithmetic_float(left);
+                /* fold_div (ir/mod.rs) divides floats as IEEE 754 does: a
+                 * zero divisor gives a NaN for a zero or NaN dividend and
+                 * otherwise an infinity with the product of the signs. The
+                 * result is built here, without dividing by zero. */
+                if (op == '*') left.floating = chain_value;
+                else if (divisor != 0.0) left.floating = dividend / divisor;
+                else if (isnan(dividend) || dividend == 0.0) left.floating = NAN;
+                else left.floating = (signbit(dividend) != 0) !=
+                                     (signbit(divisor) != 0) ? -INFINITY : INFINITY;
             } else if (op == '*') left.integer *= right.integer;
             else if (right.integer == 0) left.known = false;
             else if (left.is_unsigned || right.is_unsigned) {
@@ -8506,265 +9236,6 @@ static void yx_inv_resolve_bare_global(const YRX_COMPILER *compiler,
     }
 }
 
-/* Return 2 after recording an invariant numeric pattern-set expression, 1
- * when this is another expression, and 0 on allocation failure. The rule has
- * already passed semantic validation; this pass only counts members of a
- * syntactically simple `N of` set. */
-static int yx_compiler_warn_excess_pattern_requirement(
-    YRX_COMPILER *compiler, const char *condition, const YRX_RULE *rule,
-    const char *source, const char *origin, size_t condition_offset)
-{
-    const char *begin = condition, *end = condition + strlen(condition);
-    const char *at;
-    uint64_t required = 0;
-    size_t available = 0;
-    bool for_loop = false;
-    bool *selected = NULL;
-    const char *warning_end;
-    char note[160];
-    while (begin < end && isspace((unsigned char)*begin)) ++begin;
-    while (end > begin && isspace((unsigned char)end[-1])) --end;
-    warning_end = end;
-    at = begin;
-    if (end - at >= 3 && memcmp(at, "for", 3) == 0 &&
-        (at + 3 == end || isspace((unsigned char)at[3]))) {
-        for_loop = true;
-        at += 3;
-        while (at < end && isspace((unsigned char)*at)) ++at;
-    }
-    {
-        yx_inv_arithmetic quantifier = {at, end};
-        yx_inv_number number = yx_inv_arithmetic_or(&quantifier, 0);
-        if (!number.valid || !number.known ||
-            number.type != YX_INV_NONBOOL_INTEGER ||
-            (!number.is_unsigned && yx_inv_integer_signed(number.integer) < 0))
-            return 1;
-        required = number.integer;
-        at = quantifier.at;
-        if (!for_loop) {
-            while (begin < at && (*begin == '(' ||
-                   isspace((unsigned char)*begin))) ++begin;
-        }
-    }
-    if (required == 0 || at == end) return 1;
-    while (at < end && isspace((unsigned char)*at)) ++at;
-    if (end - at < 2 || memcmp(at, "of", 2) != 0 ||
-        (at + 2 < end && !isspace((unsigned char)at[2]))) return 1;
-    at += 2;
-    while (at < end && isspace((unsigned char)*at)) ++at;
-    if (end - at >= 4 && memcmp(at, "them", 4) == 0 &&
-        (at + 4 == end || !isalnum((unsigned char)at[4]))) {
-        available = rule->pattern_count;
-        at += 4;
-    } else if (at < end && *at == '(') {
-        const char *first = at + 1;
-        while (first < end && isspace((unsigned char)*first)) ++first;
-        if (!for_loop && first < end && *first != '$') {
-            yx_inv_parser tuple = {0};
-            unsigned parentheses = 1;
-            tuple.source = condition;
-            tuple.at = first;
-            available = 1;
-            yx_inv_next(&tuple);
-            while (tuple.token != YX_INV_END) {
-                if (tuple.token == YX_INV_LPAREN) ++parentheses;
-                else if (tuple.token == YX_INV_RPAREN && --parentheses == 0) {
-                    warning_end = condition + tuple.start;
-                    at = condition + tuple.end;
-                    break;
-                } else if (parentheses == 1 && tuple.token == YX_INV_OTHER &&
-                           tuple.end == tuple.start + 1 &&
-                           condition[tuple.start] == ',') ++available;
-                yx_inv_next(&tuple);
-            }
-            if (parentheses != 0) return 1;
-            goto counted;
-        }
-        selected = (bool *)calloc(rule->pattern_count ? rule->pattern_count : 1,
-                                  sizeof(*selected));
-        if (!selected) return 0;
-        ++at;
-        for (;;) {
-            const char *name;
-            size_t name_length;
-            bool wildcard;
-            while (at < end && isspace((unsigned char)*at)) ++at;
-            if (at == end || *at != '$') goto not_simple;
-            name = at++;
-            while (at < end && (isalnum((unsigned char)*at) || *at == '_'))
-                ++at;
-            name_length = (size_t)(at - name);
-            if (name_length == 1) goto not_simple;
-            wildcard = at < end && *at == '*';
-            if (wildcard) ++at;
-            for (size_t i = 0; i < rule->pattern_count; ++i) {
-                const char *identifier = rule->patterns[i].identifier;
-                if ((!wildcard && strlen(identifier) == name_length &&
-                     memcmp(identifier, name, name_length) == 0) ||
-                    (wildcard && strncmp(identifier, name, name_length) == 0)) {
-                    if (!selected[i]) { selected[i] = true; ++available; }
-                }
-            }
-            while (at < end && isspace((unsigned char)*at)) ++at;
-            if (at < end && *at == ',') { ++at; continue; }
-            if (at < end && *at == ')') {
-                if (!for_loop) warning_end = at;
-                ++at;
-                break;
-            }
-            goto not_simple;
-        }
-    } else return 1;
-counted:
-    while (at < end && isspace((unsigned char)*at)) ++at;
-    if ((for_loop && (at == end || *at != ':')) ||
-        (!for_loop && at != end)) goto not_simple;
-    free(selected);
-    if (required <= available) return 1;
-    snprintf(note, sizeof(note), "the expression requires %" PRIu64
-             " matching patterns out of %zu", required, available);
-    if (!yx_compiler_warning(
-            compiler, "InvariantBooleanExpression", "invariant_expr",
-            "invariant boolean expression", "this expression is always false",
-            source, origin,
-            condition_offset + (size_t)(begin - condition),
-            condition_offset + (size_t)(warning_end - condition), note))
-        return 0;
-    return 2;
-not_simple:
-    free(selected);
-    return 1;
-}
-
-/* A pattern-count expression can be one operand in a larger condition. The
- * direct-expression pass below handles the whole condition; this pass sends
- * each embedded selector through that same counter with its own source span. */
-static const char *yx_warning_matching_paren(const char *open);
-
-static bool yx_compiler_warn_embedded_pattern_requirements(
-    YRX_COMPILER *compiler, const char *condition, const YRX_RULE *rule,
-    const char *source, const char *origin, size_t condition_offset)
-{
-    const char *trimmed = condition;
-    const char *condition_end = condition + strlen(condition);
-    const char *at = condition;
-    while (isspace((unsigned char)*trimmed)) ++trimmed;
-    while (condition_end > trimmed &&
-           isspace((unsigned char)condition_end[-1])) --condition_end;
-    while (*at) {
-        const char *start, *cursor, *selector_end;
-        uint64_t number = 0;
-        char *fragment;
-        int result;
-        if (at[0] == '/' && at[1] == '/') {
-            at += 2;
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || *at == '\'') {
-            char quote = *at++;
-            while (*at && *at != quote) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            continue;
-        }
-        if (!isdigit((unsigned char)*at) ||
-            (at > condition && (isalnum((unsigned char)at[-1]) ||
-                                at[-1] == '_'))) { ++at; continue; }
-        start = at;
-        while (isdigit((unsigned char)*at)) {
-            unsigned digit = (unsigned)(*at++ - '0');
-            if (number <= (UINT64_MAX - digit) / 10)
-                number = number * 10 + digit;
-        }
-        if (number == 0 || !isspace((unsigned char)*at)) continue;
-        cursor = at;
-        while (isspace((unsigned char)*cursor)) ++cursor;
-        if (strncmp(cursor, "of", 2) != 0 ||
-            !isspace((unsigned char)cursor[2])) continue;
-        cursor += 2;
-        while (isspace((unsigned char)*cursor)) ++cursor;
-        if (strncmp(cursor, "them", 4) == 0 &&
-            !isalnum((unsigned char)cursor[4]) && cursor[4] != '_')
-            selector_end = cursor + 4;
-        else if (*cursor == '(') {
-            const char *close = yx_warning_matching_paren(cursor);
-            if (!close) continue;
-            selector_end = close + 1;
-        } else continue;
-        cursor = selector_end;
-        while (isspace((unsigned char)*cursor)) ++cursor;
-        /* Offset and range constraints belong to the full expression, and
-         * need their own span. Leave them to the dedicated warning passes. */
-        if ((strncmp(cursor, "at", 2) == 0 &&
-             !isalnum((unsigned char)cursor[2])) ||
-            (strncmp(cursor, "in", 2) == 0 &&
-             !isalnum((unsigned char)cursor[2]))) continue;
-        if (start == trimmed && selector_end == condition_end) continue;
-        {
-            const char *before = start;
-            while (before > condition && isspace((unsigned char)before[-1]))
-                --before;
-            if (before - condition >= 3 &&
-                memcmp(before - 3, "for", 3) == 0 &&
-                (before - 3 == condition ||
-                 !isalnum((unsigned char)before[-4]))) continue;
-        }
-        fragment = (char *)malloc((size_t)(selector_end - start) + 1);
-        if (!fragment) return false;
-        memcpy(fragment, start, (size_t)(selector_end - start));
-        fragment[selector_end - start] = '\0';
-        result = yx_compiler_warn_excess_pattern_requirement(
-            compiler, fragment, rule, source, origin,
-            condition_offset + (size_t)(start - condition));
-        free(fragment);
-        if (result == 0) return false;
-        at = selector_end;
-    }
-    return true;
-}
-
-static const char *yx_warning_matching_paren(const char *open)
-{
-    const char *at = open;
-    unsigned depth = 0;
-    if (*open != '(') return NULL;
-    while (*at) {
-        if (at[0] == '/' && at[1] == '/') {
-            at += 2;
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || *at == '\'') {
-            char quote = *at++;
-            while (*at && *at != quote) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            continue;
-        }
-        if (*at == '(') ++depth;
-        else if (*at == ')' && --depth == 0) return at;
-        ++at;
-    }
-    return NULL;
-}
-
 /* YARA-X folds through `with` identifiers: a declared identifier carries
  * its declaration's type value, constant folding reads type values, and
  * Expr::With takes its body's value (ir/mod.rs). So the invariant analysis
@@ -9111,7 +9582,27 @@ static void yx_compiler_move_before_later(YRX_COMPILER *compiler,
     }
 }
 
+static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler,
+    const char *condition, const YRX_RULE *rule, const char *source,
+    const char *origin, size_t condition_offset, size_t first_type_warning);
+
 int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler,
+                                         const char *condition,
+                                         const YRX_RULE *rule,
+                                         const char *source,
+                                         const char *origin,
+                                         size_t condition_offset,
+                                         size_t first_type_warning)
+{
+    int result;
+    yx_inv_scope_compiler = compiler;
+    result = yx_compiler_warn_invariant_condition_impl(compiler, condition, rule,
+        source, origin, condition_offset, first_type_warning);
+    yx_inv_scope_compiler = NULL;
+    return result;
+}
+
+static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler,
                                          const char *condition,
                                          const YRX_RULE *rule,
                                          const char *source,
@@ -9124,7 +9615,6 @@ int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler,
     const char *value;
     char label[128], note[512];
     char *expanded = NULL;
-    int pattern_warning;
     parser.source = condition;
     parser.compiler = compiler;
     parser.at = condition;
@@ -9146,23 +9636,6 @@ int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler,
     if (!yx_compiler_warn_global_rule_references(
             compiler, condition, source, origin, condition_offset))
         goto memory_failure;
-    size_t first_pattern_warning = compiler->warning_count;
-    if (!yx_compiler_warn_embedded_pattern_requirements(
-            compiler, condition, rule, source, origin, condition_offset))
-        goto memory_failure;
-    pattern_warning = yx_compiler_warn_excess_pattern_requirement(
-        compiler, condition, rule, source, origin, condition_offset);
-    if (pattern_warning == 0) goto memory_failure;
-    /* An of-expression's invariant_expr is raised once YARA-X compiled the
-     * expression (ast2ir.rs of_expr_from_ast): before the typed warnings
-     * raised after its end. */
-    for (size_t i = first_pattern_warning; i < compiler->warning_count; ++i) {
-        const char *span = strstr(compiler->warnings[i], "\"span\":{\"start\":");
-        size_t start, end;
-        if (!yx_compiler_json_span(compiler, span, &start, &end)) continue;
-        yx_compiler_move_before_later(compiler, first_type_warning, i, end);
-    }
-    if (pattern_warning == 2) return 1;
     expanded = yx_inv_expand_condition(condition);
     if (expanded) {
         parser.source = expanded;
@@ -9198,6 +9671,25 @@ int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler,
     }
     if (expr.bare_global) expr.value = expr.bare_global - 1;
     if (expr.value < 0) return 1;
+    /* A function call spans its identifier and arguments, not the object
+     * it is called on (parser ast/mod.rs, `impl WithSpan for FuncCall`), and
+     * an operation starts where its first operand does. */
+    {
+        const char *at = condition + expr.start, *name = at, *last = NULL;
+        for (;;) {
+            if (!(isalpha((unsigned char)*at) || *at == '_')) break;
+            name = at;
+            while (isalnum((unsigned char)*at) || *at == '_') ++at;
+            while (isspace((unsigned char)*at)) ++at;
+            if (*at == '(') { last = name; break; }
+            if (*at != '.') break;
+            ++at;
+            while (isspace((unsigned char)*at)) ++at;
+        }
+        if (last && last > condition + expr.start &&
+            (size_t)(last - condition) < expr.end)
+            expr.start = (size_t)(last - condition);
+    }
     value = expr.value == 1 ? "true" : "false";
     snprintf(label, sizeof(label), "this expression is always %s", value);
     snprintf(note, sizeof(note), "rule `%s` is always `%s`",
@@ -9838,8 +10330,15 @@ YRX_RESULT yx_include_source(YRX_COMPILER *compiler, const char *filename,
         yx_nul_escape_register(compiler, &escape_entry, source,
                                escape_offsets, escape_count);
         escape_offsets = NULL;
-        result = yx_parse_source(compiler, source,
-                                 origin_path ? origin_path : path);
+        {
+            /* One scan for the suppression comments of this source. */
+            yx_suppression_scope suppressions;
+            yx_suppression_scope_begin(&suppressions, (const uint8_t *)source,
+                                       strlen(source));
+            result = yx_parse_source(compiler, source,
+                                     origin_path ? origin_path : path);
+            yx_suppression_scope_end(&suppressions);
+        }
         yx_nul_escape_unregister(compiler, &escape_entry);
         free(origin_path);
     }
@@ -13237,7 +13736,12 @@ YRX_RESULT yrx_compiler_add_source_with_origin(YRX_COMPILER *compiler,
                      "out of memory recording invalid UTF-8");
         result = YRX_SYNTAX_ERROR;
     } else {
+        /* One scan for the suppression comments of this source. */
+        yx_suppression_scope suppressions;
+        yx_suppression_scope_begin(&suppressions, (const uint8_t *)source,
+                                   strlen(source));
         result = yx_parse_source(compiler, source, origin ? origin : "line");
+        yx_suppression_scope_end(&suppressions);
     }
     if (symbol_globals) {
         compiler->rules->globals = runtime_globals;
@@ -14371,6 +14875,23 @@ YRX_RESULT yrx_scanner_fast_scan(YRX_SCANNER *scanner, bool enabled)
 {
     if (!scanner) return yx_null_argument("scanner");
     scanner->fast_scan = enabled;
+    return yx_ok();
+}
+
+/* scanner/mod.rs NonMatchingRules: the zero bits of the matching-rules
+ * bitmap in rule-ID order, each rule bound to the scan context, so its
+ * patterns yield the matches the (lazy) pattern search recorded. */
+YRX_RESULT xxyara_scanner_iter_non_matching_rules(YRX_SCANNER *scanner,
+                                                  YRX_RULE_CALLBACK callback,
+                                                  void *user_data)
+{
+    if (!scanner) return yx_null_argument("scanner");
+    if (!callback) return yx_null_argument("callback");
+    for (size_t i = 0; i < scanner->rules->rule_count; ++i) {
+        const YRX_RULE *rule = scanner->views ? &scanner->views[i] :
+                                                &scanner->rules->rules[i];
+        if (!scanner->views || !rule->matched) callback(rule, user_data);
+    }
     return yx_ok();
 }
 

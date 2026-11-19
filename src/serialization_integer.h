@@ -71,10 +71,19 @@ typedef struct yx_integer_expr_node {
     int left, right, extra;
     uint8_t op;
     bool constant, floating, unsigned_value;
+    /* The partial result of a constant `+`, `-` or `*` chain that does not
+     * fit an i64 (sign and magnitude of an i128): IR::fold_arithmetic folds
+     * the whole chain before it checks the range, so the next link of the
+     * same operator may bring it back (`MAX * MAX * 0`). */
+    bool wide, wide_negative;
+    uint64_t wide_low, wide_high;
+    /* Decoding: the lazy pattern-search call preceded this pattern node. */
+    bool guarded;
     int64_t value;
     double real;
 } yx_integer_expr_node;
 
+enum { YX_INTEGER_BINDING_VALUES = 64 };
 typedef struct yx_integer_expr {
     yx_bool_parser parser;
     yx_integer_expr_node nodes[YX_INTEGER_EXPR_LIMIT];
@@ -92,6 +101,13 @@ typedef struct yx_integer_expr {
     int stop_loop_slot;
     uint64_t defined_variables[YX_ARCHIVE_MAX_VARS / 64];
     uint64_t unsigned_variables[YX_ARCHIVE_MAX_VARS / 64];
+    /* Decoding: 1 + the node bound to each of the first `with` slots (0:
+     * none), so that a later unsigned opcode can still type the literal
+     * behind a variable. A variable in a later slot is not typed that way. */
+    int binding_values[YX_INTEGER_BINDING_VALUES];
+    /* The variable nodes decoded for each of those slots since its binding
+     * (saturating): a declaration is typed through its first use only. */
+    uint8_t binding_uses[YX_INTEGER_BINDING_VALUES];
     yx_archive_binding *bindings;
     size_t binding_count, binding_capacity;
     /* Loop-shaped decodes of a block that already failed (see below). */
@@ -122,12 +138,39 @@ static bool yx_integer_expr_reserve(yx_integer_expr *tree,size_t count)
     memcpy(nodes,YX_INTEGER_NODES(tree),tree->count*sizeof(*nodes));
     free(tree->extra_nodes);tree->extra_nodes=nodes;tree->node_capacity=count;return true;
 }
+/* IR::required_matches_for_count (ir/mod.rs): the matches a fast scan must
+ * find for `#a <op> K` (`count_first`) or `K <op> #a`, `op` being the signed
+ * i64 comparison opcode. False when every match must be tracked: K is not an
+ * i64 (try_as_const_integer) or the limit is above u32::MAX. */
+static bool yx_count_required_matches(int64_t constant, bool constant_unsigned, uint8_t op,
+                                      bool count_first, uint64_t *limit)
+{
+    bool exact;
+    if (constant_unsigned && constant < 0) return false;
+    if (op == 0x51 || op == 0x52) exact = false;
+    else if (op == 0x53 || op == 0x59) exact = count_first;       /* #a < K, #a >= K; K < #a, K >= #a */
+    else if (op == 0x55 || op == 0x57) exact = !count_first;      /* K > #a, K <= #a */
+    else return false;
+    if (!exact && constant != INT64_MAX) ++constant;
+    if (constant < 1) constant = 1;
+    if (constant > (int64_t)UINT32_MAX) return false;
+    *limit = (uint64_t)constant;
+    return true;
+}
 static void yx_integer_expr_destroy(yx_integer_expr *tree)
 { if(tree){free(tree->extra_nodes);tree->extra_nodes=NULL;tree->node_capacity=0;
     free(tree->bindings);tree->bindings=NULL;tree->binding_capacity=0;
     free(tree->loop_failures);tree->loop_failures=NULL;tree->loop_failure_count=tree->loop_failure_capacity=0;} }
 static void yx_integer_expr_free(yx_integer_expr *tree)
 { yx_integer_expr_destroy(tree);free(tree); }
+static void yx_integer_note_binding(yx_integer_expr *tree, int slot, int value)
+{
+    if (slot >= 0 && slot < YX_INTEGER_BINDING_VALUES) { tree->binding_values[slot] = value + 1; tree->binding_uses[slot] = 0; }
+}
+static void yx_integer_note_use(yx_integer_expr *tree, int64_t slot)
+{
+    if (slot >= 0 && slot < YX_INTEGER_BINDING_VALUES && tree->binding_uses[slot] < UINT8_MAX) ++tree->binding_uses[slot];
+}
 static bool yx_integer_expr_boolean(uint8_t op)
 {
     return op == 0x41 || (op >= 0x51 && op <= 0x59) ||
@@ -212,6 +255,71 @@ static const char *yx_float_special_source(double value)
 }
 static bool yx_float_representable(double value)
 { return isfinite(value) || yx_float_special_source(value) != NULL; }
+/* The source text of a Float constant. A float literal has no exponent
+ * notation, so a value that "%.17g" prints with one is written in fixed
+ * notation, with the fewest digits that read back as the same value. */
+#define YX_FLOAT_SOURCE_TEXT 720
+static bool yx_float_source_text(double value, char *text)
+{
+    const char *special = yx_float_special_source(value);
+    int size;
+    if (special) { strcpy(text, special); return true; }
+    size = snprintf(text, YX_FLOAT_SOURCE_TEXT, "%.17g", value);
+    if (size <= 0 || size >= YX_FLOAT_SOURCE_TEXT - 2) return false;
+    if (!strchr(text, 'e') && !strchr(text, 'E')) {
+        if (!strchr(text, '.')) strcat(text, ".0");
+        return true;
+    }
+    for (int precision = 1; precision <= 340; ++precision) {
+        size = snprintf(text, YX_FLOAT_SOURCE_TEXT, "%.*f", precision, value);
+        if (size <= 0 || size >= YX_FLOAT_SOURCE_TEXT) return false;
+        if (strtod(text, NULL) == value) return true;
+    }
+    return false;
+}
+
+/* One step of an i128 `+`, `-` or `*` in sign and magnitude; false when the
+ * result does not fit an i128. */
+static bool yx_integer_wide_step(bool *negative, uint64_t *low, uint64_t *high,
+                                 uint64_t magnitude, bool operand_negative, uint8_t op)
+{
+    bool overflow = false;
+    if (op == 0x7e) {
+        uint32_t a[4] = {(uint32_t)*low, (uint32_t)(*low >> 32), (uint32_t)*high, (uint32_t)(*high >> 32)};
+        uint32_t b[2] = {(uint32_t)magnitude, (uint32_t)(magnitude >> 32)};
+        uint32_t product[6] = {0};
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t carry = 0;
+            for (unsigned j = 0; j < 2; ++j) {
+                uint64_t part = (uint64_t)a[i] * b[j] + product[i + j] + carry;
+                product[i + j] = (uint32_t)part;
+                carry = part >> 32;
+            }
+            product[i + 2] = (uint32_t)carry;
+        }
+        overflow = product[4] != 0 || product[5] != 0;
+        *low = (uint64_t)product[0] | (uint64_t)product[1] << 32;
+        *high = (uint64_t)product[2] | (uint64_t)product[3] << 32;
+        *negative = *negative != operand_negative;
+    } else {
+        if (op == 0x7d && magnitude) operand_negative = !operand_negative;
+        if (*negative == operand_negative) {
+            uint64_t previous = *low;
+            *low += magnitude;
+            *high += *low < previous;
+        } else if (*high || *low >= magnitude) {
+            uint64_t previous = *low;
+            *low -= magnitude;
+            *high -= previous < magnitude;
+        } else {
+            *low = magnitude - *low;
+            *negative = operand_negative;
+        }
+    }
+    if (!*high && !*low) *negative = false;
+    return !overflow && !(*high > (UINT64_C(1) << 63) ||
+        (*high == (UINT64_C(1) << 63) && (!*negative || *low != 0)));
+}
 
 static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
                                      int left, int right, int64_t value)
@@ -227,12 +335,34 @@ static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
     node = &YX_INTEGER_NODES(tree)[index];
     node->op = op; node->left = left; node->right = right; node->extra = -1;
     node->constant = op == 0x41 || op == 0x42 || op == 0x44; node->value = value;
+    node->wide = false; node->guarded = false;
     node->floating = op == 0x44 || (left >= 0 && right >= 0 &&
         !yx_integer_expr_boolean(op) && (YX_INTEGER_NODES(tree)[left].floating || YX_INTEGER_NODES(tree)[right].floating));
     node->unsigned_value = op == 0xb6 || op == 0xbb ||
         (!node->floating && !yx_integer_expr_boolean(op) && left >= 0 && right >= 0 &&
          (YX_INTEGER_NODES(tree)[left].unsigned_value ||
           ((op != 0x86 && op != 0x87) && YX_INTEGER_NODES(tree)[right].unsigned_value)));
+    /* A chain result outside i64 is only the left operand of the next link
+     * of its own operator. */
+    if (right >= 0 && right != left && YX_INTEGER_NODES(tree)[right].wide) goto unsupported;
+    if (left >= 0 && YX_INTEGER_NODES(tree)[left].wide) {
+        const yx_integer_expr_node *a = &YX_INTEGER_NODES(tree)[left];
+        bool negative = a->wide_negative, operand_negative;
+        uint64_t low = a->wide_low, high = a->wide_high, magnitude;
+        if (op != a->op || right < 0 || right == left || node->floating || node->unsigned_value ||
+            !YX_INTEGER_NODES(tree)[right].constant || YX_INTEGER_NODES(tree)[right].floating) goto unsupported;
+        operand_negative = YX_INTEGER_NODES(tree)[right].value < 0;
+        magnitude = operand_negative ? (uint64_t)0 - (uint64_t)YX_INTEGER_NODES(tree)[right].value :
+                    (uint64_t)YX_INTEGER_NODES(tree)[right].value;
+        if (!yx_integer_wide_step(&negative, &low, &high, magnitude, operand_negative, op)) goto unsupported;
+        if (!high && (negative ? low <= (UINT64_C(1) << 63) : low <= (uint64_t)INT64_MAX)) {
+            node->constant = true;
+            node->value = yx_integer_signed_bits(negative ? (uint64_t)0 - low : low);
+        } else {
+            node->wide = true; node->wide_negative = negative; node->wide_low = low; node->wide_high = high;
+        }
+        return index;
+    }
     if (node->floating && op != 0x44 && op != 0xc1 &&
         op != 0x7c && op != 0x7d && op != 0x7e && op != 0x7f) goto unsupported;
     if (node->floating && op != 0x44 &&
@@ -280,21 +410,23 @@ static int yx_integer_expr_node_new(yx_integer_expr *tree, uint8_t op,
         switch (op) {
         case 0xa0: value = a && b; break;
         case 0xa1: value = a || b; break;
-        case 0xa2: value = !a; break;
-        case 0x7c:
-            if ((b > 0 && a > INT64_MAX - b) ||
-                (b < 0 && a < INT64_MIN - b)) goto unsupported;
-            value = a + b; break;
-        case 0x7d:
-            if ((b < 0 && a > INT64_MAX + b) ||
-                (b > 0 && a < INT64_MIN + b)) goto unsupported;
-            value = a - b; break;
-        case 0x7e:
-            if ((a > 0 && b > 0 && a > INT64_MAX / b) ||
-                (a > 0 && b < 0 && b < INT64_MIN / a) ||
-                (a < 0 && b > 0 && a < INT64_MIN / b) ||
-                (a < 0 && b < 0 && a < INT64_MAX / b)) goto unsupported;
-            value = a * b; break;
+        case 0xa2:
+            /* IR::not (ir/mod.rs) folds a constant Boolean only: `not 1`
+             * stays `1 != 0` negated (emit_not, emit_bool_expr). */
+            if (!yx_integer_expr_boolean(YX_INTEGER_NODES(tree)[left].op)) return index;
+            value = !a; break;
+        case 0x7c: case 0x7d: case 0x7e: {
+            bool negative = a < 0;
+            uint64_t low = negative ? (uint64_t)0 - (uint64_t)a : (uint64_t)a, high = 0;
+            if (!yx_integer_wide_step(&negative, &low, &high,
+                    b < 0 ? (uint64_t)0 - (uint64_t)b : (uint64_t)b, b < 0, op)) goto unsupported;
+            if (high || (negative ? low > (UINT64_C(1) << 63) : low > (uint64_t)INT64_MAX)) {
+                node->wide = true; node->wide_negative = negative; node->wide_low = low; node->wide_high = high;
+                return index;
+            }
+            value = yx_integer_signed_bits(negative ? (uint64_t)0 - low : low);
+            break;
+        }
         case 0x7f:
             if (!b || (a == INT64_MIN && b == -1)) return index;
             value = a / b; break;
@@ -637,6 +769,81 @@ static int yx_integer_expr_boolean_parse(yx_integer_expr *tree, unsigned level,
     return left;
 }
 
+/* IR::and / IR::or (ir/mod.rs) on the parsed tree. The AST makes one n-ary
+ * operation of a left-nested chain; the IR builder drops its operands whose
+ * constant does not decide it and keeps the operation even with one operand
+ * left (0xd8 a one-operand `and`, 0xd9 a one-operand `or`: emit.rs gives
+ * them their own block and lazy-search scope). A chain a constant decides
+ * is constant already (yx_integer_expr_node_new). */
+static bool yx_integer_identity_constant(const yx_integer_expr_node *node, bool identity)
+{
+    if (!node->constant) return false;
+    return (node->floating ? node->real != 0.0 : node->value != 0) == identity;
+}
+
+static bool yx_integer_fold_identity_chains(yx_integer_expr *tree)
+{
+    size_t count = tree->count;
+    bool *inner;
+    int *chain, *kept;
+    bool ok = true;
+    if (!count) return true;
+    inner = calloc(count, sizeof(*inner));
+    chain = malloc(count * sizeof(*chain));
+    kept = malloc((count + 1) * sizeof(*kept));
+    if (!inner || !chain || !kept) { free(inner); free(chain); free(kept); return false; }
+    for (size_t n = 0; n < count; ++n) {
+        const yx_integer_expr_node *node = &YX_INTEGER_NODES(tree)[n];
+        if ((node->op == 0xa0 || node->op == 0xa1) && !node->constant && node->left >= 0 &&
+            (size_t)node->left < count && YX_INTEGER_NODES(tree)[node->left].op == node->op &&
+            !YX_INTEGER_NODES(tree)[node->left].constant)
+            inner[node->left] = true;
+    }
+    for (size_t n = 0; ok && n < count; ++n) {
+        yx_integer_expr_node *node = &YX_INTEGER_NODES(tree)[n];
+        size_t links = 0, operands = 0;
+        uint8_t op = node->op;
+        bool identity = op == 0xa0;
+        int at = (int)n;
+        if ((op != 0xa0 && op != 0xa1) || node->constant || inner[n]) continue;
+        /* The chain's nodes, outermost first, and its operands in order. */
+        while (YX_INTEGER_NODES(tree)[at].op == op && !YX_INTEGER_NODES(tree)[at].constant) {
+            if (YX_INTEGER_NODES(tree)[at].left < 0 || YX_INTEGER_NODES(tree)[at].right < 0 || links == count) { ok = false; break; }
+            chain[links++] = at;
+            at = YX_INTEGER_NODES(tree)[at].left;
+        }
+        if (!ok) break;
+        if (!yx_integer_identity_constant(&YX_INTEGER_NODES(tree)[at], identity)) kept[operands++] = at;
+        for (size_t link = links; link-- > 0;) {
+            int right = YX_INTEGER_NODES(tree)[chain[link]].right;
+            if (!yx_integer_identity_constant(&YX_INTEGER_NODES(tree)[right], identity)) kept[operands++] = right;
+        }
+        if (operands == links + 1 || !operands) continue;
+        if (operands == 1) {
+            node->op = identity ? 0xd8 : 0xd9;
+            node->left = node->right = kept[0];
+        } else {
+            /* The last links of the chain carry the operands that stay. */
+            int left = kept[0];
+            for (size_t k = 1; k < operands; ++k) {
+                int link = chain[operands - 1 - k];
+                YX_INTEGER_NODES(tree)[link].left = left;
+                YX_INTEGER_NODES(tree)[link].right = kept[k];
+                left = link;
+            }
+        }
+        /* The links left over stand for nothing: a constant no walk reads. */
+        for (size_t link = operands > 1 ? operands - 1 : 1; link < links; ++link) {
+            yx_integer_expr_node *unused = &YX_INTEGER_NODES(tree)[chain[link]];
+            unused->op = 0x41; unused->left = unused->right = unused->extra = -1;
+            unused->constant = true; unused->floating = unused->unsigned_value = false;
+            unused->value = identity ? 1 : 0;
+        }
+    }
+    free(inner); free(chain); free(kept);
+    return ok;
+}
+
 static int yx_integer_expr_condition(yx_integer_expr *tree, const char *condition)
 {
     int root;size_t length=strlen(condition);
@@ -644,7 +851,21 @@ static int yx_integer_expr_condition(yx_integer_expr *tree, const char *conditio
     tree->parser.at = (const unsigned char *)condition;
     root = yx_integer_expr_boolean_parse(tree, 0, 0);
     yx_bool_skip_space(&tree->parser);
-    return root >= 0 && !tree->failed && !*tree->parser.at ? root : -1;
+    if (root >= 0 && YX_INTEGER_NODES(tree)[root].wide) return -1;
+    if (root < 0 || tree->failed || *tree->parser.at) return -1;
+    if (!yx_integer_fold_identity_chains(tree)) { tree->failed = true; return -1; }
+    /* A one-operand `and` / `or` that is the whole condition emits what its
+     * operand does: the rule's own handler block is left out when unused and
+     * the operand's takes its place (catch_undef, emit.rs). */
+    if (YX_INTEGER_NODES(tree)[root].op == 0xd8 || YX_INTEGER_NODES(tree)[root].op == 0xd9) {
+        while (YX_INTEGER_NODES(tree)[root].op == 0xd8 || YX_INTEGER_NODES(tree)[root].op == 0xd9)
+            root = YX_INTEGER_NODES(tree)[root].left;
+        /* The condition is again the last node, as the walks that ask
+         * whether a node is the whole condition expect: an operand precedes
+         * its operator, so nothing after the new root belongs to it. */
+        tree->count = (size_t)root + 1;
+    }
+    return root;
 }
 
 static const uint8_t yx_integer_divisor_guard[] = {
@@ -1069,29 +1290,73 @@ static bool yx_integer_boolean_emit(const yx_integer_expr *tree, int index,
                                       yx_writer *writer, unsigned depth)
 { return yx_integer_boolean_emit_inner(tree,index,writer,depth,-1); }
 
+/* A Boolean operand that never raises `undefined` to the handler around
+ * it: catch_undef (emit.rs) then leaves that handler's block out. Only the
+ * forms that surely do not raise count; any other keeps the block (an
+ * unused one is dropped when the module is lowered). */
+static bool yx_integer_boolean_never_undefined(const yx_integer_expr *tree, int index, unsigned depth)
+{
+    const yx_integer_expr_node *n;
+    if (index < 0 || (size_t)index >= tree->count || depth > 256) return false;
+    n = &YX_INTEGER_NODES(tree)[index];
+    if (n->constant) return true;
+    switch (n->op) {
+    case 0xa0: case 0xa1: case 0xd8: case 0xd9: case 0xd1: case 0xd2: return true;
+    case 0xa2: return yx_integer_boolean_never_undefined(tree, n->left, depth + 1);
+    case 0x51: case 0x52: case 0x53: case 0x55: case 0x57: case 0x59:
+    case 0xd6: case 0xd7:
+        return yx_integer_expr_defined(tree, n->left, 0) && yx_integer_expr_defined(tree, n->right, 0);
+    case 0xd5: return yx_integer_expr_defined(tree, n->left, 0);
+    case 0xda: return n->left < 0 || yx_integer_expr_defined(tree, n->left, 0);
+    default: return false;
+    }
+}
+
 static bool yx_integer_boolean_emit_inner(const yx_integer_expr *tree, int index,
                                       yx_writer *writer, unsigned depth,int undefined_slot)
 {
     const yx_integer_expr_node *node = &YX_INTEGER_NODES(tree)[index];
     if (depth > 256) return false;
+    if (node->op == 0xd8 || node->op == 0xd9) {
+        /* A one-operand And / Or (IR::and, IR::or keep it): its own handler
+         * block and, as for any And / Or, its own lazy-search scope
+         * (emit_expr, emit.rs). */
+        bool ok, block = !yx_integer_boolean_never_undefined(tree, node->left, 0);
+        if (tree->boolean_scope) tree->boolean_scope(tree->extension, true);
+        ok = (!block || (yx_put_u8(writer, 0x02) && yx_put_u8(writer, 0x7f) &&
+                (node->op != 0xd9 || (yx_put_u8(writer, 0x02) && yx_put_u8(writer, 0x7f))))) &&
+            yx_integer_boolean_emit(tree, node->left, writer, depth + 1) &&
+            (!block || (yx_put_u8(writer, 0x0b) && (node->op != 0xd9 || yx_put_u8(writer, 0x0b))));
+        if (tree->boolean_scope) tree->boolean_scope(tree->extension, false);
+        return ok;
+    }
     if (node->op >= 0xd0)
         return tree->emit_primary && tree->emit_primary(tree, index, writer, depth,
             undefined_slot, true, tree->extension);
     if (node->op >= 0xc4 && node->op <= 0xc6)
         return yx_integer_loop_emit(tree, index, writer, depth + 1);
-    if (node->op == 0xc0) {
+    /* The declarations of a `with` are a chain of nodes, as long as the
+     * variables YARA-X allows (2048): walked here, not by recursion. */
+    while (node->op == 0xc0) {
         static const uint8_t set_start[] = {0x02,0x40,0x41};
         bool defined=yx_integer_expr_defined(tree,node->left,0);
-        if (node->value < 0 || node->value >= YX_ARCHIVE_MAX_VARS) return false;
-        return
-            yx_put_bytes(writer, set_start+(defined?2:0), sizeof(set_start)-(defined?2:0)) &&
+        if (node->value < 0 || node->value >= YX_ARCHIVE_MAX_VARS || node->right < 0) return false;
+        if (!(yx_put_bytes(writer, set_start+(defined?2:0), sizeof(set_start)-(defined?2:0)) &&
             yx_put_sleb_i64(writer, node->value * 8) &&
             yx_integer_expr_emit(tree, node->left, writer, 0, depth + 1, (int)node->value, false) &&
             yx_put_u8(writer, YX_INTEGER_NODES(tree)[node->left].floating ? 0x39 : 0x37) && yx_put_u8(writer, 0x03) &&
             yx_put_uleb(writer, 256) &&
-            (defined||(yx_integer_clear_variable(writer,node->value)&&yx_put_u8(writer,0x0b))) &&
-            yx_integer_boolean_emit_inner(tree,node->right,writer,depth+1,undefined_slot);
+            (defined||(yx_integer_clear_variable(writer,node->value)&&yx_put_u8(writer,0x0b))))) return false;
+        index = node->right;
+        node = &YX_INTEGER_NODES(tree)[index];
     }
+    if (node->op == 0xd8 || node->op == 0xd9)
+        return yx_integer_boolean_emit_inner(tree, index, writer, depth + 1, undefined_slot);
+    if (node->op >= 0xd0)
+        return tree->emit_primary && tree->emit_primary(tree, index, writer, depth,
+            undefined_slot, true, tree->extension);
+    if (node->op >= 0xc4 && node->op <= 0xc6)
+        return yx_integer_loop_emit(tree, index, writer, depth + 1);
     if (yx_integer_expr_boolean(node->op) && node->constant)
         return yx_put_u8(writer, 0x41) && yx_put_u8(writer, node->value ? 1 : 0);
     if (node->op == 0xa0 || node->op == 0xa1) {
@@ -1169,7 +1434,7 @@ static bool yx_integer_expr_resources(yx_integer_expr *tree, int index,
         bool chain = node->op == frame.parent &&
             (frame.parent == 0x7c || frame.parent == 0x7d || frame.parent == 0x7e || frame.parent == 0x7f || frame.parent == 0x81);
         if (node->constant && !chain) continue;
-        if (node->op >= 0xd0 && (!tree->resource_primary ||
+        if (node->op >= 0xd0 && node->op != 0xd8 && node->op != 0xd9 && (!tree->resource_primary ||
             !tree->resource_primary(tree, frame.index, tree->extension))) goto resources_done;
         if (node->op == 0x23) tree->has_filesize = true;
         if (node->op == 0xc0 || node->op == 0xc2 || node->op == 0xc3) tree->has_memory = true;
@@ -1355,6 +1620,11 @@ static bool yx_integer_expr_print(const yx_integer_expr *tree, int index,
     const char *op;
     bool grouped;
     if (depth > 256) return false;
+    /* The constant first: a one-operand node inside another stays apart (a
+     * left-nested chain is one operation). */
+    if (node->op == 0xd8 || node->op == 0xd9)
+        return yx_put_bytes(writer, node->op == 0xd8 ? "(true and " : "(false or ", 10) &&
+            yx_integer_expr_print(tree, node->left, writer, 0, false, depth + 1) && yx_put_u8(writer, ')');
     if (node->op >= 0xd0)
         return tree->print_primary && tree->print_primary(tree, index, writer, tree->extension);
     if (node->op == 0x41)
@@ -1372,13 +1642,19 @@ static bool yx_integer_expr_print(const yx_integer_expr *tree, int index,
             yx_integer_expr_print(tree, node->extra, writer, 0, false, depth + 1) && yx_put_u8(writer, ')');
     }
     if (node->op == 0xc0) {
-        char declaration[40];
-        int length = snprintf(declaration, sizeof(declaration), "with v%u = ", (unsigned)node->value);
-        return length > 0 && (size_t)length < sizeof(declaration) &&
-            yx_put_bytes(writer, declaration, (size_t)length) &&
-            yx_integer_expr_print(tree, node->left, writer, 0, false, depth + 1) &&
-            yx_put_bytes(writer, ": (", 3) &&
-            yx_integer_expr_print(tree, node->right, writer, 0, false, depth + 1) &&
+        /* A chain of declarations prints as one `with`: the same variables
+         * in the same slots, without nesting as deep as the chain. */
+        for (bool first = true; node->op == 0xc0; first = false) {
+            char declaration[40];
+            int length = snprintf(declaration, sizeof(declaration), first ? "with v%u = " : ", v%u = ", (unsigned)node->value);
+            if (length <= 0 || (size_t)length >= sizeof(declaration) || node->right < 0 ||
+                !yx_put_bytes(writer, declaration, (size_t)length) ||
+                !yx_integer_expr_print(tree, node->left, writer, 0, false, depth + 1)) return false;
+            index = node->right;
+            node = &YX_INTEGER_NODES(tree)[index];
+        }
+        return yx_put_bytes(writer, ": (", 3) &&
+            yx_integer_expr_print(tree, index, writer, 0, false, depth + 1) &&
             yx_put_u8(writer, ')');
     }
     if (node->op == 0xa2)
@@ -1401,18 +1677,17 @@ static bool yx_integer_expr_print(const yx_integer_expr *tree, int index,
         return yx_put_bytes(writer, "-(", 2) &&
             yx_integer_expr_print(tree, node->left, writer, 0, false, depth + 1) && yx_put_u8(writer, ')');
     if (node->op == 0x44) {
-        char text[40];
-        const char *special = yx_float_special_source(node->real);
-        if (special) return yx_put_bytes(writer, special, strlen(special));
-        int size = snprintf(text, sizeof(text), "%.17g", node->real);
-        return size > 0 && (size_t)size < sizeof(text) && yx_put_bytes(writer, text, (size_t)size) &&
-            (strchr(text, '.') || strchr(text, 'e') || strchr(text, 'E') || yx_put_bytes(writer, ".0", 2));
+        char text[YX_FLOAT_SOURCE_TEXT];
+        return yx_float_source_text(node->real, text) && yx_put_bytes(writer, text, strlen(text));
     }
     if (node->op == 0x42) {
-        char text[40];
+        char text[64];
         int size;
         if (node->unsigned_value) {
-            size = snprintf(text, sizeof(text), "%" PRIu64, (uint64_t)node->value);
+            /* An unsigned constant that fits i64 has no literal of its own:
+             * the conjunction folds to it and keeps the type. */
+            size = snprintf(text, sizeof(text), node->value < 0 ? "%" PRIu64 :
+                "(18446744073709551615 & %" PRIu64 ")", (uint64_t)node->value);
             return size > 0 && (size_t)size < sizeof(text) && yx_put_bytes(writer, text, (size_t)size);
         }
         if (node->value == INT64_MIN)
@@ -1674,6 +1949,7 @@ static int yx_integer_wasm_binding(yx_reader *reader, size_t end,
     tree->defined_variables[*slot / 64] &= ~bit;
     if (YX_INTEGER_NODES(tree)[node].unsigned_value) tree->unsigned_variables[*slot / 64] |= bit;
     else tree->unsigned_variables[*slot / 64] &= ~bit;
+    yx_integer_note_binding(tree, *slot, node);
     return node;
 }
 
@@ -1692,6 +1968,68 @@ static int yx_integer_wasm_variable_slot(const yx_reader *reader, size_t start)
     for (unsigned bit = 0; bit < 8; ++bit)
         if (mask == (INT64_C(1) << bit)) return (int)(address * 8 + bit);
     return -1;
+}
+
+/* i64.const keeps only the bits of a literal: an unsigned opcode (emit.rs
+ * emit_int_comparison, emit_div, emit_mod, emit_shift_op) tells that one of
+ * its operands has the unsigned type, which only a literal can introduce.
+ * Marks the literal that gives `index` that type; `strict` accepts only a
+ * literal above INT64_MAX. Nothing changes when no literal can be found. */
+static bool yx_integer_force_unsigned(yx_integer_expr *tree, int index, bool strict, unsigned depth)
+{
+    yx_integer_expr_node *node;
+    if (index < 0 || depth > 256) return false;
+    node = &YX_INTEGER_NODES(tree)[index];
+    if (node->floating) return false;
+    if (node->unsigned_value) return true;
+    if (node->op == 0x42) {
+        if (strict && node->value >= 0) return false;
+        node->unsigned_value = true;
+        return true;
+    }
+    if (node->constant) return false;
+    switch (node->op) {
+    case 0xc2: case 0xc3: {
+        int64_t slot = node->value;
+        /* Typing the declaration types every use of the variable: only a
+         * literal above INT64_MAX in the declaration, and only from the
+         * variable's first use, so that no use decoded before disagrees
+         * (a later use that does fails the byte comparison). An unsigned
+         * operand of a signed variable carries its type itself. */
+        if (!strict || slot < 0 || slot >= YX_INTEGER_BINDING_VALUES || !tree->binding_values[slot] ||
+            tree->binding_uses[slot] != 1 ||
+            (size_t)tree->binding_values[slot] > tree->count ||
+            !yx_integer_force_unsigned(tree, tree->binding_values[slot] - 1, strict, depth + 1)) return false;
+        tree->unsigned_variables[slot / 64] |= UINT64_C(1) << (slot % 64);
+        break;
+    }
+    case 0x7c: case 0x7d: case 0x7e: case 0x83: case 0x84: case 0x85:
+        if (!yx_integer_force_unsigned(tree, node->left, strict, depth + 1) &&
+            !yx_integer_force_unsigned(tree, node->right, strict, depth + 1)) return false;
+        break;
+    case 0x86:
+        if (!yx_integer_force_unsigned(tree, node->left, strict, depth + 1)) return false;
+        break;
+    default:
+        return false;
+    }
+    node->unsigned_value = true;
+    return true;
+}
+static bool yx_integer_make_unsigned(yx_integer_expr *tree, int index)
+{
+    return yx_integer_force_unsigned(tree, index, true, 0) ||
+        yx_integer_force_unsigned(tree, index, false, 0);
+}
+/* One of two operands is unsigned: a literal above INT64_MAX first, then an
+ * operand that is itself a literal, then a literal inside an operand. */
+static bool yx_integer_make_either_unsigned(yx_integer_expr *tree, int first, int second)
+{
+    if (YX_INTEGER_NODES(tree)[first].unsigned_value || YX_INTEGER_NODES(tree)[second].unsigned_value) return true;
+    if (yx_integer_force_unsigned(tree, first, true, 0) || yx_integer_force_unsigned(tree, second, true, 0)) return true;
+    if (YX_INTEGER_NODES(tree)[first].op == 0x42) return yx_integer_force_unsigned(tree, first, false, 0);
+    if (YX_INTEGER_NODES(tree)[second].op == 0x42) return yx_integer_force_unsigned(tree, second, false, 0);
+    return yx_integer_force_unsigned(tree, first, false, 0) || yx_integer_force_unsigned(tree, second, false, 0);
 }
 
 static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
@@ -1776,6 +2114,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                 if (matched) {
                     node = yx_integer_expr_node_new(tree, 0xc2, -1, -1, slot);
                     if (node >= 0) {
+                        yx_integer_note_use(tree, slot);
                         YX_INTEGER_NODES(tree)[node].floating = floating != 0;
                         YX_INTEGER_NODES(tree)[node].unsigned_value = !!(tree->unsigned_variables[slot / 64] & (UINT64_C(1) << (slot % 64)));
                     }
@@ -1790,7 +2129,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
         } else if (marker == 0xb9 || marker == 0xba) {
             if (!used || YX_INTEGER_NODES(tree)[stack[used - 1]].floating) return -1;
             /* Promotion is inferred again from the enclosing floating operation. */
-            if (marker == 0xba) YX_INTEGER_NODES(tree)[stack[used - 1]].unsigned_value = true;
+            if (marker == 0xba && !yx_integer_make_unsigned(tree, stack[used - 1])) return -1;
             continue;
         } else if (marker == 0x9a) {
             if (!used || !YX_INTEGER_NODES(tree)[stack[used - 1]].floating) return -1;
@@ -1814,6 +2153,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                     tree->defined_variables[slot/64]|=bit;
                     if(YX_INTEGER_NODES(tree)[value].unsigned_value)tree->unsigned_variables[slot/64]|=bit;
                     else tree->unsigned_variables[slot/64]&=~bit;
+                    yx_integer_note_binding(tree,slot,value);
                     bindings[binding_count]=value;slots[binding_count++]=slot;continue;
                 }
                 *reader=saved;tree->count=saved_count;tree->failed=saved_failed;
@@ -1827,6 +2167,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                yx_get_uleb(&probe,&offset)&&offset==256&&probe.at<=end) {
                 *reader=probe;node=yx_integer_expr_node_new(tree,0xc3,-1,-1,address/8);
                 if(node>=0) {
+                    yx_integer_note_use(tree,address/8);
                     YX_INTEGER_NODES(tree)[node].floating=opcode==0x2b;
                     YX_INTEGER_NODES(tree)[node].unsigned_value=!!(tree->unsigned_variables[address/8/64]&(UINT64_C(1)<<(address/8%64)));
                 }
@@ -1920,11 +2261,20 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                 if(used>=2) {
                     const yx_integer_expr_node *left=&YX_INTEGER_NODES(tree)[stack[used-2]],
                         *right=&YX_INTEGER_NODES(tree)[stack[used-1]];
-                    for(uint8_t local=0;local<2&&!shifted;++local)for(uint8_t op=0x86;op<=0x87&&!shifted;++op) {
-                        yx_writer expected={0};reader->at=start;
-                        shifted=yx_integer_shift_v12_emit(&expected,op,left->unsigned_value,right->unsigned_value,local)&&
-                            yx_integer_wasm_bytes(reader,end,expected.data,expected.used);
-                        free(expected.data);if(shifted)marker=op;
+                    /* The operand types as decoded first; then the types the
+                     * opcodes ask for (shr_u: left, lt_u on the count: right). */
+                    for(unsigned typing=0;typing<4&&!shifted;++typing) {
+                        bool left_unsigned=left->unsigned_value||(typing&1),right_unsigned=right->unsigned_value||(typing&2);
+                        if(((typing&1)&&left->unsigned_value)||((typing&2)&&right->unsigned_value))continue;
+                        for(uint8_t local=0;local<2&&!shifted;++local)for(uint8_t op=0x86;op<=0x87&&!shifted;++op) {
+                            yx_writer expected={0};reader->at=start;
+                            if(op==0x86&&(typing&1))continue;
+                            shifted=yx_integer_shift_v12_emit(&expected,op,left_unsigned,right_unsigned,local)&&
+                                yx_integer_wasm_bytes(reader,end,expected.data,expected.used);
+                            free(expected.data);if(shifted)marker=op;
+                        }
+                        if(shifted&&(((typing&1)&&!yx_integer_make_unsigned(tree,stack[used-2]))||
+                                     ((typing&2)&&!yx_integer_make_unsigned(tree,stack[used-1]))))return -1;
                     }
                 }
                 if(shifted) {
@@ -1949,10 +2299,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                         *right=&YX_INTEGER_NODES(tree)[stack[used-1]];
                     /* i64.const stores only bits. The unsigned opcode restores
                      * the type of a high-bit literal before folding its prefix. */
-                    if(!left->unsigned_value&&!right->unsigned_value) {
-                        if(left->op==0x42&&left->value<0)left->unsigned_value=true;
-                        else if(right->op==0x42&&right->value<0)right->unsigned_value=true;
-                    }
+                    if(!yx_integer_make_either_unsigned(tree,stack[used-1],stack[used-2]))return -1;
                     --marker;
                 }
             } else if(marker==0x21&&used>=2&&end-start>=4&&
@@ -1970,6 +2317,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                 for(m=0;m<2&&!matched;++m) {
                     bool l_uns=(m==0), r_uns=(m==1);
                     uint8_t comparison;
+                    if((l_uns&&right->unsigned_value)||(r_uns&&left->unsigned_value))continue;
                     for(comparison=0x51;comparison<=0x59;++comparison) {
                         if(comparison>0x52&&!(comparison&1))continue;
                         yx_writer expected={0};reader->at=start;
@@ -1979,8 +2327,7 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                         free(expected.data);
                         if(matched) {
                             marker=comparison;
-                            left->unsigned_value=l_uns;
-                            right->unsigned_value=r_uns;
+                            if(!yx_integer_make_unsigned(tree,l_uns?stack[used-2]:stack[used-1]))return -1;
                             break;
                         }
                     }
@@ -2006,7 +2353,19 @@ static int yx_integer_wasm_block_inner(yx_reader *reader, size_t end,
                 static const uint8_t ops[] = {0x51,0x52,0x53,0x55,0x57,0x59};
                 marker = ops[marker - 0x61];
             }
-            if(marker>=0x54&&marker<=0x5a&&!(marker&1))--marker;
+            if(marker>=0x54&&marker<=0x5a&&!(marker&1)) {
+                /* Plain unsigned comparison: both operands unsigned, or one
+                 * unsigned and the other one known not to be negative. */
+                if(used<2)return -1;
+                for(unsigned side=0;side<2;++side) {
+                    int operand=stack[used-2+side];
+                    if(!YX_INTEGER_NODES(tree)[operand].unsigned_value&&
+                       !yx_integer_expr_non_negative(&YX_INTEGER_NODES(tree)[operand])&&
+                       !yx_integer_make_unsigned(tree,operand))return -1;
+                }
+                if(!yx_integer_make_either_unsigned(tree,stack[used-1],stack[used-2]))return -1;
+                --marker;
+            }
             if (!yx_integer_expr_operator(marker) || marker >= 0xa0 || used < 2) return -1;
             if(marker>=0x51&&marker<=0x59&&!mixed_comparison) {
                 yx_integer_expr_node *left=&YX_INTEGER_NODES(tree)[stack[used-2]],

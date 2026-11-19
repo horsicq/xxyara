@@ -39,9 +39,15 @@ typedef struct yx_module_patterns {
     yx_global_rules_context prior;
     size_t *helper_calls, helper_call_count, helper_call_capacity;
     int for_of; /* the enclosing YX_MP_FOR_OF node, -1 outside a body */
+    /* The condition roots yx_module_pattern_limits looks at (a `#a` that is
+     * a whole condition needs one match), or NULL. */
+    const int *limit_roots; size_t limit_root_count;
     unsigned quantity; /* nesting of quantifier parses: no loops or `of` there */
     /* The archive's regexp pool (RegexpId order), interned while emitting. */
     yx_literal *regexes; size_t regex_count, regex_capacity;
+    /* Decoding: the name the printed conditions give each logical pattern
+     * (the reconstructed patterns have placeholder identifiers), or NULL. */
+    const char *const *anchor_names;
 } yx_module_patterns;
 static bool yx_module_pattern_relocate_helper(yx_writer *body,const size_t *offsets,size_t count,size_t id)
 {
@@ -1598,7 +1604,7 @@ static bool yx_module_pattern_wasm(yx_module_program *p, int root, uint8_t **dat
 {
     yx_module_patterns *c=p->extension;
     c->searched=false;c->scope_depth=0;c->helper_call_count=0;
-    p->import_count=0;p->call_count=0;p->i32_local=false;p->two_locals=false;
+    p->import_count=0;p->call_count=0;p->i32_local=false;p->two_locals=false;p->shift=false;p->shifts=true;
     if(!yx_module_pattern_live_globals(p,root))return false;
     p->filesize_global=c->presence?1:0;c->search_global=(uint8_t)(c->presence+p->filesize);p->memory|=c->presence;
     yx_writer expression = {0}, types = {0}, imports = {0}, body = {0}, code = {0}, wasm = {0}, wrapper={0}, main_body={0}, exports={0};
@@ -1675,7 +1681,14 @@ static bool yx_module_pattern_wasm(yx_module_program *p, int root, uint8_t **dat
         /* i64_tmp_a and, for range bounds and signed division, i64_tmp_b,
          * numbered after emit_switch's i32 temporary. */
         bool wide=p->filesize||p->divisor||p->two_locals;
-        ok = (!(p->i32_local && wide) || yx_module_shift_wide_locals(expression.data, expression.used, 1)) &&
+        /* A shift wrote i64_tmp_b as local 1: it is the only i64 local
+         * unless something uses i64_tmp_a (yx_module_wasm). */
+        if(p->shift) {
+            if(wide)p->two_locals=true;
+            else ok=yx_module_shift_wide_locals(expression.data,expression.used,-1);
+            wide=true;
+        }
+        ok = ok && (!(p->i32_local && wide) || yx_module_shift_wide_locals(expression.data, expression.used, 1)) &&
             yx_put_u8(&body, (wide ? 1 : 0) + p->i32_local) &&
             (!p->i32_local || (yx_put_u8(&body, 1) && yx_put_u8(&body, 0x7f))) &&
             (!wide || (yx_put_u8(&body, p->two_locals ? 2 : 1) && yx_put_u8(&body, 0x7e))) &&
@@ -1755,14 +1768,36 @@ static bool yx_module_pattern_limits(yx_module_program *p)
          * folded IR only; disallow_fast_scan above and below ran before. */
         if(n->op==YX_MP_COUNT&&n->folded_away)continue;
         uint64_t limit=0;
-        if(n->op==YX_MP_COUNT)for(size_t j=0;j<p->count;++j) {
+        /* IR::required_matches_for_count: the root and the Boolean contexts
+         * (`and`, `or`, `not`, the body of a `with` or a `for .. in`) need
+         * one match. Parentheses are not IR nodes. */
+        if(n->op==YX_MP_COUNT) {
+            int operand=(int)i;
+            for(bool climbed=true;climbed;) {
+                climbed=false;
+                for(size_t j=0;j<p->count&&!climbed;++j)
+                    if(p->nodes[j].op==YX_ME_GROUP&&p->nodes[j].args[0]==operand&&(int)j!=operand){operand=(int)j;climbed=true;}
+            }
+            for(size_t j=0;j<c->limit_root_count&&!limit;++j)if(c->limit_roots[j]==operand)limit=1;
+            for(size_t j=0;j<p->count&&!limit;++j) {
+                const yx_module_node *parent=&p->nodes[j];
+                if((int)j==operand)continue;
+                if(((parent->op==YX_ME_AND||parent->op==YX_ME_OR)&&(parent->args[0]==operand||parent->args[1]==operand))||
+                   (parent->op==YX_ME_NOT&&parent->args[0]==operand)||
+                   ((parent->op==YX_ME_BIND||parent->op==YX_ME_LOOP)&&parent->args[1]==operand&&parent->args[0]!=operand))limit=1;
+            }
+        }
+        if(n->op==YX_MP_COUNT&&!limit)for(size_t j=0;j<p->count;++j) {
             const yx_module_node *parent=&p->nodes[j];
-            if(parent->op!=YX_ME_COMPARE||parent->args[0]!=(int)i||parent->comparison>5)continue;
-            const yx_module_node *bound=&p->nodes[parent->args[1]];
-            if(bound->op!=YX_ME_INT||bound->integer<0||bound->integer>UINT32_MAX)continue;
-            limit=(uint64_t)bound->integer+((parent->comparison==5||parent->comparison==2)?0:1);
-            if(!limit)limit=1;
-            if(limit>UINT32_MAX)limit=0;
+            static const uint8_t ops[]={0x51,0x52,0x53,0x55,0x57,0x59};
+            if(parent->op!=YX_ME_COMPARE||(parent->args[0]!=(int)i&&parent->args[1]!=(int)i)||
+               parent->args[0]==parent->args[1]||parent->comparison>5)continue;
+            bool count_first=parent->args[0]==(int)i;
+            const yx_module_node *bound=&p->nodes[parent->args[count_first?1:0]];
+            /* IR::required_matches_for_count: any constant integer, on either side. */
+            if(!bound->constant||bound->type!=3||
+               !yx_count_required_matches(bound->integer,bound->unsigned_value,ops[parent->comparison],count_first,&limit))
+                limit=0;
             break;
         }
         /* An anonymous operand limits every pattern of its `for .. of` set. */
@@ -1931,6 +1966,7 @@ static yx_ser_result yx_encode_module_patterns_profile(const YRX_RULES *rules,ui
         if(!yx_intern_literal(a->pool[i].data,a->pool[i].length,&p->literals,&p->literal_count,&p->literal_capacity,&id)||id!=i)goto done;
     }
     int root=yx_module_parse(p,1,0);yx_bool_skip_space(&p->parser);
+    c.limit_roots=&root;c.limit_root_count=1;
     if(root<0||*p->parser.at||p->failed||!yx_module_pattern_limits(p)||
        !yx_module_pattern_wasm(p,root,&wasm,&wasm_length)||!yx_physical_pool_reserve(a,p->literal_count))goto done;
     for(size_t i=0;i<p->count;++i)if(p->nodes[i].op==YX_MP_AT||(p->nodes[i].op==YX_MP_OF&&(p->nodes[i].comparison>>4)))goto done;
@@ -2105,6 +2141,7 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     limits=calloc(a->physical?a->physical:1,sizeof(*limits));bounded=calloc(a->physical?a->physical:1,sizeof(*bounded));bounds=calloc(a->physical?a->physical:1,sizeof(*bounds));
     if(!limits||!bounded||!bounds){status=YX_SER_NO_MEMORY;goto done;}
     if(a->physical)memcpy(limits,a->limits,a->physical*sizeof(*limits));
+    c.limit_roots=&root;c.limit_root_count=1;
     if(!yx_module_pattern_limits(p)||memcmp(limits,a->limits,a->physical*sizeof(*limits)))goto done;
     memcpy(bounded,a->bounded,a->physical*sizeof(*bounded));memcpy(bounds,a->bounds,a->physical*sizeof(*bounds));
     yx_module_pattern_apply_bounds(p,root);

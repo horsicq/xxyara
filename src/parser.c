@@ -4631,6 +4631,41 @@ static bool yx_diag_token_in(const yx_diag_token *token,
     return false;
 }
 
+/* The binding strength of the operator a token spells, and the types its
+ * operands may have (check_type in ast2ir.rs); 0 for any other token. */
+static unsigned yx_function_operand_operator(const yx_diag_token *token,
+                                             const char **accepted)
+{
+    static const struct {
+        const char *spelling;
+        unsigned precedence;
+        const char *accepted;
+    } operators[] = {
+        {"*", 11, "`float` or `integer`"}, {"\\", 11, "`float` or `integer`"},
+        {"%", 11, "`integer`"},
+        {"+", 10, "`float` or `integer`"}, {"-", 10, "`float` or `integer`"},
+        {"<<", 9, "`integer`"}, {">>", 9, "`integer`"},
+        {"&", 8, "`integer`"}, {"^", 7, "`integer`"}, {"|", 6, "`integer`"},
+        {"<", 5, "`float`, `integer`, or `string`"},
+        {"<=", 5, "`float`, `integer`, or `string`"},
+        {">", 5, "`float`, `integer`, or `string`"},
+        {">=", 5, "`float`, `integer`, or `string`"},
+        {"!=", 4, "`float`, `integer`, or `string`"},
+        {"==", 4, "`boolean`, `float`, `integer`, or `string`"},
+        {"contains", 4, "`string`"}, {"icontains", 4, "`string`"},
+        {"startswith", 4, "`string`"}, {"istartswith", 4, "`string`"},
+        {"endswith", 4, "`string`"}, {"iendswith", 4, "`string`"},
+        {"iequals", 4, "`string`"}, {"matches", 4, "`string`"}
+    };
+    if (!token) return 0;
+    for (size_t i = 0; i < sizeof(operators) / sizeof(operators[0]); ++i)
+        if (yx_diag_token_is(token, operators[i].spelling)) {
+            *accepted = operators[i].accepted;
+            return operators[i].precedence;
+        }
+    return 0;
+}
+
 /* A module function referenced without a call (E002). Where a bool is
  * expected (the condition, a `for`/`with` body, an `of` tuple item) the
  * label says "a function" and may suggest the call; as an operand of
@@ -4650,6 +4685,8 @@ static int yx_function_value_error(yx_parser *p, const char *start,
     };
     yx_diag_token *tokens = NULL;
     const yx_diag_token *before, *after;
+    /* The operand types of the operator the function is an operand of. */
+    const char *accepted = "`boolean`, `float`, `integer`, or `string`";
     size_t count = 0, first = SIZE_MAX, last = SIZE_MAX, begin, end;
     bool help = false, found = false, operand, warn = false, boolean = false;
     char snippet[256];
@@ -4684,6 +4721,39 @@ static int yx_function_value_error(yx_parser *p, const char *start,
     operand = (before && yx_diag_token_in(before, unary, 2)) ||
               (before && yx_diag_token_in(before, comparisons, 14)) ||
               (after && yx_diag_token_in(after, comparisons, 14));
+    if (!(before && yx_diag_token_in(before, unary, 2))) {
+        /* The operator that binds the function: a unary `-` or `~` in
+         * front of it, or else the stronger of its two neighbours (the
+         * left one when they are equal). */
+        const char *before_accepted = NULL, *after_accepted = NULL;
+        unsigned before_strength =
+            yx_function_operand_operator(before, &before_accepted);
+        unsigned after_strength =
+            yx_function_operand_operator(after, &after_accepted);
+        const yx_diag_token *previous = first > 1 ? &tokens[first - 2] : NULL;
+        bool prefix = before &&
+            (yx_diag_token_is(before, "-") || yx_diag_token_is(before, "~")) &&
+            (!previous || (previous->kind == YX_DIAG_SYMBOL &&
+                           !yx_diag_token_is(previous, ")") &&
+                           !yx_diag_token_is(previous, "]")) ||
+             (previous->kind == YX_DIAG_WORD &&
+              (yx_diag_token_in(previous, unary, 2) ||
+               yx_diag_token_in(previous, logical, 2) ||
+               yx_diag_token_in(previous, comparisons, 14))));
+        if (prefix) {
+            accepted = yx_diag_token_is(before, "~") ?
+                "`integer`" : "`float` or `integer`";
+            operand = true;
+        } else if (before_strength || after_strength) {
+            accepted = before_strength >= after_strength ? before_accepted :
+                                                           after_accepted;
+            /* The right operand of `matches` is a regexp. */
+            if (before_strength >= after_strength &&
+                yx_diag_token_is(before, "matches"))
+                accepted = "`regexp`";
+            operand = true;
+        }
+    }
     /* `not`, `defined` and comparisons bind tighter than `and`/`or`. */
     warn = !operand &&
            ((before && yx_diag_token_in(before, logical, 2)) ||
@@ -4731,7 +4801,7 @@ static int yx_function_value_error(yx_parser *p, const char *start,
         }
         result = yx_compiler_wrong_type_error(
             p->compiler, p->begin, p->origin, begin, end,
-            "`boolean`, `float`, `integer`, or `string`", "function") ? 1 : -1;
+            accepted, "function") ? 1 : -1;
     }
 done:
     free(tokens);
@@ -4879,111 +4949,37 @@ static bool yx_exponent_notation_syntax_error(yx_parser *p,
 }
 
 typedef struct {
-    size_t body_close;
-    uint64_t multiplier;
-} yx_loop_warning_frame;
+    yx_parser *parser;
+    const char *start, *limit;
+} yx_loop_iterations_context;
 
-static bool yx_diag_decimal_u64(const yx_diag_token *token, uint64_t *value)
+static bool yx_condition_loop_iterations_warning(size_t start, size_t end,
+                                                 uint64_t iterations,
+                                                 void *user)
 {
-    uint64_t number = 0;
-    uint64_t multiplier = 1;
-    unsigned base = 10;
-    const char *at = token->start, *end = token->end;
-    if (token->kind != YX_DIAG_INTEGER || token->start == token->end)
-        return false;
-    if (end - at > 2 && at[0] == '0' &&
-        (at[1] == 'x' || at[1] == 'X' || at[1] == 'o' || at[1] == 'O')) {
-        base = at[1] == 'x' || at[1] == 'X' ? 16 : 8;
-        at += 2;
-    }
-    if (base == 10 && end - at > 2 && end[-1] == 'B' &&
-        (end[-2] == 'K' || end[-2] == 'M')) {
-        multiplier = end[-2] == 'K' ? 1024 : 1024 * 1024;
-        end -= 2;
-    }
-    for (; at < end; ++at) {
-        int digit;
-        if (*at == '_') continue;
-        digit = yx_hex_digit(*at);
-        if (digit < 0 || (unsigned)digit >= base ||
-            number > (UINT64_MAX - (unsigned)digit) / base) return false;
-        number = number * base + (unsigned)digit;
-    }
-    if (number > UINT64_MAX / multiplier) return false;
-    *value = number * multiplier;
-    return true;
+    yx_loop_iterations_context *context = user;
+    yx_parser *p = context->parser;
+    size_t offset = (size_t)(context->start - p->begin);
+    if (end > (size_t)(p->at - context->start)) return true;
+    if (context->limit && context->start + start >= context->limit) return true;
+    return yx_compiler_too_many_iterations_warning(
+        p->compiler, p->begin, p->origin, offset + start, offset + end,
+        iterations) != 0;
 }
 
-/* Estimate the product of literal range sizes for nested loops. Dynamic
- * ranges keep the inherited multiplier because their size is unknown.
- * Loops starting at or after `limit` (when not NULL) are not reported: YARA-X
- * warns about a loop before compiling its body, so the loops that enclose or
- * precede a failing statement have already been reported. */
+/* too_many_iterations from the parsed condition (condition.c,
+ * yx_condition_visit_loop_iterations). Loops starting at or after `limit`
+ * (when not NULL) are not reported: YARA-X warns about a loop before
+ * compiling its body, so the loops that enclose or precede a failing
+ * statement have already been reported. */
 static bool yx_condition_warn_too_many_iterations(yx_parser *p,
+                                                   const YRX_RULE *rule,
                                                    const char *start,
                                                    const char *limit)
 {
-    yx_diag_token *tokens = NULL;
-    yx_loop_warning_frame *frames = NULL;
-    size_t count = 0, depth = 0;
-    bool ok = false;
-    if (!yx_condition_diag_tokens(start, p->at, &tokens, &count))
-        return false;
-    frames = calloc(count ? count : 1, sizeof(*frames));
-    if (!frames) goto done;
-    for (size_t i = 0; i + 7 < count; ++i) {
-        size_t in = count, range_close, body_close, nesting;
-        uint64_t lower, upper, iterations, multiplier;
-        while (depth && frames[depth - 1].body_close < i) --depth;
-        if (limit && tokens[i].start >= limit) break;
-        if (!yx_diag_token_is(&tokens[i], "for")) continue;
-        for (size_t j = i + 1; j < count && j < i + 12; ++j) {
-            if (yx_diag_token_is(&tokens[j], "in")) { in = j; break; }
-            if (yx_diag_token_is(&tokens[j], ":")) break;
-        }
-        if (in == count || in + 5 >= count ||
-            !yx_diag_token_is(&tokens[in + 1], "(")) continue;
-        nesting = 0;
-        for (range_close = in + 1; range_close < count; ++range_close) {
-            if (yx_diag_token_is(&tokens[range_close], "(")) ++nesting;
-            else if (yx_diag_token_is(&tokens[range_close], ")") &&
-                     --nesting == 0) break;
-        }
-        if (range_close == count || range_close + 2 >= count ||
-            !yx_diag_token_is(&tokens[range_close + 1], ":") ||
-            !yx_diag_token_is(&tokens[range_close + 2], "(")) continue;
-        nesting = 0;
-        for (body_close = range_close + 2; body_close < count;
-             ++body_close) {
-            if (yx_diag_token_is(&tokens[body_close], "(")) ++nesting;
-            else if (yx_diag_token_is(&tokens[body_close], ")") &&
-                     --nesting == 0) break;
-        }
-        if (body_close == count) continue;
-        multiplier = depth ? frames[depth - 1].multiplier : 1;
-        if (range_close == in + 5 &&
-            yx_diag_decimal_u64(&tokens[in + 2], &lower) &&
-            yx_diag_token_is(&tokens[in + 3], "..") &&
-            yx_diag_decimal_u64(&tokens[in + 4], &upper) &&
-            upper >= lower && upper - lower < UINT64_MAX) {
-            iterations = upper - lower + 1;
-            multiplier = multiplier > (uint64_t)INT64_MAX / iterations ?
-                         (uint64_t)INT64_MAX : multiplier * iterations;
-            if (multiplier > 1000000 &&
-                !yx_compiler_too_many_iterations_warning(
-                    p->compiler, p->begin, p->origin,
-                    (size_t)(tokens[i].start - p->begin),
-                    (size_t)(tokens[body_close].end - p->begin),
-                    multiplier)) goto done;
-        }
-        frames[depth++] =
-            (yx_loop_warning_frame){body_close, multiplier};
-    }
-    ok = true;
-done:
-    free(tokens);
-    free(frames);
-    return ok;
+    yx_loop_iterations_context context = {p, start, limit};
+    return yx_condition_visit_loop_iterations(
+        rule->condition, yx_condition_loop_iterations_warning, &context);
 }
 
 /* Where in the source YARA-X is when it raises a condition warning, for
@@ -4991,16 +4987,48 @@ done:
  * a recorded point (warning_point_keys in internal.h); `<n> of` asking for
  * more items than there are, the whole rule's invariant_expr (raised after
  * the condition) and the label of the kinds raised at their label. */
+/* A recorded point by its key, for a binary search of the first point
+ * recorded for a warning. */
+typedef struct {
+    uintptr_t key;
+    size_t index;
+} yx_warning_point_record;
+
+static int yx_warning_point_compare(const void *a, const void *b)
+{
+    const yx_warning_point_record *left = a, *right = b;
+    if (left->key != right->key) return left->key < right->key ? -1 : 1;
+    return left->index < right->index ? -1 : left->index > right->index;
+}
+
+/* `sorted`, when given, lists the compiler's recorded points (those of the
+ * condition being compiled) by key, then by index. */
 static bool yx_warning_raise_position(const YRX_COMPILER *compiler,
-                                      const char *warning, size_t *position)
+                                      const char *warning,
+                                      const yx_warning_point_record *sorted,
+                                      size_t *position)
 {
     const char *span = strstr(warning, "\"span\":{\"start\":");
     size_t start, end;
-    for (size_t i = 0; i < compiler->warning_point_count; ++i)
-        if (compiler->warning_point_keys[i] == warning) {
-            *position = compiler->warning_point_values[i];
+    if (sorted) {
+        size_t low = 0, high = compiler->warning_point_count;
+        while (low < high) {
+            size_t middle = low + (high - low) / 2;
+            if (sorted[middle].key < (uintptr_t)warning) low = middle + 1;
+            else high = middle;
+        }
+        if (low < compiler->warning_point_count &&
+            sorted[low].key == (uintptr_t)warning) {
+            *position = compiler->warning_point_values[sorted[low].index];
             return true;
         }
+    } else {
+        for (size_t i = 0; i < compiler->warning_point_count; ++i)
+            if (compiler->warning_point_keys[i] == warning) {
+                *position = compiler->warning_point_values[i];
+                return true;
+            }
+    }
     if (!yx_compiler_json_span(compiler, span, &start, &end)) return false;
     if (strstr(warning, "\"type\":\"InvariantBooleanExpression\"")) {
         *position = strstr(warning, "the expression requires ") ?
@@ -5031,25 +5059,86 @@ static bool yx_warning_raise_position(const YRX_COMPILER *compiler,
  * expression while it compiles their `of` expression (ast2ir.rs
  * of_expr_from_ast). Moves each warning from `first` on before the first
  * warning of this condition that is raised later in the source. */
+typedef struct {
+    size_t key, arrival;
+    char *warning;
+} yx_warning_order_record;
+
+static int yx_warning_order_compare(const void *a, const void *b)
+{
+    const yx_warning_order_record *left = a, *right = b;
+    if (left->key != right->key) return left->key < right->key ? -1 : 1;
+    return left->arrival < right->arrival ? -1 : left->arrival > right->arrival;
+}
+
 static void yx_order_of_warnings(YRX_COMPILER *compiler,
                                  size_t first_condition_warning, size_t first)
 {
-    for (size_t i = first; i < compiler->warning_count; ++i) {
-        size_t position;
-        if (!yx_warning_raise_position(compiler, compiler->warnings[i],
-                                       &position)) continue;
-        for (size_t j = first_condition_warning; j < i; ++j) {
-            size_t other;
-            if (yx_warning_raise_position(compiler, compiler->warnings[j],
-                                          &other) && other > position) {
-                char *saved = compiler->warnings[i];
-                memmove(compiler->warnings + j + 1, compiler->warnings + j,
-                        (i - j) * sizeof(*compiler->warnings));
-                compiler->warnings[j] = saved;
-                break;
+    /* Moving each warning from `first` on before the first earlier warning
+     * raised after its position x puts it behind every warning whose
+     * running maximum of positions is at most x. So each warning gets a
+     * key, x when it moves and the running maximum when it stays, and the
+     * order is the stable sort by that key. The points are those of this
+     * condition (the parser resets them for each one). */
+    size_t count = compiler->warning_count, n, begin, maximum = 0;
+    yx_warning_order_record *records;
+    yx_warning_point_record *sorted = NULL;
+    char **warnings;
+    bool any = false;
+    if (first >= count || first_condition_warning > first) return;
+    n = count - first_condition_warning;
+    begin = first - first_condition_warning;
+    warnings = compiler->warnings + first_condition_warning;
+    records = (yx_warning_order_record *)malloc(n * sizeof(*records));
+    if (compiler->warning_point_count)
+        sorted = (yx_warning_point_record *)malloc(
+            compiler->warning_point_count * sizeof(*sorted));
+    if (!records || (compiler->warning_point_count && !sorted)) {
+        /* Out of memory: the same order, slowly. */
+        free(records); free(sorted);
+        for (size_t i = first; i < compiler->warning_count; ++i) {
+            size_t position;
+            if (!yx_warning_raise_position(compiler, compiler->warnings[i],
+                                           NULL, &position)) continue;
+            for (size_t j = first_condition_warning; j < i; ++j) {
+                size_t other;
+                if (yx_warning_raise_position(compiler, compiler->warnings[j],
+                                              NULL, &other) && other > position) {
+                    char *saved = compiler->warnings[i];
+                    memmove(compiler->warnings + j + 1, compiler->warnings + j,
+                            (i - j) * sizeof(*compiler->warnings));
+                    compiler->warnings[j] = saved;
+                    break;
+                }
             }
         }
+        return;
     }
+    for (size_t i = 0; i < compiler->warning_point_count; ++i) {
+        sorted[i].key = (uintptr_t)compiler->warning_point_keys[i];
+        sorted[i].index = i;
+    }
+    if (sorted)
+        qsort(sorted, compiler->warning_point_count, sizeof(*sorted),
+              yx_warning_point_compare);
+    for (size_t i = 0; i < n; ++i) {
+        size_t position = 0;
+        bool known = yx_warning_raise_position(compiler, warnings[i], sorted,
+                                               &position);
+        if (known && i >= begin && any && maximum > position) {
+            records[i].key = position;
+        } else {
+            if (known && (!any || position > maximum)) maximum = position;
+            if (known) any = true;
+            records[i].key = any ? maximum : 0;
+        }
+        records[i].arrival = i;
+        records[i].warning = warnings[i];
+    }
+    qsort(records, n, sizeof(*records), yx_warning_order_compare);
+    for (size_t i = 0; i < n; ++i) warnings[i] = records[i].warning;
+    free(records);
+    free(sorted);
 }
 
 typedef struct {
@@ -5110,17 +5199,39 @@ typedef struct {
 
 static bool yx_condition_zero_quantifier_warning(size_t quantifier_start,
                                                  size_t quantifier_end,
-                                                 size_t end, void *user)
+                                                 size_t end, size_t raised,
+                                                 void *user)
+{
+    yx_zero_quantifier_context *context = user;
+    yx_parser *p = context->parser;
+    size_t offset = (size_t)(context->start - p->begin);
+    size_t count = p->compiler->warning_count;
+    if (end > (size_t)(p->at - context->start)) return true;
+    /* Raised once the items are compiled and before the anchor is: an
+     * error in the anchor comes after it. */
+    if (context->error_start != SIZE_MAX &&
+        offset + raised > context->error_start) return true;
+    return yx_compiler_ambiguous_expr_warning(
+        p->compiler, p->begin, p->origin, offset + quantifier_start,
+        offset + quantifier_end, offset + end) != 0 &&
+        yx_compiler_warning_raised_at(p->compiler, count, offset + raised);
+}
+
+static bool yx_condition_excess_quantifier_warning(size_t start, size_t end,
+                                                   size_t raised,
+                                                   int64_t required,
+                                                   size_t available,
+                                                   void *user)
 {
     yx_zero_quantifier_context *context = user;
     yx_parser *p = context->parser;
     size_t offset = (size_t)(context->start - p->begin);
     if (end > (size_t)(p->at - context->start)) return true;
     if (context->error_start != SIZE_MAX &&
-        offset + end > context->error_start) return true;
-    return yx_compiler_ambiguous_expr_warning(
-        p->compiler, p->begin, p->origin, offset + quantifier_start,
-        offset + quantifier_end, offset + end) != 0;
+        offset + raised > context->error_start) return true;
+    return yx_compiler_excess_quantifier_warning(
+        p->compiler, p->begin, p->origin, offset + start, offset + end,
+        offset + raised, required, available) != 0;
 }
 
 /* `0 of ...` from the parsed condition: the span runs from the quantifier
@@ -5132,8 +5243,23 @@ static bool yx_condition_warn_ambiguous_zero_of(yx_parser *p,
                                                  size_t error_start)
 {
     yx_zero_quantifier_context context = {p, start, error_start};
-    return yx_condition_visit_zero_quantifiers(
-        rule->condition, yx_condition_zero_quantifier_warning, &context);
+    const char **names = NULL;
+    bool ok;
+    /* With `<n> of` asking for more items than there are (ast2ir.rs
+     * of_expr_from_ast, for_of_expr_from_ast), in one walk: an inner
+     * expression's warnings come before those of the one around it. */
+    if (rule->pattern_count) {
+        names = (const char **)malloc(rule->pattern_count * sizeof(*names));
+        if (!names) return false;
+        for (size_t i = 0; i < rule->pattern_count; ++i)
+            names[i] = rule->patterns[i].identifier;
+    }
+    ok = yx_condition_visit_of_quantifiers(
+        rule->condition, names, rule->pattern_count,
+        yx_condition_zero_quantifier_warning,
+        yx_condition_excess_quantifier_warning, &context);
+    free((void *)names);
+    return ok;
 }
 
 typedef struct {
@@ -5401,12 +5527,17 @@ static bool yx_known_function_arguments_error(yx_parser *p,
 }
 
 static bool yx_unknown_function_condition_error(yx_parser *p,
+                                                const YRX_RULE *rule,
                                                 const char *start,
                                                 const char *detail)
 {
     static const char prefix[] = "unsupported function '";
     const char *quoted = strstr(detail, prefix);
     const char *end;
+    /* func_call_from_ast: a called symbol that is no function is E002 with
+     * the symbol's type: a module is a struct, a rule a boolean. */
+    const char *symbol_type = NULL;
+    const YRX_RULES *rules = p->compiler->rules;
     yx_diag_token *tokens = NULL;
     size_t count = 0, length;
     bool diagnosed = false;
@@ -5416,10 +5547,18 @@ static bool yx_unknown_function_condition_error(yx_parser *p,
     if (!end || end[1] || end == quoted) return false;
     length = (size_t)(end - quoted);
     if (memchr(quoted, '.', length)) return false;
-    for (size_t i = 0; i < p->compiler->rules->import_count; ++i)
-        if (strlen(p->compiler->rules->imports[i]) == length &&
-            memcmp(p->compiler->rules->imports[i], quoted, length) == 0)
-            return false;
+    for (size_t i = 0; !symbol_type && i < rules->rule_count; ++i)
+        if (strlen(rules->rules[i].identifier) == length &&
+            memcmp(rules->rules[i].identifier, quoted, length) == 0 &&
+            rules->rules[i].namespace_index == rule->namespace_index &&
+            &rules->rules[i] != rule)
+            symbol_type = "boolean";
+    for (size_t i = 0; !symbol_type && i < rules->import_count; ++i)
+        if (strlen(rules->imports[i]) == length &&
+            memcmp(rules->imports[i], quoted, length) == 0) {
+            if (length == 2 && memcmp(quoted, "vt", 2) == 0) return false;
+            symbol_type = "struct";
+        }
     if (!yx_condition_diag_tokens(start, p->at, &tokens, &count))
         return false;
     for (size_t i = 0; i + 1 < count; ++i) {
@@ -5431,10 +5570,16 @@ static bool yx_unknown_function_condition_error(yx_parser *p,
         if (length >= sizeof(name)) break;
         memcpy(name, quoted, length);
         name[length] = '\0';
-        diagnosed = yx_compiler_unknown_identifier_error(
-            p->compiler, name, p->begin, p->origin,
-            (size_t)(tokens[i].start - p->begin),
-            (size_t)(tokens[i].end - p->begin)) != 0;
+        diagnosed = symbol_type ?
+            yx_compiler_wrong_type_error(
+                p->compiler, p->begin, p->origin,
+                (size_t)(tokens[i].start - p->begin),
+                (size_t)(tokens[i].end - p->begin),
+                "`function`", symbol_type) != 0 :
+            yx_compiler_unknown_identifier_error(
+                p->compiler, name, p->begin, p->origin,
+                (size_t)(tokens[i].start - p->begin),
+                (size_t)(tokens[i].end - p->begin)) != 0;
         if (diagnosed) p->recoverable_unknown_identifier = true;
         break;
     }
@@ -6139,6 +6284,34 @@ static bool yx_invalid_range_condition_error(yx_parser *p,
                                              const char *detail)
 {
     const char *cursor = start;
+    if (strncmp(detail, "invalid range span ", 19) == 0) {
+        /* Bounds that are constant through `with` variables: the validation
+         * gives their span and values; the range is the `(..)` around. */
+        size_t first, last;
+        long long lower, upper;
+        const char *open, *close;
+        if (sscanf(detail, "invalid range span %zu..%zu %lld %lld",
+                   &first, &last, &lower, &upper) != 4 || first >= last ||
+            last > (size_t)(p->at - start)) return false;
+        open = start + first;
+        close = start + last;
+        while (open > start && isspace((unsigned char)open[-1])) --open;
+        while (close < p->at && isspace((unsigned char)*close)) ++close;
+        if (open > start && open[-1] == '(' && close < p->at && *close == ')') {
+            --open;
+            ++close;
+        } else {
+            open = start + first;
+            close = start + last;
+        }
+        if (!yx_compiler_invalid_range_error(p->compiler, p->begin, p->origin,
+                                             (size_t)(open - p->begin),
+                                             (size_t)(close - p->begin),
+                                             (int64_t)lower, (int64_t)upper))
+            return false;
+        p->recoverable_unknown_identifier = true;
+        return true;
+    }
     if (strcmp(detail, "invalid range") != 0) return false;
     while (cursor < p->at) {
         const char *next = yx_condition_skip_noncode(cursor, start, p->at);
@@ -8888,7 +9061,7 @@ static int yx_parse_condition_in_scope(yx_parser *p, YRX_RULE *rule)
             goto condition_failed;
         if (yx_mismatching_types_condition_error(p, start, detail)) goto condition_failed;
         if (yx_assignment_mismatch_condition_error(p, start, detail)) goto condition_failed;
-        if (yx_unknown_function_condition_error(p, start, detail)) goto condition_failed;
+        if (yx_unknown_function_condition_error(p, rule, start, detail)) goto condition_failed;
         if (yx_unexpected_negative_condition_error(p, start, detail)) goto condition_failed;
         if (yx_test_proto_acl_condition_error(p, start, detail)) goto condition_failed;
         if (yx_test_proto_method_condition_error(p, start, detail)) goto condition_failed;
@@ -9001,12 +9174,12 @@ condition_failed:
                                 p->compiler, rule->condition_text,
                                 rule, p->begin, p->origin,
                                 (size_t)(start - p->begin), first_type_warning)) return 0;
-                        if (!yx_condition_warn_too_many_iterations(p, start, NULL))
+                        if (!yx_condition_warn_too_many_iterations(p, rule, start, NULL))
                             return yx_error(p, "out of memory recording loop warning");
                         first_of_warning = p->compiler->warning_count;
-                        if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
-                            return yx_error(p, "out of memory recording expression warning");
                         if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, SIZE_MAX))
+                            return yx_error(p, "out of memory recording expression warning");
+                        if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
                             return yx_error(p, "out of memory recording expression warning");
                         yx_order_of_warnings(p->compiler, first_type_warning,
                                              first_of_warning);
@@ -9117,9 +9290,9 @@ validation_failed:
             /* YARA-X raised these while compiling the operands before the
              * failing one: keep those that end before the error. */
             first_expression_warning = p->compiler->warning_count;
-            if (!yx_condition_warn_unsatisfiable_at(p, rule, start, error_end))
-                return yx_error(p, "out of memory recording expression warning");
             if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, error_start))
+                return yx_error(p, "out of memory recording expression warning");
+            if (!yx_condition_warn_unsatisfiable_at(p, rule, start, error_end))
                 return yx_error(p, "out of memory recording expression warning");
             yx_order_of_warnings(p->compiler, first_type_warning,
                                  first_expression_warning);
@@ -9127,7 +9300,7 @@ validation_failed:
         if (p->too_many_variables_at) {
             const char *limit = p->too_many_variables_at;
             p->too_many_variables_at = NULL;
-            if (!yx_condition_warn_too_many_iterations(p, start, limit))
+            if (!yx_condition_warn_too_many_iterations(p, rule, start, limit))
                 return yx_error(p, "out of memory recording loop warning");
         }
         if (yx_compiler_semantic_error_end(p->compiler, error_mark, &error_end) &&
@@ -9154,12 +9327,12 @@ validation_failed:
         ++p->at;
         return 1;
     }
-    if (!yx_condition_warn_too_many_iterations(p, start, NULL))
+    if (!yx_condition_warn_too_many_iterations(p, rule, start, NULL))
         return yx_error(p, "out of memory recording loop warning");
     first_of_warning = p->compiler->warning_count;
-    if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
-        return yx_error(p, "out of memory recording expression warning");
     if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, SIZE_MAX))
+        return yx_error(p, "out of memory recording expression warning");
+    if (!yx_condition_warn_unsatisfiable_at(p, rule, start, SIZE_MAX))
         return yx_error(p, "out of memory recording expression warning");
     yx_order_of_warnings(p->compiler, first_type_warning, first_of_warning);
     if (!yx_condition_warn_overlapping_pattern_sets(p, rule, start))
@@ -9850,7 +10023,30 @@ done:
     memcpy(p->compiler->error, first_error, sizeof(first_error));
 }
 
+static int yx_parse_rule_unlimited(yx_parser *p, bool is_private,
+                                   bool is_global);
+
+/* YARA-X keeps the first `max_warnings` warnings in the order it raises
+ * them (compiler/mod.rs, Warnings::add). A rule's warnings are collected by
+ * several passes and then ordered, so the limit applies once the rule's
+ * warnings are in that order. */
 static int yx_parse_rule(yx_parser *p, bool is_private, bool is_global)
+{
+    YRX_COMPILER *compiler = p->compiler;
+    size_t limit = compiler->max_warnings;
+    int result;
+    if (compiler->warning_count >= limit)
+        return yx_parse_rule_unlimited(p, is_private, is_global);
+    compiler->max_warnings = SIZE_MAX;
+    result = yx_parse_rule_unlimited(p, is_private, is_global);
+    compiler->max_warnings = limit;
+    while (compiler->warning_count > limit)
+        free(compiler->warnings[--compiler->warning_count]);
+    return result;
+}
+
+static int yx_parse_rule_unlimited(yx_parser *p, bool is_private,
+                                   bool is_global)
 {
     YRX_RULE rule = {0};
     size_t initial_warning_count = p->compiler->warning_count;
