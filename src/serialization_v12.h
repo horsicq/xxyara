@@ -176,6 +176,15 @@ done:
     free(ins);free(stack);return ok;
 }
 
+/* The instruction after i that has i's parent: past the end of a block i
+ * opens, whose inner instructions have other parents. */
+static size_t yx_v12_next_child(const yx_v12_instruction *ins,size_t i)
+{
+    if((ins[i].op==2||ins[i].op==3||ins[i].op==4)&&ins[i].mate!=SIZE_MAX&&ins[i].mate>i)
+        return ins[i].mate+1;
+    return i+1;
+}
+
 /* emit_and/emit_or use a void short-circuit block in v12. Recognize only
  * the old exact constant/branch stubs; nested expression branches retain
  * their target when the additional label is inserted. */
@@ -184,7 +193,7 @@ static void yx_v12_boolean_blocks(const uint8_t *data,yx_v12_instruction *ins,si
     for(size_t block=0;block<count;++block) {
         if(ins[block].op!=2||ins[block].argument!=0x7f||!ins[block].targeted)continue;
         int kind=-1;bool mixed=false;size_t stubs=0;
-        for(size_t i=block+1;i<ins[block].mate;++i) {
+        for(size_t i=block+1;i<ins[block].mate;i=yx_v12_next_child(ins,i)) {
             if(ins[i].parent!=block||ins[i].op!=4||ins[i].argument!=0x40||ins[i].mate!=i+4)continue;
             int value=-1;
             if(ins[i+1].op==0x41&&ins[i+1].end-ins[i+1].start==2&&data[ins[i+1].start+1]==1&&
@@ -197,7 +206,7 @@ static void yx_v12_boolean_blocks(const uint8_t *data,yx_v12_instruction *ins,si
         }
         if(!stubs||mixed)continue;
         ins[block].boolean_block=true;ins[block].short_value=(uint8_t)kind;
-        for(size_t i=block+1;i<ins[block].mate;++i) {
+        for(size_t i=block+1;i<ins[block].mate;i=yx_v12_next_child(ins,i)) {
             if(ins[i].parent!=block||ins[i].op!=4||ins[i].argument!=0x40||ins[i].mate!=i+4)continue;
             bool match=kind?ins[i+1].op==0x41&&ins[i+1].end-ins[i+1].start==2&&data[ins[i+1].start+1]==1&&
                             ins[i+2].op==0x0c&&ins[i+2].argument==1&&ins[i+3].op==5:
@@ -210,16 +219,27 @@ static void yx_v12_boolean_blocks(const uint8_t *data,yx_v12_instruction *ins,si
     }
     /* Undefined operands of AND exit the void catch block, whose fallback
      * already pushes false; no result operand belongs on that branch. */
+    size_t *open=malloc((count?count:1)*sizeof(*open)),opened=0;
     for(size_t i=1;i<count;++i) {
+        if(open) {
+            /* The blocks open before i, outermost first. */
+            const yx_v12_instruction *q=&ins[i-1];
+            if(q->op==2||q->op==3||q->op==4)open[opened++]=i-1;
+            else if(q->op==0x0b&&q->mate!=SIZE_MAX&&opened&&open[opened-1]==q->mate)--opened;
+        }
         if(ins[i].op!=0x0c||ins[i].remove||ins[i-1].remove||
            ins[i-1].op!=0x41||ins[i-1].end-ins[i-1].start!=2||
            data[ins[i-1].start+1]!=0||ins[i-1].parent!=ins[i].parent)continue;
         size_t target=ins[i].parent;
+        if(open&&opened&&open[opened-1]==target)
+            target=ins[i].argument<opened?open[opened-1-(size_t)ins[i].argument]:SIZE_MAX;
+        else
         for(uint64_t d=0;d<ins[i].argument&&target!=SIZE_MAX;++d)target=ins[target].parent;
         if(target!=SIZE_MAX&&ins[target].boolean_block&&!ins[target].short_value) {
             ins[i].catch_undef=true;ins[i].catch_target=target;ins[i-1].remove=true;
         }
     }
+    free(open);
 }
 
 /* emit_switch keeps its enclosing result block (i64, f64 or i32) even for
@@ -245,6 +265,62 @@ static bool yx_v12_switch_result_block(const yx_v12_instruction *ins,size_t coun
     return i>block+1&&i+1<count&&ins[i].op==0x20&&ins[i+1].op==0x0e;
 }
 
+/* The blocks open before each instruction, outermost first, with running
+ * counts of removed and Boolean blocks: a branch's ancestors are the top of
+ * this stack, so adjusting its depth takes O(1) instead of a walk up the
+ * parents (quadratic for deeply nested bodies). */
+typedef struct yx_v12_open {
+    size_t *blocks,*removed,*booleans,count;
+    size_t *level; /* per instruction: its position in blocks when opened */
+} yx_v12_open;
+
+/* Updates `open` for instruction i, after it is handled. */
+static void yx_v12_open_after(const yx_v12_instruction *ins,size_t i,yx_v12_open *open)
+{
+    if(ins[i].op==2||ins[i].op==3||ins[i].op==4) {
+        size_t n=open->count++;
+        open->blocks[n]=i;open->level[i]=n;
+        open->removed[n]=(n?open->removed[n-1]:0)+(ins[i].remove?1:0);
+        open->booleans[n]=(n?open->booleans[n-1]:0)+(ins[i].boolean_block?1:0);
+    } else if(ins[i].op==0x0b&&ins[i].mate!=SIZE_MAX&&open->count&&
+              open->blocks[open->count-1]==ins[i].mate)--open->count;
+}
+
+/* Of the first `n` ancestors of an instruction whose parent tops `open`
+ * (n at most open->count): how many are removed and how many Boolean. */
+static void yx_v12_open_counts(const yx_v12_open *open,size_t n,size_t *removed,size_t *booleans)
+{
+    size_t top=open->count-1,below=open->count-n;
+    *removed=open->removed[top]-(below?open->removed[below-1]:0);
+    *booleans=open->booleans[top]-(below?open->booleans[below-1]:0);
+}
+
+/* The adjusted depth of branch label `depth` from instruction p, skipping
+ * ancestor `excluded` as a Boolean block; false when `open` does not hold
+ * p's ancestors (the caller then walks the parents). */
+static bool yx_v12_open_adjust(const yx_v12_instruction *ins,const yx_v12_open *open,
+                               const yx_v12_instruction *p,uint64_t depth,size_t excluded,
+                               uint64_t *adjusted)
+{
+    size_t n,removed,booleans;
+    if(open->count?open->blocks[open->count-1]!=p->parent:p->parent!=SIZE_MAX)return false;
+    n=depth<open->count?(size_t)depth:open->count;
+    if(!n) {removed=booleans=0;}
+    else yx_v12_open_counts(open,n,&removed,&booleans);
+    if(excluded!=SIZE_MAX&&ins[excluded].boolean_block&&
+       (ins[excluded].op==2||ins[excluded].op==3||ins[excluded].op==4)) {
+        /* An open block sits at the position it was opened at. */
+        size_t k=open->level[excluded];
+        if(k>=open->count-n&&k<open->count&&open->blocks[k]==excluded)--booleans;
+    }
+    *adjusted=depth-removed+booleans;
+    if(depth<open->count) {
+        size_t parent=open->blocks[open->count-1-(size_t)depth];
+        if(ins[parent].boolean_block&&parent!=excluded)++*adjusted;
+    }
+    return true;
+}
+
 static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *functions,
                         size_t function_count,const size_t *globals,size_t global_count,
                         size_t search,bool explicit_or,yx_writer *out,size_t *instruction_count,
@@ -252,8 +328,14 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
 {
     yx_v12_instruction *ins=NULL;
     size_t count=0,locals=0;
+    yx_v12_open open={NULL,NULL,NULL,0,NULL};
     bool ok=false;
     if(!yx_v12_instructions(data,length,&ins,&count,&locals))return false;
+    open.blocks=malloc((count?count:1)*sizeof(size_t));
+    open.removed=malloc((count?count:1)*sizeof(size_t));
+    open.booleans=malloc((count?count:1)*sizeof(size_t));
+    open.level=calloc(count?count:1,sizeof(size_t));
+    if(!open.blocks||!open.removed||!open.booleans||!open.level)goto done;
     yx_v12_boolean_blocks(data,ins,count);
     yx_v12_switch_blocks(ins,count);
     /* Undefined OR operands have their own catch. Upstream gives that catch
@@ -270,10 +352,14 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
         if(next)ins[end+1].remove=true;
     }
     for(size_t i=1;i<count;++i) {
+        yx_v12_open_after(ins,i-1,&open);
         if(ins[i].op!=0x0c||ins[i].remove||ins[i-1].remove||
            ins[i-1].op!=0x41||ins[i-1].end-ins[i-1].start!=2||
            data[ins[i-1].start+1]!=0||ins[i-1].parent!=ins[i].parent)continue;
         size_t target=ins[i].parent;
+        if(open.count&&open.blocks[open.count-1]==target)
+            target=ins[i].argument<open.count?open.blocks[open.count-1-(size_t)ins[i].argument]:SIZE_MAX;
+        else
         for(uint64_t d=0;d<ins[i].argument&&target!=SIZE_MAX;++d)target=ins[target].parent;
         if(target!=SIZE_MAX&&ins[target].or_operand) {
             ins[i].catch_undef=true;ins[i].catch_target=target;ins[i-1].remove=true;
@@ -299,8 +385,10 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
     }
     if(!yx_put_bytes(out,data,locals))goto done;
     *instruction_count=0;
+    open.count=0;
     for(size_t i=0;i<count;++i) {
         yx_v12_instruction *p=&ins[i];
+        if(i)yx_v12_open_after(ins,i-1,&open);
         if(p->remove)continue;
         if(p->op!=5&&p->op!=0x0b)++*instruction_count;
         if(p->short_circuit) {
@@ -342,12 +430,14 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
             if(p->guard) {if(!yx_put_u8(out,0x45))goto done;++*instruction_count;}
         } else if(p->op==0x0c||p->op==0x0d) {
             size_t parent=p->parent;uint64_t depth=p->argument,adjusted=depth;
+            if(!yx_v12_open_adjust(ins,&open,p,depth,p->catch_target,&adjusted)) {
             for(uint64_t d=0;d<depth&&parent!=SIZE_MAX;++d) {
                 if(ins[parent].remove)--adjusted;
                 if(ins[parent].boolean_block&&parent!=p->catch_target)++adjusted;
                 parent=ins[parent].parent;
             }
             if(parent!=SIZE_MAX&&ins[parent].boolean_block&&parent!=p->catch_target)++adjusted;
+            }
             if(!yx_put_u8(out,p->op)||!yx_put_uleb(out,adjusted))goto done;
         } else if(p->op==0x0e) {
             yx_reader r={data,p->end,p->start+1,false,false};uint64_t n,d;
@@ -355,12 +445,14 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
             for(uint64_t j=0;j<=n;++j) {
                 if(!yx_get_uleb(&r,&d))goto done;
                 size_t parent=p->parent;uint64_t adjusted=d;
+                if(!yx_v12_open_adjust(ins,&open,p,d,SIZE_MAX,&adjusted)) {
                 for(uint64_t k=0;k<d&&parent!=SIZE_MAX;++k) {
                     if(ins[parent].remove)--adjusted;
                     if(ins[parent].boolean_block)++adjusted;
                     parent=ins[parent].parent;
                 }
                 if(parent!=SIZE_MAX&&ins[parent].boolean_block)++adjusted;
+                }
                 if(!yx_put_uleb(out,adjusted))goto done;
             }
         } else if(p->op==4&&p->move_value) {
@@ -381,6 +473,7 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
     }
     ok=true;
 done:
+    free(open.blocks);free(open.removed);free(open.booleans);free(open.level);
     free(ins);return ok;
 }
 

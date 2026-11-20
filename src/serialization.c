@@ -10114,14 +10114,157 @@ static bool yx_make_chunked_mixed_wasm(const bool *truths,
     return true;
 }
 
+/* Hash indexes over the intern pools being filled on this thread, so that
+ * a source with many identifiers or literals is not searched once per
+ * entry. An index belongs to one pool variable (`owner`) and array; pools
+ * only grow, so an index whose pool is now shorter, or whose first or last
+ * indexed entry changed, is rebuilt. Lookups compare the entries
+ * themselves: the index only proposes candidates. */
+typedef struct {
+    const void *owner, *array, *first, *last;
+    size_t indexed, mask, *slots, used;
+} yx_intern_index;
+enum { YX_INTERN_INDEX_MIN = 64, YX_INTERN_INDEXES = 4 };
+static _Thread_local yx_intern_index yx_ident_indexes[YX_INTERN_INDEXES];
+static _Thread_local yx_intern_index yx_literal_indexes[YX_INTERN_INDEXES];
+static _Thread_local size_t yx_intern_clock;
+static _Thread_local bool yx_intern_index_active;
+
+static uint64_t yx_intern_hash(const uint8_t *data, size_t length)
+{
+    uint64_t hash = 0xcbf29ce484222325u;
+    for (size_t i = 0; i < length; ++i)
+        hash = (hash ^ data[i]) * 0x100000001b3u;
+    return hash;
+}
+
+static uint64_t yx_intern_ident_hash(const void *array, size_t i)
+{
+    const char *name = ((const char *const *) array)[i];
+    return yx_intern_hash((const uint8_t *) name, strlen(name));
+}
+
+static const void *yx_intern_ident_key(const void *array, size_t i)
+{
+    return ((const char *const *) array)[i];
+}
+
+static uint64_t yx_intern_literal_hash(const void *array, size_t i)
+{
+    const yx_literal *literal = &((const yx_literal *) array)[i];
+    return yx_intern_hash(literal->data, literal->length);
+}
+
+static const void *yx_intern_literal_key(const void *array, size_t i)
+{
+    return ((const yx_literal *) array)[i].data;
+}
+
+static void yx_intern_index_add(yx_intern_index *index, uint64_t hash,
+                                size_t id)
+{
+    size_t at = (size_t) hash & index->mask;
+    while (index->slots[at]) at = (at + 1) & index->mask;
+    index->slots[at] = id + 1;
+}
+
+/* The index of pool variable `owner`, holding entries [0, count) of
+ * `array` with room for one more; NULL when none is used (a small pool,
+ * no memory): the caller then searches linearly. */
+static yx_intern_index *yx_intern_index_sync(
+    yx_intern_index *indexes, const void *owner, const void *array,
+    size_t count, uint64_t (*hash_at)(const void *, size_t),
+    const void *(*key_at)(const void *, size_t))
+{
+    yx_intern_index *index = NULL;
+    for (size_t i = 0; i < YX_INTERN_INDEXES; ++i)
+        if (indexes[i].owner == owner) index = &indexes[i];
+    if (index && (index->array != array || index->indexed > count ||
+                  (index->indexed &&
+                   (index->first != key_at(array, 0) ||
+                    index->last != key_at(array, index->indexed - 1))))) {
+        free(index->slots);
+        memset(index, 0, sizeof(*index));
+        index->owner = owner;
+    }
+    if (count < YX_INTERN_INDEX_MIN || !yx_intern_index_active) return NULL;
+    if (!index) {
+        index = &indexes[0];
+        for (size_t i = 1; i < YX_INTERN_INDEXES; ++i)
+            if (indexes[i].used < index->used) index = &indexes[i];
+        free(index->slots);
+        memset(index, 0, sizeof(*index));
+        index->owner = owner;
+    }
+    index->array = array;
+    index->used = ++yx_intern_clock;
+    if (!index->slots || (count + 1) * 2 > index->mask + 1) {
+        size_t size = 256;
+        while (size < (count + 1) * 4) {
+            if (size > SIZE_MAX / 2 / sizeof(*index->slots)) return NULL;
+            size *= 2;
+        }
+        free(index->slots);
+        index->slots = calloc(size, sizeof(*index->slots));
+        index->indexed = 0;
+        if (!index->slots) {
+            memset(index, 0, sizeof(*index));
+            return NULL;
+        }
+        index->mask = size - 1;
+    }
+    for (; index->indexed < count; ++index->indexed)
+        yx_intern_index_add(index, hash_at(array, index->indexed),
+                            index->indexed);
+    index->first = key_at(array, 0);
+    index->last = key_at(array, count - 1);
+    return index;
+}
+
+/* After an entry was appended to the pool of `index`. */
+static void yx_intern_index_append(yx_intern_index *index, const void *array,
+                                   size_t count, uint64_t hash,
+                                   const void *key)
+{
+    index->array = array;
+    yx_intern_index_add(index, hash, count - 1);
+    index->indexed = count;
+    index->last = key;
+}
+
+static void yx_intern_index_release(void)
+{
+    for (size_t i = 0; i < YX_INTERN_INDEXES; ++i) {
+        free(yx_ident_indexes[i].slots);
+        free(yx_literal_indexes[i].slots);
+    }
+    memset(yx_ident_indexes, 0, sizeof(yx_ident_indexes));
+    memset(yx_literal_indexes, 0, sizeof(yx_literal_indexes));
+    yx_intern_index_active = false;
+}
+
 static bool yx_intern_ident(const char *name, const char ***pool,
                             size_t *count, size_t *capacity, size_t *id)
 {
-    for (size_t i = 0; i < *count; ++i)
-        if (strcmp((*pool)[i], name) == 0) {
-            *id = i;
-            return true;
-        }
+    yx_intern_index *index = yx_intern_index_sync(
+        yx_ident_indexes, pool, *pool, *count, yx_intern_ident_hash,
+        yx_intern_ident_key);
+    uint64_t hash = 0;
+    if (index) {
+        hash = yx_intern_hash((const uint8_t *) name, strlen(name));
+        for (size_t at = (size_t) hash & index->mask; index->slots[at];
+             at = (at + 1) & index->mask)
+            if (strcmp((*pool)[index->slots[at] - 1], name) == 0) {
+                *id = index->slots[at] - 1;
+                return true;
+            }
+    } else {
+        for (size_t i = 0; i < *count; ++i)
+            if (strcmp((*pool)[i], name) == 0) {
+                *id = i;
+                return true;
+            }
+    }
     if (*count == *capacity) {
         size_t next = *capacity ? *capacity * 2 : 8;
         const char **grown;
@@ -10134,6 +10277,7 @@ static bool yx_intern_ident(const char *name, const char ***pool,
     }
     *id = *count;
     (*pool)[(*count)++] = name;
+    if (index) yx_intern_index_append(index, *pool, *count, hash, name);
     return true;
 }
 
@@ -10141,12 +10285,29 @@ static bool yx_intern_literal(const uint8_t *data, size_t length,
                               yx_literal **pool, size_t *count,
                               size_t *capacity, size_t *id)
 {
-    for (size_t i = 0; i < *count; ++i)
-        if ((*pool)[i].length == length &&
-            (!length || memcmp((*pool)[i].data, data, length) == 0)) {
-            *id = i;
-            return true;
+    yx_intern_index *index = yx_intern_index_sync(
+        yx_literal_indexes, pool, *pool, *count, yx_intern_literal_hash,
+        yx_intern_literal_key);
+    uint64_t hash = 0;
+    if (index) {
+        hash = yx_intern_hash(data, length);
+        for (size_t at = (size_t) hash & index->mask; index->slots[at];
+             at = (at + 1) & index->mask) {
+            const yx_literal *entry = &(*pool)[index->slots[at] - 1];
+            if (entry->length == length &&
+                (!length || memcmp(entry->data, data, length) == 0)) {
+                *id = index->slots[at] - 1;
+                return true;
+            }
         }
+    } else {
+        for (size_t i = 0; i < *count; ++i)
+            if ((*pool)[i].length == length &&
+                (!length || memcmp((*pool)[i].data, data, length) == 0)) {
+                *id = i;
+                return true;
+            }
+    }
     if (*count == *capacity) {
         size_t next = *capacity ? *capacity * 2 : 8;
         yx_literal *grown;
@@ -10159,6 +10320,7 @@ static bool yx_intern_literal(const uint8_t *data, size_t length,
     }
     *id = *count;
     (*pool)[(*count)++] = (yx_literal) {data, length};
+    if (index) yx_intern_index_append(index, *pool, *count, hash, data);
     return true;
 }
 
@@ -10266,7 +10428,7 @@ static size_t yx_two_text_physical_map(bool first_ascii_wide,
     return count;
 }
 
-static yx_ser_result yx_encode_fields(const YRX_RULE *rules,
+static yx_ser_result yx_encode_fields_impl(const YRX_RULE *rules,
                                       size_t rule_count, const bool *truths,
                                       const yx_ser_rule *shapes,
                                       bool magic_wasm_order,
@@ -13201,6 +13363,48 @@ done:
     free(ids);
     return status;
 }
+
+static yx_ser_result yx_encode_fields(const YRX_RULE *rules,
+                                      size_t rule_count, const bool *truths,
+                                      const yx_ser_rule *shapes,
+                                      bool magic_wasm_order,
+                                      bool global_dual_wasm_order,
+                                      bool pattern_wasm_order,
+                                      bool count_at_wasm_order,
+                                      bool dual_any_wasm_order,
+                                      bool dual_count_at_wasm_order,
+                                      bool pe_version_true_magic_wasm_order,
+                                      bool pe_version_dual_wasm_order,
+                                      bool pe_sections_len_dual_wasm_order,
+                                      bool middle_count_wasm_order,
+                                      bool integer_read_wasm_order,
+                                      yx_pattern_stat_wasm_order stat_wasm_order,
+                                      bool pe_imported,
+                                      bool vt_imported,
+                                      bool for_none_one,
+                                      bool for_all_one,
+                                      uint8_t **data, size_t *length)
+{
+    /* The intern pools of one archive are indexed (yx_intern_index_sync)
+     * while it is encoded, and the indexes freed after it. */
+    yx_ser_result status;
+    yx_intern_index_active = true;
+    status = yx_encode_fields_impl(rules, rule_count, truths, shapes,
+                                   magic_wasm_order, global_dual_wasm_order,
+                                   pattern_wasm_order, count_at_wasm_order,
+                                   dual_any_wasm_order,
+                                   dual_count_at_wasm_order,
+                                   pe_version_true_magic_wasm_order,
+                                   pe_version_dual_wasm_order,
+                                   pe_sections_len_dual_wasm_order,
+                                   middle_count_wasm_order,
+                                   integer_read_wasm_order, stat_wasm_order,
+                                   pe_imported, vt_imported, for_none_one,
+                                   for_all_one, data, length);
+    yx_intern_index_release();
+    return status;
+}
+
 
 static void yx_skip_condition_spaces(const char **text)
 {

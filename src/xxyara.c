@@ -9910,7 +9910,7 @@ static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler,
     yx_inv_parser parser = {0};
     yx_inv_expr expr;
     const char *value;
-    char label[128], note[512];
+    char label[128], *note;
     char *expanded = NULL;
     parser.source = condition;
     parser.compiler = compiler;
@@ -9989,17 +9989,22 @@ static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler,
     }
     value = expr.value == 1 ? "true" : "false";
     snprintf(label, sizeof(label), "this expression is always %s", value);
-    snprintf(note, sizeof(note), "rule `%s` is always `%s`",
-             rule->identifier, value);
-    if (!yx_compiler_warning(compiler, "InvariantBooleanExpression",
+    /* The note holds the whole rule identifier, however long. */
+    note = malloc(strlen(rule->identifier) + 32);
+    if (note)
+        sprintf(note, "rule `%s` is always `%s`", rule->identifier, value);
+    if (!note ||
+        !yx_compiler_warning(compiler, "InvariantBooleanExpression",
                              "invariant_expr", "invariant boolean expression",
                              label, source, origin,
                              condition_offset + expr.start,
                              condition_offset + expr.end, note)) {
+        free(note);
         snprintf(compiler->error, sizeof(compiler->error),
                  "out of memory recording invariant expression warning");
         return 0;
     }
+    free(note);
     return 1;
 memory_failure:
     free(parser.nonbool);

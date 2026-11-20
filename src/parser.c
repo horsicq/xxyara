@@ -3962,6 +3962,10 @@ static bool yx_unknown_module_condition_error(yx_parser *p,
     if (!name) return false;
     while (name[path_length] && name[path_length] != '\'')
         ++path_length;
+    /* A path longer than the detail buffer arrives cut off: keep its whole
+     * members, the first unknown one comes long before the cut. */
+    if (!name[path_length])
+        while (path_length && name[--path_length] != '.') {}
     while (name[name_length] && name[name_length] != '.' &&
            name[name_length] != '\'') ++name_length;
     if (!name_length || name_length >= sizeof(identifier)) return false;

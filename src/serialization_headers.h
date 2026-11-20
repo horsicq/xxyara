@@ -349,15 +349,32 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     yx_physical_archive a;uint8_t *out=NULL;size_t out_length=0,anchored=0,kept=0;
     yx_ser_result status=YX_SER_UNSUPPORTED;yx_writer storage={0};
     YRX_PATTERN *literals=NULL;const YRX_PATTERN **patterns=NULL;
+    /* Per pattern: its frame count, last frame, and whether all its frames
+     * are plain (one pass over the frames, not one per pattern). */
+    size_t *frame_counts=NULL,*last_frames=NULL,*first_frames=NULL,*next_frames=NULL;bool *not_plain=NULL;
+    /* Every pattern's anchor from one walk (yx_pattern_anchor_offsets). */
+    bool *anchors=NULL;uint64_t *offsets=NULL;
     if(root<0||!yx_physical_read(*data,*length,&a))return YX_SER_UNSUPPORTED;
     if(a.anchored_count||a.logical<2)goto done;
     /* Upstream assigns the rule's header constraint to its regexp and hex
      * patterns; a lone plain literal frame contributes its bytes. */
     literals=calloc(a.physical,sizeof(*literals));patterns=calloc(a.physical,sizeof(*patterns));
-    if(!literals||!patterns){status=YX_SER_NO_MEMORY;goto done;}
+    frame_counts=calloc(a.physical,sizeof(*frame_counts));last_frames=calloc(a.physical,sizeof(*last_frames));
+    not_plain=calloc(a.physical,sizeof(*not_plain));
+    /* Each pattern's frames as a list in frame order (index + 1, 0 ends). */
+    first_frames=calloc(a.physical,sizeof(*first_frames));
+    next_frames=calloc(a.frame_count?a.frame_count:1,sizeof(*next_frames));
+    if(!literals||!patterns||!frame_counts||!last_frames||!not_plain||!first_frames||!next_frames)
+        {status=YX_SER_NO_MEMORY;goto done;}
+    for(size_t i=0;i<a.frame_count;++i) {
+        size_t p=a.frames[i].pattern;
+        if(p>=a.physical)continue;
+        if(frame_counts[p])next_frames[last_frames[p]]=i+1;else first_frames[p]=i+1;
+        ++frame_counts[p];last_frames[p]=i;
+        if(a.frames[i].frame.variant!=0||(a.frames[i].frame.flags&2))not_plain[p]=true;
+    }
     for(size_t p=0;p<a.physical;++p) {
-        size_t frames=0,last=0;
-        for(size_t i=0;i<a.frame_count;++i)if(a.frames[i].pattern==p)++frames,last=i;
+        size_t frames=frame_counts[p],last=last_frames[p];
         if(frames==1&&a.frames[last].frame.variant==0&&!(a.frames[last].frame.flags&3)) {
             literals[p].kind=YX_PATTERN_TEXT;literals[p].bytes=(uint8_t *)a.frames[last].frame.literal;
             literals[p].length=a.frames[last].frame.literal_length;patterns[p]=&literals[p];
@@ -375,17 +392,16 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
                     a.headers[a.mapping[i]]=header;++anchored;
                 }
     }
+    anchors=malloc((a.physical?a.physical:1)*sizeof(*anchors));
+    offsets=malloc((a.physical?a.physical:1)*sizeof(*offsets));
+    if(!anchors||!offsets||!yx_pattern_anchor_offsets(tree,root,a.physical,anchors,offsets))
+        {status=YX_SER_NO_MEMORY;goto done;}
     for(size_t p=0;p<a.physical;++p) {
-        uint64_t offset=0;bool plain=true,any=false;
-        if(!yx_pattern_anchor_offset(tree,root,(int64_t)p,&offset))continue;
-        for(size_t i=0;i<a.frame_count;++i) {
-            if(a.frames[i].pattern!=p)continue;
-            any=true;
-            if(a.frames[i].frame.variant!=0||(a.frames[i].frame.flags&2))plain=false;
-        }
+        uint64_t offset=offsets[p];bool plain=!not_plain[p],any=frame_counts[p]!=0;
+        if(!anchors[p])continue;
         if(!any||!plain)continue;
-        for(size_t i=0;i<a.frame_count;++i)
-            if(a.frames[i].pattern==p){a.frames[i].anchored=true;a.frames[i].offset=offset;}
+        for(size_t i=first_frames[p];i;i=next_frames[i-1])
+            {a.frames[i-1].anchored=true;a.frames[i-1].offset=offset;}
         ++anchored;
     }
     if(!anchored)goto done;
@@ -397,7 +413,9 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     status=yx_physical_write(&a,&out,&out_length);
     if(status==YX_SER_SUCCESS){free(*data);*data=out;*length=out_length;out=NULL;}
 done:
-    free(out);free(storage.data);free(literals);free(patterns);yx_physical_destroy(&a);return status;
+    free(out);free(storage.data);free(literals);free(patterns);
+    free(frame_counts);free(last_frames);free(first_frames);free(next_frames);free(not_plain);
+    free(anchors);free(offsets);yx_physical_destroy(&a);return status;
 }
 /* Reader: validates the anchor and header against the condition, then
  * restores the plain form (best literal atom per frame, no header) that the

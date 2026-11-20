@@ -8,13 +8,16 @@ static int yx_v12_numeric_rule(const uint8_t *body,yx_v12_instruction *ins,size_
     yx_integer_expr tree=*imports;yx_writer expression={0};int root=-1;tree.loop_failures=NULL;tree.loop_failure_count=tree.loop_failure_capacity=0;
     yx_rule_expression_setup(&tree,context);
     if(first>=finish||finish>count)goto done;
+    /* The rules of one function are decoded in order on the same `ins`:
+     * the blocks before `first` were marked by the earlier calls. */
+    size_t marked=first;
     bool range=false;
     for(size_t i=first+1;i<finish;++i)
         if(ins[i].op==3&&ins[i].parent==first){range=true;break;}
     if(!range&&ins[first].op==2&&ins[first].argument==0x7f&&ins[first].mate+1==finish) {
         ++first;--finish;
     }
-    for(size_t i=0;i<finish;++i) {
+    for(size_t i=marked;i<finish;++i) {
         if(ins[i].op!=2||ins[i].argument!=0x7f||i+1>=count)continue;
         size_t inner=i+1,end=ins[inner].mate;
         if(ins[inner].op!=2||ins[inner].argument!=0x40||end==SIZE_MAX||

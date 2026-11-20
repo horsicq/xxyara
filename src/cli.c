@@ -5801,6 +5801,10 @@ typedef struct yx_dep_rules {
     yx_dep_rule *items;
     size_t count;
     size_t capacity;
+    /* Rule names by hash (index + 1, 0 empty), so that a source with many
+     * rules is not searched once per rule and per identifier. */
+    size_t *slots;
+    size_t slot_mask;
 } yx_dep_rules;
 
 static bool yx_dep_is_ident_start(uint8_t ch)
@@ -5963,10 +5967,50 @@ static bool yx_cli_check_lex(const uint8_t *src, size_t length,
     return yx_dep_lex_mode(src, length, tokens, true);
 }
 
+static size_t yx_dep_name_hash(const char *text, size_t length)
+{
+    uint64_t hash = 0xcbf29ce484222325u;
+    for (size_t i = 0; i < length; ++i)
+        hash = (hash ^ (uint8_t)text[i]) * 0x100000001b3u;
+    return (size_t)hash;
+}
+
+/* The index of the rule named text[0..length), or SIZE_MAX. */
+static size_t yx_dep_find_rule(const yx_dep_rules *rules, const char *text,
+                               size_t length)
+{
+    if (!rules->slots) return SIZE_MAX;
+    for (size_t at = yx_dep_name_hash(text, length) & rules->slot_mask;
+         rules->slots[at]; at = (at + 1) & rules->slot_mask) {
+        const char *name = rules->items[rules->slots[at] - 1].name;
+        if (strlen(name) == length && memcmp(name, text, length) == 0)
+            return rules->slots[at] - 1;
+    }
+    return SIZE_MAX;
+}
+
+static bool yx_dep_index_rule(yx_dep_rules *rules, size_t index)
+{
+    const char *name = rules->items[index].name;
+    size_t at = yx_dep_name_hash(name, strlen(name)) & rules->slot_mask;
+    while (rules->slots[at]) at = (at + 1) & rules->slot_mask;
+    rules->slots[at] = index + 1;
+    return true;
+}
+
 static bool yx_dep_push_rule(yx_dep_rules *rules, const yx_dep_rule *rule)
 {
     yx_dep_rule *larger;
     size_t capacity;
+    if (!rules->slots || (rules->count + 1) * 2 > rules->slot_mask + 1) {
+        size_t size = rules->slots ? (rules->slot_mask + 1) * 2 : 64;
+        size_t *slots = (size_t *)calloc(size, sizeof(*slots));
+        if (!slots) return false;
+        free(rules->slots);
+        rules->slots = slots;
+        rules->slot_mask = size - 1;
+        for (size_t i = 0; i < rules->count; ++i) yx_dep_index_rule(rules, i);
+    }
     if (rules->count == rules->capacity) {
         capacity = rules->capacity ? rules->capacity * 2 : 16;
         if (capacity <= rules->capacity ||
@@ -5978,7 +6022,7 @@ static bool yx_dep_push_rule(yx_dep_rules *rules, const yx_dep_rule *rule)
         rules->capacity = capacity;
     }
     rules->items[rules->count++] = *rule;
-    return true;
+    return yx_dep_index_rule(rules, rules->count - 1);
 }
 
 static void yx_dep_clear_rules(yx_dep_rules *rules)
@@ -5990,6 +6034,7 @@ static void yx_dep_clear_rules(yx_dep_rules *rules)
         free(rules->items[i].modules);
     }
     free(rules->items);
+    free(rules->slots);
 }
 
 /* Return the matching close parenthesis or the last token on bad input. */
@@ -6124,7 +6169,7 @@ static bool yx_dep_scopes(const yx_dep_tokens *tokens,
                 if (!depth && tokens->items[j].kind == YX_DEP_IDENT &&
                     j + 1 < colon && yx_dep_symbol(&tokens->items[j + 1], '=') &&
                     (j == i + 1 || yx_dep_symbol(&tokens->items[j - 1], ','))) {
-                    declaration[j] = true;
+                    declaration[j - begin] = true;
                     if (!yx_dep_add_scope(scopes, scope_count, &capacity,
                                           j, colon + 2, body_end)) return false;
                 }
@@ -6149,7 +6194,7 @@ static bool yx_dep_scopes(const yx_dep_tokens *tokens,
             while (j > i + 1) {
                 --j;
                 if (tokens->items[j].kind != YX_DEP_IDENT) break;
-                declaration[j] = true;
+                declaration[j - begin] = true;
                 if (!yx_dep_add_scope(scopes, scope_count, &capacity,
                                       j, colon + 2, body_end)) return false;
                 if (j <= i + 1 ||
@@ -6167,7 +6212,9 @@ static bool yx_dep_collect(yx_dep_rule *rule, const yx_dep_rules *rules,
     yx_dep_scope *scopes = NULL;
     bool *declaration = NULL, ok = false;
     size_t scope_count = 0, i, j;
-    declaration = (bool *)calloc(tokens->count ? tokens->count : 1,
+    /* One flag per token of the condition (yx_dep_scopes). */
+    declaration = (bool *)calloc(rule->condition_end > rule->condition_begin ?
+                                  rule->condition_end - rule->condition_begin : 1,
                                   sizeof(*declaration));
     if (!declaration) goto done;
     if (!yx_dep_scopes(tokens, rule->condition_begin, rule->condition_end,
@@ -6176,7 +6223,7 @@ static bool yx_dep_collect(yx_dep_rule *rule, const yx_dep_rules *rules,
         const yx_dep_token *token = &tokens->items[i];
         const char *module;
         bool local = false;
-        if (token->kind != YX_DEP_IDENT || declaration[i] ||
+        if (token->kind != YX_DEP_IDENT || declaration[i - rule->condition_begin] ||
             (i && yx_dep_symbol(&tokens->items[i - 1], '.'))) continue;
         for (j = 0; j < scope_count; ++j) {
             if (i >= scopes[j].begin && i <= scopes[j].end &&
@@ -6188,11 +6235,7 @@ static bool yx_dep_collect(yx_dep_rule *rule, const yx_dep_rules *rules,
             }
         }
         if (local) continue;
-        for (j = 0; j < rules->count; ++j) {
-            if (strlen(rules->items[j].name) == token->length &&
-                memcmp(rules->items[j].name, token->text,
-                       token->length) == 0) break;
-        }
+        j = yx_dep_find_rule(rules, token->text, token->length);
         if (j < rules->count) {
             if (!yx_dep_add_rule_ref(rule, j)) goto done;
         } else if ((module = yx_dep_module(token)) != NULL) {
@@ -6589,12 +6632,10 @@ static int yx_cli_deps_command(int argc, char **argv)
         name = yx_cli_copy(tokens.items[i + 1].text,
                            tokens.items[i + 1].length);
         if (!name) goto done;
-        for (j = 0; j < rules.count; ++j) {
-            if (strcmp(rules.items[j].name, name) == 0) {
-                fprintf(stderr, "error: Duplicate rule \"%s\" found\n", name);
-                free(name);
-                goto done;
-            }
+        if (yx_dep_find_rule(&rules, name, strlen(name)) != SIZE_MAX) {
+            fprintf(stderr, "error: Duplicate rule \"%s\" found\n", name);
+            free(name);
+            goto done;
         }
         if (i + 2 < tokens.count &&
             !yx_dep_symbol(&tokens.items[i + 2], ':') &&
