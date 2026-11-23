@@ -175,6 +175,9 @@ static bool yx_composed_condition_literals(yx_module_program *p,yx_module_patter
     for(size_t i=0;ok&&i<count;++i) {
         yx_writer scratch={0};
         p->literal_count=0;c->searched=false;c->scope_depth=0;p->undefined_slot=-1;
+        /* Call offsets refer to the scratch writer: a loop's catch rewrite
+         * moves those after its start, so earlier rules' must not remain. */
+        p->call_count=0;c->helper_call_count=0;
         ok=yx_module_boolean(p,roots[i],&scratch,0);
         free(scratch.data);
         if(ok&&p->literal_count) {
@@ -265,7 +268,7 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
     size_t begin,end,count=0,logical=0,*firsts=NULL,*counts=NULL,*ids=NULL,*namespaces=NULL,*metadata_starts=NULL;
     size_t *names=NULL,*mapping=NULL,*body_starts=NULL,*body_ends=NULL;
     uint8_t *kinds=NULL;bool *private_patterns=NULL,*private_rules=NULL,*global_rules=NULL,*referenced=NULL,*tracked=NULL;
-    yx_physical_pattern_options *options=NULL;uint64_t *limits=NULL;yx_writer *header_storage=NULL;
+    yx_physical_pattern_options *options=NULL;uint64_t *limits=NULL;yx_writer *header_storage=NULL;uint16_t *frame_flags=NULL;
     yx_physical_archive *a=calloc(1,sizeof(*a));yx_ser_rule *decoded=NULL;YRX_RULES *loaded=NULL;
     yx_module_program *p=calloc(1,sizeof(*p));yx_module_pattern_schema schema={0};yx_module_patterns c={0};
     YRX_RULE *source_rules=NULL;YRX_RULES source={0};char *module_names[32]={0};
@@ -512,6 +515,10 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
         if(!valid||!yx_put_u8(&text,0)){free(text.data);status=YX_SER_NO_MEMORY;goto done;}
         free(decoded[i].runtime_integer_condition);decoded[i].runtime_integer_condition=(char *)text.data;
     }
+    /* The frame flags of every physical pattern in one pass: a scan of
+     * every frame per declaration is quadratic in large rule sets. */
+    frame_flags=yx_physical_frame_flags(a);
+    if(!frame_flags){status=YX_SER_NO_MEMORY;goto done;}
     for(size_t i=0;i<count;++i)if(counts[i]) {
         yx_writer declarations={0};bool valid=true;
         decoded[i].runtime_literal_prefilters=calloc(counts[i],sizeof(*decoded[i].runtime_literal_prefilters));
@@ -521,7 +528,7 @@ static yx_ser_result yx_decode_composed_rules_mode(const uint8_t *data,size_t le
         if(!decoded[i].runtime_regexp_programs){status=YX_SER_NO_MEMORY;goto done;}
         decoded[i].runtime_regexp_program_count=counts[i];
         for(size_t j=0;valid&&j<counts[i];++j) {
-            size_t k=firsts[i]+j;valid=yx_physical_pattern_declaration(&declarations,a->names[names[k]],&loaded->rules[0].patterns[k],a,mapping[k]);
+            size_t k=firsts[i]+j;valid=yx_physical_flagged_declaration(&declarations,a->names[names[k]],&loaded->rules[0].patterns[k],a,frame_flags,mapping[k]);
             if(valid&&private_patterns[k])valid=yx_tr_text(&declarations,"private ");
             if(valid)valid=yx_physical_copy_prefilter(&decoded[i].runtime_literal_prefilters[j],
                 &loaded->rules[0].patterns[k].archived_literal_prefilter);
@@ -541,7 +548,7 @@ done:
     free(c.helper_calls);free(c.regexes);free(header_storage);
     free(names);free(mapping);free(kinds);free(private_patterns);free(referenced);free(tracked);free(options);free(limits);
     free(firsts);free(counts);free(ids);free(namespaces);free(metadata_starts);free(private_rules);free(global_rules);free(source_rules);free(roots);free(body_starts);free(body_ends);
-    free(base);free(canonical);free(wasm);free(shifted);free(metadata.data);free(fake_metadata.data);return status;
+    free(base);free(canonical);free(wasm);free(shifted);free(metadata.data);free(fake_metadata.data);free(frame_flags);return status;
 }
 static yx_ser_result yx_decode_composed_rules(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *rule_count)
 {

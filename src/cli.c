@@ -5197,6 +5197,11 @@ unexpected_option:
         fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() : "cannot create compiler");
         goto done;
     }
+    /* Warnings that will not be shown are not rendered (compile_rules'
+     * switch_warning). */
+    compiler->warnings_all_disabled = disable_all_warnings;
+    compiler->warnings_disabled = (const char *const *)disabled_warnings.items;
+    compiler->warnings_disabled_count = disabled_warnings.count;
     for (i = 0; i < ignored_count; ++i) {
         if (yrx_compiler_ignore_module(compiler, ignored_modules[i]) !=
             YRX_SUCCESS) {
@@ -38047,6 +38052,11 @@ static int yx_cli_fix_warnings(int argc, char **argv)
                                     disable_values, disable_value_count)) goto done;
     if (yrx_compiler_create(options.compiler_flags, &compiler) != YRX_SUCCESS)
         goto done;
+    /* Warnings that will not be shown are not rendered (compile_rules'
+     * switch_warning). */
+    compiler->warnings_all_disabled = disable_all;
+    compiler->warnings_disabled = (const char *const *)disabled.items;
+    compiler->warnings_disabled_count = disabled.count;
     /* `fix warnings` compiles through compile_rules, as `yr compile` does:
      * every error is reported as a structured diagnostic after the
      * warnings, followed by the error total. */
@@ -38920,6 +38930,11 @@ static int yx_cli_compile_command(int argc, char **argv)
         goto done;
     if (yrx_compiler_create(options.compiler_flags, &compiler) != YRX_SUCCESS)
         goto api_error;
+    /* Warnings that will not be shown are not rendered (compile_rules'
+     * switch_warning). */
+    compiler->warnings_all_disabled = disable_all_warnings;
+    compiler->warnings_disabled = (const char *const *)disabled_warnings.items;
+    compiler->warnings_disabled_count = disabled_warnings.count;
     for (size_t i = 0; i < ignored_count; ++i)
         if (yrx_compiler_ignore_module(compiler, ignored_modules[i]) !=
             YRX_SUCCESS) goto api_error;

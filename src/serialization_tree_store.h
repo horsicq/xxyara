@@ -71,6 +71,22 @@ static size_t yx_tree_inline_nodes(const yx_integer_expr *tree)
 static bool yx_tree_store_park(yx_tree_store *s, size_t i)
 {
     yx_integer_expr *t = s->scratch;
+    /* A decoder reserves for the rest of a function body, which holds the
+     * later rules of the chunk too: a tree that fits half the inline nodes
+     * goes back to them, a larger one keeps twice its size (both leave room
+     * for the nodes a later emission adds). */
+    if (t->extra_nodes && t->count <= YX_INTEGER_EXPR_LIMIT / 2) {
+        if (t->count) memcpy(t->nodes, t->extra_nodes, t->count * sizeof(yx_integer_expr_node));
+        free(t->extra_nodes); t->extra_nodes = NULL; t->node_capacity = 0;
+    } else if (t->extra_nodes && t->count <= SIZE_MAX / 2 / sizeof(yx_integer_expr_node) &&
+               t->count * 2 < t->node_capacity) {
+        yx_integer_expr_node *fit = realloc(t->extra_nodes, t->count * 2 * sizeof(*fit));
+        if (fit) { t->extra_nodes = fit; t->node_capacity = t->count * 2; }
+    }
+    /* The failed loop decodes a decode remembers only spare it work: a
+     * parked tree is not decoded again. */
+    free(t->loop_failures);
+    t->loop_failures = NULL; t->loop_failure_count = t->loop_failure_capacity = 0;
     size_t nodes = yx_tree_inline_nodes(t);
     if (i >= s->count || nodes > (SIZE_MAX - YX_TREE_HEAD) / sizeof(yx_integer_expr_node)) return false;
     size_t size = YX_TREE_HEAD + nodes * sizeof(yx_integer_expr_node);

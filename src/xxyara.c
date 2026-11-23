@@ -687,6 +687,8 @@ static size_t yx_diagnostic_display_width(const char *start, const char *end)
     while (at < limit) {
         uint32_t scalar = *at;
         size_t length = 1;
+        /* Printable ASCII takes one cell. */
+        if (scalar >= 0x20 && scalar < 0x7f) { ++cells; ++at; continue; }
         if (scalar >= 0xc2 && scalar <= 0xdf && limit - at >= 2 &&
             (at[1] & 0xc0) == 0x80) {
             scalar = ((scalar & 0x1f) << 6) | (at[1] & 0x3f);
@@ -1256,7 +1258,8 @@ static char *yx_diagnostic_text_source(const char *level, const char *code,
      * 45-column crop below then handles. There is no 256-column clamp:
      * spans up to 272 columns keep their full marker. */
     bool oversized_regexp = strcmp(code, "E014") == 0 &&
-                            strcmp(label, "regex is too large") == 0;
+                            (strcmp(label, "regex is too large") == 0 ||
+                             strcmp(label, "regexp is too large") == 0);
     if (line_length > INT_MAX || column > INT_MAX || width > INT_MAX) return NULL;
     marker_column = yx_diagnostic_display_width(line_start,
                                                  source + start) + 1;
@@ -1517,6 +1520,19 @@ done:
     return json;
 }
 
+/* A warning the caller will not show (yr's --disable-warnings, set on the
+ * compiler by the CLI): it is not rendered or recorded, as the reference
+ * compiler's switch_warning(code, false) does not generate it. */
+bool yx_compiler_warning_skipped(const YRX_COMPILER *compiler, const char *code)
+{
+    if (!compiler || !code) return false;
+    if (compiler->warnings_all_disabled) return true;
+    for (size_t i = 0; i < compiler->warnings_disabled_count; ++i)
+        if (compiler->warnings_disabled[i] && strcmp(compiler->warnings_disabled[i], code) == 0)
+            return true;
+    return false;
+}
+
 static bool yx_compiler_warning(YRX_COMPILER *compiler, const char *type,
                                 const char *code, const char *title,
                                 const char *label, const char *source,
@@ -1524,6 +1540,7 @@ static bool yx_compiler_warning(YRX_COMPILER *compiler, const char *type,
                                 const char *note)
 {
     char *text, *json, **grown;
+    if (yx_compiler_warning_skipped(compiler, code)) return true;
     if (compiler->warning_count >= compiler->max_warnings) return true;
     if (source && yx_warning_suppressed_span((const uint8_t *)source,
                                              yx_source_text_length(source), code, start,
@@ -1656,6 +1673,8 @@ typedef struct {
     char **rows;
     size_t *lengths, *kept;
     size_t count, capacity;
+    /* Allocated bytes of each row (0 before its first write). */
+    size_t *allocated;
 } yx_snippet_buffer;
 
 static bool yx_snippet_row(yx_snippet_buffer *buffer, size_t row)
@@ -1673,9 +1692,13 @@ static bool yx_snippet_row(yx_snippet_buffer *buffer, size_t row)
             kept = realloc(buffer->kept, next * sizeof(*kept));
             if (!kept) return false;
             buffer->kept = kept;
+            kept = realloc(buffer->allocated, next * sizeof(*kept));
+            if (!kept) return false;
+            buffer->allocated = kept;
             buffer->capacity = next;
         }
         buffer->rows[buffer->count] = NULL;
+        buffer->allocated[buffer->count] = 0;
         buffer->kept[buffer->count] = 0;
         buffer->lengths[buffer->count++] = 0;
     }
@@ -1688,8 +1711,14 @@ static bool yx_snippet_put(yx_snippet_buffer *buffer, size_t row, size_t column,
     char *grown;
     if (!yx_snippet_row(buffer, row)) return false;
     if (buffer->lengths[row] < column + length) {
-        grown = realloc(buffer->rows[row], column + length + 1);
-        if (!grown) return false;
+        size_t needed = column + length + 1;
+        if (needed > buffer->allocated[row]) {
+            size_t size = buffer->allocated[row] * 2;
+            if (size < needed) size = needed;
+            grown = realloc(buffer->rows[row], size);
+            if (!grown) return false;
+            buffer->allocated[row] = size;
+        } else grown = buffer->rows[row];
         memset(grown + buffer->lengths[row], ' ',
                column + length - buffer->lengths[row]);
         buffer->rows[row] = grown;
@@ -1710,7 +1739,11 @@ static size_t yx_snippet_columns(const char *start, const char *end)
 {
     size_t cells = 0;
     while (start < end) {
-        size_t length = yx_diagnostic_scalar_length(start, end);
+        size_t length;
+        if ((unsigned char)*start >= 0x20 && (unsigned char)*start < 0x7f) {
+            ++cells; ++start; continue;
+        }
+        length = yx_diagnostic_scalar_length(start, end);
         cells += *start == '\t' ? 1 : yx_diagnostic_display_width(start, start + length);
         start += length;
     }
@@ -1807,6 +1840,7 @@ static bool yx_snippet_row_pictures(yx_snippet_buffer *buffer, size_t row,
     if (!grown) { free(rendered); return false; }
     memcpy(grown + from, rendered, length + 1);
     free(rendered);
+    buffer->allocated[row] = from + length + 1;
     buffer->rows[row] = grown;
     buffer->lengths[row] = from + length;
     if (buffer->kept[row]) buffer->kept[row] = from + length;
@@ -1975,6 +2009,7 @@ static bool yx_snippet_replace(yx_snippet_buffer *buffer, size_t row,
         char *grown = (char *)realloc(text, length + 3 - (end - begin) + 1);
         if (!grown) return false;
         buffer->rows[row] = text = grown;
+        buffer->allocated[row] = length + 3 - (end - begin) + 1;
     }
     memmove(text + begin + 3, text + end, length - end);
     memcpy(text + begin, "...", 3);
@@ -2436,6 +2471,7 @@ done:
     free(buffer.rows);
     free(buffer.lengths);
     free(buffer.kept);
+    free(buffer.allocated);
     return text;
 }
 
@@ -2528,10 +2564,12 @@ static bool yx_compiler_pair_warning(YRX_COMPILER *compiler,
                                      const char *b_label,
                                      bool b_note)
 {
-    yx_nul_escape_entry *entry = yx_nul_escape_find(compiler, source);
+    yx_nul_escape_entry *entry;
     const char *display = NULL;
     unsigned char space;
     bool ok;
+    if (yx_compiler_warning_skipped(compiler, code)) return true;
+    entry = yx_nul_escape_find(compiler, source);
     /* Past the warning limit the plain call returns without rendering. */
     if (entry && compiler->warning_count < compiler->max_warnings)
         display = yx_nul_escape_display(entry);
@@ -2588,6 +2626,7 @@ static bool yx_compiler_pair_warning_source(YRX_COMPILER *compiler,
     char **grown;
     bool ok = false;
     if (!compiler || !source || !a_label || !b_label) return false;
+    if (yx_compiler_warning_skipped(compiler, code)) return true;
     source_length = yx_source_text_length(source);
     if (a_start >= a_end || b_start >= b_end ||
         a_end > source_length || b_end > source_length) return false;
@@ -2940,6 +2979,7 @@ int yx_compiler_duplicate_pattern_value_warning(
     size_t existing_used = 0, existing_capacity = 0;
     bool ok = false;
     if (!compiler || !identifier || !source) return false;
+    if (yx_compiler_warning_skipped(compiler, "duplicate_pattern_value")) return true;
     if (compiler->warning_count >= compiler->max_warnings) return true;
     if (yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "duplicate_pattern_value",
@@ -3642,7 +3682,8 @@ int yx_compiler_slow_pattern_warning(YRX_COMPILER *compiler,
         pattern->literal_end <= pattern->literal_start) return 1;
     /* Rules rebuilt from a compiled archive discard their warnings
      * (max_warnings is 0): skip the atom analysis that only feeds them. */
-    if (compiler->warning_count >= compiler->max_warnings &&
+    if ((compiler->warning_count >= compiler->max_warnings ||
+         yx_compiler_warning_skipped(compiler, "slow_pattern")) &&
         !(compiler->flags & YRX_ERROR_ON_SLOW_PATTERN)) return 1;
     start = pattern->kind == YX_PATTERN_HEX ? pattern->literal_start :
             pattern->declaration_start;
@@ -3981,6 +4022,7 @@ static bool yx_compiler_deprecated_field_warning(
     const char *label = strcmp(field->module, "test_proto2") == 0 ?
         "don't use" : "this field is deprecated";
     char *text, *json, **grown, *rendered_line = NULL;
+    if (yx_compiler_warning_skipped(compiler, "deprecated_field")) return true;
     if (compiler->warning_count >= compiler->max_warnings) return true;
     if (yx_warning_suppressed_span((const uint8_t *)source, yx_source_text_length(source),
                                    "deprecated_field", start, end))
@@ -4743,15 +4785,21 @@ done:
     return ok;
 }
 
+static void yx_compiler_move_before_later(YRX_COMPILER *compiler,
+                                          size_t first_type_warning,
+                                          size_t index, size_t position);
+
 /* YARA-X checks field accesses while compiling a condition, so the
  * deprecations it meets before a semantic error stay reported for the
- * failing rule: those starting before the error's end. */
+ * failing rule: those starting before the error's end. Warnings
+ * from `first_type_warning` on are the typed ones kept for it. */
 int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
                                        const char *condition,
                                        const char *source, const char *origin,
-                                       size_t condition_offset, size_t limit)
+                                       size_t condition_offset, size_t limit,
+                                       size_t first_type_warning)
 {
-    size_t length = strlen(condition);
+    size_t length = strlen(condition), first_deprecated;
     char *prefix;
     bool ok;
     if (limit <= condition_offset) return 1;
@@ -4766,9 +4814,18 @@ int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
     if (!(prefix = malloc(length + 1))) return 0;
     memcpy(prefix, condition, length);
     prefix[length] = '\0';
+    first_deprecated = compiler->warning_count;
     ok = yx_compiler_warn_deprecated_fields(compiler, prefix, source, origin,
                                             condition_offset);
     free(prefix);
+    /* Merged into the typed warnings kept for the rule as the full
+     * condition's are: a field is read when its operand is converted. */
+    for (size_t i = first_deprecated; ok && i < compiler->warning_count; ++i) {
+        const char *span = strstr(compiler->warnings[i], "\"span\":{\"start\":");
+        size_t position;
+        if (!yx_compiler_json_span(compiler, span, &position, NULL)) continue;
+        yx_compiler_move_before_later(compiler, first_type_warning, i, position);
+    }
     return ok;
 }
 
@@ -4799,18 +4856,26 @@ bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler,
 
 /* YARA-X warns about an expression after checking its operands, so a
  * semantic error inside it leaves no warning for it: warnings for the
- * expressions enclosing the error are dropped, those for operands remain. */
+ * expressions enclosing the error are dropped, those for operands remain.
+ * Nor did it convert what follows the error and the operands converted
+ * before it (`converted_end`, 0 when unknown): warnings there are dropped
+ * too. */
 void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first,
                                      size_t error_mark, size_t error_start,
-                                     size_t error_end)
+                                     size_t error_end, size_t converted_end)
 {
     size_t kept = first, moment = error_start;
     const char *json = compiler->error_diagnostic_json;
     /* An `and`/`or` operand of the wrong type (E002) fails after YARA-X
      * warned about every operand of its chain: the error happens at the
-     * point of that operand's own non_bool_expr warning. */
+     * point of that operand's own non_bool_expr warning. Another E002 at
+     * the operand (a member of a call's result) is met while converting it,
+     * before that warning. */
     if (json && strlen(json) > error_mark &&
-        strstr(json + error_mark, "\"code\":\"E002\"")) {
+        strstr(json + error_mark, "\"code\":\"E002\"") &&
+        (strstr(json + error_mark, "expression should be `bool`") ||
+         strstr(json + error_mark,
+                "expression should be `boolean`, `float`, `integer`, or `string`"))) {
         for (size_t point = 0; point < compiler->warning_point_count; ++point) {
             const char *key = compiler->warning_point_keys[point], *span;
             size_t start, end;
@@ -4844,8 +4909,10 @@ void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first,
         else
             drop = span && yx_compiler_json_span(compiler, span,
                                                  &start, &end) &&
-                   start <= error_start &&
-                   end >= error_end && (start < error_start || end > error_end);
+                   ((start <= error_start && end >= error_end &&
+                     (start < error_start || end > error_end)) ||
+                    (converted_end &&
+                     start >= (converted_end > error_end ? converted_end : error_end)));
         if (drop) {
             free(compiler->warnings[i]);
             continue;
@@ -7908,7 +7975,8 @@ int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler,
     /* Measuring the whole source for every hex pattern is quadratic in the
      * rule set; it is needed only for a warning that will be recorded (no
      * span check below reads the source before that). */
-    if (compiler->warning_count >= compiler->max_warnings)
+    if (compiler->warning_count >= compiler->max_warnings ||
+        yx_compiler_warning_skipped(compiler, "text_as_hex"))
         return 1;
     source_length = yx_source_text_length(source);
     if (end > source_length)
@@ -13258,6 +13326,44 @@ done:
     return ok;
 }
 
+/* The pattern views of one rule and the condition queries that set their
+ * scan strategy (yx_make_views). */
+typedef struct { const YRX_RULE *source; YRX_RULE *view; } yx_view_query_job;
+static void yx_view_query_patterns(void *data)
+{
+    yx_view_query_job *job = data;
+    const YRX_RULE *source = job->source;
+    YRX_RULE *view = job->view;
+    for (size_t j = 0; j < source->pattern_count; ++j) {
+        view->patterns[j] = source->patterns[j];
+        view->patterns[j].matches = NULL;
+        view->patterns[j].match_count = 0;
+        view->patterns[j].match_capacity = 0;
+        view->patterns[j].fast_scan_needs_all =
+            yx_condition_pattern_requires_all_matches(
+                source->condition, source->patterns[j].identifier);
+        view->patterns[j].fixed_at_enabled =
+            yx_pattern_uses_fixed_at_atom(&source->patterns[j]) &&
+            yx_condition_pattern_fixed_at(
+                source->condition, source->patterns[j].identifier,
+                &view->patterns[j].fixed_at_offset);
+        view->patterns[j].fast_count_enabled =
+            yx_condition_pattern_fast_count(
+                source->condition, source->patterns[j].identifier,
+                &view->patterns[j].fast_count_threshold);
+        /* A one-match limit (`#a` used as a Boolean) is YARA-X's
+         * default fast-scan limit: the pattern is that of a bare `$a`. */
+        if (view->patterns[j].fast_count_enabled &&
+            view->patterns[j].fast_count_threshold <= 1) {
+            view->patterns[j].fast_count_enabled = false;
+            view->patterns[j].fast_scan_needs_all = false;
+        }
+        view->patterns[j].compat_nonanchorable =
+            yx_condition_pattern_nonanchorable(
+                source->condition, source->patterns[j].identifier,
+                view->patterns[j].fixed_at_enabled);
+    }
+}
 static bool yx_make_views(YRX_SCANNER *scanner)
 {
     size_t i, j, next_pattern_id = 0;
@@ -13291,34 +13397,14 @@ static bool yx_make_views(YRX_SCANNER *scanner)
             free(heads); free(tails); free(chain); free(hashes); free(items);
             return false;
         }
+        {
+            /* The condition queries of every pattern, on one deep stack for
+             * a deep condition (the queries then run in place). */
+            yx_view_query_job job = {source, view};
+            if (!yx_condition_run_deep(source->condition, yx_view_query_patterns, &job))
+                yx_view_query_patterns(&job);
+        }
         for (j = 0; j < source->pattern_count; ++j) {
-            view->patterns[j] = source->patterns[j];
-            view->patterns[j].matches = NULL;
-            view->patterns[j].match_count = 0;
-            view->patterns[j].match_capacity = 0;
-            view->patterns[j].fast_scan_needs_all =
-                yx_condition_pattern_requires_all_matches(
-                    source->condition, source->patterns[j].identifier);
-            view->patterns[j].fixed_at_enabled =
-                yx_pattern_uses_fixed_at_atom(&source->patterns[j]) &&
-                yx_condition_pattern_fixed_at(
-                    source->condition, source->patterns[j].identifier,
-                    &view->patterns[j].fixed_at_offset);
-            view->patterns[j].fast_count_enabled =
-                yx_condition_pattern_fast_count(
-                    source->condition, source->patterns[j].identifier,
-                    &view->patterns[j].fast_count_threshold);
-            /* A one-match limit (`#a` used as a Boolean) is YARA-X's
-             * default fast-scan limit: the pattern is that of a bare `$a`. */
-            if (view->patterns[j].fast_count_enabled &&
-                view->patterns[j].fast_count_threshold <= 1) {
-                view->patterns[j].fast_count_enabled = false;
-                view->patterns[j].fast_scan_needs_all = false;
-            }
-            view->patterns[j].compat_nonanchorable =
-                yx_condition_pattern_nonanchorable(
-                    source->condition, source->patterns[j].identifier,
-                    view->patterns[j].fixed_at_enabled);
             view->patterns[j].prefilter_owner = SIZE_MAX;
             view->patterns[j].compat_pattern_id = next_pattern_id;
             if (view->patterns[j].kind == YX_PATTERN_TEXT) {

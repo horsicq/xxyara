@@ -536,7 +536,24 @@ static bool yx_v12_restore_module_expression(const uint8_t *data,size_t length,y
     if(r.at!=r.length||match==UINT64_MAX)goto done;
     r=(yx_reader){parts[3],sizes[3],0,false,false};
     if(!yx_get_uleb(&r,&n))goto done;
-    if(n>4||(n>=4&&search==UINT64_MAX)) {
+    /* Four functions with a pattern search are one rule function, the
+     * pattern-match helper, a namespace function and main, or two rule
+     * functions (eleven to twenty rules whose conditions need no helper)
+     * with a namespace function and main. */
+    bool chunked=n>4||(n>=4&&search==UINT64_MAX);
+    if(!chunked&&n==4) {
+        yx_reader code={parts[10],sizes[10],0,false,false};uint64_t bodies_count,width;size_t rules=0;
+        if(yx_get_uleb(&code,&bodies_count)&&bodies_count==n)
+            for(uint64_t f=0;f<bodies_count;++f) {
+                yx_v12_instruction *walk=NULL;size_t used=0,local_bytes=0;bool calls=false;
+                if(!yx_get_uleb(&code,&width)||width>code.length-code.at||
+                   !yx_v12_instructions(code.data+code.at,(size_t)width,&walk,&used,&local_bytes))break;
+                for(size_t i=0;i<used&&!calls;++i)calls=walk[i].op==0x10&&walk[i].argument==match;
+                free(walk);rules+=calls;code.at+=(size_t)width;
+            }
+        chunked=rules>1;
+    }
+    if(chunked) {
         ok=yx_v12_restore_module_chunks(data,length,parts,sizes,&imports,(size_t)import_count,(size_t)match,(size_t)search,restored);
         goto done;
     }

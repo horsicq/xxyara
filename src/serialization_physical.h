@@ -1515,15 +1515,35 @@ static void yx_physical_part_verify(const YRX_RULES *direct,const YRX_RULES *ful
     free(x.data);free(y.data);
 }
 #endif
+/* What the callers of the parts read of a loaded physical pattern: its
+ * declaration after `<name> = ` (yx_physical_flagged_declaration), its
+ * archived literal prefilter and its archived program. A part keeps only
+ * these, so the loaded rules of a part are freed as soon as it loads. */
+typedef struct yx_physical_part {
+    char *declaration;
+    yx_archived_literal_prefilter prefilter;
+    yx_archived_regexp *regexp;
+} yx_physical_part;
+static void yx_physical_part_free(yx_physical_part *part)
+{
+    free(part->declaration);free(part->prefilter.atoms);free(part->regexp);
+    memset(part,0,sizeof(*part));
+}
+/* Writes name and the part's declaration as yx_physical_flagged_declaration
+ * writes the loaded pattern. */
+static bool yx_physical_part_declaration(yx_writer *w,const char *name,const yx_physical_part *part)
+{
+    return part->declaration&&yx_tr_text(w,name)&&yx_tr_text(w," = ")&&yx_tr_text(w,part->declaration);
+}
 /* Loads every physical pattern of a through its own one-pattern archive
- * (names default, $a, r): *out[p] holds one rule with one pattern, and
- * belongs to the caller (a->physical entries). */
+ * (names default, $a, r): out[p] holds what its callers read of the one
+ * pattern loaded (a->physical entries), freed by yx_physical_destroy_parts. */
 typedef struct yx_physical_parts_job {
     const yx_physical_archive *a;
     /* The frames and atoms of physical pattern p are frame_list/atom_list
      * [first[p], first[p + 1]); its code is [begins[p], ends[p]). */
     const size_t *frame_first,*atom_first,*frame_list,*atom_list,*logical_of,*begins,*ends;
-    YRX_RULES **loaded;
+    yx_physical_part *loaded;
     yx_ser_result *statuses;
 } yx_physical_parts_job;
 /* The position of frame id in ids[0, count), the frame ids of one pattern in
@@ -1663,24 +1683,40 @@ done:
 static void yx_physical_load_part_task(size_t p,void *context)
 {
     const yx_physical_parts_job *job=context;
-    job->statuses[p]=yx_physical_load_part(job,p,&job->loaded[p]);
+    YRX_RULES *loaded=NULL;
+    yx_ser_result status=yx_physical_load_part(job,p,&loaded);
+    if(status==YX_SER_SUCCESS) {
+        /* The declaration as yx_physical_flagged_declaration writes it, with
+         * the frame flags of this pattern (its frames: frame_list). */
+        const yx_physical_archive *a=job->a;yx_physical_part *part=&job->loaded[p];
+        YRX_PATTERN copy=loaded->rules[0].patterns[0];uint16_t flags=0;yx_writer w={0};
+        for(size_t k=job->frame_first[p];k<job->frame_first[p+1];++k) {
+            const yx_physical_frame *f=&a->frames[job->frame_list[k]];
+            if(f->frame.variant<8)flags|=f->frame.flags;
+        }
+        if((flags&24u)&&copy.kind!=YX_PATTERN_HEX)copy.modifiers|=YX_MOD_FULLWORD;
+        if(!yx_physical_declaration(&w,"",&copy)||!yx_put_u8(&w,0)||w.used<4||
+           !yx_physical_copy_prefilter(&part->prefilter,&loaded->rules[0].patterns[0].archived_literal_prefilter)||
+           !yx_physical_copy_regexp(&part->regexp,loaded->rules[0].patterns[0].archived_regexp))status=YX_SER_NO_MEMORY;
+        else if(!(part->declaration=malloc(w.used-3)))status=YX_SER_NO_MEMORY;
+        else memcpy(part->declaration,w.data+3,w.used-3);
+        free(w.data);
+        if(status!=YX_SER_SUCCESS)yx_physical_part_free(part);
+    }
+    yrx_rules_destroy(loaded);
+    job->statuses[p]=status;
 }
-static void yx_physical_destroy_part_task(size_t p,void *context)
+/* Destroys count loaded parts. */
+static void yx_physical_destroy_parts(yx_physical_part *parts,size_t count)
 {
-    YRX_RULES **parts=context;
-    yrx_rules_destroy(parts[p]);
-}
-/* Destroys count loaded parts (independent rule sets) on several threads. */
-static void yx_physical_destroy_parts(YRX_RULES **parts,size_t count)
-{
-    if(parts)yx_parallel_run(count,yx_parallel_threads(count,64),yx_physical_destroy_part_task,parts);
+    if(parts)for(size_t p=0;p<count;++p)yx_physical_part_free(&parts[p]);
 }
 /* Physical patterns per thread below which the parts load on the calling
  * thread alone. */
 enum { YX_PHYSICAL_PARTS_PER_THREAD = 8 };
-static yx_ser_result yx_physical_load_parts(const yx_physical_archive *a,YRX_RULES ***out)
+static yx_ser_result yx_physical_load_parts(const yx_physical_archive *a,yx_physical_part **out)
 {
-    YRX_RULES **loaded=NULL;size_t loaded_count=0,cursor=0,limit=0;
+    yx_physical_part *loaded=NULL;size_t loaded_count=0,cursor=0,limit=0;
     size_t *frame_first=NULL,*atom_first=NULL,*frame_list=NULL,*atom_list=NULL,*logical_of=NULL;
     size_t *begins=NULL,*ends=NULL;yx_ser_result *statuses=NULL;
     yx_ser_result status=YX_SER_UNSUPPORTED;
@@ -1742,7 +1778,7 @@ done:
 static yx_ser_result yx_decode_physical_patterns(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *rule_count)
 {
     yx_physical_archive *a=calloc(1,sizeof(*a));
-    YRX_RULES **loaded=NULL;size_t loaded_count=0;yx_ser_rule *decoded=NULL;uint16_t *frame_flags=NULL;
+    yx_physical_part *loaded=NULL;size_t loaded_count=0;yx_ser_rule *decoded=NULL;
     uint8_t *canonical=NULL;size_t canonical_length=0;
     yx_writer declarations={0};yx_ser_result status=YX_SER_UNSUPPORTED;
     if(!a){status=YX_SER_NO_MEMORY;goto done;}
@@ -1763,18 +1799,15 @@ static yx_ser_result yx_decode_physical_patterns(const uint8_t *data,size_t leng
     decoded->runtime_literal_prefilter_count=a->logical;
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_prefilter(&decoded->runtime_literal_prefilters[i],
-           &loaded[a->mapping[i]]->rules[0].patterns[0].archived_literal_prefilter)){status=YX_SER_NO_MEMORY;goto done;}
+           &loaded[a->mapping[i]].prefilter)){status=YX_SER_NO_MEMORY;goto done;}
     decoded->runtime_regexp_programs=calloc(a->logical,sizeof(*decoded->runtime_regexp_programs));
     if(!decoded->runtime_regexp_programs){status=YX_SER_NO_MEMORY;goto done;}
     decoded->runtime_regexp_program_count=a->logical;
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_regexp(&decoded->runtime_regexp_programs[i],
-           loaded[a->mapping[i]]->rules[0].patterns[0].archived_regexp)){status=YX_SER_NO_MEMORY;goto done;}
-    frame_flags=yx_physical_frame_flags(a);
-    if(!frame_flags){status=YX_SER_NO_MEMORY;goto done;}
+           loaded[a->mapping[i]].regexp)){status=YX_SER_NO_MEMORY;goto done;}
     for(size_t i=0;i<a->logical;++i)
-        if(!yx_physical_flagged_declaration(&declarations,a->names[a->name_ids[i]],&loaded[a->mapping[i]]->rules[0].patterns[0],
-                                            a,frame_flags,a->mapping[i])||
+        if(!yx_physical_part_declaration(&declarations,a->names[a->name_ids[i]],&loaded[a->mapping[i]])||
            (a->pattern_private[i]&&!yx_tr_text(&declarations,"private ")))goto done;
     if(!yx_put_u8(&declarations,0)){status=YX_SER_NO_MEMORY;goto done;}
     decoded->namespace_name=yx_copy_string(a->names[a->namespace_id]);
@@ -1809,7 +1842,7 @@ static yx_ser_result yx_decode_physical_patterns(const uint8_t *data,size_t leng
 done:
     if(a){yx_physical_destroy(a);free(a);}
     yx_physical_destroy_parts(loaded,loaded_count);
-    free(loaded);free(frame_flags);
+    free(loaded);
     yx_ser_rules_destroy(decoded,decoded?1:0);free(canonical);free(declarations.data);return status;
 }
 
@@ -1928,8 +1961,13 @@ static YRX_RESULT yx_physical_compile_combined(const char *source,size_t length,
     unsigned threads=yx_parallel_threads(count,YX_COMBINED_CHUNK_PATTERNS);
     YRX_RULES **parts=NULL;YRX_RESULT *results=NULL;bool joined=false;
     *out=NULL;
-    if(count<YX_COMBINED_MINIMUM_PATTERNS||count>YX_COMBINED_MAXIMUM_PATTERNS||threads<2||
-       length>=yx_get_source_size_limit())return yx_compile_quiet(source,out);
+    /* More patterns than one rule may hold (E035): the archive's rules held
+     * them, and the reconstruction compiles them in chunks only, on one
+     * thread if need be; a chunk that does not compile fails the whole. */
+    bool chunked_only=count>YX_COMBINED_MAXIMUM_PATTERNS;
+    if(chunked_only&&threads<1)threads=1;
+    if(!chunked_only&&(count<YX_COMBINED_MINIMUM_PATTERNS||threads<2||
+       length>=yx_get_source_size_limit()))return yx_compile_quiet(source,out);
     parts=calloc(chunks,sizeof(*parts));results=calloc(chunks,sizeof(*results));
     if(parts&&results) {
         yx_combined_job job={source,starts,count,parts,results};
@@ -1964,9 +2002,9 @@ static YRX_RESULT yx_physical_compile_combined(const char *source,size_t length,
     }
     if(parts)for(size_t k=0;k<chunks;++k)yrx_rules_destroy(parts[k]);
     free(parts);free(results);
-    if(!joined)return yx_compile_quiet(source,out);
+    if(!joined)return chunked_only?YRX_SYNTAX_ERROR:yx_compile_quiet(source,out);
 #ifdef XXYARA_VERIFY_LOAD
-    {
+    if(!chunked_only) {
         YRX_RULES *whole=NULL;
         bool same=yx_compile_quiet(source,&whole)==YRX_SUCCESS&&whole&&whole->rule_count==1&&
             whole->rules[0].pattern_count==count;
@@ -1984,17 +2022,15 @@ static YRX_RESULT yx_physical_compile_combined(const char *source,size_t length,
  * the declarations and the literal prefilters, which depend on neither. */
 static bool yx_physical_reconstruct_direct(const yx_physical_archive *a,YRX_RULES **loaded)
 {
-    YRX_RULES **parts=NULL,*rules=NULL;uint16_t *frame_flags=NULL;yx_writer source={0};bool ok=false;
+    yx_physical_part *parts=NULL;YRX_RULES *rules=NULL;yx_writer source={0};bool ok=false;
     size_t *starts=malloc((a->logical+1)*sizeof(*starts));
     *loaded=NULL;
     if(!starts||yx_physical_load_parts(a,&parts)!=YX_SER_SUCCESS)goto done;
-    frame_flags=yx_physical_frame_flags(a);
-    if(!frame_flags||!yx_tr_text(&source,yx_combined_head))goto done;
+    if(!yx_tr_text(&source,yx_combined_head))goto done;
     for(size_t i=0;i<a->logical;++i) {
         starts[i]=source.used;
         if(a->mapping[i]>=a->physical||
-           !yx_physical_flagged_declaration(&source,a->names[a->name_ids[i]],&parts[a->mapping[i]]->rules[0].patterns[0],
-                                            a,frame_flags,a->mapping[i])||
+           !yx_physical_part_declaration(&source,a->names[a->name_ids[i]],&parts[a->mapping[i]])||
            (a->pattern_private[i]&&!yx_tr_text(&source,"private ")))goto done;
     }
     starts[a->logical]=source.used;
@@ -2003,16 +2039,16 @@ static bool yx_physical_reconstruct_direct(const yx_physical_archive *a,YRX_RULE
        !rules||rules->rule_count!=1||rules->rules[0].pattern_count!=a->logical)goto done;
     for(size_t i=0;i<a->logical;++i)
         if(!yx_physical_copy_prefilter(&rules->rules[0].patterns[i].archived_literal_prefilter,
-                                       &parts[a->mapping[i]]->rules[0].patterns[0].archived_literal_prefilter))goto done;
+                                       &parts[a->mapping[i]].prefilter))goto done;
     for(size_t i=0;i<a->logical;++i) {
         free(rules->rules[0].patterns[i].archived_regexp);
         if(!yx_physical_copy_regexp(&rules->rules[0].patterns[i].archived_regexp,
-                                    parts[a->mapping[i]]->rules[0].patterns[0].archived_regexp))goto done;
+                                    parts[a->mapping[i]].regexp))goto done;
     }
     *loaded=rules;rules=NULL;ok=true;
 done:
     yx_physical_destroy_parts(parts,a->physical);
-    free(parts);free(frame_flags);free(source.data);free(starts);yrx_rules_destroy(rules);return ok;
+    free(parts);free(source.data);free(starts);yrx_rules_destroy(rules);return ok;
 }
 static bool yx_physical_reconstruct_patterns(const yx_physical_archive *original,YRX_RULES **loaded)
 {

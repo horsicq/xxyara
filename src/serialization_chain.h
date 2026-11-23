@@ -386,6 +386,8 @@ static bool yx_chain_fast_residue(const yx_fast_program *fast, yx_writer *code)
             return false;
     return yx_put_u8(code, 0);
 }
+/* MAX_ATOM_SEARCH_BYTES of atoms/quality.rs. */
+enum { YX_CHAIN_ATOM_SEARCH_BYTES = 32768 };
 static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_tr_node *n,
                                    uint16_t common, yx_writer *code, yx_writer *literal)
 {
@@ -396,8 +398,6 @@ static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_t
     if ((common & 24u) && index + 1 == a->frame_count)
         f->flags |= 16;
     if (yx_chain_literal(n, literal) && literal->used) {
-        if (literal->used > UINT16_MAX)
-            return false;
         f->variant = index ? 3 : 2;
         f->literal = literal->data;
         f->literal_length = literal->used;
@@ -411,11 +411,13 @@ static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_t
             ++a->pool_count;
         }
         f->literal_index = pool;
-        uint8_t *mask = malloc(literal->used);
+        size_t searched = literal->used < YX_CHAIN_ATOM_SEARCH_BYTES ?
+            literal->used : YX_CHAIN_ATOM_SEARCH_BYTES;
+        uint8_t *mask = malloc(searched);
         if (!mask)
             return false;
-        memset(mask, 255, literal->used);
-        yx_fast_literal l = {literal->data, mask, literal->used, false};
+        memset(mask, 255, searched);
+        yx_fast_literal l = {literal->data, mask, searched, false};
         size_t offset, width;
         yx_fast_best_atom(&l, &offset, &width);
         free(mask);
@@ -516,11 +518,16 @@ static bool yx_literal_atom_variants(yx_chain_archive *a, size_t frame,
 static bool yx_literal_frame_atoms(yx_chain_archive *a, size_t index)
 {
     const yx_chain_frame *f = &a->frames[index];
-    uint8_t *mask = malloc(f->literal_length);
+    /* best_range_in_bytes (atoms/quality.rs) searches the first 32 KiB only
+     * (MAX_ATOM_SEARCH_BYTES): the atom's u16 backtrack. A literal itself
+     * has any length (SubPattern::Literal, c_alternation_literal). */
+    size_t searched = f->literal_length < YX_CHAIN_ATOM_SEARCH_BYTES ?
+        f->literal_length : YX_CHAIN_ATOM_SEARCH_BYTES;
+    uint8_t *mask = malloc(searched ? searched : 1);
     if (!mask)
         return false;
-    memset(mask, 255, f->literal_length);
-    yx_fast_literal literal = {(uint8_t *)f->literal, mask, f->literal_length, false};
+    memset(mask, 255, searched);
+    yx_fast_literal literal = {(uint8_t *)f->literal, mask, searched, false};
     size_t offset, width;
     yx_fast_best_atom(&literal, &offset, &width);
     free(mask);
@@ -592,8 +599,7 @@ static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba
     }
     for (size_t i = 0; i < alternatives; ++i) {
         const yx_tr_node *leaf = n->kind == YX_TR_ALT ? n->children[i] : n;
-        if (leaf->kind != YX_TR_LITERAL || !leaf->length ||
-            leaf->length > UINT16_MAX / (wide ? 2u : 1u))
+        if (leaf->kind != YX_TR_LITERAL || !leaf->length || leaf->length > SIZE_MAX / 2)
             goto done;
         for (unsigned variant = raw ? 0 : 1; variant < (wide ? 2u : 1u); ++variant) {
             size_t index = a.frame_count++;
@@ -669,8 +675,6 @@ static bool yx_chain_expand_widths(yx_chain_archive *a, bool ascii_wide, yx_writ
             previous[wide ? 1 : 0] = index;
             if (literal) {
                 if (wide) {
-                    if (original->literal_length > UINT16_MAX / 2)
-                        goto done;
                     for (size_t j = 0; j < original->literal_length; ++j)
                         if (!yx_put_u8(&storage[index], original->literal[j]) ||
                             !yx_put_u8(&storage[index], 0))
@@ -934,7 +938,7 @@ static bool yx_chain_read(const uint8_t *data, size_t length, yx_chain_archive *
         goto fail;
     a->pool_count = (size_t)n;
     for (size_t i = 0; i < a->pool_count; ++i) {
-        if (!yx_get_uint(&r, &n) || !n || n > UINT16_MAX || n > length - r.at)
+        if (!yx_get_uint(&r, &n) || !n || n > length - r.at)
             goto fail;
         a->pool[i] = data + r.at;
         a->pool_lengths[i] = (size_t)n;

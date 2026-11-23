@@ -118,11 +118,12 @@ done:
 static bool yx_v12_restore_numeric_rules(const uint8_t *data,size_t length,
     size_t rule_count,yx_writer *restored)
 {
-    const uint8_t *parts[13];size_t sizes[13];yx_integer_expr imports={0},*trees=NULL;
+    const uint8_t *parts[13];size_t sizes[13];yx_integer_expr imports={0};
+    yx_tree_store store={0};yx_tree_list trees={NULL,&store};
     int *roots=NULL;uint8_t *seed=NULL;size_t seed_length=0;bool ok=false;uint64_t n;
     yx_rule_expression_context context={0};
     if(!rule_count||rule_count>INT32_MAX||rule_count>length||
-       rule_count>SIZE_MAX/sizeof(*trees)||!yx_v12_sections(data,length,parts,sizes)||
+       rule_count>SIZE_MAX/sizeof(int)||!yx_v12_sections(data,length,parts,sizes)||
        !parts[2]||!parts[3]||!parts[10])return false;
     yx_reader r={parts[2],sizes[2],0,false,false};imports.match_id=255;
     if(!yx_get_uleb(&r,&n)||n>YX_INTEGER_READ_COUNT+1)goto done;
@@ -144,8 +145,9 @@ static bool yx_v12_restore_numeric_rules(const uint8_t *data,size_t length,
         ++imports.function_count;
     }
     if(r.at!=r.length||imports.match_id==255)goto done;
-    trees=calloc(rule_count,sizeof(*trees));roots=malloc(rule_count*sizeof(*roots));
-    if(!trees||!roots)goto done;
+    /* One tree per rule, parked in a store (see serialization_tree_store.h). */
+    roots=malloc(rule_count*sizeof(*roots));
+    if(!yx_tree_store_init(&store,rule_count)||!roots)goto done;
     for(size_t i=0;i<rule_count;++i)roots[i]=-1;
     context.rule_count=rule_count;
     r=(yx_reader){parts[10],sizes[10],0,false,false};uint64_t functions;
@@ -163,7 +165,9 @@ static bool yx_v12_restore_numeric_rules(const uint8_t *data,size_t length,
                !yx_get_sleb_i64(&immediate,&id)||immediate.at!=immediate.length||
                id<0||(uint64_t)id>=rule_count||roots[id]>=0) {valid=false;break;}
             context.current=(size_t)id;
-            roots[id]=yx_v12_numeric_rule(body,ins,count,first,i-4,&imports,&context,&trees[id]);
+            yx_integer_expr *tree=yx_tree_store_fresh(&store);
+            roots[id]=yx_v12_numeric_rule(body,ins,count,first,i-4,&imports,&context,tree);
+            if(!yx_tree_store_park(&store,(size_t)id)){yx_integer_expr_destroy(tree);roots[id]=-1;}
             if(roots[id]<0){valid=false;break;}
             first=i+2;
         }
@@ -173,13 +177,13 @@ static bool yx_v12_restore_numeric_rules(const uint8_t *data,size_t length,
     for(size_t i=0;i<rule_count;++i)if(roots[i]<0)goto done;
     for(unsigned profile=0;!ok&&profile<4;++profile) {
         yx_writer expected={0};free(seed);seed=NULL;seed_length=0;
-        ok=yx_rule_expressions_wasm(trees,roots,rule_count,0,&seed,&seed_length)&&
+        ok=yx_rule_expressions_wasm_list(&trees,roots,rule_count,0,&seed,&seed_length)&&
             yx_v12_wasm(seed,seed_length,(profile&1?4:0)|(profile&2?256:0),&expected)&&
             expected.used==length&&!memcmp(expected.data,data,length);
         free(expected.data);
     }
     if(ok)ok=yx_put_bytes(restored,seed,seed_length);
 done:
-    if(trees)for(size_t i=0;i<rule_count;++i)yx_integer_expr_destroy(&trees[i]);
-    free(trees);free(roots);free(seed);return ok;
+    yx_tree_store_destroy(&store);
+    free(roots);free(seed);return ok;
 }

@@ -265,6 +265,71 @@ static bool yx_v12_switch_result_block(const yx_v12_instruction *ins,size_t coun
     return i>block+1&&i+1<count&&ins[i].op==0x20&&ins[i+1].op==0x0e;
 }
 
+/* The open blocks around an instruction, outermost first, with prefix
+ * counts of the removed and of the Boolean ones: a branch depth is adjusted
+ * from them in constant time, instead of walking its depth through the
+ * parents (a switch of n arms has n nested blocks and n branches). */
+typedef struct yx_v12_chain {
+    size_t *stack,*position,*removed,*boolean,size;
+} yx_v12_chain;
+static bool yx_v12_chain_init(yx_v12_chain *c,size_t count)
+{
+    size_t n=count+1;
+    memset(c,0,sizeof(*c));
+    if(n>SIZE_MAX/sizeof(size_t))return false;
+    c->stack=malloc(n*sizeof(size_t));c->position=malloc(n*sizeof(size_t));
+    c->removed=malloc(n*sizeof(size_t));c->boolean=malloc(n*sizeof(size_t));
+    if(!c->stack||!c->position||!c->removed||!c->boolean)return false;
+    for(size_t i=0;i<n;++i)c->position[i]=SIZE_MAX;
+    c->removed[0]=c->boolean[0]=0;
+    return true;
+}
+static void yx_v12_chain_free(yx_v12_chain *c)
+{
+    free(c->stack);free(c->position);free(c->removed);free(c->boolean);
+}
+static bool yx_v12_chain_on(const yx_v12_chain *c,size_t block)
+{
+    size_t at=c->position[block];
+    return at!=SIZE_MAX&&at<c->size&&c->stack[at]==block;
+}
+/* Makes the stack the parent chain of `parent` (SIZE_MAX: none). */
+static bool yx_v12_chain_enter(yx_v12_chain *c,const yx_v12_instruction *ins,size_t count,size_t parent)
+{
+    size_t missing=0,at=parent;
+    while(at!=SIZE_MAX&&!yx_v12_chain_on(c,at)) {
+        if(at>=count||missing>=count)return false;
+        ++missing;at=ins[at].parent;
+    }
+    c->size=at==SIZE_MAX?0:c->position[at]+1;
+    if(c->size+missing>count)return false;
+    /* Push the missing blocks, outermost first. */
+    size_t top=c->size+missing;
+    for(size_t block=parent,k=top;k>c->size;block=ins[block].parent)c->stack[--k]=block;
+    for(size_t k=c->size;k<top;++k) {
+        size_t block=c->stack[k];
+        c->position[block]=k;
+        c->removed[k+1]=c->removed[k]+(ins[block].remove?1u:0u);
+        c->boolean[k+1]=c->boolean[k]+(ins[block].boolean_block?1u:0u);
+    }
+    c->size=top;
+    return true;
+}
+/* The branch depth `depth` from inside the current chain, as the walk
+ * through the parents adjusts it: removed blocks do not count, Boolean ones
+ * (except `excluded`) count twice, and so does a Boolean block it reaches. */
+static uint64_t yx_v12_chain_depth(const yx_v12_chain *c,const yx_v12_instruction *ins,uint64_t depth,size_t excluded)
+{
+    size_t m=depth<c->size?(size_t)depth:c->size,low=c->size-m;
+    uint64_t adjusted=depth-(c->removed[c->size]-c->removed[low])+(c->boolean[c->size]-c->boolean[low]);
+    if(excluded!=SIZE_MAX&&ins[excluded].boolean_block&&yx_v12_chain_on(c,excluded)&&c->position[excluded]>=low)--adjusted;
+    if(m==depth&&low>0) {
+        size_t reached=c->stack[low-1];
+        if(ins[reached].boolean_block&&reached!=excluded)++adjusted;
+    }
+    return adjusted;
+}
+
 /* The blocks open before each instruction, outermost first, with running
  * counts of removed and Boolean blocks: a branch's ancestors are the top of
  * this stack, so adjusting its depth takes O(1) instead of a walk up the
@@ -330,6 +395,7 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
     size_t count=0,locals=0;
     yx_v12_open open={NULL,NULL,NULL,0,NULL};
     bool ok=false;
+    yx_v12_chain chain={0};
     if(!yx_v12_instructions(data,length,&ins,&count,&locals))return false;
     open.blocks=malloc((count?count:1)*sizeof(size_t));
     open.removed=malloc((count?count:1)*sizeof(size_t));
@@ -383,6 +449,7 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
             ins[p->mate].move_value=true;
         }
     }
+    if(!yx_v12_chain_init(&chain,count))goto done;
     if(!yx_put_bytes(out,data,locals))goto done;
     *instruction_count=0;
     open.count=0;
@@ -429,30 +496,21 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
                !yx_put_uleb(out,globals[p->argument]))goto done;
             if(p->guard) {if(!yx_put_u8(out,0x45))goto done;++*instruction_count;}
         } else if(p->op==0x0c||p->op==0x0d) {
-            size_t parent=p->parent;uint64_t depth=p->argument,adjusted=depth;
+            uint64_t depth=p->argument,adjusted=depth;
             if(!yx_v12_open_adjust(ins,&open,p,depth,p->catch_target,&adjusted)) {
-            for(uint64_t d=0;d<depth&&parent!=SIZE_MAX;++d) {
-                if(ins[parent].remove)--adjusted;
-                if(ins[parent].boolean_block&&parent!=p->catch_target)++adjusted;
-                parent=ins[parent].parent;
-            }
-            if(parent!=SIZE_MAX&&ins[parent].boolean_block&&parent!=p->catch_target)++adjusted;
+                if(!yx_v12_chain_enter(&chain,ins,count,p->parent))goto done;
+                adjusted=yx_v12_chain_depth(&chain,ins,depth,p->catch_target);
             }
             if(!yx_put_u8(out,p->op)||!yx_put_uleb(out,adjusted))goto done;
         } else if(p->op==0x0e) {
             yx_reader r={data,p->end,p->start+1,false,false};uint64_t n,d;
             if(!yx_get_uleb(&r,&n)||!yx_put_u8(out,0x0e)||!yx_put_uleb(out,n))goto done;
+            if(!yx_v12_chain_enter(&chain,ins,count,p->parent))goto done;
             for(uint64_t j=0;j<=n;++j) {
                 if(!yx_get_uleb(&r,&d))goto done;
-                size_t parent=p->parent;uint64_t adjusted=d;
-                if(!yx_v12_open_adjust(ins,&open,p,d,SIZE_MAX,&adjusted)) {
-                for(uint64_t k=0;k<d&&parent!=SIZE_MAX;++k) {
-                    if(ins[parent].remove)--adjusted;
-                    if(ins[parent].boolean_block)++adjusted;
-                    parent=ins[parent].parent;
-                }
-                if(parent!=SIZE_MAX&&ins[parent].boolean_block)++adjusted;
-                }
+                uint64_t adjusted=d;
+                if(!yx_v12_open_adjust(ins,&open,p,d,SIZE_MAX,&adjusted))
+                    adjusted=yx_v12_chain_depth(&chain,ins,d,SIZE_MAX);
                 if(!yx_put_uleb(out,adjusted))goto done;
             }
         } else if(p->op==4&&p->move_value) {
@@ -474,7 +532,7 @@ static bool yx_v12_body(const uint8_t *data,size_t length,const size_t *function
     ok=true;
 done:
     free(open.blocks);free(open.removed);free(open.booleans);free(open.level);
-    free(ins);return ok;
+    yx_v12_chain_free(&chain);free(ins);return ok;
 }
 
 typedef struct yx_v12_import {
@@ -546,6 +604,77 @@ static void yx_v12_body_task(size_t i,void *context)
 /* Function bodies per thread below which a module's bodies stay on the
  * calling thread. */
 enum { YX_V12_BODIES_PER_THREAD = 32 };
+/* walrus emits local functions by LocalFunction::size, descending; equal
+ * sizes keep the order in which WasmModuleBuilder finished them: the
+ * pattern-match helper (WasmModuleBuilder::new), then each namespace
+ * function after the rule functions it calls, then main. A private module
+ * orders its functions by an estimate of the lowered size, which can tie
+ * them differently, so the creation order is recovered from the calls:
+ * main calls the namespace functions, those call the rule functions, and
+ * the rule functions call imports and the helper. Returns 1 with *out
+ * set, 0 when the module has another structure (its order is then kept),
+ * -1 when memory runs out (the caller fails: never another order). */
+static int yx_v12_creation_ranks(const uint8_t *code,size_t code_length,
+                                 size_t import_count,size_t defined,size_t main,size_t **out)
+{
+    yx_reader r={code,code_length,0,false,false};uint64_t n;
+    size_t **calls=NULL,*call_counts=NULL,*ranks=NULL,*stack=NULL,*next=NULL,rank=0,depth=0;
+    bool *imports=NULL;int result=-1;
+    *out=NULL;
+    if(main>=defined||!yx_get_uleb(&r,&n)||n!=defined)return 0;
+    calls=calloc(defined,sizeof(*calls));call_counts=calloc(defined,sizeof(*call_counts));
+    ranks=malloc(defined*sizeof(*ranks));stack=malloc(defined*sizeof(*stack));next=calloc(defined,sizeof(*next));
+    imports=calloc(defined,sizeof(*imports));
+    if(!calls||!call_counts||!ranks||!stack||!next||!imports)goto done;
+    for(size_t f=0;f<defined;++f) {
+        yx_v12_instruction *ins=NULL;size_t count=0,locals=0,local_calls=0;
+        ranks[f]=SIZE_MAX;
+        if(!yx_get_uleb(&r,&n)||n>r.length-r.at){result=0;goto done;}
+        /* yx_v12_body walked these bodies with the same walker before the
+         * sort: a failure here is an allocation failure (result -1). */
+        if(!yx_v12_instructions(r.data+r.at,(size_t)n,&ins,&count,&locals))goto done;
+        r.at+=(size_t)n;
+        /* One entry per call to a defined function, not per instruction. */
+        for(size_t i=0;i<count;++i)if(ins[i].op==0x10) {
+            if(ins[i].argument<import_count)imports[f]=true;
+            else if(ins[i].argument-import_count<defined)++local_calls;
+            else{free(ins);result=0;goto done;}
+        }
+        if(local_calls&&!(calls[f]=malloc(local_calls*sizeof(**calls)))){free(ins);goto done;}
+        for(size_t i=0;i<count;++i)if(ins[i].op==0x10&&ins[i].argument>=import_count)
+            calls[f][call_counts[f]++]=(size_t)(ins[i].argument-import_count);
+        free(ins);
+    }
+    if(r.at!=r.length){result=0;goto done;}
+    /* The helper: called by a rule function, calls nothing itself. */
+    for(size_t f=0;f<defined;++f)if(imports[f])
+        for(size_t k=0;k<call_counts[f];++k) {
+            size_t g=calls[f][k];
+            if(!imports[g]&&!call_counts[g]&&g!=main&&ranks[g]==SIZE_MAX)ranks[g]=rank++;
+        }
+    /* Post-order from main, callees in call order. */
+    stack[depth++]=main;ranks[main]=SIZE_MAX-1;
+    while(depth) {
+        size_t f=stack[depth-1];
+        if(next[f]<call_counts[f]) {
+            size_t g=calls[f][next[f]++];
+            if(ranks[g]==SIZE_MAX){ranks[g]=SIZE_MAX-1;stack[depth++]=g;}
+            continue;
+        }
+        ranks[f]=rank++;--depth;
+    }
+    result=rank==defined;
+    /* Only rule functions (those calling imports) take part: ties with the
+     * helper, namespace functions or main keep the private order, which
+     * its writers already give in creation order. */
+    for(size_t f=0;result==1&&f<defined;++f)if(!imports[f])ranks[f]=SIZE_MAX;
+done:
+    if(calls)for(size_t f=0;f<defined;++f)free(calls[f]);
+    free(calls);free(call_counts);free(stack);free(next);free(imports);
+    if(result==1)*out=ranks;else free(ranks);
+    return result;
+}
+
 static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
                         yx_writer *out,size_t *definition_map,size_t map_capacity,
                         yx_v12_origins **constant_origins,size_t *origin_function_count)
@@ -642,9 +771,23 @@ static bool yx_v12_wasm_impl(const uint8_t *data,size_t length,unsigned profile,
         r.at+=(size_t)n;
     }
     if(r.at!=r.length)goto done;
-    for(size_t i=1;i<defined;++i) {
-        size_t p=order[i],j=i;
-        while(j&&counts[order[j-1]]<counts[p]){order[j]=order[j-1];--j;}order[j]=p;
+    {
+        size_t *ranks=NULL;bool tied=false;
+        for(size_t i=0;!tied&&i<defined;++i)for(size_t j=i+1;!tied&&j<defined;++j)tied=counts[i]==counts[j];
+        if(tied) {
+            yx_reader e={sections[7],sizes[7],0,false,false};char name[64];uint8_t kind;uint64_t index;
+            if(yx_get_uleb(&e,&n)&&n==1&&yx_v12_read_name(&e,name,sizeof(name))&&!strcmp(name,"main")&&
+               yx_get_u8(&e,&kind)&&!kind&&yx_get_uleb(&e,&index)&&index>=import_count&&index-import_count<defined)
+                if(yx_v12_creation_ranks(sections[10],sizes[10],import_count,defined,(size_t)(index-import_count),&ranks)<0)goto done;
+        }
+        for(size_t i=1;i<defined;++i) {
+            size_t p=order[i],j=i;
+            while(j&&(counts[order[j-1]]<counts[p]||
+                      (ranks&&counts[order[j-1]]==counts[p]&&ranks[p]!=SIZE_MAX&&
+                       ranks[order[j-1]]!=SIZE_MAX&&ranks[order[j-1]]>ranks[p]))){order[j]=order[j-1];--j;}
+            order[j]=p;
+        }
+        free(ranks);
     }
     for(size_t i=0;i<defined;++i)map[import_count+order[i]]=import_count+i;
     if(definition_map) {

@@ -146,6 +146,16 @@ static void yx_anchor_top_level(const yx_integer_expr *tree,int index,int64_t pa
               YX_INTEGER_NODES(tree)[n->left].value>=0)
         *offset=YX_INTEGER_NODES(tree)[n->left].value;
 }
+/* anchor_patterns: an unanchored `<quantifier> of <set>` makes each pattern
+ * of the set without a top-level anchor non-anchorable. The trees that hold
+ * set nodes (0xda) are pattern-expression trees, whose extension starts with
+ * the yx_pattern_expression_context (yx_multi_pattern_context too). */
+static const yx_pattern_of_set *yx_anchor_of_set(const yx_integer_expr *tree,const yx_integer_expr_node *n)
+{
+    const yx_pattern_expression_context *c=tree->extension;
+    if(n->op!=0xda||!c||n->value<0||(uint64_t)(n->value>>4)>=c->of_set_count)return NULL;
+    return &c->of_sets[n->value>>4];
+}
 static bool yx_anchor_uses(const yx_integer_expr *tree,int index,int64_t pattern,bool top,
     int64_t *anchor,bool *blocked,unsigned depth)
 {
@@ -162,6 +172,11 @@ static bool yx_anchor_uses(const yx_integer_expr *tree,int index,int64_t pattern
             else if(*anchor>=0&&*anchor!=at->value)*blocked=true;
             else *anchor=at->value;
         } else if(n->op!=0xd1||!top)*blocked=true;
+    }
+    if(n->op==0xda&&!top) {
+        const yx_pattern_of_set *set=yx_anchor_of_set(tree,n);
+        for(uint8_t i=0;set&&i<set->count;++i)
+            if(pattern>=0&&(uint64_t)pattern>=set->start[i]&&(uint64_t)pattern<=set->end[i])*blocked=true;
     }
     if(!yx_anchor_uses(tree,n->left,pattern,top,anchor,blocked,depth+1))return false;
     if(n->right!=n->left&&!yx_anchor_uses(tree,n->right,pattern,top,anchor,blocked,depth+1))return false;
@@ -256,7 +271,7 @@ static void yx_anchor_top_level_all(const yx_integer_expr *tree,int index,size_t
         top[n->value]=YX_INTEGER_NODES(tree)[n->left].value;
 }
 static bool yx_anchor_uses_all(const yx_integer_expr *tree,int index,size_t count,const int64_t *top,
-    int64_t *anchor,bool *blocked,unsigned depth)
+    int64_t *anchor,bool *blocked,size_t *cover,unsigned depth)
 {
     if(index<0)return true;
     if(depth>4096)return false;
@@ -271,22 +286,35 @@ static bool yx_anchor_uses_all(const yx_integer_expr *tree,int index,size_t coun
             else anchor[p]=at->value;
         } else if(n->op!=0xd1||top[p]<0)blocked[p]=true;
     }
-    if(!yx_anchor_uses_all(tree,n->left,count,top,anchor,blocked,depth+1))return false;
-    if(n->right!=n->left&&!yx_anchor_uses_all(tree,n->right,count,top,anchor,blocked,depth+1))return false;
+    /* A set's ranges go to a difference array (cover[count + 1]) that the
+     * caller resolves once: not one pass over the set per set expression. */
+    if(n->op==0xda) {
+        const yx_pattern_of_set *set=yx_anchor_of_set(tree,n);
+        for(uint8_t i=0;set&&i<set->count;++i)
+            if(set->start[i]<count&&set->start[i]<=set->end[i]) {
+                ++cover[set->start[i]];
+                --cover[set->end[i]<count?set->end[i]+1:count];
+            }
+    }
+    if(!yx_anchor_uses_all(tree,n->left,count,top,anchor,blocked,cover,depth+1))return false;
+    if(n->right!=n->left&&!yx_anchor_uses_all(tree,n->right,count,top,anchor,blocked,cover,depth+1))return false;
     return n->extra<0||n->extra==n->left||n->extra==n->right||
-           yx_anchor_uses_all(tree,n->extra,count,top,anchor,blocked,depth+1);
+           yx_anchor_uses_all(tree,n->extra,count,top,anchor,blocked,cover,depth+1);
 }
 static bool yx_pattern_anchor_offsets(const yx_integer_expr *tree,int root,size_t count,bool *anchored,uint64_t *offset)
 {
     int64_t *top=malloc((count?count:1)*sizeof(*top)),*anchor=malloc((count?count:1)*sizeof(*anchor));
     bool *blocked=calloc(count?count:1,sizeof(*blocked)),walked;
-    if(!top||!anchor||!blocked){free(top);free(anchor);free(blocked);return false;}
+    size_t *cover=calloc(count+1,sizeof(*cover)),covered=0;
+    if(!top||!anchor||!blocked||!cover){free(top);free(anchor);free(blocked);free(cover);return false;}
     for(size_t p=0;p<count;++p){top[p]=-1;anchor[p]=-1;anchored[p]=false;offset[p]=0;}
     yx_anchor_top_level_all(tree,root,count,top,0);
-    walked=yx_anchor_uses_all(tree,root,count,top,anchor,blocked,0);
+    walked=yx_anchor_uses_all(tree,root,count,top,anchor,blocked,cover,0);
+    /* Unsigned wrap-around sums the +1/-1 entries exactly. */
+    for(size_t p=0;p<count;++p){covered+=cover[p];if(covered&&top[p]<0)blocked[p]=true;}
     for(size_t p=0;walked&&p<count;++p)
         if(!blocked[p]&&anchor[p]>=0){anchored[p]=true;offset[p]=(uint64_t)anchor[p];}
-    free(top);free(anchor);free(blocked);return true;
+    free(top);free(anchor);free(blocked);free(cover);return true;
 }
 static bool yx_pattern_anchor_offset(const yx_integer_expr *tree,int root,int64_t pattern,
     uint64_t *offset)
@@ -322,8 +350,10 @@ static yx_ser_result yx_constrain_single_pattern_archive(uint8_t **data,size_t *
        !yx_header_integer(tree,root,patterns,1,NULL,0,&storage,&header)){free(storage.data);return YX_SER_NO_MEMORY;}
     if(!yx_physical_read(*data,*length,&a)){free(storage.data);return YX_SER_UNSUPPORTED;}
     if(a.logical!=1||a.physical!=1||!a.frame_count||a.anchored_count||a.headers[0].kind)goto done;
+    /* c_literal_pattern never anchors a nocase text pattern; a nocase
+     * regexp literal (c_alternation_literal) is anchored. */
     for(size_t i=0;anchored&&i<a.frame_count;++i)
-        if(a.frames[i].frame.variant!=0||(a.frames[i].frame.flags&2))anchored=false;
+        if(a.frames[i].frame.variant!=0||((a.frames[i].frame.flags&2)&&pattern->kind==YX_PATTERN_TEXT))anchored=false;
     if(!anchored&&!header.kind)goto done;
     if(anchored) {
         for(size_t i=0;i<a.frame_count;++i) {
@@ -351,7 +381,7 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     YRX_PATTERN *literals=NULL;const YRX_PATTERN **patterns=NULL;
     /* Per pattern: its frame count, last frame, and whether all its frames
      * are plain (one pass over the frames, not one per pattern). */
-    size_t *frame_counts=NULL,*last_frames=NULL,*first_frames=NULL,*next_frames=NULL;bool *not_plain=NULL;
+    size_t *frame_counts=NULL,*last_frames=NULL,*first_frames=NULL,*next_frames=NULL;bool *not_plain=NULL,*text_patterns=NULL;
     /* Every pattern's anchor from one walk (yx_pattern_anchor_offsets). */
     bool *anchors=NULL;uint64_t *offsets=NULL;
     if(root<0||!yx_physical_read(*data,*length,&a))return YX_SER_UNSUPPORTED;
@@ -366,12 +396,17 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     next_frames=calloc(a.frame_count?a.frame_count:1,sizeof(*next_frames));
     if(!literals||!patterns||!frame_counts||!last_frames||!not_plain||!first_frames||!next_frames)
         {status=YX_SER_NO_MEMORY;goto done;}
+    /* c_literal_pattern never anchors a nocase text pattern; a nocase
+     * regexp literal (c_alternation_literal) is anchored. */
+    text_patterns=calloc(a.physical?a.physical:1,sizeof(*text_patterns));
+    if(!text_patterns){status=YX_SER_NO_MEMORY;goto done;}
+    for(size_t i=0;i<a.logical;++i)if(a.mapping[i]<a.physical&&a.kinds[i]==YX_PATTERN_TEXT)text_patterns[a.mapping[i]]=true;
     for(size_t i=0;i<a.frame_count;++i) {
         size_t p=a.frames[i].pattern;
         if(p>=a.physical)continue;
         if(frame_counts[p])next_frames[last_frames[p]]=i+1;else first_frames[p]=i+1;
         ++frame_counts[p];last_frames[p]=i;
-        if(a.frames[i].frame.variant!=0||(a.frames[i].frame.flags&2))not_plain[p]=true;
+        if(a.frames[i].frame.variant!=0||((a.frames[i].frame.flags&2)&&text_patterns[p]))not_plain[p]=true;
     }
     for(size_t p=0;p<a.physical;++p) {
         size_t frames=frame_counts[p],last=last_frames[p];
@@ -414,7 +449,7 @@ static yx_ser_result yx_constrain_pattern_anchors(uint8_t **data,size_t *length,
     if(status==YX_SER_SUCCESS){free(*data);*data=out;*length=out_length;out=NULL;}
 done:
     free(out);free(storage.data);free(literals);free(patterns);
-    free(frame_counts);free(last_frames);free(first_frames);free(next_frames);free(not_plain);
+    free(frame_counts);free(last_frames);free(first_frames);free(next_frames);free(not_plain);free(text_patterns);
     free(anchors);free(offsets);yx_physical_destroy(&a);return status;
 }
 /* Reader: validates the anchor and header against the condition, then
@@ -436,7 +471,7 @@ static yx_ser_result yx_unconstrain_single_pattern_archive(const uint8_t *data,s
            !yx_pattern_anchor_offset(tree,root,0,&offset))goto done;
         for(size_t i=0;i<a.frame_count;++i)
             if(a.frames[i].frame.variant!=0||!a.frames[i].anchored||a.frames[i].offset!=offset||
-               (a.frames[i].frame.flags&2)||!a.frames[i].frame.literal_length)goto done;
+               ((a.frames[i].frame.flags&2)&&a.kinds[0]==YX_PATTERN_TEXT)||!a.frames[i].frame.literal_length)goto done;
     }
     if(a.headers[0].kind) {
         yx_writer plain={0},literal={0};yx_physical_header without={0},with={0};bool ok;

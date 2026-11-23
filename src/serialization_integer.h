@@ -896,12 +896,26 @@ static int yx_integer_expr_condition(yx_integer_expr *tree, const char *conditio
      * operand does: the rule's own handler block is left out when unused and
      * the operand's takes its place (catch_undef, emit.rs). */
     if (YX_INTEGER_NODES(tree)[root].op == 0xd8 || YX_INTEGER_NODES(tree)[root].op == 0xd9) {
+        bool tracked = false;
         while (YX_INTEGER_NODES(tree)[root].op == 0xd8 || YX_INTEGER_NODES(tree)[root].op == 0xd9)
             root = YX_INTEGER_NODES(tree)[root].left;
+        /* An offset, length, anchored match or ranged count in an operand
+         * that folded away still ran disallow_fast_scan (ast2ir.rs): the
+         * node scans for match limits must see it, so it is kept and the
+         * root copied after it. */
+        for (size_t n = (size_t)root + 1; !tracked && n < tree->count; ++n)
+            tracked = YX_INTEGER_NODES(tree)[n].op >= 0xd3 && YX_INTEGER_NODES(tree)[n].op <= 0xd7;
         /* The condition is again the last node, as the walks that ask
          * whether a node is the whole condition expect: an operand precedes
          * its operator, so nothing after the new root belongs to it. */
-        tree->count = (size_t)root + 1;
+        if (!tracked) tree->count = (size_t)root + 1;
+        else {
+            yx_integer_expr_node node = YX_INTEGER_NODES(tree)[root];
+            int copy = yx_integer_expr_node_new(tree, node.op, node.left, node.right, node.value);
+            if (copy < 0) { tree->failed = true; return -1; }
+            YX_INTEGER_NODES(tree)[copy] = node;
+            root = copy;
+        }
     }
     return root;
 }

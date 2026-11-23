@@ -94,36 +94,38 @@ static bool yx_module_pattern_of_loop(const yx_module_node *n)
 static uint32_t *yx_module_pattern_set(yx_module_program *p,size_t *count)
 {
     yx_module_patterns *c=p->extension;
-    const unsigned char *items[64];size_t lengths[64],item_count=0;bool wildcards[64];
+    yx_pattern_tuple tuple={0};
+    uint32_t *ids=NULL;
     *count=0;
     if(!yx_bool_keyword(&p->parser,"them")) {
         if(!yx_module_take(p,'('))return NULL;
         do {
-            const unsigned char *name;size_t length;
+            const unsigned char *name;size_t length;bool wildcard;
             yx_bool_skip_space(&p->parser);
-            if(*p->parser.at!='$'||item_count==64)return NULL;
+            if(*p->parser.at!='$')goto fail;
             ++p->parser.at;
             if(!yx_with_identifier(&p->parser,&name,&length))length=0,name=p->parser.at;
-            items[item_count]=name;lengths[item_count]=length;
-            wildcards[item_count]=*p->parser.at=='*';
-            if(wildcards[item_count])++p->parser.at;
-            else if(!length)return NULL;
-            ++item_count;
+            wildcard=*p->parser.at=='*';
+            if(wildcard)++p->parser.at;
+            else if(!length)goto fail;
+            /* Tuples of any length (yx_pattern_tuple). */
+            if(!yx_pattern_tuple_add(&tuple,name,length,wildcard))goto fail;
         } while(yx_module_take(p,','));
-        if(!yx_module_take(p,')'))return NULL;
+        if(!yx_module_take(p,')')||!yx_pattern_tuple_finish(&tuple))goto fail;
     }
     size_t finish=c->rule_scope?c->logical_start+c->logical_count:c->archive->logical;
-    uint32_t *ids=malloc((finish>c->logical_start?finish-c->logical_start:1)*sizeof(*ids));
-    if(!ids)return NULL;
+    ids=malloc((finish>c->logical_start?finish-c->logical_start:1)*sizeof(*ids));
+    if(!ids)goto fail;
     for(size_t index=c->logical_start;index<finish;++index) {
-        const char *name=c->archive->names[c->archive->name_ids[index]];size_t length=strlen(name+1);bool member=!item_count;
-        for(size_t j=0;j<item_count&&!member;++j)
-            member=wildcards[j]?length>=lengths[j]&&!memcmp(name+1,items[j],lengths[j]):
-                   length==lengths[j]&&!memcmp(name+1,items[j],lengths[j]);
+        const char *name=c->archive->names[c->archive->name_ids[index]];
+        bool member=!tuple.count||yx_pattern_tuple_match(&tuple,name+1,strlen(name+1));
         if(member)ids[(*count)++]=(uint32_t)c->archive->mapping[index];
     }
+    yx_pattern_tuple_free(&tuple);
     if(!*count){free(ids);return NULL;}
     return ids;
+fail:
+    yx_pattern_tuple_free(&tuple);free(ids);*count=0;return NULL;
 }
 /* Whether the quantifier at `at` ends in the keyword `of`: a short balanced
  * run of operands and arithmetic operators followed by `of`. */
@@ -1303,7 +1305,11 @@ static int yx_module_pattern_of_loop_decode(yx_reader *r,size_t end,yx_module_pr
     free(item.data);
     uint8_t anchor=0;int args[3],argc=0;
     if(quantity>=0)args[argc++]=quantity;
-    if(ok&&!(c->presence&&end-q.at>=2&&q.data[q.at]==0x10&&q.data[q.at+1]==c->helper_id)) {
+    /* The helper's index is LEB128: two bytes from function index 128 on. */
+    yx_reader helper_call={q.data,end,q.at,false,false};uint64_t helper_index=UINT64_MAX;
+    bool helper=ok&&c->presence&&yx_rule_expression_byte(&helper_call,0x10)&&
+        yx_get_uleb(&helper_call,&helper_index)&&helper_index==c->helper_id;
+    if(ok&&!helper) {
         /* An anchor's operands and is_pat_match_at/_in. */
         size_t at_id=SIZE_MAX,in_id=SIZE_MAX,stop=SIZE_MAX;
         for(size_t i=0;i<p->import_count;++i) {
@@ -1330,7 +1336,7 @@ static int yx_module_pattern_of_loop_decode(yx_reader *r,size_t end,yx_module_pr
         }
         else ok=false;
         if(ok){q.at=stop;ok=yx_module_expect(&q,end,"\x10",1)&&yx_get_uleb(&q,&(uint64_t){0});}
-    } else if(ok) q.at+=2;
+    } else if(ok) q.at=helper_call.at;
     ok=ok&&yx_module_tail_decode(&q,end,counted,caught,base+1,base+2,base+3,base+4,&kind);
     if(ok&&(node=yx_module_node_new(p,YX_MP_OF,1))>=0) {
         yx_module_node *n=&p->nodes[node];
@@ -2119,8 +2125,16 @@ static bool yx_module_pattern_decode_header_mode(yx_reader *r, yx_module_program
     }
     return false;
 }
+/* Decodes of archives without modules or globals in progress on this thread:
+ * restoring the patterns decodes rebuilt archives of that kind, which take
+ * the other codecs. */
+static _Thread_local unsigned yx_module_patterns_plain_depth;
+/* Set by yx_decode_module_patterns_plain, the last decoder tried: such an
+ * archive is first left to the other codecs. */
+static _Thread_local bool yx_module_patterns_plain_allowed;
 static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *rule_count)
 {
+    bool plain=false;
     yx_physical_archive *a=calloc(1,sizeof(*a));yx_module_program *p=calloc(1,sizeof(*p));
     yx_module_pattern_schema dynamic={0};yx_global *globals=NULL;size_t global_count=0;
     YRX_RULES source_rules={0};char *module_names[32]={0};
@@ -2140,7 +2154,12 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     }
     source_rules.import_count=a->import_count;source_rules.imports=module_names;
     yx_reader gr={a->globals,a->globals_length,0,false,false};uint64_t fields;
-    if(!yx_get_uint(&gr,&fields)||!fields||fields<a->import_count||fields-a->import_count>UINT16_MAX)goto done;
+    if(!yx_get_uint(&gr,&fields)||fields<a->import_count||fields-a->import_count>UINT16_MAX)goto done;
+    /* No module and no global (a root `defined` of a pattern operand). */
+    if(!fields) {
+        if(yx_module_patterns_plain_depth||!yx_module_patterns_plain_allowed)goto done;
+        plain=true;++yx_module_patterns_plain_depth;
+    }
     global_count=(size_t)(fields-a->import_count);
     if(global_count) {
         globals=calloc(global_count,sizeof(*globals));if(!globals){global_count=0;status=YX_SER_NO_MEMORY;goto done;}
@@ -2309,7 +2328,23 @@ static yx_ser_result yx_decode_module_patterns(const uint8_t *data,size_t length
     decoded->runtime_globals=globals;decoded->runtime_global_count=global_count;globals=NULL;global_count=0;
     decoded->preserve_serialized_prefix=true;decoded->truth=true;
     *rules=decoded;*rule_count=1;decoded=NULL;status=YX_SER_SUCCESS;
-done:free(canonical);free(wasm);free(source.data);free(declarations.data);yrx_rules_destroy(loaded);
+done:if(plain)--yx_module_patterns_plain_depth;
+    free(canonical);free(wasm);free(source.data);free(declarations.data);yrx_rules_destroy(loaded);
     if(a)yx_physical_destroy(a);
     free(c.helper_calls);free(c.regexes);free(header_storage.data);free(limits);free(bounded);free(bounds);free(a);yx_module_program_free(p);yx_module_pattern_schema_free(&dynamic);yx_archive_globals_destroy(globals,global_count);yx_ser_rules_destroy(decoded,decoded?1:0);return status;
+}
+/* yx_decode_module_patterns of an archive without modules and globals. */
+static yx_ser_result yx_decode_module_patterns_plain(const uint8_t *data,size_t length,yx_ser_rule **rules,size_t *rule_count)
+{
+    bool saved=yx_module_patterns_plain_allowed,defined=false;
+    yx_ser_result status;
+    /* emit_defined drops the operand for `i32.const 1`: without those bytes
+     * the archive has no root `defined` (and the restoration, which decodes
+     * rebuilt archives, is not worth its stack on load worker threads). */
+    for(size_t i=0;i+2<length&&!defined;++i)defined=data[i]==0x1a&&data[i+1]==0x41&&data[i+2]==1;
+    if(!defined)return YX_SER_UNSUPPORTED;
+    yx_module_patterns_plain_allowed=true;
+    status=yx_decode_module_patterns(data,length,rules,rule_count);
+    yx_module_patterns_plain_allowed=saved;
+    return status;
 }

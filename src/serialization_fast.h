@@ -999,6 +999,9 @@ static bool yx_fast_rule(const YRX_RULES *rules)
 static bool yx_fast_masked_atoms(yx_fast_program *p, const yx_fast_literal *literal)
 {
     size_t offset, width; yx_fast_literal masked = *literal; masked.force_masked = true;
+    /* best_range_in_masked_bytes reads the first 32 KiB only
+     * (MAX_ATOM_SEARCH_BYTES, atoms/quality.rs). */
+    if (masked.length > 32768) masked.length = 32768;
     yx_fast_best_atom(&masked,&offset,&width);
     if (!width || offset > UINT16_MAX) return false;
     for (;;) {
@@ -1112,6 +1115,31 @@ static yx_ser_result yx_encode_fast_regex(const YRX_RULES *rules, bool vba_order
     yx_ser_result result = YX_SER_UNSUPPORTED;
     uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
     memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
+    if (!parsed && pattern->kind == YX_PATTERN_HEX && !pattern->hex_has_jump && pattern->bytes &&
+        pattern->mask && pattern->length > UINT16_MAX &&
+        !(pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE))) {
+        /* A hex pattern of bytes and masked bytes beyond FastVM's u16
+         * pieces: Hir::try_extract_literal_with_mask (re/hir.rs) has no
+         * length limit, so it is a LiteralWithMask sub-pattern
+         * (compiler/mod.rs c_regexp_pattern). A plain literal is left to the
+         * literal codec. */
+        bool masked = false;
+        uint8_t *bytes = malloc(pattern->length);
+        if (!bytes) { yx_fast_program_destroy(p); return YX_SER_NO_MEMORY; }
+        for (size_t i = 0; i < pattern->length; ++i) {
+            bytes[i] = pattern->bytes[i] & pattern->mask[i];
+            if (pattern->mask[i] != 255) masked = true;
+        }
+        yx_fast_literal literal = {bytes, pattern->mask, pattern->length, true};
+        if (masked && (!vba_order || yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) &&
+            yx_fast_masked_atoms(p, &literal))
+            result = yx_pattern_envelope_encode(rule->identifier, pattern->identifier, (uint8_t)pattern->kind,
+                (pattern->modifiers & YX_MOD_FULLWORD) ? 24 : 0, wasm, sizeof(wasm), p->atoms, p->atom_count,
+                NULL, 0, bytes, pattern->mask, pattern->length, data, length);
+        free(bytes);
+        yx_fast_program_destroy(p);
+        return result;
+    }
     /* FastVM's splitter reads through capture groups and takes masked
      * bytes, so /(caf)e|zz/ and /ab[\x30-\x3f]|zzz/ are one alternation
      * piece, but Hir::is_alternation_literal (lib/src/re/hir.rs) is false

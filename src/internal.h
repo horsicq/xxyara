@@ -367,6 +367,12 @@ typedef struct yx_patch_note {
 typedef struct yx_nul_escape_entry yx_nul_escape_entry;
 
 struct YRX_COMPILER {
+    /* Warnings the caller will not show (yr --disable-warnings): not
+     * rendered (yx_compiler_warning_skipped in xxyara.c). The caller owns
+     * the codes. */
+    bool warnings_all_disabled;
+    const char *const *warnings_disabled;
+    size_t warnings_disabled_count;
     uint32_t flags;
     YRX_RULES *rules;
     /* Earlier rule names for type warnings; see yx_rule_name_cache. */
@@ -415,6 +421,8 @@ struct YRX_COMPILER {
     size_t global_rules_scanned, global_rule_count;
     char error[1024];
 };
+/* A warning the caller will not show (warnings_disabled): not rendered. */
+bool yx_compiler_warning_skipped(const YRX_COMPILER *compiler, const char *code);
 
 /* Borrowed until the next scan, matching yrx_scanner_set_module_data. */
 typedef struct yx_scanner_module_data {
@@ -739,7 +747,8 @@ int yx_compiler_too_many_variables_error(YRX_COMPILER *compiler,
 int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
                                        const char *condition,
                                        const char *source, const char *origin,
-                                       size_t condition_offset, size_t limit);
+                                       size_t condition_offset, size_t limit,
+                                       size_t first_type_warning);
 bool yx_compiler_json_span(const YRX_COMPILER *compiler, const char *span,
                            size_t *start, size_t *end);
 bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler,
@@ -748,7 +757,8 @@ bool yx_compiler_semantic_error_span(const YRX_COMPILER *compiler,
                                      size_t mark, size_t *start, size_t *end);
 void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first,
                                      size_t error_mark, size_t error_start,
-                                     size_t error_end);
+                                     size_t error_end,
+                                     size_t converted_end);
 int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
                                           const char *identifier,
                                           const char *source,

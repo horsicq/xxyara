@@ -143,9 +143,110 @@ static int64_t yx_pattern_of_value(const yx_pattern_of_set *set,uint8_t index,un
         value|=set->start[i]==set->end[i]&&kind!=3?8:4;
     return value;
 }
+/* The selectors of a pattern tuple `($a, $b*, ...)`: wildcard prefixes in
+ * order and exact names in a hash table, so that finding the members of n
+ * patterns is linear in n and the tuple's length. */
+typedef struct yx_pattern_tuple {
+    const unsigned char **names;size_t *lengths;bool *wildcards;size_t count,capacity;
+    /* table: selector indexes by (name, wildcard); prefixes: the distinct
+     * lengths of the wildcard prefixes. */
+    size_t *table,table_size,*prefixes,prefix_count;
+} yx_pattern_tuple;
+static uint64_t yx_pattern_tuple_hash(const unsigned char *name,size_t length)
+{
+    uint64_t hash=UINT64_C(1469598103934665603);
+    for(size_t i=0;i<length;++i)hash=(hash^name[i])*UINT64_C(1099511628211);
+    return hash;
+}
+static bool yx_pattern_tuple_add(yx_pattern_tuple *t,const unsigned char *name,size_t length,bool wildcard)
+{
+    if(t->count==t->capacity) {
+        size_t capacity=t->capacity?t->capacity*2:16;
+        if(capacity>SIZE_MAX/sizeof(*t->lengths))return false;
+        const unsigned char **names=realloc((void *)t->names,capacity*sizeof(*names));
+        if(!names)return false;
+        t->names=names;
+        size_t *lengths=realloc(t->lengths,capacity*sizeof(*lengths));
+        if(!lengths)return false;
+        t->lengths=lengths;
+        bool *wildcards=realloc(t->wildcards,capacity*sizeof(*wildcards));
+        if(!wildcards)return false;
+        t->wildcards=wildcards;t->capacity=capacity;
+    }
+    t->names[t->count]=name;t->lengths[t->count]=length;t->wildcards[t->count]=wildcard;++t->count;
+    return true;
+}
+/* The slot of selector (name, wildcard) in the table: its entry, or the
+ * empty slot where it goes. `hash` is yx_pattern_tuple_hash of the name. */
+static size_t yx_pattern_tuple_slot_hashed(const yx_pattern_tuple *t,uint64_t hash,const unsigned char *name,size_t length,bool wildcard)
+{
+    size_t mask=t->table_size-1;
+    size_t at=(size_t)(hash^(wildcard?UINT64_C(0x9e3779b97f4a7c15):0))&mask;
+    for(;t->table[at]!=SIZE_MAX;at=(at+1)&mask) {
+        size_t item=t->table[at];
+        if(t->wildcards[item]==wildcard&&t->lengths[item]==length&&!memcmp(name,t->names[item],length))break;
+    }
+    return at;
+}
+static size_t yx_pattern_tuple_slot(const yx_pattern_tuple *t,const unsigned char *name,size_t length,bool wildcard)
+{
+    return yx_pattern_tuple_slot_hashed(t,yx_pattern_tuple_hash(name,length),name,length,wildcard);
+}
+static int yx_pattern_tuple_length_compare(const void *a,const void *b)
+{
+    size_t x=*(const size_t *)a,y=*(const size_t *)b;
+    return x<y?-1:x>y?1:0;
+}
+/* Repeated selectors are entered once (a tuple naming `$a` n times costs n
+ * probes); wildcard prefixes are looked up by their distinct lengths, so a
+ * pattern costs one probe per such length instead of one per wildcard. */
+static bool yx_pattern_tuple_finish(yx_pattern_tuple *t)
+{
+    size_t size=16;
+    while(size<t->count*2){if(size>SIZE_MAX/4/sizeof(size_t))return false;size*=2;}
+    t->table=malloc(size*sizeof(*t->table));t->prefixes=malloc((t->count?t->count:1)*sizeof(*t->prefixes));
+    if(!t->table||!t->prefixes)return false;
+    t->table_size=size;t->prefix_count=0;
+    for(size_t i=0;i<size;++i)t->table[i]=SIZE_MAX;
+    for(size_t i=0;i<t->count;++i) {
+        size_t at=yx_pattern_tuple_slot(t,t->names[i],t->lengths[i],t->wildcards[i]);
+        if(t->table[at]!=SIZE_MAX)continue;
+        t->table[at]=i;
+        if(t->wildcards[i]) {
+            size_t k=0;
+            while(k<t->prefix_count&&t->prefixes[k]!=t->lengths[i])++k;
+            if(k==t->prefix_count)t->prefixes[t->prefix_count++]=t->lengths[i];
+        }
+    }
+    qsort(t->prefixes,t->prefix_count,sizeof(*t->prefixes),yx_pattern_tuple_length_compare);
+    return true;
+}
+/* Whether a pattern name (without `$`) is selected by the tuple. */
+static bool yx_pattern_tuple_match(const yx_pattern_tuple *t,const char *name,size_t length)
+{
+    const unsigned char *bytes=(const unsigned char *)name;
+    /* One pass over the name: its hash is read at each prefix length
+     * (ascending), as yx_pattern_tuple_hash extends it byte by byte. */
+    uint64_t hash=yx_pattern_tuple_hash(bytes,0);size_t hashed=0;
+    for(size_t i=0;i<t->prefix_count&&t->prefixes[i]<=length;++i) {
+        for(;hashed<t->prefixes[i];++hashed)hash=(hash^bytes[hashed])*UINT64_C(1099511628211);
+        if(t->table[yx_pattern_tuple_slot_hashed(t,hash,bytes,t->prefixes[i],true)]!=SIZE_MAX)return true;
+    }
+    return t->table[yx_pattern_tuple_slot(t,bytes,length,false)]!=SIZE_MAX;
+}
+static void yx_pattern_tuple_free(yx_pattern_tuple *t)
+{
+    free((void *)t->names);free(t->lengths);free(t->wildcards);free(t->table);free(t->prefixes);
+    memset(t,0,sizeof(*t));
+}
+static int yx_pattern_tuple_id_compare(const void *a,const void *b)
+{
+    uint32_t x=*(const uint32_t *)a,y=*(const uint32_t *)b;
+    return x<y?-1:x>y?1:0;
+}
 static int yx_pattern_expression_of(yx_integer_expr *tree,unsigned depth,yx_pattern_expression_context *c)
 {
-    const unsigned char *start=tree->parser.at,*items[64];size_t lengths[64];bool wildcards[64];
+    const unsigned char *start=tree->parser.at;yx_pattern_tuple tuple={0};
     size_t item_count=0,count=c->pattern_count?c->pattern_count:1,id_count=0;
     uint32_t *ids=NULL;int quantity=-1;uint8_t kind;yx_pattern_of_set set={0};
     (void)depth;
@@ -171,16 +272,18 @@ static int yx_pattern_expression_of(yx_integer_expr *tree,unsigned depth,yx_patt
         do {
             const unsigned char *name;size_t length;
             yx_bool_skip_space(&tree->parser);
-            if(*tree->parser.at!='$'||item_count==64)goto unsupported;
+            bool wildcard;
+            if(*tree->parser.at!='$')goto unsupported;
             ++tree->parser.at;
             if(!yx_with_identifier(&tree->parser,&name,&length))length=0,name=tree->parser.at;
-            items[item_count]=name;lengths[item_count]=length;
-            wildcards[item_count]=*tree->parser.at=='*';
-            if(wildcards[item_count])++tree->parser.at;
+            wildcard=*tree->parser.at=='*';
+            if(wildcard)++tree->parser.at;
             else if(!length)goto unsupported;
+            /* Any number of items (yx_pattern_tuple). */
+            if(!yx_pattern_tuple_add(&tuple,name,length,wildcard))goto unsupported;
             ++item_count;
         } while(yx_pattern_expression_symbol_token(&tree->parser,','));
-        if(!yx_pattern_expression_symbol_token(&tree->parser,')'))goto unsupported;
+        if(!yx_pattern_expression_symbol_token(&tree->parser,')')||!yx_pattern_tuple_finish(&tuple))goto unsupported;
     }
     {
         /* `at` and `in` anchors use a loop. */
@@ -191,16 +294,12 @@ static int yx_pattern_expression_of(yx_integer_expr *tree,unsigned depth,yx_patt
     ids=malloc(count*sizeof(*ids));
     if(!ids)goto unsupported;
     for(size_t i=0;i<count;++i) {
-        const char *name=c->pattern_count?yx_pattern_names(c)[i]:c->name;bool member=!item_count;
-        size_t length=name?strlen(name+1):0;
-        for(size_t j=0;name&&j<item_count&&!member;++j)
-            member=wildcards[j]?length>=lengths[j]&&!memcmp(name+1,items[j],lengths[j]):
-                   length==lengths[j]&&!memcmp(name+1,items[j],lengths[j]);
+        const char *name=c->pattern_count?yx_pattern_names(c)[i]:c->name;
+        bool member=!item_count||(name&&yx_pattern_tuple_match(&tuple,name+1,strlen(name+1)));
         if(member)ids[id_count++]=(uint32_t)(c->pattern_count?yx_pattern_mapping(c)[i]:0);
     }
     if(!id_count)goto unsupported;
-    for(size_t i=1;i<id_count;++i)
-        for(size_t j=i;j&&ids[j-1]>ids[j];--j){uint32_t t=ids[j];ids[j]=ids[j-1];ids[j-1]=t;}
+    qsort(ids,id_count,sizeof(*ids),yx_pattern_tuple_id_compare);
     for(size_t i=0;i<id_count;++i) {
         if(i&&ids[i]==ids[i-1])goto unsupported;
         if(i&&ids[i]==ids[i-1]+1){set.end[set.count-1]=ids[i];continue;}
@@ -208,11 +307,11 @@ static int yx_pattern_expression_of(yx_integer_expr *tree,unsigned depth,yx_patt
         set.start[set.count]=set.end[set.count]=ids[i];++set.count;
     }
     if((kind==3&&set.count!=1)||c->of_set_count==YX_PATTERN_OF_SETS)goto unsupported;
-    free(ids);
+    free(ids);yx_pattern_tuple_free(&tuple);
     c->of_sets[c->of_set_count]=set;c->saw_pattern=true;
     return yx_integer_expr_node_new(tree,0xda,quantity,-1,yx_pattern_of_value(&set,c->of_set_count++,kind));
 unsupported:
-    free(ids);tree->failed=true;return -1;
+    free(ids);yx_pattern_tuple_free(&tuple);tree->failed=true;return -1;
 }
 
 static int yx_pattern_expression_primary(yx_integer_expr *tree,unsigned depth,void *user)
@@ -707,7 +806,7 @@ static bool yx_pattern_expression_wasm(yx_integer_expr *tree,int root,yx_pattern
     for(size_t n=0;n<tree->count;++n) {
         const yx_integer_expr_node *node=&YX_INTEGER_NODES(tree)[n];
         if(node->op>=0xd3&&node->op<=0xd7&&node->value>=0&&(uint64_t)node->value<yx_pattern_capacity(c))
-            yx_pattern_limits(c)[node->value]=0;
+            yx_pattern_limits(c)[node->value]=0,c->unlimited=true;
     }
     bool locals=tree->has_filesize||tree->has_shift||tree->has_divisor||tree->has_loop;
     if(!yx_put_u8(&body,locals?1:0)||(locals&&(!yx_put_u8(&body,tree->has_loop||

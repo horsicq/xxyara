@@ -3106,8 +3106,14 @@ static int yx_report_pattern_regexp_error(yx_parser *p,
         if (!label) (void)yx_regex_unicode_issue(body, length, &location, &width, &label);
         if (size_label && !ast_found && (!label || strcmp(label,
                 "exceed the maximum number of nested parentheses/brackets (250)") != 0)) {
+            /* The span of the whole pattern, its modifiers included (those
+             * of this declaration end after its literal). */
+            const char *span_end = literal_end;
+            for (size_t modifier = 0; modifier < 9; ++modifier)
+                if (p->modifier_end[modifier] && p->modifier_end[modifier] > span_end)
+                    span_end = p->modifier_end[modifier];
             location = pattern_start;
-            width = (size_t)(literal_end - pattern_start);
+            width = (size_t)(span_end - pattern_start);
             label = size_label;
             note = NULL;
         }
@@ -5338,6 +5344,8 @@ static bool yx_condition_warn_overlapping_pattern_sets(yx_parser *p,
     yx_pattern_set_context context = {p, start};
     const char **names = NULL;
     bool ok;
+    /* A warning that will not be shown needs no analysis. */
+    if (yx_compiler_warning_skipped(p->compiler, "unintended_pattern_in_set")) return true;
     if (rule->pattern_count) {
         names = (const char **)malloc(rule->pattern_count * sizeof(*names));
         if (!names) return false;
@@ -9164,7 +9172,8 @@ condition_failed:
         if (yx_compiler_semantic_error_end(p->compiler, error_mark, &error_end) &&
             !yx_compiler_warn_deprecated_before(
                 p->compiler, rule->condition_text, p->begin, p->origin,
-                (size_t)(start - p->begin), error_end))
+                (size_t)(start - p->begin), error_end,
+                p->compiler->warning_count))
             return yx_error(p, "out of memory recording deprecated field");
         return 0;
     }
@@ -9204,6 +9213,7 @@ condition_failed:
             pattern_names[i] = rule->patterns[i].identifier;
     }
     yx_condition_symbols symbols = {p, rule};
+    size_t converted_end = 0;
     bool valid = yx_condition_validate(rule->condition, pattern_names,
                                        rule->pattern_count,
                                        (const char *const *)p->compiler->rules->imports,
@@ -9213,7 +9223,8 @@ condition_failed:
                                        p->compiler->rules->globals,
                                        p->compiler->rules->global_count,
                                        yx_condition_identifier_exists,
-                                       &symbols, detail, sizeof(detail));
+                                       &symbols, detail, sizeof(detail),
+                                       &converted_end);
     free(pattern_names);
     if (!valid) {
         static const char prefix[] = "unknown identifier '";
@@ -9370,12 +9381,15 @@ condition_failed:
         }
         return yx_error(p, detail);
 validation_failed:
+        /* The source offset up to which YARA-X has converted the condition
+         * when it fails (an operation's operands before their types). */
+        if (converted_end) converted_end += (size_t)(start - p->begin);
         if (yx_compiler_semantic_error_span(p->compiler, error_mark,
                                             &error_start, &error_end)) {
             size_t first_expression_warning;
             yx_compiler_drop_warnings_after(p->compiler, first_type_warning,
                                             error_mark, error_start,
-                                            error_end);
+                                            error_end, converted_end);
             /* YARA-X raised these while compiling the operands before the
              * failing one: keep those that end before the error. */
             first_expression_warning = p->compiler->warning_count;
@@ -9395,7 +9409,9 @@ validation_failed:
         if (yx_compiler_semantic_error_end(p->compiler, error_mark, &error_end) &&
             !yx_compiler_warn_deprecated_before(
                 p->compiler, rule->condition_text, p->begin, p->origin,
-                (size_t)(start - p->begin), error_end))
+                (size_t)(start - p->begin),
+                converted_end > error_end ? converted_end : error_end,
+                first_type_warning))
             return yx_error(p, "out of memory recording deprecated field");
         return 0;
     }

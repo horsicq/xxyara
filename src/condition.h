@@ -221,13 +221,17 @@ typedef bool (*yx_condition_pattern_set_callback)(const char *pattern,
 bool yx_condition_visit_pattern_sets(const yx_condition *condition,
     const char *const *pattern_names, size_t pattern_count,
     yx_condition_pattern_set_callback callback, void *user);
+/* On failure *converted_end (when not NULL) is the condition offset up to
+ * which YARA-X has converted the expression when it reports the error, or
+ * 0 when unknown. */
 bool yx_condition_validate(const yx_condition *condition,
                            const char *const *pattern_names, size_t pattern_count,
                            const char *const *imports, size_t import_count,
                            const char *const *features, size_t feature_count,
                            const yx_global *globals, size_t global_count,
                            yx_condition_identifier_resolver identifier_exists,
-                           void *user_data, char *error, size_t error_capacity);
+                           void *user_data, char *error, size_t error_capacity,
+                           size_t *converted_end);
 /* Instructions YARA-X 1.23.0 emits for the rule's condition, including the
  * code that records the result; above 100,000 the rule fails with E048.
  * Pattern names are in declaration order. 0 when it cannot be computed. */
@@ -237,6 +241,10 @@ uint64_t yx_condition_wasm_size(const yx_condition *condition,
                                 size_t pattern_count,
                                 const yx_global *globals,
                                 size_t global_count);
+/* Runs call(data) on one thread whose stack holds a walk of the condition,
+ * on which the queries below run in place; false (call not run) for a
+ * shallow condition or when no such thread could be started. */
+bool yx_condition_run_deep(const yx_condition *condition, void (*call)(void *), void *data);
 /* True when a condition can inspect more than a pattern's mere existence. */
 bool yx_condition_pattern_requires_all_matches(const yx_condition *condition,
                                                 const char *pattern_name);

@@ -73,7 +73,11 @@ static int yx_multi_pattern_join(yx_integer_expr *tree,const int *roots,size_t c
     if(count==1)return roots[0];
     size_t middle=count/2;
     int left=yx_multi_pattern_join(tree,roots,middle),right=yx_multi_pattern_join(tree,roots+middle,count-middle);
-    return left<0||right<0?-1:yx_integer_expr_node_new(tree,0xa0,left,right,0);
+    int node=left<0||right<0?-1:yx_integer_expr_node_new(tree,0xa0,left,right,0);
+    /* The join only collects the import and type union of every rule: a
+     * constant-false rule must not fold the other rules' calls away. */
+    if(node>=0)YX_INTEGER_NODES(tree)[node].constant=false;
+    return node;
 }
 static bool yx_multi_pattern_emit_rule(yx_integer_expr *tree,int root,
     yx_pattern_expression_context *context,const yx_pattern_expression_context *all,
@@ -554,9 +558,7 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
     else yx_multi_canonical_run(&check);
     if(!canonical_task&&check.status!=YX_SER_SUCCESS){status=check.status;goto done;}
     status=YX_SER_UNSUPPORTED;
-    /* Started here, its result is taken where it was computed before. */
     bool reconstructing=!yx_physical_inspect_nesting;
-    if(reconstructing){reconstruct.a=a;reconstruct_task=yx_async_start(yx_multi_reconstruct_run,&reconstruct);}
     contexts=calloc(count,sizeof(*contexts));decoded=calloc(count,sizeof(*decoded));
     if(!yx_tree_store_init(&store,count)||!contexts||!decoded){status=YX_SER_NO_MEMORY;goto done;}
     limits=calloc(a->physical?a->physical:1,sizeof(*limits));patterns=calloc(a->physical?a->physical:1,sizeof(*patterns));
@@ -616,6 +618,11 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
         }
     }
     for(size_t i=0;i<count;++i)if(roots[i]<0)goto done;
+    /* Every rule's condition decoded: the patterns load on another thread
+     * while the conditions re-emit the module. A load that refuses earlier
+     * (the decoder cascade tries this codec on several forms of an
+     * archive) does not wait for every pattern to compile. */
+    if(reconstructing){reconstruct.a=a;reconstruct_task=yx_async_start(yx_multi_reconstruct_run,&reconstruct);}
     uint8_t profile;
     for(profile=0;profile<4;++profile) {
         free(canonical);canonical=NULL;

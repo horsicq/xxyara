@@ -7095,6 +7095,45 @@ static bool yx_ser_build_atom_ac_uncached(const uint8_t *const *atoms, const siz
     if (output_count != atom_count ||
         state_count > (SIZE_MAX - 14 - 12 * atom_count - 65537) / 12)
         goto done;
+    /* The 2-gram table is kept only when it filters: with c[i] the 2-grams
+     * whose bit i is cleared, i < shortest - 1, the product of c[i] / 65536
+     * is at most 1/16 (the official tool keeps it at 4096 first 2-grams of
+     * two-byte atoms and drops it at 4097; 8192 x 32768 for three-byte
+     * atoms is kept, 8193 x 32768 dropped). */
+    /* Each c[i] is at most atom_count: with 4096 atoms or fewer the product
+     * is at most 16 * 4096^(n) <= 65536^(n), and the table is kept without
+     * counting (one-pattern archives of a load are that small). */
+    if (shortest > 1 && atom_count > 4096) {
+        uint8_t *grams = malloc(65536);
+        size_t cleared[8] = {0};
+        if (!grams) goto done;
+        memset(grams, 0xff, 65536);
+        /* Each bit is counted when it is first cleared: one pass over the
+         * atoms, not over the whole table. */
+        for (size_t pattern = 0; pattern < atom_count; ++pattern)
+            for (size_t i = 0; i + 1 < lengths[pattern]; ++i) {
+                uint8_t *gram = &grams[((size_t) atoms[pattern][i] << 8) | atoms[pattern][i + 1]];
+                if (*gram >> i & 1u) {
+                    *gram &= (uint8_t) ~(1u << i);
+                    ++cleared[i];
+                }
+            }
+        free(grams);
+        if (shortest <= 4) {
+            /* At most three factors of 2^16: exact in 64 bits. */
+            uint64_t product = 16, limit = 1;
+            for (size_t i = 0; i + 1 < shortest; ++i) {
+                product *= cleared[i];
+                limit <<= 16;
+            }
+            if (product > limit) shortest = 1;
+        } else {
+            double product = 16.0;
+            for (size_t i = 0; i + 1 < shortest; ++i)
+                product *= (double) cleared[i] / 65536.0;
+            if (product > 1.0) shortest = 1;
+        }
+    }
     ac_length = 4 + state_count * 12 + 8 + 4 + atom_count * 12 + 1 +
                 4 + 1 + (shortest <= 1 ? 0 : 65537);
     ac = calloc(ac_length, 1);
@@ -18327,6 +18366,8 @@ static yx_ser_result yx_encode_cuckoo(const YRX_RULES *rules,
 
 #include "serialization_modules.h"
 #include "serialization_globals.h"
+/* The per-rule tree store of large rule sets, also for the rule codecs. */
+#include "serialization_tree_store.h"
 #include "serialization_rules.h"
 #include "serialization_global_rules.h"
 #include "serialization_text.h"
@@ -25273,7 +25314,10 @@ static yx_ser_result yx_decode_later_shapes(const uint8_t *data, size_t length,
     if (module_status != YX_SER_UNSUPPORTED) return module_status;
     module_status = yx_decode_module_expression(data, length, rules, rule_count);
     if (module_status != YX_SER_UNSUPPORTED) return module_status;
-    return yx_decode_composed_rules_relaxed(data, length, rules, rule_count);
+    module_status = yx_decode_composed_rules_relaxed(data, length, rules, rule_count);
+    if (module_status != YX_SER_UNSUPPORTED) return module_status;
+    /* A root `defined` of a pattern operand without modules or globals. */
+    return yx_decode_module_patterns_plain(data, length, rules, rule_count);
 }
 
 /* A small physical archive (one rule, few names) with verifier code. */
@@ -28541,6 +28585,25 @@ yx_ser_result yx_ser_normalize_unknown_wasm_import_name(
     *normalized = NULL;
     if (!yx_serialized_wasm_span(data, length, &wasm_at, &wasm_size))
         return YX_SER_UNSUPPORTED;
+    /* The names are in the import section. Each candidate costs a whole
+     * decode, so a module whose sections can be walked is searched there
+     * only: elsewhere, in a large module's code, length-prefixed ASCII runs
+     * are many. */
+    if (wasm_size > 8) {
+        yx_reader sections = {data, wasm_at + wasm_size, wasm_at + 8, false, false};
+        uint8_t id;
+        uint64_t width;
+        while (sections.at < sections.length &&
+               yx_get_u8(&sections, &id) && yx_get_uleb(&sections, &width) &&
+               width <= sections.length - sections.at) {
+            if (id == 2) {
+                wasm_at = sections.at;
+                wasm_size = (size_t)width;
+                break;
+            }
+            sections.at += (size_t)width;
+        }
+    }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         size_t name_length = strlen(names[i]);
         if (name_length >= wasm_size) continue;

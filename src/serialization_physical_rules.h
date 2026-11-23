@@ -63,17 +63,32 @@ static inline bool yx_physical_header_equal(const yx_physical_header *a,const yx
 static inline bool yx_physical_rules_options_equal(const yx_physical_archive *a,
     const yx_physical_pattern_options *options)
 {
-    for(size_t i=0;i<a->logical;++i) {
+    /* Each physical pattern's frames, found once: a scan of every frame per
+     * logical pattern is quadratic in large rule sets. */
+    size_t *first=calloc(a->physical+1,sizeof(*first)),*list=malloc((a->frame_count?a->frame_count:1)*sizeof(*list));
+    bool equal=first&&list;
+    if(equal) {
+        for(size_t j=0;j<a->frame_count;++j)if(a->frames[j].pattern<a->physical)++first[a->frames[j].pattern+1];
+        for(size_t p=0;p<a->physical;++p)first[p+1]+=first[p];
+        for(size_t j=0,*fill=first;j<a->frame_count;++j)
+            if(a->frames[j].pattern<a->physical)list[fill[a->frames[j].pattern]++]=j;
+        /* fill advanced first[p] to the end of p's frames: shift back. */
+        for(size_t p=a->physical;p>0;--p)first[p]=first[p-1];
+        first[0]=0;
+    }
+    for(size_t i=0;equal&&i<a->logical;++i) {
         size_t p=a->mapping[i];const yx_physical_pattern_options *o=&options[i];
         bool bounded=o->bounds.lower_kind!=2||o->bounds.upper_kind!=2;
         if(p>=a->physical||a->limits[p]!=o->limit||a->bounded[p]!=bounded||!yx_physical_header_equal(&a->headers[p],&o->header)||
-           (bounded&&!yx_physical_rule_bounds_equal(&a->bounds[p],&o->bounds)))return false;
-        for(size_t j=0;j<a->frame_count;++j)if(a->frames[j].pattern==p) {
-            const yx_physical_frame *f=&a->frames[j];bool anchored=o->anchored&&f->frame.variant==0;
-            if(f->anchored!=anchored||(anchored&&f->offset!=o->offset))return false;
+           (bounded&&!yx_physical_rule_bounds_equal(&a->bounds[p],&o->bounds))){equal=false;break;}
+        for(size_t q=first[p];equal&&q<first[p+1];++q) {
+            const yx_physical_frame *f=&a->frames[list[q]];bool anchored=o->anchored&&f->frame.variant==0&&
+                !(a->kinds[i]==YX_PATTERN_TEXT&&(f->frame.flags&2));
+            if(f->anchored!=anchored||(anchored&&f->offset!=o->offset))equal=false;
         }
     }
-    return true;
+    free(first);free(list);
+    return equal;
 }
 /* Offsets delimit the rule-metadata vector, after the shared Wasm program. */
 static bool yx_multi_pattern_metadata_span(const uint8_t *data,size_t length,size_t *begin,size_t *end)
@@ -250,7 +265,9 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules,
                     if(f.frame.variant<=3||f.frame.variant>=7)f.frame.literal_index=pools[f.frame.literal_index];
                     if(f.frame.variant==1||f.frame.variant>=10)f.mask=pools[f.mask];
                     if(f.frame.variant==3||f.frame.variant==6)f.frame.previous+=frame_start;
-                    if(options[index].anchored&&f.frame.variant==0) {
+                    /* c_literal_pattern (compiler/mod.rs) never anchors a
+                     * nocase text pattern; its Pattern keeps the anchor. */
+                    if(options[index].anchored&&f.frame.variant==0&&!(p->kind==YX_PATTERN_TEXT&&(f.frame.flags&2))) {
                         f.anchored=true;f.offset=options[index].offset;a->anchored[a->anchored_count++]=a->frame_count;
                     }
                     a->frames[a->frame_count++]=f;

@@ -237,8 +237,13 @@ static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         atom_width = pattern->global_atom_count_hint;
     /* Teddy verifies the wide subpattern first. Its input threshold also
        includes the shortest atom's width. Equal four-byte literal atoms
-       retain that verification order in the fallback as well. */
-    bool wide_tie = pattern->kind == YX_PATTERN_TEXT && ascii && wide &&
+       retain that verification order in the fallback as well. A regexp
+       that is one literal (scanned here with its `regexp` kept) adds its
+       ascii sub-pattern before the wide one (c_alternation_literal), and
+       its ascii atom never ends after the wide one where both match at one
+       offset: the ascii match is kept there. */
+    bool wide_tie = pattern->kind == YX_PATTERN_TEXT && !pattern->regexp &&
+                    ascii && wide &&
                     (pattern->length >= 4 ||
                      (atom_width && size >= 15 + atom_width &&
                       pattern->global_atom_count_hint <= 16));
@@ -12213,6 +12218,12 @@ static int yx_scan_archived_literal(YRX_PATTERN *pattern,const uint8_t *data,siz
     return 1;
 }
 
+/* The literal of a regexp that is one plain literal (its candidate plan):
+ * YARA-X compiles it as a literal sub-pattern (c_alternation_literal), so it
+ * is scanned as a text literal, also when it is too long for PCRE2. */
+static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan,
+                                                const YRX_PATTERN *pattern, size_t *length);
+
 YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
                            size_t max_matches, bool fast_scan)
 {
@@ -12300,6 +12311,27 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
             yx_scan_hex(pattern, data, size, max_matches);
         break;
     case YX_PATTERN_REGEX:
+        {
+            size_t literal_length = 0;
+            const uint8_t *literal = yx_candidate_plan_literal(pattern->candidate_plan, pattern,
+                                                               &literal_length);
+            if (literal) {
+                YRX_PATTERN text = *pattern;
+                text.kind = YX_PATTERN_TEXT;
+                text.bytes = (uint8_t *)literal;
+                text.length = literal_length;
+                text.modifiers &= ~(unsigned)YX_MOD_DOTALL;
+                success = yx_scan_text(&text, data, size, max_matches,
+                                       fast_scan && !pattern->fast_scan_needs_all);
+                pattern->matches = text.matches;
+                pattern->match_count = text.match_count;
+                pattern->match_capacity = text.match_capacity;
+                pattern->ever_matched = text.ever_matched;
+                pattern->zero_limit_present = text.zero_limit_present;
+                literal_alternation_handled = true;
+                break;
+            }
+        }
         {
             /* Chains of sub-patterns: the reference's own join. */
             success = yx_ser_scan_regex_chain(pattern, data, size, yx_large_regex_emit, pattern);
@@ -12412,7 +12444,19 @@ struct yx_candidate_plan {
     bool gate;
     uint8_t *gate_bytes; /* encoded branches; atom variant k spans */
     size_t *gate_offsets; /* gate_bytes[gate_offsets[k]..gate_offsets[k+1]) */
+    /* A regexp that is one plain literal: its bytes (yx_candidate_plan_literal). */
+    uint8_t *literal;
+    size_t literal_length;
 };
+
+static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan,
+                                                const YRX_PATTERN *pattern, size_t *length)
+{
+    if (!plan || !plan->literal || plan->kind != YX_PATTERN_REGEX ||
+        plan->regex_source != pattern->regexp) return NULL;
+    *length = plan->literal_length;
+    return plan->literal;
+}
 
 static pcre2_code *yx_candidate_cached_regex(const YRX_PATTERN *pattern)
 {
@@ -13111,6 +13155,27 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
     }
     if (pattern->kind != YX_PATTERN_REGEX && (!pattern->bytes || !pattern->length))
         return yx_candidate_hex_gate(pattern);
+    if (pattern->kind == YX_PATTERN_REGEX && pattern->regexp && !pattern->gap_head_regexp &&
+        !(pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD |
+                                 YX_MOD_PRIVATE | YX_MOD_DOTALL))) {
+        /* One plain literal (Hir::as_literal_bytes): a literal sub-pattern
+         * in YARA-X (compiler/mod.rs c_alternation_literal), scanned as text
+         * behind its own gate. */
+        uint8_t *bytes = NULL;
+        size_t length = 0;
+        int literal = yx_ser_regexp_literal(pattern, &bytes, &length);
+        if (literal < 0) return NULL;
+        if (literal == 1) {
+            yx_candidate_plan *plan = calloc(1, sizeof(*plan));
+            if (!plan) { free(bytes); return NULL; }
+            plan->kind = YX_PATTERN_REGEX;
+            plan->regex_source = pattern->regexp;
+            plan->literal = bytes;
+            plan->literal_length = length;
+            plan->gate = yx_candidate_gate_plan(plan, pattern);
+            return plan;
+        }
+    }
     int regex_chain = pattern->kind == YX_PATTERN_REGEX ? yx_ser_regex_chain_status(pattern) : 0;
     /* Out of memory: no plan, the full scanner reports the failure. */
     if (regex_chain < 0) return NULL;
@@ -13176,6 +13241,7 @@ void yx_candidate_plan_free(yx_candidate_plan *plan)
     pcre2_code_free(plan->regex);
     free(plan->gate_bytes);
     free(plan->gate_offsets);
+    free(plan->literal);
     free(plan);
 }
 
@@ -13202,6 +13268,12 @@ yx_candidate_plan *yx_candidate_plan_clone(const yx_candidate_plan *plan,
     copy->program = plan->program;
     copy->gate = plan->gate;
     copy->regex_source = plan->regex_source ? pattern->regexp : NULL;
+    if (plan->literal) {
+        copy->literal = malloc(plan->literal_length ? plan->literal_length : 1);
+        if (!copy->literal) goto failed;
+        memcpy(copy->literal, plan->literal, plan->literal_length);
+        copy->literal_length = plan->literal_length;
+    }
     if (plan->atom_count) {
         copy->atoms = malloc(plan->atom_count * sizeof(*copy->atoms));
         if (!copy->atoms) goto failed;

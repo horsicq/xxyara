@@ -263,6 +263,20 @@ typedef struct yx_node {
      * the call's own errors. */
     size_t result_end;
     const char *result_type;
+    /* A member read from an item of a module collection that is no
+     * structure (`pe.version_info["a"].x`): the lookup's span, the item's
+     * type and the key the collection takes (1 an array index, 2 an
+     * integer map key, 3 a string map key). */
+    size_t item_member_start, item_member_end;
+    const char *item_member_type;
+    uint8_t item_member_key;
+    /* The node itself (set by yx_new_node; a copy differs), and the
+     * validation walk, scope and for-of context it validated in: a node of
+     * the tree is validated once per walk (yx_validate_node). */
+    const struct yx_node *self;
+    unsigned valid_generation;
+    const void *valid_scope;
+    bool valid_inside_for_of;
     /* A `with` statement that is the first operand of an `and` (1) or `or`
      * (2): set by yx_condition_alias_free_text. */
     uint8_t alias_chain_parent;
@@ -292,14 +306,47 @@ struct yx_condition {
 #ifndef YX_DEEP_TREE_DEPTH
 #define YX_DEEP_TREE_DEPTH 192
 #endif
-typedef struct { void (*call)(void *); void *data; } yx_deep_job;
+typedef struct { void (*call)(void *); void *data; size_t stack; } yx_deep_job;
+/* The deep stack the current thread runs on: its first frame's address and
+ * its reservation, set by the thread's entry while `call` runs. A nested
+ * walk on such a thread checks the room left below the current frame
+ * against its own minimum (yx_run_deep) and then runs in place. */
+#ifdef _MSC_VER
+static __declspec(thread) uintptr_t yx_deep_base;
+static __declspec(thread) size_t yx_deep_size;
+#else
+static _Thread_local uintptr_t yx_deep_base;
+static _Thread_local size_t yx_deep_size;
+#endif
+static void yx_deep_entry(yx_deep_job *job)
+{
+    char base;
+    yx_deep_base = (uintptr_t)(void *)&base;
+    yx_deep_size = job->stack;
+    job->call(job->data);
+    yx_deep_base = 0;
+    yx_deep_size = 0;
+}
 #ifdef _WIN32
 static DWORD WINAPI yx_deep_thread(LPVOID pointer)
-{ yx_deep_job *job = pointer; job->call(job->data); return 0; }
+{ yx_deep_entry(pointer); return 0; }
 #else
 static void *yx_deep_thread(void *pointer)
-{ yx_deep_job *job = pointer; job->call(job->data); return NULL; }
+{ yx_deep_entry(pointer); return NULL; }
 #endif
+/* The bytes left on the current deep stack below this frame, or 0 when the
+ * thread is not a deep one. The addresses are compared as integers (the two
+ * frames are distinct objects), and the distance holds for a stack growing
+ * either way; 64 KiB of margin covers the thread's own start frames. */
+static size_t yx_deep_room(void)
+{
+    char here;
+    uintptr_t at = (uintptr_t)(void *)&here;
+    uintptr_t used;
+    if (!yx_deep_base) return 0;
+    used = (at < yx_deep_base ? yx_deep_base - at : at - yx_deep_base) + 65536;
+    return used < yx_deep_size ? (size_t)(yx_deep_size - used) : 0;
+}
 /* Runs `call` on a thread whose stack holds a walk of a tree `depth`
  * levels high. The reservation starts at 32 KiB per level (8 KiB per level
  * past 1 GiB on 64-bit) and is halved while thread creation fails, down to
@@ -311,7 +358,7 @@ static void *yx_deep_thread(void *pointer)
 #define YX_DEEP_INLINE_MAXIMUM 1024
 static bool yx_run_deep(size_t depth, void (*call)(void *), void *data)
 {
-    yx_deep_job job = {call, data};
+    yx_deep_job job = {call, data, 0};
     size_t stack, minimum;
     if (depth < YX_DEEP_TREE_DEPTH) { call(data); return true; }
     /* Only a reservation: pages are committed as the walk reaches them. */
@@ -323,7 +370,11 @@ static bool yx_run_deep(size_t depth, void (*call)(void *), void *data)
         stack = (size_t)1 << 30;
     minimum = depth <= (SIZE_MAX - ((size_t)32 << 20)) / YX_DEEP_LEVEL_MINIMUM ?
               depth * YX_DEEP_LEVEL_MINIMUM + ((size_t)32 << 20) : SIZE_MAX;
+    /* Already on a deep stack (yx_condition_run_deep) with the room the
+     * walk needs: no thread of its own. */
+    if (minimum != SIZE_MAX && yx_deep_room() >= minimum) { call(data); return true; }
     for (; stack >= minimum; stack /= 2) {
+        job.stack = stack;
 #ifdef _WIN32
         HANDLE thread = CreateThread(NULL, stack, yx_deep_thread, &job,
                                      STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
@@ -349,6 +400,18 @@ static bool yx_run_deep(size_t depth, void (*call)(void *), void *data)
     if (depth > YX_DEEP_INLINE_MAXIMUM) return false;
     call(data);
     return true;
+}
+
+/* Runs `call` on one deep stack for a walk of the condition's height, so
+ * that the condition queries `call` makes run in place instead of on a
+ * thread each (yx_make_views asks several per pattern). False when no such
+ * thread could be started: `call` has then not run, and the queries start
+ * their own threads as before. The thread ends before this returns. */
+bool yx_condition_run_deep(const yx_condition *condition, void (*call)(void *), void *data)
+{
+    size_t depth = condition ? condition->depth : 0;
+    if (depth < YX_DEEP_TREE_DEPTH) return false;
+    return yx_run_deep(depth, call, data);
 }
 
 /* Tree height without recursion. */
@@ -1309,6 +1372,7 @@ static yx_node *yx_new_node(yx_parser *p, yx_node_kind kind)
     node->frame_end = SIZE_MAX;
     node->iterable_start = SIZE_MAX;
     node->iterable_end = SIZE_MAX;
+    node->self = node;
     node->next_allocated = p->condition->allocated;
     p->condition->allocated = node;
     return node;
@@ -4135,14 +4199,17 @@ static yx_node *yx_parse_primary(yx_parser *p)
                 }
                 {
                     /* A member read from an item that is not a structure
-                     * (`pe.version_info["a"].x`): E002 at the lookup. */
-                    const char *element = yx_mo_schema_element_type_name(node->name);
-                    if (element && strcmp(element, "struct") != 0) {
-                        yx_fail(p, "wrong type span:%zu:%zu:`struct`:%s",
-                                token.offset,
-                                p->previous_token.offset + p->previous_token.length,
-                                element);
-                        return NULL;
+                     * (`pe.version_info["a"].x`): E002 at the lookup, which
+                     * the validation reports after the module's import and
+                     * the key's own errors and type (ast2ir converts the
+                     * lookup, key first, before the member read from it). */
+                    const char *key = NULL, *item = NULL;
+                    if (yx_mo_schema_collection_types(node->name, &key, &item) && item) {
+                        node->item_member_type = item;
+                        node->item_member_key = !key ? 1 : strcmp(key, "string") == 0 ? 3 : 2;
+                        node->item_member_start = token.offset;
+                        node->item_member_end =
+                            p->previous_token.offset + p->previous_token.length;
                     }
                 }
                 if (!yx_expect(p, TK_DOT, "'.' after indexed module item"))
@@ -5533,8 +5600,21 @@ static void yx_folded_text_collect(const yx_node *node, yx_folded_text_spans *sp
             spans->failed = true;
             return;
         }
-        yx_folded_text_add(spans, node->span_start, node->span_start + 3,
-                           node->fold_state == 2 ? "true or " : "false and ");
+        /* Grouped: `not` binds tighter than the `and` / `or` after its
+         * operand (`not (false and $a) and $a` is `(true or (..)) and $a`). */
+        {
+            size_t start = node->span_start, end = yx_folded_text_end(node);
+            if (end < node->span_end) end = node->span_end;
+            if (end > spans->source_length ||
+                !yx_text_span_balance(spans->source, spans->source_length, &start, &end) ||
+                start != node->span_start) {
+                spans->failed = true;
+                return;
+            }
+            yx_folded_text_add(spans, node->span_start, node->span_start + 3,
+                               node->fold_state == 2 ? "(true or " : "(false and ");
+            yx_folded_text_add(spans, end, end, ")");
+        }
     }
     for (i = 0; i < node->item_count; ++i)
         yx_folded_text_collect(node->items[i], spans);
@@ -6029,7 +6109,17 @@ int yx_condition_alias_free_text(const char *expression, char **text)
                 while (body && yx_alias_text_erasable(body)) body = body->body;
                 if (body && body->kind == N_BINARY &&
                     body->operation == (node->alias_chain_parent == 1 ?
-                                        TK_AND : TK_OR)) goto done;
+                                        TK_AND : TK_OR)) {
+                    /* That operand is the IR of `(true and (A and B)) and
+                     * C` (`false or` for `or`): the neutral constant that
+                     * the n-ary operation drops keeps the body apart. */
+                    if (frame || body != node->body) goto done;
+                    yx_alias_text_add(&edits, node->with_start, node->with_colon + 1,
+                        yx_copy(node->alias_chain_parent == 1 ? "(true and" : "(false or", 9));
+                    yx_alias_text_add(&edits, node->with_close + 1, node->with_close + 1,
+                                      yx_copy(")", 1));
+                    continue;
+                }
             }
             yx_alias_text_add(&edits, node->with_start, node->with_colon + 1,
                 frame ? yx_alias_text_markers("with ", aliases, false, " :") :
@@ -6328,13 +6418,20 @@ enum { YX_SET_INDEX_MIN = 16 };
 static _Thread_local unsigned yx_set_index_building;
 typedef struct yx_set_index {
     char *const *names;
-    size_t count, mask, *slots, *wild, wild_count;
+    /* slots: one entry per distinct exact name and per distinct wildcard
+     * prefix; same: the next item with the same selector (SIZE_MAX ends the
+     * chain), so repeated items are probed once and still all marked;
+     * lengths: of the names; wild: the distinct prefix lengths of the
+     * wildcards in ascending order (wild_count of them). */
+    size_t count, mask, *slots, *same, *lengths, *wild, wild_count;
 } yx_set_index;
 
 static void yx_set_index_free(yx_set_index *index)
 {
     if (!index) return;
     free(index->slots);
+    free(index->same);
+    free(index->lengths);
     free(index->wild);
     free(index);
 }
@@ -6344,6 +6441,26 @@ static size_t yx_set_index_hash(const char *name)
     uint64_t hash = 0xcbf29ce484222325u;
     for (; *name; ++name) hash = (hash ^ (uint8_t)*name) * 0x100000001b3u;
     return (size_t)hash;
+}
+
+/* The slot hash of a wildcard's prefix, extended one byte at a time from
+ * YX_SET_INDEX_PREFIX_SEED (a pattern reads it at each prefix length). */
+#define YX_SET_INDEX_PREFIX_SEED UINT64_C(0x84222325cbf29ce4)
+static uint64_t yx_set_index_prefix_step(uint64_t hash, char byte)
+{
+    return (hash ^ (uint8_t)byte) * UINT64_C(0x100000001b3);
+}
+
+static bool yx_set_index_wildcard(const yx_set_index *index, size_t item)
+{
+    size_t length = index->lengths[item];
+    return length && index->names[item][length - 1] == '*';
+}
+
+static int yx_set_index_length_compare(const void *left, const void *right)
+{
+    size_t a = *(const size_t *)left, b = *(const size_t *)right;
+    return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /* The index of node's set; NULL when it is not used (a small set, a copy
@@ -6370,29 +6487,63 @@ static const yx_set_index *yx_set_index_for(const yx_node *node)
     index = calloc(1, sizeof(*index));
     if (!index) return NULL;
     index->slots = calloc(size, sizeof(size_t));
+    index->same = malloc(node->set_count * sizeof(size_t));
+    index->lengths = malloc(node->set_count * sizeof(size_t));
     index->wild = malloc(node->set_count * sizeof(size_t));
-    if (!index->slots || !index->wild) {
+    if (!index->slots || !index->same || !index->lengths || !index->wild) {
         yx_set_index_free(index);
         return NULL;
     }
     index->mask = size - 1;
+    index->names = node->set_names;
+    for (size_t i = 0; i < node->set_count; ++i) {
+        index->same[i] = SIZE_MAX;
+        index->lengths[i] = node->set_names[i] ? strlen(node->set_names[i]) : 0;
+    }
     for (size_t i = 0; i < node->set_count; ++i) {
         const char *name = node->set_names[i];
-        size_t length = name ? strlen(name) : 0, at;
+        size_t length = index->lengths[i], at, key;
+        bool wild;
         if (!name) continue;
-        if (length && name[length - 1] == '*') {
-            index->wild[index->wild_count++] = i;
+        wild = yx_set_index_wildcard(index, i);
+        key = wild ? length - 1 : length;
+        if (wild) {
+            uint64_t hash = YX_SET_INDEX_PREFIX_SEED;
+            for (size_t k = 0; k < key; ++k) hash = yx_set_index_prefix_step(hash, name[k]);
+            at = (size_t)hash & index->mask;
+        } else at = yx_set_index_hash(name) & index->mask;
+        for (; index->slots[at]; at = (at + 1) & index->mask) {
+            size_t item = index->slots[at] - 1;
+            if (yx_set_index_wildcard(index, item) == wild && index->lengths[item] == length &&
+                memcmp(index->names[item], name, key) == 0) break;
+        }
+        if (index->slots[at]) {
+            /* A repeated selector joins the first one's chain. */
+            size_t head = index->slots[at] - 1;
+            index->same[i] = index->same[head];
+            index->same[head] = i;
             continue;
         }
-        at = yx_set_index_hash(name) & index->mask;
-        while (index->slots[at]) at = (at + 1) & index->mask;
         index->slots[at] = i + 1;
+        if (wild) {
+            /* Patterns test each distinct prefix length once, not every
+             * wildcard (patterns x wildcards). */
+            size_t k = 0;
+            while (k < index->wild_count && index->wild[k] != key) ++k;
+            if (k == index->wild_count) index->wild[index->wild_count++] = key;
+        }
     }
-    index->names = node->set_names;
+    qsort(index->wild, index->wild_count, sizeof(*index->wild), yx_set_index_length_compare);
     index->count = node->set_count;
     owner->set_index = index;
     owner->set_index_owner = node;
     return index;
+}
+
+/* Marks the items of a selector's chain. */
+static void yx_set_index_mark(const yx_set_index *index, size_t item, bool *found)
+{
+    for (; item != SIZE_MAX; item = index->same[item]) found[item] = true;
 }
 
 /* Whether a pattern matches an item of the indexed set; `found`, when
@@ -6402,23 +6553,41 @@ static bool yx_set_index_matches(const yx_set_index *index,
 {
     const char *actual = pattern_name;
     bool matched = false;
+    size_t actual_length;
     if (!actual) return false;
     if (actual[0] == '$') actual++;
+    actual_length = strlen(actual);
     for (size_t at = yx_set_index_hash(actual) & index->mask;
          index->slots[at]; at = (at + 1) & index->mask) {
         size_t item = index->slots[at] - 1;
-        if (strcmp(index->names[item], actual) == 0) {
+        if (index->lengths[item] == actual_length &&
+            memcmp(index->names[item], actual, actual_length) == 0) {
             matched = true;
             if (!found) return true;
-            found[item] = true;
+            yx_set_index_mark(index, item, found);
+            break;
         }
     }
-    for (size_t k = 0; k < index->wild_count; ++k) {
-        size_t item = index->wild[k];
-        if (yx_name_matches(pattern_name, index->names[item])) {
-            matched = true;
-            if (!found) return true;
-            found[item] = true;
+    if (index->wild_count) {
+        /* One pass over the name: the prefix hash is read at each wildcard
+         * length (ascending). */
+        uint64_t hash = YX_SET_INDEX_PREFIX_SEED;
+        size_t hashed = 0;
+        for (size_t k = 0; k < index->wild_count; ++k) {
+            size_t prefix = index->wild[k];
+            if (prefix > actual_length) break;
+            for (; hashed < prefix; ++hashed) hash = yx_set_index_prefix_step(hash, actual[hashed]);
+            for (size_t at = (size_t)hash & index->mask;
+                 index->slots[at]; at = (at + 1) & index->mask) {
+                size_t item = index->slots[at] - 1;
+                if (index->lengths[item] == prefix + 1 && yx_set_index_wildcard(index, item) &&
+                    memcmp(index->names[item], actual, prefix) == 0) {
+                    matched = true;
+                    if (!found) return true;
+                    yx_set_index_mark(index, item, found);
+                    break;
+                }
+            }
         }
     }
     return matched;
@@ -6438,6 +6607,10 @@ typedef struct {
     size_t error_capacity;
     /* Nodes whose validation has failed; see yx_validate_operands_first. */
     size_t failures;
+    /* The end of the innermost node whose own check failed (0 unknown):
+     * YARA-X has converted the operands up to there when it reports the
+     * error, an operation's operands before their types. */
+    size_t converted_end;
 } yx_validation;
 
 static bool yx_validation_has_feature(const yx_validation *state,
@@ -7680,11 +7853,16 @@ static bool yx_module_struct_path(const char *name)
            yx_mo_schema_path_type(name) == YX_MO_DATA_STRUCT;
 }
 
+static char *yx_string_len_receiver(const yx_node *node);
 static yx_static_type yx_static_node_type(const yx_node *node);
 static yx_static_type yx_static_node_type_uncached(const yx_node *node)
 {
     yx_static_type left, right;
     if (!node) return YX_STATIC_UNKNOWN;
+    {
+        char *receiver = yx_string_len_receiver(node);
+        if (receiver) { free(receiver); return YX_STATIC_INT; }
+    }
     bool vt_length = false;
     if ((node->kind == N_RULE || node->kind == N_MODULE_FIELD) &&
         yx_module_root_name(node->name))
@@ -9441,6 +9619,11 @@ typedef struct yx_scope_name {
     size_t table_count;
     const uint32_t *table_slots;
     size_t table_slot_count; /* a power of two */
+    /* The validation's outermost entry (no name, no type): whether an
+     * identifier that no entry above declares names another rule, a
+     * boolean (Symbol::Rule). */
+    bool (*rule_exists)(void *user_data, const char *name);
+    void *rule_user_data;
 } yx_scope_name;
 
 static uint64_t yx_scope_hash(const char *name, size_t length)
@@ -9860,6 +10043,12 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
         for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
              at = yx_scope_named(at->parent, node->name, strlen(node->name)))
             if (strcmp(at->name, node->name) == 0) return at->type;
+        for (const yx_scope_name *at = scope; at; at = at->parent)
+            if (at->rule_exists) {
+                if (at->rule_exists(at->rule_user_data, node->name))
+                    return YX_STATIC_BOOL;
+                break;
+            }
     }
     if (node->kind == N_GLOBAL_INDEXED) {
         for (const yx_scope_name *at = scope; at; at = at->parent)
@@ -10553,6 +10742,18 @@ static bool yx_integer_operands_check(yx_validation *state,
         return yx_wrong_type_span(state, operand, "`integer`",
                                   yx_static_type_name(type));
     return yx_validation_error(state, detail, "");
+}
+
+/* check_type on one operand that ast2ir has just converted (a quantifier,
+ * a range bound, an index): YARA-X has converted nothing after it. */
+static bool yx_operand_integer_check(yx_validation *state, const yx_node *operand,
+                                     const yx_scope_name *scope, const char *detail)
+{
+    if (yx_integer_operands_check(state, operand,
+                                  yx_scoped_node_type(operand, scope),
+                                  NULL, YX_STATIC_UNKNOWN, detail)) return true;
+    if (operand && operand->span_end != SIZE_MAX) state->converted_end = operand->span_end;
+    return false;
 }
 
 /* An identifier that names another rule is a boolean (Symbol::Rule,
@@ -11261,6 +11462,30 @@ static bool yx_function_member_check(const yx_node *node, yx_validation *state,
  * looked up in the global scope (E009); a field of a structure is no
  * function (E002). A signature's `valid_on` read without a call is a
  * function value. False with the detail when the node is of that kind. */
+/* `<string>.len()` on a module field, the method RuntimeString::len
+ * (wasm/mod.rs string_len): the receiver's path when `node` calls it on a
+ * string field of a module schema, else NULL. The caller frees it. */
+static char *yx_string_len_receiver(const yx_node *node)
+{
+    size_t length;
+    const char *type;
+    char *receiver;
+    if (!node || !node->name || node->item_count) return NULL;
+    if (node->kind != N_CALL &&
+        !((node->kind == N_MODULE_INDEXED_FIELD ||
+           node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
+           node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) &&
+          node->operation == TK_LPAREN)) return NULL;
+    length = strlen(node->name);
+    if (length < 6 || strcmp(node->name + length - 4, ".len") != 0) return NULL;
+    receiver = yx_copy(node->name, length - 4);
+    if (!receiver) return NULL;
+    type = strchr(receiver, '.') ?
+        yx_mo_schema_path_type_name(receiver, true, NULL) : NULL;
+    if (!type || strcmp(type, "string") != 0) { free(receiver); return NULL; }
+    return receiver;
+}
+
 static bool yx_method_member_check(const yx_node *node, yx_validation *state,
                                    const yx_scope_name *scope)
 {
@@ -11361,6 +11586,115 @@ static bool yx_method_member_check(const yx_node *node, yx_validation *state,
     return true;
 }
 
+/* The receiver of `<string field>.len()` as the field node it names (kept
+ * out of yx_validate_node_step's frame). Frees `receiver`. */
+#if defined(_MSC_VER)
+static __declspec(noinline)
+#elif defined(__GNUC__)
+static __attribute__((noinline))
+#else
+static
+#endif
+bool yx_validate_string_len(const yx_node *node, char *receiver, yx_validation *state,
+                            bool inside_for_of, const yx_scope_name *scope)
+{
+    yx_node field = *node;
+    bool ok;
+    field.name = receiver;
+    field.kind = node->kind == N_CALL ? N_MODULE_FIELD : node->kind;
+    field.operation = TK_BAD;
+    field.cache_self = NULL;
+    field.item_count = 0;
+    ok = yx_validate_node(&field, state, inside_for_of, scope);
+    free(receiver);
+    return ok;
+}
+
+/* A member read from an item of a module collection (`pe.sections[k].x`,
+ * `pe.version_info["a"].x`). ast2ir converts a field access operand by
+ * operand, each lookup key first: the module (E009 without its import),
+ * then for each lookup its key's own errors and type
+ * (non_negative_integer_from_ast for an array index, the key type for a
+ * map), then E002 `struct` at a lookup whose item is no structure. A
+ * variable or global that hides the module's name keeps its own error
+ * (the caller skips this then). True when the member is checked as usual. */
+static bool yx_item_member_check(const yx_node *node, yx_validation *state,
+                                 bool inside_for_of, const yx_scope_name *scope)
+{
+    size_t root = strcspn(node->name, "."), i;
+    bool imported = false;
+    const yx_node *keys[3];
+    unsigned count = yx_module_node_indices(node), level;
+    keys[0] = node->a;
+    keys[1] = node->b;
+    keys[2] = node->c;
+    for (i = 0; i < state->import_count; ++i)
+        if (strlen(state->imports[i]) == root &&
+            memcmp(state->imports[i], node->name, root) == 0)
+            imported = true;
+    if (!imported) {
+        /* The collection's path, as the source spells it before `[`. */
+        if (state->error && state->error_capacity)
+            snprintf(state->error, state->error_capacity,
+                     "module is not imported: '%.*s'",
+                     (int)node->first_three_index_ends[0], node->name);
+        return false;
+    }
+    for (level = 0; level < count && level < 3; ++level) {
+        const yx_node *key = keys[level];
+        const char *key_name = NULL, *item = NULL;
+        yx_static_type want, key_type;
+        int64_t constant;
+        char *prefix;
+        size_t end = node->first_three_index_ends[level];
+        bool known;
+        if (!key || !end || end > strlen(node->name)) break;
+        if (level == 0) {
+            key_name = node->item_member_key == 3 ? "string" :
+                       node->item_member_key == 2 ? "integer" : NULL;
+            item = node->item_member_type;
+            known = true;
+        } else {
+            prefix = malloc(end + 1);
+            if (!prefix) return yx_validation_error(state, "out of memory%s", "");
+            memcpy(prefix, node->name, end);
+            prefix[end] = '\0';
+            known = yx_mo_schema_collection_types(prefix, &key_name, &item) && item;
+            free(prefix);
+        }
+        if (!known) break;
+        want = key_name && strcmp(key_name, "string") == 0 ? YX_STATIC_STRING :
+               YX_STATIC_INT;
+        /* A regexp key is E002 by its type alone. */
+        if (key->kind != N_REGEX &&
+            !yx_validate_node(key, state, inside_for_of, scope)) return false;
+        key_type = yx_scoped_node_type(key, scope);
+        if (yx_rule_operand(state, key, key_type, scope))
+            return yx_wrong_type_span(state, key, want == YX_STATIC_STRING ?
+                                      "`string`" : "`integer`", "boolean");
+        if (!yx_static_accepts(key_type, want))
+            return yx_wrong_key_type(state, key, want, scope);
+        if (!key_name && yx_constant_integer(key, &constant) && constant < 0)
+            return yx_negative_number_error(state, key);
+        if (level == 0 && strcmp(item, "struct") != 0) {
+            yx_node lookup = *node;
+            lookup.span_start = node->item_member_start;
+            lookup.span_end = node->item_member_end;
+            return yx_wrong_type_span_exact(state, &lookup, "`struct`", item);
+        }
+        if (strcmp(item, "struct") != 0) break;
+    }
+    return true;
+}
+
+/* Whether a `with` or `for` variable or a global has the name of the
+ * module that a dotted path starts with. */
+static bool yx_scope_hides_module(const yx_scope_name *scope, const char *path)
+{
+    const yx_scope_name *entry = yx_scope_find(scope, path, strcspn(path, "."));
+    return entry && !entry->imported_module;
+}
+
 static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                                   bool inside_for_of,
                                   const yx_scope_name *scope,
@@ -11393,6 +11727,11 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         }
         return false;
     }
+    /* A member read from an item of a module collection: the lookups'
+     * keys before the member (yx_item_member_check). */
+    if (node->item_member_type && node->name &&
+        !yx_scope_hides_module(scope, node->name) &&
+        !yx_item_member_check(node, state, inside_for_of, scope)) return false;
     /* A member of a call's result that is no structure: the call's own
      * errors (its arguments) come first. */
     if (node->result_end && node->result_type &&
@@ -11406,6 +11745,12 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         call.span_end = node->result_end;
         return yx_wrong_type_span_exact(state, &call, "`struct`",
                                         node->result_type);
+    }
+    {
+        /* `<string field>.len()` (RuntimeString::len): the receiver is
+         * validated as the field it names, indexes included. */
+        char *receiver = yx_string_len_receiver(node);
+        if (receiver) return yx_validate_string_len(node, receiver, state, inside_for_of, scope);
     }
     if (!yx_function_member_check(node, state, scope)) return false;
     if (!yx_method_member_check(node, state, scope)) return false;
@@ -11906,13 +12251,14 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         if (node->map_loop) {
             yx_scope_name value_binding = {0};
             if (node->set_count != 1 || !node->b ||
-                !yx_validate_node(node->a, state, inside_for_of, scope) ||
-                !yx_validate_node(node->b, state, inside_for_of, scope))
+                !yx_validate_node(node->a, state, inside_for_of, scope))
                 return false;
             if (node->a && !yx_static_accepts(
                     yx_scoped_node_type(node->a, scope), YX_STATIC_INT))
                 return yx_validation_error(state,
                                            "wrong quantifier type%s", "");
+            if (!yx_validate_node(node->b, state, inside_for_of, scope))
+                return false;
             if (yx_scoped_node_type(node->b, scope) != YX_STATIC_MAP) {
                 if (yx_scoped_node_type(node->b, scope) == YX_STATIC_ARRAY &&
                     state->error && state->error_capacity) {
@@ -11943,8 +12289,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         }
         if (node->array_loop) {
             if (!node->b ||
-                !yx_validate_node(node->a, state, inside_for_of, scope) ||
-                !yx_validate_node(node->b, state, inside_for_of, scope))
+                !yx_validate_node(node->a, state, inside_for_of, scope))
                 return false;
             if (node->a &&
                 !yx_static_accepts(yx_scoped_node_type(node->a, scope),
@@ -11955,6 +12300,8 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                 node->a->kind == N_INTEGER && node->a->number > 100)
                 return yx_range_error_span(state, "percent out of range",
                                            node->a);
+            if (!yx_validate_node(node->b, state, inside_for_of, scope))
+                return false;
             if (yx_scoped_node_type(node->b, scope) != YX_STATIC_ARRAY) {
                 if (yx_scoped_node_type(node->b, scope) == YX_STATIC_MAP &&
                     state->error && state->error_capacity) {
@@ -12026,27 +12373,28 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
             return yx_validate_bool_body(node->body, state, inside_for_of,
                                     &binding);
         }
-        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
-            !yx_validate_node(node->b, state, inside_for_of, scope) ||
-            !yx_validate_node(node->c, state, inside_for_of, scope)) return false;
+        /* for_in_expr_from_ast: the quantifier (its own errors, then its
+         * type), then the iterable; range_from_ast takes the lower bound,
+         * then the upper one (non_negative_integer_from_ast). */
+        if (!yx_validate_node(node->a, state, inside_for_of, scope)) return false;
         if (node->a &&
-            !yx_integer_operands_check(state, node->a,
-                                       yx_scoped_node_type(node->a, scope),
-                                       NULL, YX_STATIC_UNKNOWN,
-                                       "wrong quantifier type%s"))
+            !yx_operand_integer_check(state, node->a, scope,
+                                      "wrong quantifier type%s"))
             return false;
         if (node->quantifier == Q_PERCENT && node->a &&
             node->a->kind == N_INTEGER && node->a->number > 100)
             return yx_range_error_span(state, "percent out of range",
                                        node->a);
+        if (!node->range_loop &&
+            (!yx_validate_node(node->b, state, inside_for_of, scope) ||
+             !yx_validate_node(node->c, state, inside_for_of, scope))) return false;
         if (node->range_loop) {
-            yx_static_type low = yx_scoped_node_type(node->b, scope);
-            yx_static_type high = yx_scoped_node_type(node->c, scope);
-            if (!yx_integer_operands_check(state, node->b, low, node->c, high,
-                                           "wrong range type%s"))
-                return false;
             const yx_node *bounds[] = {node->b, node->c};
-            for (size_t bound = 0; bound < 2; ++bound)
+            for (size_t bound = 0; bound < 2; ++bound) {
+                if (!yx_validate_node(bounds[bound], state, inside_for_of, scope) ||
+                    !yx_operand_integer_check(state, bounds[bound], scope,
+                                              "wrong range type%s"))
+                    return false;
                 if (bounds[bound]->kind == N_INTEGER && bounds[bound]->is_unsigned &&
                     bounds[bound]->number > INT64_MAX) {
                     if (state->error && state->error_capacity)
@@ -12055,6 +12403,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                                  bounds[bound]->span_start, bounds[bound]->span_end);
                     return false;
                 }
+            }
             if (node->b->kind == N_INTEGER && node->c->kind == N_INTEGER &&
                 (int64_t)node->b->number > (int64_t)node->c->number)
                 return yx_validation_error(state, "invalid range%s", "");
@@ -12071,8 +12420,10 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                     return yx_validation_error(state,
                                                "collection tuple item has wrong type%s", "");
                 if (item_type != YX_STATIC_UNKNOWN && current != item_type) {
-                    /* E003 labels the item and the one before it. */
+                    /* E003 labels the item and the one before it, the
+                     * last item converted. */
                     const yx_node *item = node->items[i];
+                    if (item->span_end != SIZE_MAX) state->converted_end = item->span_end;
                     if (typed_item && state->error && state->error_capacity &&
                         typed_item->span_start < typed_item->span_end &&
                         typed_item->span_end <= item->span_start &&
@@ -13415,7 +13766,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                     if (node->items[i]->kind != N_REGEX &&
                         !yx_validate_node(node->items[i], state,
                                           inside_for_of, scope)) return false;
-                    t[i] = yx_static_node_type(node->items[i]);
+                    t[i] = yx_scoped_node_type(node->items[i], scope);
                 }
                 if (is_imphash) valid = node->item_count == 0;
                 else if (is_import_rva)
@@ -13882,10 +14233,10 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
     if (node->kind == N_OF || node->kind == N_OF_EXPR ||
         node->kind == N_FOR_OF) {
         if (node->a) {
-            yx_static_type amount = yx_scoped_node_type(node->a, scope);
-            if (!yx_integer_operands_check(state, node->a, amount, NULL,
-                                           YX_STATIC_UNKNOWN,
-                                           "wrong quantifier type%s"))
+            /* quantifier_from_ast: the quantifier's own errors first. */
+            if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+                !yx_operand_integer_check(state, node->a, scope,
+                                          "wrong quantifier type%s"))
                 return false;
             if (node->quantifier == Q_PERCENT &&
                 node->a->kind == N_INTEGER && node->a->number > 100)
@@ -13896,10 +14247,10 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
     if (node->kind == N_PATTERN || node->kind == N_COUNT ||
         node->kind == N_OFFSET || node->kind == N_LENGTH) {
         if ((node->kind == N_OFFSET || node->kind == N_LENGTH) && node->a) {
-            yx_static_type index_type = yx_scoped_node_type(node->a, scope);
-            if (!yx_integer_operands_check(state, node->a, index_type, NULL,
-                                           YX_STATIC_UNKNOWN,
-                                           "pattern match index has wrong type%s"))
+            /* integer_in_range_from_ast: the index's own errors first. */
+            if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+                !yx_operand_integer_check(state, node->a, scope,
+                                          "pattern match index has wrong type%s"))
                 return false;
             if (node->a->kind == N_INTEGER &&
                 !node->a->is_unsigned && (int64_t)node->a->number <= 0)
@@ -13908,22 +14259,24 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                                            node->a);
         }
         if (node->filter != FILTER_NONE) {
-            yx_static_type low = yx_scoped_node_type(node->b, scope);
-            yx_static_type high = node->filter == FILTER_IN ?
-                                  yx_scoped_node_type(node->c, scope) :
-                                  YX_STATIC_INT;
-            if (!yx_integer_operands_check(state, node->b, low,
-                                           node->filter == FILTER_IN ? node->c : NULL,
-                                           high, "wrong pattern offset type%s"))
-                return false;
-            if ((node->b && node->b->kind == N_INTEGER &&
-                 !node->b->is_unsigned && (int64_t)node->b->number < 0) ||
-                (node->filter == FILTER_IN && node->c &&
-                 node->c->kind == N_INTEGER &&
-                 !node->c->is_unsigned && (int64_t)node->c->number < 0))
-                return yx_validation_error(state,
-                                           "unexpected negative pattern offset%s",
-                                           "");
+            /* anchor_from_ast and range_from_ast: each bound by
+             * non_negative_integer_from_ast, its own errors before its
+             * type, the lower bound before the upper one. */
+            const yx_node *bounds[2];
+            bounds[0] = node->b;
+            bounds[1] = node->filter == FILTER_IN ? node->c : NULL;
+            for (i = 0; i < 2; ++i) {
+                if (!bounds[i]) continue;
+                if (!yx_validate_node(bounds[i], state, inside_for_of, scope) ||
+                    !yx_operand_integer_check(state, bounds[i], scope,
+                                              "wrong pattern offset type%s"))
+                    return false;
+                if (bounds[i]->kind == N_INTEGER && !bounds[i]->is_unsigned &&
+                    (int64_t)bounds[i]->number < 0)
+                    return yx_validation_error(state,
+                                               "unexpected negative pattern offset%s",
+                                               "");
+            }
             if (node->filter == FILTER_IN && node->b && node->c &&
                 node->b->kind == N_INTEGER &&
                 node->c->kind == N_INTEGER &&
@@ -14181,6 +14534,71 @@ static void yx_validate_operands_first(const yx_node *node,
     }
 }
 
+/* and, or, +, -, *, / and % are n-ary in YARA-X: `a + b + c` is one
+ * operation, and so is `(a + b) + c` (a left operand of the same operator
+ * takes the next one in). gen_n_ary_operation converts every operand
+ * before it checks their types, so the errors inside the operands come
+ * first, in source order. */
+static bool yx_nary_operation(const yx_node *node)
+{
+    return node && node->kind == N_BINARY &&
+           (node->operation == TK_AND || node->operation == TK_OR ||
+            node->operation == TK_PLUS || node->operation == TK_MINUS ||
+            node->operation == TK_STAR || node->operation == TK_DIV ||
+            node->operation == TK_PERCENT);
+}
+
+/* A node of such an operation that continues it into its left operand. */
+static bool yx_nary_link(const yx_node *node)
+{
+    return yx_nary_operation(node) && node->a && node->a->kind == N_BINARY &&
+           node->a->operation == node->operation;
+}
+
+/* Validates the operands of the n-ary chain that `top` ends, from the
+ * first: the leftmost operand, then each right one. A regexp literal is
+ * converted; the operator's own check rejects it. */
+static bool yx_validate_nary_operands(const yx_node *top, yx_validation *state,
+                                      bool inside_for_of,
+                                      const yx_scope_name *scope)
+{
+    const yx_node *local[64], **operands = local, *link = top;
+    size_t count = 0, capacity = sizeof(local) / sizeof(local[0]);
+    bool ok = true;
+    for (;;) {
+        const yx_node *operand = yx_nary_link(link) ? link->b : NULL;
+        bool last = !operand;
+        if (count + 2 > capacity) {
+            size_t grown = capacity * 2;
+            const yx_node **larger = operands == local ?
+                malloc(grown * sizeof(*larger)) :
+                realloc((void *)operands, grown * sizeof(*larger));
+            if (!larger) {
+                if (operands != local) free((void *)operands);
+                return yx_validation_error(state, "out of memory%s", "");
+            }
+            if (operands == local) memcpy(larger, local, sizeof(local));
+            operands = larger;
+            capacity = grown;
+        }
+        if (last) {
+            /* The innermost link of the chain: both of its operands. */
+            operands[count++] = link->b;
+            operands[count++] = link->a;
+            break;
+        }
+        operands[count++] = operand;
+        link = link->a;
+    }
+    while (ok && count) {
+        const yx_node *operand = operands[--count];
+        if (operand && operand->kind != N_REGEX)
+            ok = yx_validate_node(operand, state, inside_for_of, scope);
+    }
+    if (operands != local) free((void *)operands);
+    return ok;
+}
+
 static bool yx_validate_node(const yx_node *node, yx_validation *state,
                               bool inside_for_of,
                               const yx_scope_name *scope)
@@ -14188,16 +14606,52 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
     const yx_node *local[64], **pending = local;
     size_t count = 0, capacity = sizeof(local) / sizeof(local[0]);
     bool ok = true;
+    const yx_node *root = node;
+    /* A node of the tree validated in this walk, in this scope, before:
+     * operands checked first (keys, chains, receivers of `.len()`) are
+     * reached again from their parents. */
+    if (node && node->self == node && yx_type_cache_generation &&
+        node->valid_generation == yx_type_cache_generation &&
+        node->valid_scope == (const void *)scope &&
+        node->valid_inside_for_of == inside_for_of) return true;
+    /* The next link of an n-ary chain whose operands are validated, and
+     * where that chain ends (all of its operands are converted before a
+     * link's types are checked). */
+    const yx_node *chain = NULL;
+    size_t chain_end = 0;
     while (node) {
         const yx_node *spine;
-        size_t failures = state->failures;
-        bool step = yx_validate_node_step(node, state, inside_for_of, scope,
-                                          &spine);
-        /* The node's own check failed when no node inside it did. */
-        if (!step && state->failures == failures) {
-            ++state->failures;
-            yx_validate_operands_first(node, state, inside_for_of, scope);
+        size_t failures;
+        bool step;
+        if (node != chain && yx_nary_operation(node) &&
+            !yx_validate_nary_operands(node, state, inside_for_of, scope)) {
+            ok = false;
+            break;
         }
+        if (node != chain && yx_nary_operation(node))
+            chain_end = node->span_end != SIZE_MAX ? node->span_end : 0;
+        chain = yx_nary_link(node) ? node->a : NULL;
+        failures = state->failures;
+        state->converted_end = 0;
+        step = yx_validate_node_step(node, state, inside_for_of, scope,
+                                     &spine);
+        /* The node's own check failed when no node inside it did. Unless
+         * the check named the operand it typed (yx_operand_integer_check),
+         * the node's operands are converted. */
+        if (!step && state->failures == failures) {
+            size_t own_end = state->converted_end ? state->converted_end :
+                             node->span_end != SIZE_MAX ? node->span_end : 0;
+            ++state->failures;
+            state->converted_end = 0;
+            yx_validate_operands_first(node, state, inside_for_of, scope);
+            /* An operand's own error replaced the node's: its end. */
+            if (!state->converted_end) state->converted_end = own_end;
+        }
+        /* A link of an n-ary chain fails in its types' check, after every
+         * operand of the chain was converted (even when an inner validation
+         * of the link reports it). */
+        if (!step && yx_nary_operation(node) && chain_end > state->converted_end)
+            state->converted_end = chain_end;
         if (!step || !yx_validate_folded_bounds(node, state)) {
             ok = false;
             break;
@@ -14224,11 +14678,14 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
             capacity = grown;
         }
         pending[count++] = spine;
-        node = spine->a;
+        /* The operands of an n-ary chain are validated: the walk goes on
+         * to its next link only. */
+        node = spine == node && yx_nary_operation(spine) && !chain ? NULL : spine->a;
     }
     while (ok && count) {
         const yx_node *spine = pending[--count];
-        ok = yx_validate_node(spine->b, state, inside_for_of, scope) &&
+        ok = (yx_nary_operation(spine) ||
+              yx_validate_node(spine->b, state, inside_for_of, scope)) &&
              yx_validate_node(spine->c, state, inside_for_of, scope) &&
              yx_validate_node(spine->body, state,
                               inside_for_of || spine->kind == N_FOR_OF,
@@ -14237,6 +14694,12 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
               yx_bool_context_check(state, spine->body, scope));
     }
     if (pending != local) free((void *)pending);
+    if (ok && root && root->self == root && yx_type_cache_generation) {
+        yx_node *mark = (yx_node *)root;
+        mark->valid_generation = yx_type_cache_generation;
+        mark->valid_scope = scope;
+        mark->valid_inside_for_of = inside_for_of;
+    }
     return ok;
 }
 
@@ -14282,13 +14745,25 @@ static bool yx_validate_variable_stack(const yx_node *node, size_t used,
     return true;
 }
 
+/* The rule_exists of the validation's outermost scope entry: a name that
+ * the resolver knows and that is no global or import names a rule. */
+static bool yx_validation_rule_exists(void *user_data, const char *name)
+{
+    const yx_validation *state = (const yx_validation *)user_data;
+    for (size_t i = 0; i < state->import_count; ++i)
+        if (strcmp(state->imports[i], name) == 0) return false;
+    return state->identifier_exists &&
+           state->identifier_exists(state->user_data, name);
+}
+
 static bool yx_condition_validate_impl(const yx_condition *condition,
                            const char *const *pattern_names, size_t pattern_count,
                            const char *const *imports, size_t import_count,
                            const char *const *features, size_t feature_count,
                            const yx_global *globals, size_t global_count,
                            yx_condition_identifier_resolver identifier_exists,
-                           void *user_data, char *error, size_t error_capacity);
+                           void *user_data, char *error, size_t error_capacity,
+                           size_t *converted_end);
 typedef struct {
     const yx_condition *condition;
     const char *const *pattern_names; size_t pattern_count;
@@ -14296,7 +14771,7 @@ typedef struct {
     const char *const *features; size_t feature_count;
     const yx_global *globals; size_t global_count;
     yx_condition_identifier_resolver identifier_exists; void *user_data;
-    char *error; size_t error_capacity; bool result;
+    char *error; size_t error_capacity; size_t *converted_end; bool result;
 } yx_validate_job;
 static void yx_type_cache_new_walk(void);
 static void yx_validate_thunk(void *data)
@@ -14307,7 +14782,8 @@ static void yx_validate_thunk(void *data)
     ++yx_set_index_building;
     j->result = yx_condition_validate_impl(j->condition, j->pattern_names, j->pattern_count,
         j->imports, j->import_count, j->features, j->feature_count, j->globals, j->global_count,
-        j->identifier_exists, j->user_data, j->error, j->error_capacity);
+        j->identifier_exists, j->user_data, j->error, j->error_capacity,
+        j->converted_end);
     --yx_set_index_building;
     yx_static_type_walk = false;
 }
@@ -14317,11 +14793,12 @@ bool yx_condition_validate(const yx_condition *condition,
                            const char *const *features, size_t feature_count,
                            const yx_global *globals, size_t global_count,
                            yx_condition_identifier_resolver identifier_exists,
-                           void *user_data, char *error, size_t error_capacity)
+                           void *user_data, char *error, size_t error_capacity,
+                           size_t *converted_end)
 {
     yx_validate_job job = {condition, pattern_names, pattern_count, imports, import_count,
         features, feature_count, globals, global_count, identifier_exists, user_data,
-        error, error_capacity, false};
+        error, error_capacity, converted_end, false};
     yx_run_deep(condition ? condition->depth : 0, yx_validate_thunk, &job);
     return job.result;
 }
@@ -14331,10 +14808,11 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
                            const char *const *features, size_t feature_count,
                            const yx_global *globals, size_t global_count,
                            yx_condition_identifier_resolver identifier_exists,
-                           void *user_data, char *error, size_t error_capacity)
+                           void *user_data, char *error, size_t error_capacity,
+                           size_t *converted_end)
 {
     yx_validation state = {0};
-    yx_scope_name *global_scopes = NULL;
+    yx_scope_name *global_scopes = NULL, rules_scope = {0};
     const yx_scope_name *global_scope = NULL;
     bool valid;
     size_t i;
@@ -14366,6 +14844,10 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
         if (error && error_capacity) snprintf(error, error_capacity, "out of memory");
         return false;
     }
+    rules_scope.name = "";
+    rules_scope.rule_exists = yx_validation_rule_exists;
+    rules_scope.rule_user_data = &state;
+    global_scope = &rules_scope;
     if (global_count) {
         global_scopes = (yx_scope_name *) calloc(global_count,
                                                  sizeof(*global_scopes));
@@ -14386,7 +14868,7 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
             }
             if (globals[i].type == YX_GLOBAL_STRUCT)
                 global_scopes[i].object = globals[i].value.object;
-            global_scopes[i].parent = i ? &global_scopes[i - 1] : NULL;
+            global_scopes[i].parent = i ? &global_scopes[i - 1] : &rules_scope;
         }
         global_scope = &global_scopes[global_count - 1];
     }
@@ -14418,6 +14900,7 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
     }
     free(state.used);
     free(global_scopes);
+    if (converted_end) *converted_end = valid ? 0 : state.converted_end;
     return valid;
 }
 
@@ -16038,12 +16521,109 @@ typedef struct {
     bool result;
 } yx_pattern_set_job;
 
+/* The uses of one DNF branch by selector: the first use (lowest index) of
+ * each exact name and of each wildcard prefix, and the distinct wildcard
+ * prefix lengths in ascending order. Finding the use that makes a pattern
+ * of a wildcard set explicit is then a few probes, not a pass over the
+ * uses (patterns x uses x uses for long tuples). */
+typedef struct {
+    const yx_set_use *uses;
+    size_t *slots, mask, *lengths, length_count, *name_lengths;
+} yx_set_use_lookup;
+
+static uint64_t yx_set_use_step(uint64_t hash, char byte)
+{
+    return (hash ^ (uint8_t)byte) * UINT64_C(0x100000001b3);
+}
+
+static size_t yx_set_use_slot(const yx_set_use_lookup *l, uint64_t hash, const char *name,
+                              size_t length, bool wildcard)
+{
+    size_t at = (size_t)(hash ^ (wildcard ? UINT64_C(0x9e3779b97f4a7c15) : 0)) & l->mask;
+    for (; l->slots[at]; at = (at + 1) & l->mask) {
+        size_t item = l->slots[at] - 1;
+        if (l->uses[item].wildcard == wildcard &&
+            l->name_lengths[item] - (wildcard ? 1 : 0) == length &&
+            memcmp(l->uses[item].name, name, length) == 0) break;
+    }
+    return at;
+}
+
+static int yx_set_use_length_compare(const void *left, const void *right)
+{
+    size_t a = *(const size_t *)left, b = *(const size_t *)right;
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+static void yx_set_use_lookup_free(yx_set_use_lookup *l)
+{
+    free(l->slots); free(l->lengths); free(l->name_lengths);
+    memset(l, 0, sizeof(*l));
+}
+
+static bool yx_set_use_lookup_build(yx_set_use_lookup *l, const yx_set_use *uses, size_t count)
+{
+    size_t size = 16;
+    yx_set_use_lookup_free(l);
+    while (size < count * 2) {
+        if (size > SIZE_MAX / 4 / sizeof(size_t)) return false;
+        size *= 2;
+    }
+    l->uses = uses;
+    l->slots = calloc(size, sizeof(*l->slots));
+    l->lengths = malloc((count ? count : 1) * sizeof(*l->lengths));
+    l->name_lengths = malloc((count ? count : 1) * sizeof(*l->name_lengths));
+    if (!l->slots || !l->lengths || !l->name_lengths) return false;
+    l->mask = size - 1;
+    for (size_t i = 0; i < count; ++i) {
+        size_t length, at, k = 0;
+        uint64_t hash = UINT64_C(0xcbf29ce484222325);
+        l->name_lengths[i] = strlen(uses[i].name);
+        length = l->name_lengths[i] - (uses[i].wildcard ? 1 : 0);
+        for (size_t b = 0; b < length; ++b) hash = yx_set_use_step(hash, uses[i].name[b]);
+        at = yx_set_use_slot(l, hash, uses[i].name, length, uses[i].wildcard);
+        if (l->slots[at]) continue; /* an earlier use of the same selector */
+        l->slots[at] = i + 1;
+        if (!uses[i].wildcard) continue;
+        while (k < l->length_count && l->lengths[k] != length) ++k;
+        if (k == l->length_count) l->lengths[l->length_count++] = length;
+    }
+    qsort(l->lengths, l->length_count, sizeof(*l->lengths), yx_set_use_length_compare);
+    return true;
+}
+
+/* The first use that names `pattern` exactly, else the first wildcard use
+ * longer than `set_use` that includes it; NULL when there is none. */
+static const yx_set_use *yx_set_use_other(const yx_set_use_lookup *l, size_t set_use,
+                                          const char *pattern)
+{
+    const char *name = pattern + 1;
+    size_t length = strlen(name), own = l->name_lengths[set_use] - 1, best = SIZE_MAX, hashed = 0;
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (size_t b = 0; b < length; ++b) hash = yx_set_use_step(hash, name[b]);
+    {
+        size_t at = yx_set_use_slot(l, hash, name, length, false);
+        if (l->slots[at]) return &l->uses[l->slots[at] - 1];
+    }
+    hash = UINT64_C(0xcbf29ce484222325);
+    for (size_t k = 0; k < l->length_count; ++k) {
+        size_t prefix = l->lengths[k], at;
+        if (prefix > length) break;
+        for (; hashed < prefix; ++hashed) hash = yx_set_use_step(hash, name[hashed]);
+        if (prefix <= own) continue;
+        at = yx_set_use_slot(l, hash, name, prefix, true);
+        if (l->slots[at] && l->slots[at] - 1 < best) best = l->slots[at] - 1;
+    }
+    return best == SIZE_MAX ? NULL : &l->uses[best];
+}
+
 static void yx_pattern_set_thunk(void *data)
 {
     yx_pattern_set_job *job = data;
     yx_dnf_set set = {NULL, 0, 0};
     yx_dnf_branch empty = {NULL, 0, 0};
     yx_set_use *uses = NULL, *reported = NULL;
+    yx_set_use_lookup lookup = {0};
     size_t use_count = 0, use_capacity = 0;
     size_t reported_count = 0, reported_capacity = 0;
     int status;
@@ -16074,6 +16654,7 @@ static void yx_pattern_set_thunk(void *data)
         }
         /* Each wildcard set, each rule pattern it includes: an explicit use
          * of that pattern in the branch, else a more specific set. */
+        if (job->result && !yx_set_use_lookup_build(&lookup, uses, use_count)) job->result = false;
         for (size_t s = 0; s < use_count && job->result; ++s) {
             const yx_set_use *set_use = &uses[s];
             if (!set_use->wildcard) continue;
@@ -16083,14 +16664,7 @@ static void yx_pattern_set_thunk(void *data)
                 const yx_set_use *first, *second;
                 bool seen = false;
                 if (!pattern || !yx_set_use_is(set_use, pattern, true)) continue;
-                for (size_t o = 0; o < use_count && !other; ++o)
-                    if (!uses[o].wildcard && yx_set_use_is(&uses[o], pattern, false))
-                        other = &uses[o];
-                for (size_t o = 0; o < use_count && !other; ++o)
-                    if (uses[o].wildcard &&
-                        strlen(uses[o].name) > strlen(set_use->name) &&
-                        yx_set_use_is(&uses[o], pattern, true))
-                        other = &uses[o];
+                other = yx_set_use_other(&lookup, s, pattern);
                 if (!other) continue;
                 first = set_use->start < other->start ? set_use : other;
                 second = first == set_use ? other : set_use;
@@ -16108,6 +16682,7 @@ static void yx_pattern_set_thunk(void *data)
             }
         }
     }
+    yx_set_use_lookup_free(&lookup);
     free(uses);
     free(reported);
     yx_dnf_free(&set);
@@ -21798,6 +22373,32 @@ static yx_value yx_eval(const yx_node *node, const yx_eval_context *ctx,
     return result;
 }
 
+/* RuntimeString::len of a string module field: its length. Kept out of
+ * yx_eval_uncached, whose frame every nested evaluation pays. Frees
+ * `receiver`. */
+#if defined(_MSC_VER)
+static __declspec(noinline)
+#elif defined(__GNUC__)
+static __attribute__((noinline))
+#else
+static
+#endif
+yx_value yx_eval_string_len(const yx_node *node, char *receiver,
+                            const yx_eval_context *ctx, size_t current_pattern,
+                            const yx_binding *bindings)
+{
+    yx_node field = *node;
+    yx_value value;
+    field.name = receiver;
+    field.kind = node->kind == N_CALL ? N_MODULE_FIELD : node->kind;
+    field.operation = TK_BAD;
+    field.cache_self = NULL;
+    value = yx_eval(&field, ctx, current_pattern, bindings);
+    free(receiver);
+    return value.defined && value.type == V_STRING ?
+        yx_defined(value.string_length) : yx_undefined();
+}
+
 static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx,
                                  size_t current_pattern, const yx_binding *bindings)
 {
@@ -21815,6 +22416,10 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
         node->kind == N_MODULE_FIELD || node->kind == N_MODULE_INDEXED_FIELD ||
         node->kind == N_MODULE_NESTED_INDEXED_FIELD ||
         node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) {
+    {
+        char *receiver = yx_string_len_receiver(node);
+        if (receiver) return yx_eval_string_len(node, receiver, ctx, current_pattern, bindings);
+    }
     {
         yx_node alias, keys[3] = {{0}};
         if (yx_eval_module_alias(node, ctx, bindings, &alias, keys))
