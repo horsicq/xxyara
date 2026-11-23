@@ -49,8 +49,8 @@ endif()
 option(XXYARA_NO_CRT "Link xxyara.dll, yr.exe, the C examples and the tests without the Microsoft C runtime (MSVC x64)"
     ${_xxyara_no_crt_default})
 if(XXYARA_NO_CRT)
-    if(NOT MSVC OR NOT CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64)$")
-        message(FATAL_ERROR "XXYARA_NO_CRT needs MSVC for x64")
+    if(NOT MSVC OR NOT CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64|X86|x86)$")
+        message(FATAL_ERROR "XXYARA_NO_CRT needs MSVC for x64 or x86")
     endif()
     enable_language(ASM_MASM)
     # No security-cookie checks (they live in the C runtime) and no default
@@ -1256,7 +1256,15 @@ if(XXYARA_NO_CRT)
         src/crt/platforms/xx_crt_dll_windows.c
         src/crt/platforms/xx_crt_dllmain_windows.c
         src/crt/platforms/xx_crt_tls_windows.c
-        src/platforms/xx_chkstk_windows_x64.asm)
+        )
+    if(CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(X86|x86)$")
+        list(APPEND _xxyara_crt_sources src/crt/platforms/xx_crt_helpers_windows_x86.asm)
+        set_source_files_properties(
+            "${XXYARA_XXFCLIB_SOURCE_DIR}/src/crt/platforms/xx_crt_helpers_windows_x86.asm"
+            PROPERTIES COMPILE_OPTIONS /safeseh)
+    else()
+        list(APPEND _xxyara_crt_sources src/platforms/xx_chkstk_windows_x64.asm)
+    endif()
     list(TRANSFORM _xxyara_crt_sources PREPEND "${XXYARA_XXFCLIB_SOURCE_DIR}/")
     add_library(xxyara_crt STATIC ${_xxyara_crt_sources})
     add_library(xxfclib::crt ALIAS xxyara_crt)
