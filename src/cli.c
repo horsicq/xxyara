@@ -395,7 +395,12 @@ static void yx_cli_diagnostic_text_with(FILE *output, const char *text,
             continue;
         }
         if (!colors) fwrite(line, 1, count, output);
-        else if ((count >= 6 && memcmp(line, "error[", 6) == 0) ||
+        else if (count >= 6 && memcmp(line, "error:", 6) == 0) {
+            (void)xx_terminal_writer_ansi_span(&terminal, line, 6,
+                                               XX_TERMINAL_ANSI_RED,
+                                               XX_TERMINAL_ANSI_BOLD);
+            fwrite(line + 6, 1, count - 6, output);
+        } else if ((count >= 6 && memcmp(line, "error[", 6) == 0) ||
                  (count >= 8 && memcmp(line, "warning[", 8) == 0)) {
             error = line[0] == 'e';
             size_t prefix = error ? 6 : 8, close = prefix;
@@ -471,6 +476,26 @@ static void yx_cli_diagnostic_report(const YRX_COMPILER *compiler,
     else yx_cli_diagnostic_text_with(stderr, report, strlen(report),
                                      compiler);
     fputc('\n', stderr);
+}
+
+/* A line `error: <message>` on stderr; on a terminal `error:` is red and
+ * bold, as YARA-X's yr prints the error that ends a command
+ * ("error:".paint(Red).bold()). `format` is the text after "error:". */
+static void yx_cli_error_line(const char *format, ...)
+{
+    va_list args;
+    if (!yx_cli_worker_stderr && yx_cli_diagnostic_colors()) {
+        xx_terminal_writer terminal;
+        yx_cli_terminal_writer(&terminal, stderr);
+        (void)xx_terminal_writer_ansi_span(&terminal, "error:", 6,
+                                           XX_TERMINAL_ANSI_RED,
+                                           XX_TERMINAL_ANSI_BOLD);
+    } else {
+        fputs("error:", stderr);
+    }
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
 }
 
 static void yx_cli_copy_stream(FILE *input, FILE *output)
@@ -3927,7 +3952,7 @@ static bool yx_cli_print_unknown_pattern(const char *origin,
     for (size_t i = 1; i < column; ++i) fputc(' ', stderr);
     for (size_t i = 0; i < pattern_length; ++i) fputc('^', stderr);
     fputs(" this pattern is not declared in the `strings` section\n", stderr);
-    if (!ignore_invalid_rules) fputs("error: 1 error(s) found\n", stderr);
+    if (!ignore_invalid_rules) yx_cli_error_line(" 1 error(s) found\n");
     return true;
 }
 
@@ -3948,7 +3973,7 @@ static void yx_cli_print_source_error(YRX_COMPILER *compiler,
         size_t count = 0;
         if (yx_cli_check_reports(compiler, true, &count) && count) {
             if (!ignore_invalid_rules)
-                fprintf(stderr, "error: %zu error(s) found\n", count);
+                yx_cli_error_line(" %zu error(s) found\n", count);
             return;
         }
     }
@@ -5304,7 +5329,7 @@ unexpected_option:
                 !yx_cli_check_reports(compiler, true, &error_count))
                 goto done;
             if (error_count)
-                fprintf(stderr, "error: %zu error(s) found\n", error_count);
+                yx_cli_error_line(" %zu error(s) found\n", error_count);
             goto done;
         }
     }
@@ -6388,7 +6413,7 @@ static void yx_dep_syntax_error(const char *message,
     printf("SyntaxError { message: \"%s\", span: Span(%zu..%zu) }\n",
            message, start, start + length);
     fflush(stdout);
-    fputs("error: 1 syntax error(s) found\n", stderr);
+    yx_cli_error_line(" 1 syntax error(s) found\n");
 }
 
 static void yx_dep_syntax_found(char *message, size_t capacity,
@@ -6628,7 +6653,7 @@ static int yx_cli_deps_command(int argc, char **argv)
             }
             if (count) {
                 fflush(stdout);
-                fprintf(stderr, "error: %zu syntax error(s) found\n", count);
+                yx_cli_error_line(" %zu syntax error(s) found\n", count);
                 yx_sc_result_free(&syntax);
                 goto done;
             }
@@ -33256,6 +33281,69 @@ static void yx_cli_unused_identifier_warning(const char *path,
 
 /* Fallback for warning paths without a compiler diagnostic. Track lexical
  * bindings, including references in later initializers and shadowed scopes. */
+/* A table from a name (the text of an identifier token) to a slot number:
+ * the CLI's binding sweeps keep per-name state in the slots, so a token is
+ * matched with the bindings of its own name only. */
+typedef struct yx_cli_names {
+    const uint8_t **texts;
+    size_t *lengths;
+    size_t *slots; /* slot + 1, 0: empty (open addressing) */
+    size_t mask, count;
+} yx_cli_names;
+
+static size_t yx_cli_name_hash(const uint8_t *text, size_t length)
+{
+    size_t hash = 2166136261u;
+    for (size_t i = 0; i < length; ++i) hash = (hash ^ text[i]) * 16777619u;
+    return hash;
+}
+
+static bool yx_cli_names_init(yx_cli_names *names, size_t capacity)
+{
+    size_t size = 64;
+    memset(names, 0, sizeof(*names));
+    while (size < capacity * 2 + 16) {
+        if (size > SIZE_MAX / 4 / sizeof(size_t)) return false;
+        size *= 2;
+    }
+    names->slots = (size_t *)calloc(size, sizeof(*names->slots));
+    names->texts = (const uint8_t **)malloc((capacity ? capacity : 1) *
+                                            sizeof(*names->texts));
+    names->lengths = (size_t *)malloc((capacity ? capacity : 1) *
+                                      sizeof(*names->lengths));
+    names->mask = size - 1;
+    return names->slots && names->texts && names->lengths;
+}
+
+static void yx_cli_names_free(yx_cli_names *names)
+{
+    free(names->slots);
+    free((void *)names->texts);
+    free(names->lengths);
+    memset(names, 0, sizeof(*names));
+}
+
+/* The slot of a name; with `add`, a new one when it has none (the caller
+ * sized the table for every name it adds). SIZE_MAX: none. */
+static size_t yx_cli_names_slot(yx_cli_names *names, const uint8_t *text,
+                                size_t length, bool add)
+{
+    for (size_t at = yx_cli_name_hash(text, length) & names->mask;;
+         at = (at + 1) & names->mask) {
+        size_t slot = names->slots[at];
+        if (!slot) {
+            if (!add) return SIZE_MAX;
+            names->texts[names->count] = text;
+            names->lengths[names->count] = length;
+            names->slots[at] = ++names->count;
+            return names->count - 1;
+        }
+        --slot;
+        if (names->lengths[slot] == length &&
+            memcmp(names->texts[slot], text, length) == 0) return slot;
+    }
+}
+
 /* Sorts the indices of `bindings` by scope start (`by_end`: by scope end),
  * keeping the creation order among equal keys (a stable merge sort). */
 static void yx_cli_sort_bindings(const yx_cli_with_binding *bindings,
@@ -33305,7 +33393,10 @@ static bool yx_cli_check_unused_identifiers(const char *path,
     yx_cli_with_binding *bindings = NULL;
     bool *declaration = NULL, ok = false;
     size_t binding_count = 0, *by_begin = NULL, *open = NULL;
-    size_t next = 0, open_count = 0;
+    size_t *by_end = NULL, *slot_of = NULL, *heads = NULL;
+    size_t next = 0, next_end = 0;
+    unsigned char *state = NULL; /* 0 not open yet, 1 open, 2 ended */
+    yx_cli_names names = {0};
     *count = 0;
     if (!yx_dep_lex(source, length, &tokens)) goto done;
     bindings = (yx_cli_with_binding *)calloc(tokens.count ? tokens.count : 1,
@@ -33314,14 +33405,18 @@ static bool yx_cli_check_unused_identifiers(const char *path,
                                   sizeof(*declaration));
     if (!bindings || !declaration) goto done;
     for (size_t i = 0; i < tokens.count; ++i) {
-        size_t colon = tokens.count, close, depth = 0;
+        size_t colon = tokens.count, close, depth = 0, nested = 0;
         if (!yx_dep_equal(&tokens.items[i], "with")) continue;
         for (size_t j = i + 1; j < tokens.count; ++j) {
             if (yx_dep_symbol(&tokens.items[j], '(') ||
                 yx_dep_symbol(&tokens.items[j], '[')) ++depth;
             else if ((yx_dep_symbol(&tokens.items[j], ')') ||
                       yx_dep_symbol(&tokens.items[j], ']')) && depth) --depth;
+            else if (!depth && (yx_dep_equal(&tokens.items[j], "for") ||
+                                yx_dep_equal(&tokens.items[j], "with")))
+                ++nested; /* its own `:` comes first */
             else if (!depth && yx_dep_symbol(&tokens.items[j], ':')) {
+                if (nested) { --nested; continue; }
                 colon = j;
                 break;
             }
@@ -33339,7 +33434,7 @@ static bool yx_cli_check_unused_identifiers(const char *path,
                 j + 1 < colon && yx_dep_symbol(&tokens.items[j + 1], '=') &&
                 (j == i + 1 || yx_dep_symbol(&tokens.items[j - 1], ','))) {
                 /* The new name cannot shadow an outer name in its initializer. */
-                size_t visible_at = colon + 1, value_depth = 0;
+                size_t visible_at = colon + 1, value_depth = 0, value_nested = 0;
                 for (size_t k = j + 2; k < colon; ++k) {
                     if (yx_dep_symbol(&tokens.items[k], '(') ||
                         yx_dep_symbol(&tokens.items[k], '[')) ++value_depth;
@@ -33347,6 +33442,13 @@ static bool yx_cli_check_unused_identifiers(const char *path,
                               yx_dep_symbol(&tokens.items[k], ']')) &&
                              value_depth) --value_depth;
                     else if (!value_depth &&
+                             (yx_dep_equal(&tokens.items[k], "for") ||
+                              yx_dep_equal(&tokens.items[k], "with")))
+                        ++value_nested;
+                    else if (!value_depth && value_nested &&
+                             yx_dep_symbol(&tokens.items[k], ':'))
+                        --value_nested;
+                    else if (!value_depth && !value_nested &&
                              yx_dep_symbol(&tokens.items[k], ',')) {
                         visible_at = k + 1;
                         break;
@@ -33358,33 +33460,50 @@ static bool yx_cli_check_unused_identifiers(const char *path,
             }
         }
     }
-    /* Bindings in the order of their scope's start; a walk over the tokens
-     * keeps the ones whose scope is open, so each use is matched against
-     * the bindings around it only (linear in the rules, not quadratic). */
+    /* Bindings in the order of their scope's start and of its end; a walk
+     * over the tokens opens and closes them there, keeping for each name a
+     * stack of its open bindings (innermost first), so a use looks at the
+     * bindings of its own name only. */
     by_begin = (size_t *)malloc((binding_count ? binding_count : 1) *
                                 sizeof(*by_begin));
+    by_end = (size_t *)malloc((binding_count ? binding_count : 1) *
+                              sizeof(*by_end));
     open = (size_t *)malloc((binding_count ? binding_count : 1) *
-                            sizeof(*open));
-    if (!by_begin || !open) goto done;
-    for (size_t i = 0; i < binding_count; ++i) by_begin[i] = i;
+                            sizeof(*open)); /* next older open binding */
+    slot_of = (size_t *)malloc((binding_count ? binding_count : 1) *
+                               sizeof(*slot_of));
+    if (!by_begin || !by_end || !open || !slot_of ||
+        !yx_cli_names_init(&names, binding_count)) goto done;
+    heads = (size_t *)malloc((binding_count ? binding_count : 1) *
+                             sizeof(*heads));
+    state = (unsigned char *)calloc(binding_count ? binding_count : 1, 1);
+    if (!heads || !state) goto done;
+    for (size_t i = 0; i < binding_count; ++i) {
+        const yx_dep_token *name = &tokens.items[bindings[i].name];
+        by_begin[i] = by_end[i] = i;
+        slot_of[i] = yx_cli_names_slot(&names, name->text, name->length, true);
+        heads[slot_of[i]] = SIZE_MAX;
+    }
     yx_cli_sort_bindings(bindings, by_begin, binding_count, false);
+    yx_cli_sort_bindings(bindings, by_end, binding_count, true);
     for (size_t i = 0; i < tokens.count; ++i) {
-        size_t selected = binding_count, kept = 0;
+        size_t selected = binding_count, slot;
         yx_dep_token usage = tokens.items[i];
         while (next < binding_count && bindings[by_begin[next]].begin <= i) {
-            /* `open` stays in creation order: the first of the innermost
-             * bindings wins, as before. */
-            size_t at = open_count, added = by_begin[next++];
-            while (at && open[at - 1] > added) {
-                open[at] = open[at - 1];
-                --at;
-            }
-            open[at] = added;
-            ++open_count;
+            size_t added = by_begin[next++];
+            if (state[added]) continue; /* its scope already ended */
+            state[added] = 1;
+            open[added] = heads[slot_of[added]];
+            heads[slot_of[added]] = added;
         }
-        for (size_t j = 0; j < open_count; ++j)
-            if (bindings[open[j]].end > i) open[kept++] = open[j];
-        open_count = kept;
+        while (next_end < binding_count && bindings[by_end[next_end]].end <= i) {
+            size_t closed = by_end[next_end++], *link;
+            if (state[closed] != 1) { state[closed] = 2; continue; }
+            state[closed] = 2;
+            for (link = &heads[slot_of[closed]]; *link != closed;
+                 link = &open[*link]) {}
+            *link = open[closed];
+        }
         /* The dependency lexer keeps `0..name` in one numeric token. The
          * range endpoint is still a lexical use of its bound identifier. */
         if (usage.kind == YX_DEP_OTHER && usage.length &&
@@ -33402,16 +33521,14 @@ static bool yx_cli_check_unused_identifiers(const char *path,
             (i && yx_dep_symbol(&tokens.items[i - 1], '.') &&
              !(i >= 2 && yx_dep_symbol(&tokens.items[i - 2], '.'))))
             continue;
-        for (size_t o = 0; o < open_count; ++o) {
-            size_t j = open[o];
-            const yx_cli_with_binding *binding = &bindings[j];
-            const yx_dep_token *name = &tokens.items[binding->name];
-            if (i < binding->begin || i >= binding->end ||
-                name->length != usage.length ||
-                memcmp(name->text, usage.text, name->length) != 0)
-                continue;
-            if (selected == binding_count ||
-                bindings[selected].begin < binding->begin) selected = j;
+        slot = yx_cli_names_slot(&names, usage.text, usage.length, false);
+        if (slot == SIZE_MAX) continue;
+        /* The innermost binding of the name (the latest scope start); of
+         * several starting together, the first created, as before. */
+        for (size_t j = heads[slot]; j != SIZE_MAX; j = open[j]) {
+            if (selected != binding_count &&
+                bindings[j].begin != bindings[selected].begin) break;
+            if (selected == binding_count || j < selected) selected = j;
         }
         if (selected != binding_count) bindings[selected].used = true;
     }
@@ -33453,6 +33570,11 @@ static bool yx_cli_check_unused_identifiers(const char *path,
     }
     ok = true;
 done:
+    yx_cli_names_free(&names);
+    free(by_end);
+    free(slot_of);
+    free(heads);
+    free(state);
     free(by_begin);
     free(open);
     free(bindings);
@@ -36211,6 +36333,7 @@ static bool yx_cli_emit_source_warnings(
 {
     char code_field[80];
     yx_cli_paths files = {0};
+    FILE *capture = NULL;
     bool ok = false;
     int code_length;
     if (disable_all || yx_cli_warning_disabled(code, disabled))
@@ -36223,6 +36346,12 @@ static bool yx_cli_emit_source_warnings(
     if (yx_compiler_warnings_contain(compiler, code_field)) {
         ok = true;
         goto done;
+    }
+    /* On a terminal the reports are coloured as the library colours one:
+     * written to a buffer here, then copied through that colouring. */
+    if (!yx_cli_worker_stderr && yx_cli_diagnostic_colors()) {
+        capture = tmpfile();
+        if (capture) yx_cli_worker_stderr = capture;
     }
     for (size_t i = 0; i < argument_count; ++i)
         if (!yx_fix_collect_rules(arguments[i], &files)) goto done;
@@ -36240,6 +36369,11 @@ static bool yx_cli_emit_source_warnings(
     }
     ok = true;
 done:
+    if (capture) {
+        yx_cli_worker_stderr = NULL;
+        yx_cli_copy_stream(capture, stderr);
+        fclose(capture);
+    }
     yx_cli_paths_clear(&files);
     return ok;
 }
@@ -36449,6 +36583,38 @@ static int yx_fix_binding_order(const void *a, const void *b)
     return x->from < y->from ? -1 : x->from > y->from ? 1 : 0;
 }
 
+/* Sorts `order` (indices of `bindings`) by scope end. */
+static void yx_fix_sort_by_end(const yx_fix_binding *bindings, size_t *order,
+                               size_t count)
+{
+    size_t *scratch = count > 1 ? (size_t *)malloc(count * sizeof(*scratch)) : NULL;
+    if (count < 2) return;
+    if (!scratch) {
+        for (size_t i = 1; i < count; ++i) {
+            size_t value = order[i], j = i;
+            while (j && bindings[order[j - 1]].to > bindings[value].to) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = value;
+        }
+        return;
+    }
+    for (size_t width = 1; width < count; width *= 2) {
+        for (size_t left = 0; left < count; left += 2 * width) {
+            size_t middle = left + width < count ? left + width : count;
+            size_t right = middle + width < count ? middle + width : count;
+            size_t x = left, y = middle, at = left;
+            while (x < middle || y < right)
+                scratch[at++] = y >= right || (x < middle &&
+                    bindings[order[x]].to <= bindings[order[y]].to) ?
+                    order[x++] : order[y++];
+        }
+        memcpy(order, scratch, count * sizeof(*order));
+    }
+    free(scratch);
+}
+
 static bool yx_fix_binding_push(yx_fix_binding **items, size_t *count,
                                 size_t *capacity, size_t name, size_t from,
                                 size_t to)
@@ -36481,8 +36647,9 @@ static bool yx_fix_bound_tokens(const yx_dep_tokens *tokens, bool **bound)
 {
     size_t count = tokens->count, *close = NULL, *open = NULL, opened = 0;
     size_t binding_count = 0, binding_capacity = 0, next = 0;
-    size_t active_count = 0, active_capacity = 0;
-    yx_fix_binding *bindings = NULL, *active = NULL;
+    size_t *open_of_name = NULL, *slot_of = NULL, *by_end = NULL;
+    yx_cli_names names = {0};
+    yx_fix_binding *bindings = NULL;
     bool ok = false;
     *bound = (bool *)calloc(count ? count : 1, sizeof(**bound));
     close = (size_t *)malloc((count ? count : 1) * sizeof(*close));
@@ -36499,6 +36666,7 @@ static bool yx_fix_bound_tokens(const yx_dep_tokens *tokens, bool **bound)
         bool with = yx_dep_equal(&tokens->items[j], "with");
         bool loop = yx_dep_equal(&tokens->items[j], "for");
         size_t k, depth = 0, colon = SIZE_MAX, first = binding_count, end;
+        size_t unplaced = binding_count, nested = 0;
         bool names_done = false, declaration_start = true;
         if (!with && !loop) continue;
         for (k = j + 1; k < count; ++k) {
@@ -36513,11 +36681,22 @@ static bool yx_fix_bound_tokens(const yx_dep_tokens *tokens, bool **bound)
                 continue;
             }
             if (depth) continue;
-            if (yx_dep_symbol(t, ':')) { colon = k; break; }
-            if (with && yx_dep_symbol(t, ',')) {
+            /* A `for` or `with` in an initializer: its own `:` first. */
+            if (yx_dep_equal(t, "for") || yx_dep_equal(t, "with")) {
+                ++nested;
+                declaration_start = false;
+                continue;
+            }
+            if (yx_dep_symbol(t, ':')) {
+                if (nested) { --nested; continue; }
+                colon = k;
+                break;
+            }
+            if (with && !nested && yx_dep_symbol(t, ',')) {
                 /* The declaration before this comma is in scope from it. */
-                for (size_t d = first; d < binding_count; ++d)
-                    if (bindings[d].from == SIZE_MAX) bindings[d].from = k;
+                for (; unplaced < binding_count; ++unplaced)
+                    if (bindings[unplaced].from == SIZE_MAX)
+                        bindings[unplaced].from = k;
                 declaration_start = true;
                 continue;
             }
@@ -36549,34 +36728,49 @@ static bool yx_fix_bound_tokens(const yx_dep_tokens *tokens, bool **bound)
     }
     if (binding_count)
         qsort(bindings, binding_count, sizeof(*bindings), yx_fix_binding_order);
-    for (size_t t = 0; t < count; ++t) {
+    /* The walk opens a binding after its scope's first token and closes it
+     * at its end, counting the open bindings of each name; a token is bound
+     * when its name has one. Only identifiers are looked up. */
+    if (!yx_cli_names_init(&names, binding_count)) goto done;
+    open_of_name = (size_t *)calloc(binding_count ? binding_count : 1,
+                                    sizeof(*open_of_name));
+    slot_of = (size_t *)malloc((binding_count ? binding_count : 1) *
+                               sizeof(*slot_of));
+    by_end = (size_t *)malloc((binding_count ? binding_count : 1) *
+                              sizeof(*by_end));
+    if (!open_of_name || !slot_of || !by_end) goto done;
+    for (size_t b = 0; b < binding_count; ++b) {
+        const yx_dep_token *name = &tokens->items[bindings[b].name];
+        slot_of[b] = yx_cli_names_slot(&names, name->text, name->length, true);
+        by_end[b] = b;
+    }
+    yx_fix_sort_by_end(bindings, by_end, binding_count);
+    for (size_t t = 0, closing = 0; t < count; ++t) {
         const yx_dep_token *token = &tokens->items[t];
-        size_t kept = 0;
+        size_t slot;
         while (next < binding_count && bindings[next].from < t) {
-            if (bindings[next].to > t &&
-                !yx_fix_binding_push(&active, &active_count,
-                                     &active_capacity, bindings[next].name,
-                                     bindings[next].from, bindings[next].to))
-                goto done;
+            /* A scope of no token is never open. */
+            if (bindings[next].to > bindings[next].from + 1)
+                ++open_of_name[slot_of[next]];
             ++next;
         }
-        for (size_t i = 0; i < active_count; ++i)
-            if (active[i].to > t) active[kept++] = active[i];
-        active_count = kept;
-        if (token->kind != YX_DEP_IDENT) continue;
-        for (size_t i = 0; i < active_count && !(*bound)[t]; ++i) {
-            const yx_dep_token *name = &tokens->items[active[i].name];
-            if (name->length == token->length &&
-                memcmp(name->text, token->text, name->length) == 0)
-                (*bound)[t] = true;
+        while (closing < binding_count && bindings[by_end[closing]].to <= t) {
+            size_t b = by_end[closing++];
+            if (bindings[b].to > bindings[b].from + 1) --open_of_name[slot_of[b]];
         }
+        if (token->kind != YX_DEP_IDENT) continue;
+        slot = yx_cli_names_slot(&names, token->text, token->length, false);
+        if (slot != SIZE_MAX && open_of_name[slot]) (*bound)[t] = true;
     }
     ok = true;
 done:
+    yx_cli_names_free(&names);
+    free(open_of_name);
+    free(slot_of);
+    free(by_end);
     free(close);
     free(open);
     free(bindings);
-    free(active);
     if (!ok) { free(*bound); *bound = NULL; }
     return ok;
 }
@@ -37835,6 +38029,7 @@ static bool yx_cli_emit_scan_file_warnings(
 {
     char code_field[80];
     yx_cli_paths files = {0};
+    FILE *capture = NULL;
     bool ok = false;
     int code_length;
     if (disable_all || yx_cli_warning_disabled(code, disabled))
@@ -37848,6 +38043,12 @@ static bool yx_cli_emit_scan_file_warnings(
         ok = true;
         goto done;
     }
+    /* On a terminal the reports are coloured as the library colours one:
+     * written to a buffer here, then copied through that colouring. */
+    if (!yx_cli_worker_stderr && yx_cli_diagnostic_colors()) {
+        capture = tmpfile();
+        if (capture) yx_cli_worker_stderr = capture;
+    }
     for (size_t i = 0; i < argument_count; ++i)
         if (!yx_fix_collect_rules(arguments[i], &files)) goto done;
     for (size_t i = 0; i < files.count; ++i) {
@@ -37856,6 +38057,11 @@ static bool yx_cli_emit_scan_file_warnings(
     }
     ok = true;
 done:
+    if (capture) {
+        yx_cli_worker_stderr = NULL;
+        yx_cli_copy_stream(capture, stderr);
+        fclose(capture);
+    }
     yx_cli_paths_clear(&files);
     return ok;
 }
@@ -38415,7 +38621,7 @@ static int yx_cli_fix_warnings(int argc, char **argv)
                 !yx_cli_check_reports(compiler, true, &error_count))
                 goto done;
             if (error_count)
-                fprintf(stderr, "error: %zu error(s) found\n", error_count);
+                yx_cli_error_line(" %zu error(s) found\n", error_count);
             goto done;
         }
     }
@@ -39287,7 +39493,7 @@ static int yx_cli_compile_command(int argc, char **argv)
                 !yx_cli_check_reports(compiler, true, &error_count))
                 goto done;
             if (error_count)
-                fprintf(stderr, "error: %zu error(s) found\n", error_count);
+                yx_cli_error_line(" %zu error(s) found\n", error_count);
             goto done;
         }
     }

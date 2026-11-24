@@ -79,7 +79,7 @@ static inline bool yx_header_finish(yx_header_collection *c,yx_writer *storage,y
         const yx_header_piece *p=&c->pieces[i];
         if(p->offset>storage->used)break;
         size_t skip=storage->used-(size_t)p->offset;
-        if(skip<p->length&&!yx_put_bytes(storage,p->bytes+skip,p->length-skip))return false;
+        if(skip<p->length&&!yx_put_bytes(storage,p->bytes+skip,p->length-skip)){yx_walk_no_memory=true;return false;}
     }
     if(storage->used)*header=(yx_physical_header){2,storage->data,storage->used};
     return true;
@@ -87,18 +87,18 @@ static inline bool yx_header_finish(yx_header_collection *c,yx_writer *storage,y
 static inline bool yx_header_pattern_bytes(const YRX_PATTERN *pattern,yx_writer *bytes)
 {
     if(!pattern||(pattern->modifiers&(YX_MOD_WIDE|YX_MOD_NOCASE|YX_MOD_XOR|YX_MOD_BASE64|YX_MOD_BASE64WIDE)))return true;
-    if(pattern->kind==YX_PATTERN_TEXT)return yx_put_bytes(bytes,pattern->bytes,pattern->length);
+    if(pattern->kind==YX_PATTERN_TEXT){bool ok=yx_put_bytes(bytes,pattern->bytes,pattern->length);if(!ok)yx_walk_no_memory=true;return ok;}
     if(pattern->kind==YX_PATTERN_HEX) {
         if(pattern->hex_has_jump||!pattern->mask)return true;
         for(size_t i=0;i<pattern->length;++i)if(pattern->mask[i]!=255)return true;
-        return yx_put_bytes(bytes,pattern->bytes,pattern->length);
+        bool ok=yx_put_bytes(bytes,pattern->bytes,pattern->length);if(!ok)yx_walk_no_memory=true;return ok;
     }
     if(!pattern->regexp)return true;
     yx_tr_parser parser={.text=(const uint8_t *)pattern->regexp,.length=strlen(pattern->regexp)};
     yx_tr_node *root=yx_tr_expression(&parser),*node=root;bool ok=!parser.oom;
     if(node&&!parser.failed&&parser.at==parser.length&&node->kind==YX_TR_LITERAL)
         ok=yx_put_bytes(bytes,node->bytes,node->length);
-    yx_tr_destroy(root);return ok;
+    yx_tr_destroy(root);if(!ok)yx_walk_no_memory=true;return ok;
 }
 typedef struct {
     const YRX_PATTERN *const *patterns;size_t pattern_count;

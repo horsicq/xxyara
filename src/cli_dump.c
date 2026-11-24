@@ -1887,9 +1887,9 @@ static void yx_dump_macho(yx_dump_doc *doc, yx_dump_node *parent,
         size_t dyld_length;
         bool dyld_little;
         bool dyld_info_present =
-            yx_dump_macho_command(data, size, 0x22, &dyld_payload,
+            yx_dump_macho_command(file_data, file_size, 0x22, &dyld_payload,
                                     &dyld_length, &dyld_little) ||
-            yx_dump_macho_command(data, size, UINT32_C(0x80000022),
+            yx_dump_macho_command(file_data, file_size, UINT32_C(0x80000022),
                                     &dyld_payload, &dyld_length,
                                     &dyld_little);
         if (yx_dump_child(module, "dyld_info") != NULL) {
@@ -1918,7 +1918,7 @@ static void yx_dump_macho(yx_dump_doc *doc, yx_dump_node *parent,
             size_t chained_length;
             bool chained_little;
             bool chained_fixups = yx_dump_macho_command(
-                data, size, UINT32_C(0x80000034), &chained_payload,
+                file_data, file_size, UINT32_C(0x80000034), &chained_payload,
                 &chained_length, &chained_little);
             if (!has_imports && !dyld_info_present && !chained_fixups)
                 yx_dump_macho_symbol_names(doc, module, symbols, false, true);
@@ -2491,7 +2491,8 @@ static void yx_dump_pe_rich_signature(yx_dump_doc *doc,
         if (memcmp(data + i, "Rich", 4) == 0) { rich = i; break; }
         if (i == 0) break;
     }
-    if (rich == SIZE_MAX) return;
+    /* "DanS" precedes "Rich" by at least one 4-byte word. */
+    if (rich == SIZE_MAX || rich < 4) return;
     uint32_t key = (uint32_t)yx_dump_le(data, rich + 4, 4);
     uint32_t dans = key ^ UINT32_C(0x536e6144);
     size_t start = SIZE_MAX;
@@ -2764,8 +2765,11 @@ static void yx_dump_pe_version_visit(void *opaque,
                                value_length, false);
         if (member) {
             member->owned_key = (char *)malloc(key_length + 1);
-            if (!member->owned_key) doc->oom = true;
-            else {
+            if (!member->owned_key) {
+                /* the member stays in the map: its key must not be NULL */
+                doc->oom = true;
+                member->key = "";
+            } else {
                 if (key_length) memcpy(member->owned_key, key, key_length);
                 member->owned_key[key_length] = 0;
                 member->key = member->owned_key;

@@ -491,34 +491,63 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
                 atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_N;
             else if (strcmp(atom.text, "\\P{N}") == 0)
                 atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_NOT_N;
-    } else if ((c == 'b' || c == 'B' || c == '<' || c == '>') && !in_class) {
+    } else if (c == 'b' || c == 'B' || c == '<' || c == '>' ||
+               ((c == 'A' || c == 'z') && in_class)) {
         char kind[24] = {(char)c, 0};
         if (c == '<')
             strcpy(kind, "start");
         if (c == '>')
             strcpy(kind, "end");
+        /* regex-syntax, maybe_parse_special_word_boundary: `\b{` starts a
+         * special boundary only when a name character follows the brace;
+         * otherwise the brace belongs to a repetition of `\b`. */
         if (c == 'b' && p->at < p->length && p->text[p->at] == '{') {
-            size_t begin = ++p->at;
-            while (p->at < p->length && p->text[p->at] != '}')
-                ++p->at;
-            size_t length = p->at - begin;
-            if (length >= sizeof(kind))
-                length = sizeof(kind) - 1;
-            memcpy(kind, p->text + begin, length);
-            kind[length] = 0;
-            if (strcmp(kind, "start") && strcmp(kind, "end") &&
-                strcmp(kind, "start-half") && strcmp(kind, "end-half")) {
+            size_t brace = p->at, end = brace + 1;
+            if (end == p->length) {
                 yx_rx_error(
-                    p, begin, p->at,
-                    "unrecognized special word boundary assertion, valid "
-                    "choices are: start, end, start-half or end-half");
+                    p, atom.start, end,
+                    "found either the beginning of a special word boundary "
+                    "or a bounded repetition on a \\b with an opening brace, "
+                    "but no closing brace");
                 return atom;
             }
-            if (p->at < p->length)
-                ++p->at;
+            if (isalpha((unsigned char)p->text[end]) || p->text[end] == '-') {
+                while (end < p->length &&
+                       (isalpha((unsigned char)p->text[end]) ||
+                        p->text[end] == '-'))
+                    ++end;
+                if (end == p->length || p->text[end] != '}') {
+                    yx_rx_error(
+                        p, brace, end,
+                        "special word boundary assertion is either unclosed "
+                        "or contains an invalid character");
+                    return atom;
+                }
+                size_t length = end - brace - 1;
+                if (length < sizeof(kind)) {
+                    memcpy(kind, p->text + brace + 1, length);
+                    kind[length] = 0;
+                }
+                if (length >= sizeof(kind) ||
+                    (strcmp(kind, "start") && strcmp(kind, "end") &&
+                     strcmp(kind, "start-half") && strcmp(kind, "end-half"))) {
+                    yx_rx_error(
+                        p, brace + 1, end,
+                        "unrecognized special word boundary assertion, valid "
+                        "choices are: start, end, start-half or end-half");
+                    return atom;
+                }
+                p->at = end + 1;
+            }
+        }
+        if (in_class) {
+            /* an assertion is not a class member (ClassEscapeInvalid) */
+            yx_rx_error(p, atom.start, p->at,
+                        "invalid escape sequence found in character class");
+            return atom;
         }
         atom.text = yx_rx_boundary(p, flags, kind);
-    } else if ((c == 'A' || c == 'z') && !in_class)
+    } else if (c == 'A' || c == 'z')
         atom.text = yx_rx_format("\\%c", c);
     else if (c == 'x' || c == 'u' || c == 'U') {
         unsigned value = 0;

@@ -10390,8 +10390,21 @@ static bool yx_inv_with_append(yx_inv_with_state *state, const char *text,
 {
     if (state->used > YX_INV_WITH_TEXT_LIMIT ||
         length > YX_INV_WITH_TEXT_LIMIT) return false;
-    return yx_diagnostic_append(&state->text, &state->used, &state->capacity,
-                                "%.*s", (int)length, text);
+    /* The copy yx_diagnostic_append("%.*s") makes, without formatting each
+     * token of the condition (the text holds no NUL byte). */
+    if (state->used + length + 1 > state->capacity) {
+        size_t next = state->capacity ? state->capacity : 256;
+        char *grown;
+        while (next < state->used + length + 1) next *= 2;
+        grown = (char *)realloc(state->text, next);
+        if (!grown) return false;
+        state->text = grown;
+        state->capacity = next;
+    }
+    memcpy(state->text + state->used, text, length);
+    state->used += length;
+    state->text[state->used] = '\0';
+    return true;
 }
 
 /* Appends source[at..end) with the bound identifiers replaced. A

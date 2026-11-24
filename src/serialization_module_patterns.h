@@ -490,7 +490,7 @@ static bool yx_module_pattern_helper_call(yx_module_patterns *c,yx_writer *w)
     if(c->helper_call_count==c->helper_call_capacity) {
         size_t capacity=c->helper_call_capacity?c->helper_call_capacity*2:32;
         if(capacity<c->helper_call_capacity||capacity>SIZE_MAX/sizeof(*c->helper_calls))return false;
-        size_t *grown=realloc(c->helper_calls,capacity*sizeof(*grown));if(!grown)return false;
+        size_t *grown=realloc(c->helper_calls,capacity*sizeof(*grown));if(!grown){yx_walk_no_memory=true;return false;}
         c->helper_calls=grown;c->helper_call_capacity=capacity;
     }
     if(!yx_put_u8(w,0x10))return false;
@@ -1486,7 +1486,7 @@ static int yx_module_pattern_decode_call(yx_reader *r,size_t end,yx_module_progr
            first->integer<0||last->integer<first->integer||(uint64_t)last->integer>=c->archive->physical||
            p->nodes[required].type!=3)return -1;
         size_t count=(size_t)(last->integer-first->integer)+1;
-        uint32_t *ids=malloc(count*sizeof(*ids));if(!ids)return -1;
+        uint32_t *ids=malloc(count*sizeof(*ids));if(!ids){yx_walk_no_memory=true;return -1;}
         for(size_t i=0;i<count;++i)ids[i]=(uint32_t)(first->integer+(int64_t)i);
         const yx_module_node *k=&p->nodes[required];
         uint8_t kind=count==1||k->op!=YX_ME_INT?3:k->integer==1?0:k->integer==(int64_t)count?1:3;
@@ -2010,7 +2010,7 @@ static bool yx_module_pattern_schema_build(yx_module_pattern_schema *out,const Y
         if(!module||module->signature_count>SIZE_MAX-signature_count)return false;
         signature_count+=module->signature_count;
     }
-    out->signatures=calloc(signature_count?signature_count:1,sizeof(*out->signatures));if(!out->signatures)return false;
+    out->signatures=calloc(signature_count?signature_count:1,sizeof(*out->signatures));if(!out->signatures){yx_walk_no_memory=true;return false;}
     for(size_t m=0;m<rules->import_count;++m) {
         const yx_archive_module_schema *module=yx_archive_schema(rules->imports[m]);
         const uint8_t *bytes=module->globals[profile];size_t length=module->globals_length[profile];

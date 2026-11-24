@@ -9978,6 +9978,15 @@ static bool yx_scoped_module_alias(const yx_node *node,
                                     const yx_scope_name *scope,
                                     yx_node *result, char **owned_name)
 {
+    /* Only a named node of these kinds can be an alias's path
+     * (yx_module_alias_node): the others need no walk of the scope, which
+     * a `with` of many declarations makes long. */
+    if (!node || !node->name || node->resolved_module_alias ||
+        (node->kind != N_RULE && node->kind != N_GLOBAL_INDEXED &&
+         node->kind != N_MODULE_FIELD && node->kind != N_CALL &&
+         node->kind != N_MODULE_INDEXED_FIELD &&
+         node->kind != N_MODULE_NESTED_INDEXED_FIELD &&
+         node->kind != N_MODULE_TRIPLE_INDEXED_FIELD)) return false;
     for (const yx_scope_name *at = scope; at; at = at->parent) {
         yx_node base;
         char *base_name = NULL;
