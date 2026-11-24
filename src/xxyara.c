@@ -294,6 +294,22 @@ static YRX_RESULT yx_buffer_from_text(const char *text, size_t length,
     return yx_ok();
 }
 
+/* yx_buffer_from_text for a malloc'd text of `length` bytes (NUL at
+ * `length`) that the buffer takes: freed here on failure. */
+static YRX_RESULT yx_buffer_adopt_text(char *text, size_t length,
+                                       YRX_BUFFER **out)
+{
+    YRX_BUFFER *buffer = (YRX_BUFFER *) malloc(sizeof(*buffer));
+    if (!buffer) {
+        free(text);
+        return yx_fail(YRX_SERIALIZATION_ERROR, "out of memory building JSON");
+    }
+    buffer->data = (uint8_t *) text;
+    buffer->length = length;
+    *out = buffer;
+    return yx_ok();
+}
+
 static YRX_RESULT yx_error_json(const char *message, YRX_BUFFER **out)
 {
     static const char prefix[] =
@@ -1801,6 +1817,117 @@ static bool yx_warning_row_walk(const char *row, const char *segment,
     return true;
 }
 
+/* Writes a row of YX_WARNING_ROW_MIN bytes or more as references to kept
+ * rows. `shown` (YX_WARNING_RECENT_ROWS entries) holds the rows the same
+ * report showed before. False: out of memory. */
+static bool yx_warning_put_row(yx_warning_rows *rows, yx_warning_bytes *out,
+                               const char *segment, size_t size,
+                               size_t *shown, size_t *shown_count)
+{
+    size_t prefix_id = SIZE_MAX, suffix_id = SIZE_MAX, id = SIZE_MAX;
+    size_t best_matched = 0, best_suffix = 0;
+    uint64_t hash = 0;
+    /* An exact copy of a kept row wins: a recent one (compared first, no
+     * hash), else any. */
+    for (size_t i = 0; i < rows->recent_count && id == SIZE_MAX; ++i) {
+        size_t candidate = rows->recent[i];
+        if (rows->lengths[candidate] == size &&
+            memcmp(rows->items[candidate], segment, size) == 0)
+            id = candidate;
+    }
+    if (id == SIZE_MAX) {
+        hash = yx_warning_row_hash(segment, size);
+        id = yx_warning_row_find(rows, segment, size, hash);
+    }
+    /* Otherwise a patched copy of a row this report showed before it (a
+     * `+` row after its `-` rows): the prefix at equal offsets from one of
+     * them, the suffix from one of them. Any other new row is kept, so a
+     * source line is stored once. */
+    for (size_t i = 0; id == SIZE_MAX && i < *shown_count; ++i) {
+        size_t candidate = shown[i], suffix = 0;
+        size_t row_length = rows->lengths[candidate];
+        size_t limit = row_length < size ? row_length : size;
+        const char *row = rows->items[candidate];
+        while (suffix < limit &&
+               row[row_length - 1 - suffix] == segment[size - 1 - suffix])
+            ++suffix;
+        if (suffix > best_suffix) {
+            best_suffix = suffix;
+            suffix_id = candidate;
+        }
+    }
+    for (size_t i = 0; id == SIZE_MAX && i < *shown_count; ++i) {
+        size_t candidate = shown[i], matched, stop;
+        size_t row_length = rows->lengths[candidate];
+        size_t limit = row_length < size - best_suffix ? row_length :
+                       size - best_suffix;
+        yx_warning_row_walk(rows->items[candidate], segment, limit,
+                            candidate, NULL, &matched, &stop);
+        if (matched > best_matched) {
+            best_matched = matched;
+            prefix_id = candidate;
+        }
+    }
+    if (id == SIZE_MAX &&
+        best_matched + best_suffix >= YX_WARNING_ROW_MIN &&
+        best_matched + best_suffix >= size / 2) {
+        size_t stop = 0, matched;
+        if (prefix_id != SIZE_MAX) {
+            size_t row_length = rows->lengths[prefix_id];
+            size_t limit = row_length < size - best_suffix ? row_length :
+                           size - best_suffix;
+            if (!yx_warning_row_walk(rows->items[prefix_id], segment, limit,
+                                     prefix_id, out, &matched, &stop))
+                return false;
+        }
+        return yx_warning_bytes_put(out, segment + stop,
+                                    size - best_suffix - stop) &&
+               (!best_suffix ||
+                yx_warning_bytes_ref(out, suffix_id,
+                                     rows->lengths[suffix_id] - best_suffix,
+                                     best_suffix));
+    }
+    if (id == SIZE_MAX && !yx_warning_row_add(rows, segment, size, hash, &id))
+        return false;
+    yx_warning_row_recent(rows, id);
+    if (*shown_count < YX_WARNING_RECENT_ROWS) shown[(*shown_count)++] = id;
+    return yx_warning_bytes_ref(out, id, 0, size);
+}
+
+/* Plain text (rows separated by newlines) in the stored form: long rows
+ * refer to kept rows, a text with raw reference bytes is kept as it is.
+ * NULL: out of memory. */
+static char *yx_warning_compact_text(yx_warning_rows *rows, const char *text,
+                                     size_t length)
+{
+    yx_warning_bytes out = {0};
+    size_t shown[YX_WARNING_RECENT_ROWS], shown_count = 0;
+    const char *segment = text, *end = text + length;
+    if (memchr(text, YX_WARNING_ROW_REF, length) ||
+        memchr(text, YX_WARNING_COMPACT, length)) {
+        if (!yx_warning_bytes_put(&out, text, length)) goto failure;
+        return out.data;
+    }
+    if (!yx_warning_bytes_put(&out, "\x02", 1)) goto failure;
+    for (;;) {
+        const char *line_end = memchr(segment, '\n', (size_t)(end - segment));
+        size_t size = (size_t)((line_end ? line_end : end) - segment);
+        if (size < YX_WARNING_ROW_MIN) {
+            if (!yx_warning_bytes_put(&out, segment, size)) goto failure;
+        } else if (!yx_warning_put_row(rows, &out, segment, size, shown,
+                                       &shown_count)) {
+            goto failure;
+        }
+        if (!line_end) break;
+        if (!yx_warning_bytes_put(&out, "\n", 1)) goto failure;
+        segment = line_end + 1;
+    }
+    return out.data;
+failure:
+    free(out.data);
+    return NULL;
+}
+
 /* Takes a warning's JSON about to be stored (or stored and rewritten) and
  * returns the form to store, which may be `json` itself; NULL (and `json`
  * freed) when out of memory. */
@@ -1839,7 +1966,7 @@ static char *yx_warning_compact(YRX_COMPILER *compiler, char *json)
         goto failure;
     for (segment = at = value;;) {
         bool stop = at >= end;
-        size_t size, id;
+        size_t size;
         if (!stop && !(at[0] == '\\' && at[1] == 'n')) {
             at += at[0] == '\\' ? 2 : 1;
             continue;
@@ -1848,81 +1975,9 @@ static char *yx_warning_compact(YRX_COMPILER *compiler, char *json)
         if (size < YX_WARNING_ROW_MIN) {
             if (!yx_warning_bytes_put(&out, segment, size)) goto failure;
         } else {
-            size_t prefix_id = SIZE_MAX, suffix_id = SIZE_MAX;
-            size_t best_matched = 0, best_suffix = 0;
-            uint64_t hash = 0;
-            id = SIZE_MAX;
-            /* An exact copy of a kept row wins: a recent one (compared
-             * first, no hash), else any. */
-            for (size_t i = 0; i < rows->recent_count && id == SIZE_MAX; ++i) {
-                size_t candidate = rows->recent[i];
-                if (rows->lengths[candidate] == size &&
-                    memcmp(rows->items[candidate], segment, size) == 0)
-                    id = candidate;
-            }
-            if (id == SIZE_MAX) {
-                hash = yx_warning_row_hash(segment, size);
-                id = yx_warning_row_find(rows, segment, size, hash);
-            }
-            /* Otherwise a patched copy of a row this report showed before
-             * it (a `+` row after its `-` rows): the prefix at equal
-             * offsets from one of them, the suffix from one of them. Any
-             * other new row is kept, so a source line is stored once. */
-            for (size_t i = 0; id == SIZE_MAX && i < shown_count; ++i) {
-                size_t candidate = shown[i], suffix = 0;
-                size_t row_length = rows->lengths[candidate];
-                size_t limit = row_length < size ? row_length : size;
-                const char *row = rows->items[candidate];
-                while (suffix < limit &&
-                       row[row_length - 1 - suffix] ==
-                       segment[size - 1 - suffix])
-                    ++suffix;
-                if (suffix > best_suffix) {
-                    best_suffix = suffix;
-                    suffix_id = candidate;
-                }
-            }
-            for (size_t i = 0; id == SIZE_MAX && i < shown_count; ++i) {
-                size_t candidate = shown[i], matched, stop;
-                size_t row_length = rows->lengths[candidate];
-                size_t limit = row_length < size - best_suffix ? row_length :
-                               size - best_suffix;
-                yx_warning_row_walk(rows->items[candidate], segment, limit,
-                                    candidate, NULL, &matched, &stop);
-                if (matched > best_matched) {
-                    best_matched = matched;
-                    prefix_id = candidate;
-                }
-            }
-            if (id == SIZE_MAX &&
-                best_matched + best_suffix >= YX_WARNING_ROW_MIN &&
-                best_matched + best_suffix >= size / 2) {
-                size_t stop = 0, matched;
-                if (prefix_id != SIZE_MAX) {
-                    size_t row_length = rows->lengths[prefix_id];
-                    size_t limit = row_length < size - best_suffix ?
-                                   row_length : size - best_suffix;
-                    if (!yx_warning_row_walk(rows->items[prefix_id], segment,
-                                             limit, prefix_id, &out,
-                                             &matched, &stop))
-                        goto failure;
-                }
-                if (!yx_warning_bytes_put(&out, segment + stop,
-                                          size - best_suffix - stop) ||
-                    (best_suffix &&
-                     !yx_warning_bytes_ref(&out, suffix_id,
-                                           rows->lengths[suffix_id] -
-                                           best_suffix, best_suffix)))
-                    goto failure;
-            } else {
-                if (id == SIZE_MAX &&
-                    !yx_warning_row_add(rows, segment, size, hash, &id))
-                    goto failure;
-                yx_warning_row_recent(rows, id);
-                if (shown_count < YX_WARNING_RECENT_ROWS)
-                    shown[shown_count++] = id;
-                if (!yx_warning_bytes_ref(&out, id, 0, size)) goto failure;
-            }
+            if (!yx_warning_put_row(rows, &out, segment, size, shown,
+                                    &shown_count))
+                goto failure;
             compacted = true;
         }
         if (stop) break;
@@ -4281,7 +4336,11 @@ static int yx_compiler_redundant_case_modifier_warning_source(
     last_column = yx_diagnostic_columns(last_start,
                                          source + nocase_start) + 1;
     if (last_line == first_line && last_column <= first_column) return 0;
-    if (last_line > first_line + 1) {
+    /* Lines the renderer's margin cuts (long, deeply indented or not plain
+     * ASCII) are drawn by the general snippet renderer too. */
+    if (last_line > first_line + 1 ||
+        yx_snippet_margin_applies(source, (const size_t[]){suffix_start,
+                                                           nocase_start}, 2)) {
         /* The line between the labels, or `...` for several. */
         yx_snippet_label labels[2] = {
             {suffix_start, suffix_start + 1, suffix_label, false},
@@ -5743,7 +5802,9 @@ static void yx_note_patch(YRX_COMPILER *compiler, const char *text,
     const char *help = NULL, *rows, *at, *last;
     yx_patch_note note, *grown;
     bool first_removal = true, addition_marked = false;
-    if (!compiler || !(compiler->flags & YRX_COLORIZE_ERRORS) || !text) return;
+    if (!compiler || !text ||
+        (!(compiler->flags & YRX_COLORIZE_ERRORS) &&
+         !compiler->record_patch_notes)) return;
     for (at = strstr(text, "\nhelp: "); at; at = strstr(at + 1, "\nhelp: "))
         help = at;
     if (!help || !(rows = strchr(help + 1, '\n')) ||
@@ -5786,13 +5847,68 @@ static void yx_note_patch(YRX_COMPILER *compiler, const char *text,
         last = at + length;
         if (!line_end) break;
     }
-    if (last == rows || !(note.rows = malloc((size_t)(last - rows) + 1))) return;
-    memcpy(note.rows, rows, (size_t)(last - rows));
-    note.rows[last - rows] = '\0';
-    grown = realloc(compiler->patch_notes,
-                    (compiler->patch_note_count + 1) * sizeof(*grown));
-    if (!grown) { free(note.rows); return; }
-    compiler->patch_notes = grown;
+    if (last == rows) return;
+    /* Kept in the stored form: a long line shown by many notes is kept
+     * once (compiler->warning_rows), so the notes stay linear in size. */
+    note.length = (size_t)(last - rows);
+    note.hash = yx_warning_row_hash(rows, note.length);
+    /* Only the first note for the same rows is ever used: an equal one is
+     * not kept again (one per rows, so a lookup stops at its match). */
+    if (compiler->patch_note_slot_capacity) {
+        size_t mask = compiler->patch_note_slot_capacity - 1;
+        for (size_t at = (size_t)note.hash & mask;
+             compiler->patch_note_slots[at]; at = (at + 1) & mask) {
+            const yx_patch_note *kept =
+                &compiler->patch_notes[compiler->patch_note_slots[at] - 1];
+            char *expanded;
+            bool same;
+            if (kept->hash != note.hash || kept->length != note.length) continue;
+            expanded = yx_warning_expand(compiler, kept->rows, NULL);
+            if (!expanded) return;
+            same = memcmp(expanded, rows, note.length) == 0;
+            free(expanded);
+            if (same) return;
+        }
+    }
+    note.rows = yx_warning_compact_text(&compiler->warning_rows, rows,
+                                        note.length);
+    if (!note.rows) return;
+    if (compiler->patch_note_count == compiler->patch_note_capacity) {
+        size_t next = compiler->patch_note_capacity ?
+                      compiler->patch_note_capacity * 2 : 16;
+        if (compiler->patch_note_capacity > SIZE_MAX / 2 / sizeof(*grown)) {
+            free(note.rows);
+            return;
+        }
+        grown = realloc(compiler->patch_notes, next * sizeof(*grown));
+        if (!grown) { free(note.rows); return; }
+        compiler->patch_notes = grown;
+        compiler->patch_note_capacity = next;
+    }
+    if (compiler->patch_note_count >= compiler->patch_note_slot_capacity / 2) {
+        size_t next = compiler->patch_note_slot_capacity ?
+                      compiler->patch_note_slot_capacity * 2 : 64;
+        size_t *slots;
+        if (compiler->patch_note_slot_capacity > SIZE_MAX / 2 / sizeof(*slots) ||
+            !(slots = calloc(next, sizeof(*slots)))) {
+            free(note.rows);
+            return;
+        }
+        free(compiler->patch_note_slots);
+        compiler->patch_note_slots = slots;
+        compiler->patch_note_slot_capacity = next;
+        for (size_t i = 0; i < compiler->patch_note_count; ++i) {
+            size_t at = (size_t)compiler->patch_notes[i].hash & (next - 1);
+            while (slots[at]) at = (at + 1) & (next - 1);
+            slots[at] = i + 1;
+        }
+    }
+    {
+        size_t mask = compiler->patch_note_slot_capacity - 1;
+        size_t at = (size_t)note.hash & mask;
+        while (compiler->patch_note_slots[at]) at = (at + 1) & mask;
+        compiler->patch_note_slots[at] = compiler->patch_note_count + 1;
+    }
     compiler->patch_notes[compiler->patch_note_count++] = note;
 }
 
@@ -5824,15 +5940,26 @@ static void yx_color_patch(const YRX_COMPILER *compiler, const char **lines,
         if (lines[i][sign] == '-') has_removal = true;
         group_length += lengths[i] + 1;
     }
-    for (size_t n = 0; compiler && n < compiler->patch_note_count; ++n) {
-        const char *rows = compiler->patch_notes[n].rows, *at = rows;
-        bool same = strlen(rows) + 1 == group_length;
-        for (size_t i = first; same && i < first + count; ++i) {
-            same = !memcmp(at, lines[i], lengths[i]) &&
-                   (at[lengths[i]] == (i + 1 < first + count ? '\n' : '\0'));
-            at += lengths[i] + 1;
+    /* The first note for these rows (the rows are one run of the report's
+     * text): found by hash, then compared in full. */
+    if (compiler && compiler->patch_note_slot_capacity && group_length) {
+        size_t length = group_length - 1, best = SIZE_MAX;
+        size_t mask = compiler->patch_note_slot_capacity - 1;
+        uint64_t hash = yx_warning_row_hash(lines[first], length);
+        for (size_t at = (size_t)hash & mask;
+             compiler->patch_note_slots[at]; at = (at + 1) & mask) {
+            size_t n = compiler->patch_note_slots[at] - 1;
+            const yx_patch_note *candidate = &compiler->patch_notes[n];
+            char *rows;
+            if (n >= best || candidate->hash != hash ||
+                candidate->length != length)
+                continue;
+            rows = yx_warning_expand(compiler, candidate->rows, NULL);
+            if (rows && memcmp(rows, lines[first], length) == 0) best = n;
+            free(rows);
+            if (best != SIZE_MAX) break;
         }
-        if (same) { note = &compiler->patch_notes[n]; break; }
+        if (best != SIZE_MAX) note = &compiler->patch_notes[best];
     }
     if (note) {
         for (size_t m = 0; m < note->mark_count; ++m) {
@@ -6096,9 +6223,26 @@ static char *yx_colorize_diagnostic(const YRX_COMPILER *compiler, const char *te
                     continue;
                 }
                 {
+                    /* A label's text, up to the next annotation on the
+                     * row: spaces then a run of markers. The spaces
+                     * between them keep no style. */
                     unsigned char color = last ? last : columns[at];
-                    if (color) memset(style + at, color, length - at);
-                    break;
+                    size_t label_end = length, next = length;
+                    for (size_t k = at; k + 1 < length; ++k) {
+                        size_t j = k;
+                        if (line[k] != ' ' || line[k + 1] != ' ') continue;
+                        while (j < length && line[j] == ' ') ++j;
+                        if (j < length && (line[j] == '^' || line[j] == '-')) {
+                            label_end = k;
+                            next = j;
+                            break;
+                        }
+                        k = j;
+                    }
+                    if (color) memset(style + at, color, label_end - at);
+                    if (next == length) break;
+                    at = next;
+                    continue;
                 }
             }
         } else if (length == indent + 3 && !memcmp(line + indent, "...", 3)) {
@@ -6154,6 +6298,13 @@ done:
     free(lengths);
     free(columns);
     return out;
+}
+
+/* One plain report text as YRX_COLORIZE_ERRORS renders it (compiler may be
+ * NULL: no patch notes). NULL: not a report, or out of memory. */
+char *yx_compiler_colorize_report(const YRX_COMPILER *compiler, const char *text)
+{
+    return text ? yx_colorize_diagnostic(compiler, text) : NULL;
 }
 
 /* A report array with each "text" value colorized. */
@@ -7143,6 +7294,9 @@ int yx_compiler_entrypoint_unsupported_error(YRX_COMPILER *compiler,
             "`macho.entry_point`\n%*s|\n%zu - %s\n%zu + %s\n%*s|",
             base, (int)digits + 1, "", (int)digits + 1, "",
             line, original, line, changed, (int)digits + 1, "")) goto done;
+    /* Colored, the patch marks the whole replaced span and replacement. */
+    yx_note_patch(compiler, text, offset, end - start,
+                  sizeof(replacement) - 1);
     json = yx_diagnostic_json("EntrypointUnsupported", "E017", title,
                               label, text, source, origin, start, end,
                               NULL, "error");
@@ -14618,6 +14772,7 @@ void yrx_compiler_destroy(YRX_COMPILER *compiler)
     for (size_t i = 0; i < compiler->patch_note_count; ++i)
         free(compiler->patch_notes[i].rows);
     free(compiler->patch_notes);
+    free(compiler->patch_note_slots);
     free((void *)compiler->warning_point_keys);
     free(compiler->warning_point_values);
     yx_free_globals(compiler->redefined_global_symbols,
@@ -16520,35 +16675,48 @@ YRX_RESULT yrx_compiler_warnings_json(YRX_COMPILER *compiler, YRX_BUFFER **buffe
     if (!buffer) return yx_null_argument("buf");
     *buffer = NULL;
     if (!compiler) return yx_null_argument("compiler");
-    for (size_t i = 0; i < compiler->warning_count; ++i) {
-        size_t length = yx_warning_expand_into(&compiler->warning_rows,
-                                               compiler->warnings[i], NULL);
-        /* size + length + separator + the terminator must fit. */
-        if (length == SIZE_MAX || size >= SIZE_MAX - 3 ||
-            length > SIZE_MAX - 2 - size - (i != 0))
-            return yx_fail(YRX_SERIALIZATION_ERROR, "warning JSON too large");
-        size += length + (i != 0);
-    }
-    json = (char *) malloc(size + 1);
-    if (!json) return yx_fail(YRX_SERIALIZATION_ERROR, "out of memory");
-    json[used++] = '[';
-    for (size_t i = 0; i < compiler->warning_count; ++i) {
-        if (i) json[used++] = ',';
-        used += yx_warning_expand_into(&compiler->warning_rows,
-                                       compiler->warnings[i], json + used);
-    }
-    json[used++] = ']';
-    json[used] = '\0';
     if (compiler->flags & YRX_COLORIZE_ERRORS) {
-        char *colored = yx_colorize_reports(compiler, json);
-        free(json);
-        if (!colored)
+        /* Each element colored on its own, as the array would be (a
+         * report's text closes its element): one element at a time beside
+         * the result. */
+        yx_warning_bytes out = {0};
+        bool ok = yx_warning_bytes_put(&out, "[", 1);
+        for (size_t i = 0; ok && i < compiler->warning_count; ++i) {
+            char *element = yx_compiler_warning_json(compiler, i);
+            ok = element && (!i || yx_warning_bytes_put(&out, ",", 1)) &&
+                 yx_warning_bytes_put(&out, element, strlen(element));
+            free(element);
+        }
+        if (!ok || !yx_warning_bytes_put(&out, "]", 1)) {
+            free(out.data);
             return yx_fail(YRX_SERIALIZATION_ERROR, "out of memory");
-        json = colored;
-        used = strlen(json);
+        }
+        json = out.data;
+        used = out.used;
+    } else {
+        for (size_t i = 0; i < compiler->warning_count; ++i) {
+            size_t length = yx_warning_expand_into(&compiler->warning_rows,
+                                                   compiler->warnings[i], NULL);
+            /* size + length + separator + the terminator must fit. */
+            if (length == SIZE_MAX || size >= SIZE_MAX - 3 ||
+                length > SIZE_MAX - 2 - size - (i != 0))
+                return yx_fail(YRX_SERIALIZATION_ERROR,
+                               "warning JSON too large");
+            size += length + (i != 0);
+        }
+        json = (char *) malloc(size + 1);
+        if (!json) return yx_fail(YRX_SERIALIZATION_ERROR, "out of memory");
+        json[used++] = '[';
+        for (size_t i = 0; i < compiler->warning_count; ++i) {
+            if (i) json[used++] = ',';
+            used += yx_warning_expand_into(&compiler->warning_rows,
+                                           compiler->warnings[i], json + used);
+        }
+        json[used++] = ']';
+        json[used] = '\0';
     }
-    result = yx_buffer_from_text(json, used, buffer);
-    free(json);
+    /* The buffer takes the text: no second copy of what can be large. */
+    result = yx_buffer_adopt_text(json, used, buffer);
     return result;
 }
 char *yx_compiler_warning_json(const YRX_COMPILER *compiler, size_t index)

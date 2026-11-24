@@ -358,7 +358,12 @@ typedef struct yx_ignored_rule {
 
 /* The spans a rendered `help:` patch replaces, for YRX_COLORIZE_ERRORS. */
 typedef struct yx_patch_note {
+    /* The patch rows in the stored form of compiler->warning_rows (one copy
+     * of a long source line for all the notes that show it), with their
+     * length and hash for the lookup. */
     char *rows;
+    size_t length;
+    uint64_t hash;
     size_t mark_count;
     size_t marks[16][3];
 } yx_patch_note;
@@ -436,6 +441,13 @@ struct YRX_COMPILER {
     unsigned char nul_json_space;
     yx_patch_note *patch_notes;
     size_t patch_note_count;
+    size_t patch_note_capacity;
+    /* Note index + 1 (0: empty), open addressing by the rows' hash. */
+    size_t *patch_note_slots;
+    size_t patch_note_slot_capacity;
+    /* Patch notes are kept for a caller that colours reports itself
+     * (yr on a terminal) as for YRX_COLORIZE_ERRORS. */
+    bool record_patch_notes;
     /* Global rules among rules->rules[0 .. global_rules_scanned): the rules
      * only grow until build replaces them, which resets both counts. */
     size_t global_rules_scanned, global_rule_count;
@@ -451,6 +463,11 @@ char *yx_compiler_warning_json(const YRX_COMPILER *compiler, size_t index);
  * lie outside a report's rendered text (a "code" field, for example). */
 bool yx_compiler_warnings_contain(const YRX_COMPILER *compiler,
                                   const char *needle);
+/* A plain report as YRX_COLORIZE_ERRORS renders it, using the patch notes
+ * of `compiler` (may be NULL). The caller frees it; NULL: not a report or
+ * out of memory. */
+char *yx_compiler_colorize_report(const YRX_COMPILER *compiler,
+                                  const char *text);
 
 /* Borrowed until the next scan, matching yrx_scanner_set_module_data. */
 typedef struct yx_scanner_module_data {

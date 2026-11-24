@@ -346,7 +346,15 @@ static void yx_cli_diagnostic_link(xx_terminal_writer *terminal, bool error,
 
 /* codespan-reporting's terminal palette. Source text remains uncolored;
  * severity titles, gutters and labels receive the same ANSI styles. */
-static void yx_cli_diagnostic_text(FILE *output, const char *text, size_t length)
+static bool yx_cli_report_start(const char *line, size_t count)
+{
+    return (count >= 6 && memcmp(line, "error[", 6) == 0) ||
+           (count >= 8 && memcmp(line, "warning[", 8) == 0);
+}
+
+static void yx_cli_diagnostic_text_with(FILE *output, const char *text,
+                                        size_t length,
+                                        const YRX_COMPILER *compiler)
 {
     bool colors = yx_cli_diagnostic_colors();
     bool error = false;
@@ -357,6 +365,35 @@ static void yx_cli_diagnostic_text(FILE *output, const char *text, size_t length
         const char *line = text + begin;
         while (end < length && text[end] != '\n') ++end;
         size_t count = end - begin;
+        if (colors && yx_cli_report_start(line, count)) {
+            /* A report, through the next report or `error:` line: styled
+             * as YARA-X's renderer styles it (the compiler's colorizer). */
+            size_t stop = end, size;
+            char *copy, *colored = NULL;
+            while (stop < length) {
+                size_t next = stop + 1, next_end = next;
+                while (next_end < length && text[next_end] != '\n') ++next_end;
+                if (yx_cli_report_start(text + next, next_end - next) ||
+                    (next_end - next >= 6 && memcmp(text + next, "error:", 6) == 0) ||
+                    (next_end - next >= 8 && memcmp(text + next, "warning:", 8) == 0))
+                    break;
+                stop = next_end;
+            }
+            size = stop - begin;
+            copy = (char *)malloc(size + 1);
+            if (copy) {
+                memcpy(copy, line, size);
+                copy[size] = '\0';
+                colored = yx_compiler_colorize_report(compiler, copy);
+            }
+            if (colored) fputs(colored, output);
+            else fwrite(line, 1, size, output);
+            free(colored);
+            free(copy);
+            if (stop < length) fputc('\n', output);
+            begin = stop + 1;
+            continue;
+        }
         if (!colors) fwrite(line, 1, count, output);
         else if ((count >= 6 && memcmp(line, "error[", 6) == 0) ||
                  (count >= 8 && memcmp(line, "warning[", 8) == 0)) {
@@ -411,10 +448,28 @@ static void yx_cli_diagnostic_text(FILE *output, const char *text, size_t length
     }
 }
 
-static void yx_cli_diagnostic_report(const char *report)
+static void yx_cli_diagnostic_text(FILE *output, const char *text, size_t length)
+{
+    yx_cli_diagnostic_text_with(output, text, length, NULL);
+}
+
+/* YARA-X's yr colours the compiler's reports when stdout is a terminal
+ * (compile_rules: colorize_errors(stdout().is_tty())). The reports stay
+ * plain for the CLI's own parsing; the compiler keeps the patch spans so
+ * that the same colours can be applied when one is shown. */
+static void yx_cli_compiler_colors(YRX_COMPILER *compiler)
+{
+    if (compiler) compiler->record_patch_notes = yx_cli_diagnostic_colors();
+}
+
+/* A report of `compiler`, whose patch notes give the colours of a `help:`
+ * patch (NULL: none). */
+static void yx_cli_diagnostic_report(const YRX_COMPILER *compiler,
+                                     const char *report)
 {
     if (yx_cli_worker_stderr) fputs(report, stderr);
-    else yx_cli_diagnostic_text(stderr, report, strlen(report));
+    else yx_cli_diagnostic_text_with(stderr, report, strlen(report),
+                                     compiler);
     fputc('\n', stderr);
 }
 
@@ -2173,7 +2228,7 @@ static bool yx_cli_emit_warnings(YRX_COMPILER *compiler,
             if (valid) valid = xx_json_object_end(&json);
             if (valid && code && report && !disable_all &&
                 !yx_cli_warning_disabled(code, disabled)) {
-                yx_cli_diagnostic_report(report);
+                yx_cli_diagnostic_report(compiler, report);
                 if (displayed) ++*displayed;
             }
             xx_str_free(code);
@@ -5197,6 +5252,7 @@ unexpected_option:
         fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() : "cannot create compiler");
         goto done;
     }
+    yx_cli_compiler_colors(compiler);
     /* Warnings that will not be shown are not rendered (compile_rules'
      * switch_warning). */
     compiler->warnings_all_disabled = disable_all_warnings;
@@ -31973,7 +32029,7 @@ static bool yx_cli_check_reports(YRX_COMPILER *compiler, bool errors,
             }
             if (valid) valid = xx_json_object_end(&json);
             if (valid && report) {
-                yx_cli_diagnostic_report(report);
+                yx_cli_diagnostic_report(compiler, report);
                 ++*count;
             }
             xx_str_free(report);
@@ -33200,6 +33256,47 @@ static void yx_cli_unused_identifier_warning(const char *path,
 
 /* Fallback for warning paths without a compiler diagnostic. Track lexical
  * bindings, including references in later initializers and shadowed scopes. */
+/* Sorts the indices of `bindings` by scope start (`by_end`: by scope end),
+ * keeping the creation order among equal keys (a stable merge sort). */
+static void yx_cli_sort_bindings(const yx_cli_with_binding *bindings,
+                                 size_t *order, size_t count, bool by_end)
+{
+    size_t *scratch;
+    if (count < 2) return;
+    scratch = (size_t *)malloc(count * sizeof(*scratch));
+    if (!scratch) {
+        /* Insertion sort: the same order, without the buffer. */
+        for (size_t i = 1; i < count; ++i) {
+            size_t value = order[i], j = i;
+            size_t key = by_end ? bindings[value].end : bindings[value].begin;
+            while (j && (by_end ? bindings[order[j - 1]].end :
+                                  bindings[order[j - 1]].begin) > key) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = value;
+        }
+        return;
+    }
+    for (size_t width = 1; width < count; width *= 2) {
+        for (size_t left = 0; left < count; left += 2 * width) {
+            size_t middle = left + width < count ? left + width : count;
+            size_t right = middle + width < count ? middle + width : count;
+            size_t x = left, y = middle, at = left;
+            while (x < middle || y < right) {
+                bool take_left = y >= right ||
+                    (x < middle &&
+                     (by_end ? bindings[order[x]].end : bindings[order[x]].begin) <=
+                     (by_end ? bindings[order[y]].end : bindings[order[y]].begin));
+                scratch[at++] = take_left ? order[x++] : order[y++];
+            }
+        }
+        memcpy(order, scratch, count * sizeof(*order));
+        if (width > count / 2) break;
+    }
+    free(scratch);
+}
+
 static bool yx_cli_check_unused_identifiers(const char *path,
                                              const uint8_t *source,
                                              size_t length, size_t *count)
@@ -33207,7 +33304,8 @@ static bool yx_cli_check_unused_identifiers(const char *path,
     yx_dep_tokens tokens = {0};
     yx_cli_with_binding *bindings = NULL;
     bool *declaration = NULL, ok = false;
-    size_t binding_count = 0;
+    size_t binding_count = 0, *by_begin = NULL, *open = NULL;
+    size_t next = 0, open_count = 0;
     *count = 0;
     if (!yx_dep_lex(source, length, &tokens)) goto done;
     bindings = (yx_cli_with_binding *)calloc(tokens.count ? tokens.count : 1,
@@ -33260,9 +33358,33 @@ static bool yx_cli_check_unused_identifiers(const char *path,
             }
         }
     }
+    /* Bindings in the order of their scope's start; a walk over the tokens
+     * keeps the ones whose scope is open, so each use is matched against
+     * the bindings around it only (linear in the rules, not quadratic). */
+    by_begin = (size_t *)malloc((binding_count ? binding_count : 1) *
+                                sizeof(*by_begin));
+    open = (size_t *)malloc((binding_count ? binding_count : 1) *
+                            sizeof(*open));
+    if (!by_begin || !open) goto done;
+    for (size_t i = 0; i < binding_count; ++i) by_begin[i] = i;
+    yx_cli_sort_bindings(bindings, by_begin, binding_count, false);
     for (size_t i = 0; i < tokens.count; ++i) {
-        size_t selected = binding_count;
+        size_t selected = binding_count, kept = 0;
         yx_dep_token usage = tokens.items[i];
+        while (next < binding_count && bindings[by_begin[next]].begin <= i) {
+            /* `open` stays in creation order: the first of the innermost
+             * bindings wins, as before. */
+            size_t at = open_count, added = by_begin[next++];
+            while (at && open[at - 1] > added) {
+                open[at] = open[at - 1];
+                --at;
+            }
+            open[at] = added;
+            ++open_count;
+        }
+        for (size_t j = 0; j < open_count; ++j)
+            if (bindings[open[j]].end > i) open[kept++] = open[j];
+        open_count = kept;
         /* The dependency lexer keeps `0..name` in one numeric token. The
          * range endpoint is still a lexical use of its bound identifier. */
         if (usage.kind == YX_DEP_OTHER && usage.length &&
@@ -33280,7 +33402,8 @@ static bool yx_cli_check_unused_identifiers(const char *path,
             (i && yx_dep_symbol(&tokens.items[i - 1], '.') &&
              !(i >= 2 && yx_dep_symbol(&tokens.items[i - 2], '.'))))
             continue;
-        for (size_t j = 0; j < binding_count; ++j) {
+        for (size_t o = 0; o < open_count; ++o) {
+            size_t j = open[o];
             const yx_cli_with_binding *binding = &bindings[j];
             const yx_dep_token *name = &tokens.items[binding->name];
             if (i < binding->begin || i >= binding->end ||
@@ -33292,25 +33415,35 @@ static bool yx_cli_check_unused_identifiers(const char *path,
         }
         if (selected != binding_count) bindings[selected].used = true;
     }
-    for (size_t i = 0; i < binding_count; ++i) {
-        if (!bindings[i].used) continue;
-        const yx_dep_token *name = &tokens.items[bindings[i].name];
-        for (size_t j = 0; j < binding_count; ++j) {
-            const yx_dep_token *other = &tokens.items[bindings[j].name];
-            if (bindings[i].end == bindings[j].end &&
-                name->length == other->length &&
-                memcmp(name->text, other->text, name->length) == 0)
-                bindings[j].used = true;
+    /* A used name marks the bindings of the same name that end with it;
+     * then the bindings in the order of their scope's end (stable). */
+    for (size_t i = 0; i < binding_count; ++i) by_begin[i] = i;
+    yx_cli_sort_bindings(bindings, by_begin, binding_count, true);
+    for (size_t first = 0; first < binding_count;) {
+        size_t last = first + 1;
+        while (last < binding_count &&
+               bindings[by_begin[last]].end == bindings[by_begin[first]].end)
+            ++last;
+        for (size_t x = first; x < last; ++x) {
+            const yx_dep_token *name = &tokens.items[bindings[by_begin[x]].name];
+            if (!bindings[by_begin[x]].used) continue;
+            for (size_t y = first; y < last; ++y) {
+                const yx_dep_token *other =
+                    &tokens.items[bindings[by_begin[y]].name];
+                if (name->length == other->length &&
+                    memcmp(name->text, other->text, name->length) == 0)
+                    bindings[by_begin[y]].used = true;
+            }
         }
+        first = last;
     }
-    for (size_t i = 1; i < binding_count; ++i) {
-        yx_cli_with_binding binding = bindings[i];
-        size_t j = i;
-        while (j && bindings[j - 1].end > binding.end) {
-            bindings[j] = bindings[j - 1];
-            --j;
-        }
-        bindings[j] = binding;
+    {
+        yx_cli_with_binding *sorted = (yx_cli_with_binding *)malloc(
+            (binding_count ? binding_count : 1) * sizeof(*sorted));
+        if (!sorted) goto done;
+        for (size_t i = 0; i < binding_count; ++i) sorted[i] = bindings[by_begin[i]];
+        free(bindings);
+        bindings = sorted;
     }
     for (size_t i = 0; i < binding_count; ++i) {
         if (bindings[i].used) continue;
@@ -33320,6 +33453,8 @@ static bool yx_cli_check_unused_identifiers(const char *path,
     }
     ok = true;
 done:
+    free(by_begin);
+    free(open);
     free(bindings);
     free(declaration);
     free(tokens.items);
@@ -34235,6 +34370,7 @@ static int yx_cli_check_file(const char *path,
         if (config->metadata_count) {
             if (!yx_cli_check_lint_source(source, length, &lint_source) ||
                 yrx_compiler_create(0, &compiler) != YRX_SUCCESS) goto done;
+            yx_cli_compiler_colors(compiler);
             (void)yx_compiler_add_source_bytes(compiler, lint_source, length, path);
         }
         for (size_t i = 0; i < syntax.item_count; ++i) {
@@ -34269,6 +34405,7 @@ static int yx_cli_check_file(const char *path,
         compiler = NULL;
     }
     if (yrx_compiler_create(0, &compiler) != YRX_SUCCESS) goto done;
+    yx_cli_compiler_colors(compiler);
     result = yx_compiler_add_source_bytes(compiler,
         compile_source ? compile_source : source, length, path);
     if (result != YRX_SUCCESS &&
@@ -35646,7 +35783,7 @@ static bool yx_cli_emit_warnings_with_imports(
                 char *report = yx_cli_core_warning_report(compiler,
                                                           &core[next]);
                 if (!report) goto done;
-                yx_cli_diagnostic_report(report);
+                yx_cli_diagnostic_report(compiler, report);
                 xx_str_free(report);
                 if (displayed) ++*displayed;
             }
@@ -35737,6 +35874,7 @@ static bool yx_cli_import_keyword_in(const uint8_t *source, size_t length,
 }
 
 static bool yx_cli_emit_ordered_warnings(
+    const YRX_COMPILER *compiler,
     const char *path, const uint8_t *source, size_t length,
     const yx_cli_core_warning *core, size_t core_count, size_t *next_core,
     const yx_cli_duplicate_event *duplicates, size_t duplicate_count,
@@ -35776,7 +35914,7 @@ static bool yx_cli_emit_ordered_warnings(
                 !yx_cli_emit_included_imports(path, &core[*next_core],
                     included_imports_seen, included_import_count, NULL))
                 return false;
-            yx_cli_diagnostic_report(core[*next_core].report);
+            yx_cli_diagnostic_report(compiler, core[*next_core].report);
             ++*next_core;
             ++*core_displayed;
         } else {
@@ -35982,7 +36120,7 @@ static bool yx_cli_check_text_hex_compiled(
                                         end) &&
             yx_fix_hex_as_text(source, start, end, &literal)) {
             if (core_warning_count && duplicate_warning_count) {
-                if (!yx_cli_emit_ordered_warnings(path, source, length,
+                if (!yx_cli_emit_ordered_warnings(compiler, path, source, length,
                     core_warnings, core_warnings_length, &next_core_warning,
                     duplicates, duplicate_length, &next_duplicate, start,
                     false, core_warning_count, duplicate_warning_count,
@@ -36014,7 +36152,7 @@ static bool yx_cli_check_text_hex_compiled(
         i = close;
     }
     if (core_warning_count && duplicate_warning_count) {
-        if (!yx_cli_emit_ordered_warnings(path, source, length, core_warnings,
+        if (!yx_cli_emit_ordered_warnings(compiler, path, source, length, core_warnings,
             core_warnings_length, &next_core_warning, duplicates,
             duplicate_length, &next_duplicate, SIZE_MAX, true,
             core_warning_count, duplicate_warning_count,
@@ -36022,7 +36160,8 @@ static bool yx_cli_check_text_hex_compiled(
             &included_import_count,
             import_cursor, import_warning_count)) goto done;
     } else while (next_core_warning < core_warnings_length) {
-        yx_cli_diagnostic_report(core_warnings[next_core_warning].report);
+        yx_cli_diagnostic_report(compiler,
+                                 core_warnings[next_core_warning].report);
         ++*core_warning_count;
         ++next_core_warning;
     }
@@ -36297,6 +36436,151 @@ static void yx_fix_hash_case_note(const uint8_t *source, size_t length,
     fprintf(stderr, "\n%*s|\n", (int)(digits + 1), "");
 }
 
+/* A name bound by a `with` declaration or a `for` variable: its token and
+ * the tokens [from, to) where it is in scope. */
+typedef struct yx_fix_binding {
+    size_t name, from, to;
+} yx_fix_binding;
+
+static int yx_fix_binding_order(const void *a, const void *b)
+{
+    const yx_fix_binding *x = (const yx_fix_binding *)a;
+    const yx_fix_binding *y = (const yx_fix_binding *)b;
+    return x->from < y->from ? -1 : x->from > y->from ? 1 : 0;
+}
+
+static bool yx_fix_binding_push(yx_fix_binding **items, size_t *count,
+                                size_t *capacity, size_t name, size_t from,
+                                size_t to)
+{
+    if (*count == *capacity) {
+        size_t next = *capacity ? *capacity * 2 : 16;
+        yx_fix_binding *grown;
+        if (*capacity > SIZE_MAX / 2 / sizeof(**items)) return false;
+        grown = (yx_fix_binding *)realloc(*items, next * sizeof(**items));
+        if (!grown) return false;
+        *items = grown;
+        *capacity = next;
+    }
+    (*items)[*count].name = name;
+    (*items)[*count].from = from;
+    (*items)[*count].to = to;
+    ++*count;
+    return true;
+}
+
+/* bound[t] is true for the identifier tokens that name a `with` declaration
+ * or a `for` variable in scope there: such a binding shadows the built-in
+ * function or module of that name (YARA-X resolves a symbol in the
+ * innermost scope), so `with uint8 = uint16 : (uint8(0) == 0x6261)` reads
+ * 16 bits. A declaration is in scope after its own initializer (in the
+ * later declarations and the body); a `for` variable in the body. One pass
+ * over the tokens: the walk keeps the bindings whose scope is open. The
+ * caller frees *bound; false: out of memory. */
+static bool yx_fix_bound_tokens(const yx_dep_tokens *tokens, bool **bound)
+{
+    size_t count = tokens->count, *close = NULL, *open = NULL, opened = 0;
+    size_t binding_count = 0, binding_capacity = 0, next = 0;
+    size_t active_count = 0, active_capacity = 0;
+    yx_fix_binding *bindings = NULL, *active = NULL;
+    bool ok = false;
+    *bound = (bool *)calloc(count ? count : 1, sizeof(**bound));
+    close = (size_t *)malloc((count ? count : 1) * sizeof(*close));
+    open = (size_t *)malloc((count ? count : 1) * sizeof(*open));
+    if (!*bound || !close || !open) goto done;
+    /* The `)` closing each `(` (SIZE_MAX: none). */
+    for (size_t i = 0; i < count; ++i) {
+        close[i] = SIZE_MAX;
+        if (yx_dep_symbol(&tokens->items[i], '(')) open[opened++] = i;
+        else if (yx_dep_symbol(&tokens->items[i], ')') && opened)
+            close[open[--opened]] = i;
+    }
+    for (size_t j = 0; j < count; ++j) {
+        bool with = yx_dep_equal(&tokens->items[j], "with");
+        bool loop = yx_dep_equal(&tokens->items[j], "for");
+        size_t k, depth = 0, colon = SIZE_MAX, first = binding_count, end;
+        bool names_done = false, declaration_start = true;
+        if (!with && !loop) continue;
+        for (k = j + 1; k < count; ++k) {
+            const yx_dep_token *t = &tokens->items[k];
+            if (yx_dep_symbol(t, '(') || yx_dep_symbol(t, '[')) {
+                ++depth;
+                continue;
+            }
+            if (yx_dep_symbol(t, ')') || yx_dep_symbol(t, ']')) {
+                if (!depth) break;
+                --depth;
+                continue;
+            }
+            if (depth) continue;
+            if (yx_dep_symbol(t, ':')) { colon = k; break; }
+            if (with && yx_dep_symbol(t, ',')) {
+                /* The declaration before this comma is in scope from it. */
+                for (size_t d = first; d < binding_count; ++d)
+                    if (bindings[d].from == SIZE_MAX) bindings[d].from = k;
+                declaration_start = true;
+                continue;
+            }
+            if (t->kind != YX_DEP_IDENT) { declaration_start = false; continue; }
+            if (loop && (yx_dep_equal(t, "in") || yx_dep_equal(t, "of")))
+                names_done = true;
+            if (with && declaration_start && k + 1 < count &&
+                yx_dep_symbol(&tokens->items[k + 1], '=') &&
+                !(k + 2 < count && yx_dep_symbol(&tokens->items[k + 2], '='))) {
+                if (!yx_fix_binding_push(&bindings, &binding_count,
+                                         &binding_capacity, k, SIZE_MAX,
+                                         SIZE_MAX)) goto done;
+            } else if (loop && k >= j + 2 && !names_done) {
+                if (!yx_fix_binding_push(&bindings, &binding_count,
+                                         &binding_capacity, k, SIZE_MAX,
+                                         SIZE_MAX)) goto done;
+            }
+            declaration_start = false;
+        }
+        /* The scope ends with the body's `)`; without a body, nothing. */
+        end = colon != SIZE_MAX && colon + 1 < count &&
+              yx_dep_symbol(&tokens->items[colon + 1], '(') ?
+              close[colon + 1] : SIZE_MAX;
+        for (size_t d = first; d < binding_count; ++d) {
+            if (end == SIZE_MAX) { bindings[d].from = bindings[d].to = 0; continue; }
+            if (bindings[d].from == SIZE_MAX || loop) bindings[d].from = colon;
+            bindings[d].to = end;
+        }
+    }
+    if (binding_count)
+        qsort(bindings, binding_count, sizeof(*bindings), yx_fix_binding_order);
+    for (size_t t = 0; t < count; ++t) {
+        const yx_dep_token *token = &tokens->items[t];
+        size_t kept = 0;
+        while (next < binding_count && bindings[next].from < t) {
+            if (bindings[next].to > t &&
+                !yx_fix_binding_push(&active, &active_count,
+                                     &active_capacity, bindings[next].name,
+                                     bindings[next].from, bindings[next].to))
+                goto done;
+            ++next;
+        }
+        for (size_t i = 0; i < active_count; ++i)
+            if (active[i].to > t) active[kept++] = active[i];
+        active_count = kept;
+        if (token->kind != YX_DEP_IDENT) continue;
+        for (size_t i = 0; i < active_count && !(*bound)[t]; ++i) {
+            const yx_dep_token *name = &tokens->items[active[i].name];
+            if (name->length == token->length &&
+                memcmp(name->text, token->text, name->length) == 0)
+                (*bound)[t] = true;
+        }
+    }
+    ok = true;
+done:
+    free(close);
+    free(open);
+    free(bindings);
+    free(active);
+    if (!ok) { free(*bound); *bound = NULL; }
+    return ok;
+}
+
 static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
                                               bool warning_from_core,
                                               size_t *warnings,
@@ -36306,12 +36590,15 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
     yx_suppression_scope suppressions = {0};
     size_t length = 0;
     yx_dep_tokens tokens = {0};
+    bool *bound = NULL;
     bool ok = false;
     if (!enabled || warning_from_core) return true;
     if (!yx_cli_read_file(path, &source, &length) ||
         !yx_dep_lex(source, length, &tokens)) goto done;
     /* One scan for the suppression comments of the file. */
     yx_suppression_scope_begin(&suppressions, source, length);
+    /* The names a `with` or `for` binds, which can shadow a function. */
+    if (!yx_fix_bound_tokens(&tokens, &bound)) goto done;
     for (size_t i = 0; i + 1 < tokens.count; ++i) {
         size_t prefix = i, close, literal_index, func_start, func_end;
         size_t literal_start, literal_end, left_start, left_end;
@@ -36332,7 +36619,8 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
             if (digest_length) { hash = true; prefix = i - 2; }
         } else if (yx_fix_read_integer_range(&tokens.items[i], &minimum,
                                               &maximum)) read = true;
-        if ((!hash && !read) || !yx_dep_symbol(&tokens.items[i + 1], '('))
+        if ((!hash && !read) || !yx_dep_symbol(&tokens.items[i + 1], '(') ||
+            bound[prefix])
             continue;
         /* `-uint8(0) == -77`: the operand is an Expr::Minus / BitwiseNot / Sub
          * value, which has no integer range. */
@@ -36442,6 +36730,7 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled,
     ok = true;
 done:
     yx_suppression_scope_end(&suppressions);
+    free(bound);
     free(source);
     free(tokens.items);
     return ok;
@@ -38082,6 +38371,7 @@ static int yx_cli_fix_warnings(int argc, char **argv)
                                     disable_values, disable_value_count)) goto done;
     if (yrx_compiler_create(options.compiler_flags, &compiler) != YRX_SUCCESS)
         goto done;
+    yx_cli_compiler_colors(compiler);
     /* Warnings that will not be shown are not rendered (compile_rules'
      * switch_warning). */
     compiler->warnings_all_disabled = disable_all;
@@ -38960,6 +39250,7 @@ static int yx_cli_compile_command(int argc, char **argv)
         goto done;
     if (yrx_compiler_create(options.compiler_flags, &compiler) != YRX_SUCCESS)
         goto api_error;
+    yx_cli_compiler_colors(compiler);
     /* Warnings that will not be shown are not rendered (compile_rules'
      * switch_warning). */
     compiler->warnings_all_disabled = disable_all_warnings;

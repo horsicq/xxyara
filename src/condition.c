@@ -11723,6 +11723,84 @@ static bool yx_scope_hides_module(const yx_scope_name *scope, const char *path)
     return entry && !entry->imported_module;
 }
 
+/* The module functions YARA-X lists in a wrong-arguments note (parser.c)
+ * none of whose signatures has a regexp argument. */
+static bool yx_function_without_regexp(const char *name)
+{
+    static const char *const names[] = {
+        "console.hex", "console.log", "crx.permhash", "dex.checksum",
+        "dex.contains_class", "dex.contains_method", "dex.contains_string",
+        "dex.signature", "elf.import_md5", "elf.telfhash", "hash.checksum32",
+        "hash.crc32", "hash.md5", "hash.sha1", "hash.sha256",
+        "macho.dylib_hash", "macho.entitlement_hash",
+        "macho.entry_point_for_arch", "macho.export_hash",
+        "macho.file_index_for_arch", "macho.has_dylib",
+        "macho.has_entitlement", "macho.has_export", "macho.has_import",
+        "macho.has_rpath", "macho.import_hash", "macho.symhash", "math.abs",
+        "math.count", "math.deviation", "math.entropy", "math.in_range",
+        "math.max", "math.mean", "math.min", "math.mode",
+        "math.monte_carlo_pi", "math.percentage", "math.serial_correlation",
+        "math.to_number", "math.to_string", "pe.calculate_checksum",
+        "pe.delayed_import_rva", "pe.imphash", "pe.import_rva", "pe.is_32bit",
+        "pe.is_64bit", "pe.is_dll", "pe.language", "pe.locale",
+        "pe.offset_to_rva", "pe.rich_signature.toolid",
+        "pe.rich_signature.version", "pe.rva_to_offset", "pe.section_index",
+        "string.length", "string.to_int", "time.now"
+    };
+    if (!name) return false;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (strcmp(name, names[i]) == 0) return true;
+    return false;
+}
+
+/* True when a regexp literal argument of `node` (a call) is where none of
+ * the function's signatures with that many arguments takes a regexp. */
+static bool yx_call_has_regexp(const yx_node *node)
+{
+    /* The signatures with regexp arguments: 'r' regexp, other letters any
+     * other type (the order of the wrong-arguments note in parser.c). */
+    static const struct { const char *name; const char *signatures; } with_regexp[] = {
+        {"cuckoo.filesystem.file_access", "r"},
+        {"cuckoo.network.dns_lookup", "r"},
+        {"cuckoo.network.host", "r"},
+        {"cuckoo.network.http_get", "r"},
+        {"cuckoo.network.http_post", "r"},
+        {"cuckoo.network.http_request", "r"},
+        {"cuckoo.network.http_user_agent", "r"},
+        {"cuckoo.network.tcp", "ri"},
+        {"cuckoo.network.udp", "ri"},
+        {"cuckoo.registry.key_access", "r"},
+        {"cuckoo.sync.mutex", "r"},
+        {"pe.exports", "r s i"},
+        {"pe.exports_index", "r s i"},
+        {"pe.imports", "rr ss si s irr iss isi is"}
+    };
+    const char *signatures = NULL;
+    bool any = false;
+    for (size_t i = 0; i < node->item_count; ++i)
+        if (node->items[i] && node->items[i]->kind == N_REGEX) any = true;
+    if (!any) return false;
+    if (yx_function_without_regexp(node->name)) return true;
+    for (size_t i = 0; node->name &&
+         i < sizeof(with_regexp) / sizeof(with_regexp[0]); ++i)
+        if (strcmp(node->name, with_regexp[i].name) == 0)
+            signatures = with_regexp[i].signatures;
+    if (!signatures) return false;
+    for (size_t i = 0; i < node->item_count; ++i) {
+        const char *at = signatures;
+        bool allowed = false;
+        if (!node->items[i] || node->items[i]->kind != N_REGEX) continue;
+        while (*at) {
+            size_t length = strcspn(at, " ");
+            if (length == node->item_count && at[i] == 'r') allowed = true;
+            at += length;
+            if (*at == ' ') ++at;
+        }
+        if (!allowed) return true;
+    }
+    return false;
+}
+
 static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                                   bool inside_for_of,
                                   const yx_scope_name *scope,
@@ -11733,6 +11811,12 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
     bool feature_operands_checked = false;
     *spine = NULL;
     if (!node) return true;
+    /* A regexp argument of a function none of whose signatures takes one:
+     * the other arguments are converted, then no signature matches
+     * (ast2ir's func_call, E004 wrong arguments). */
+    if ((node->kind == N_READ && node->a && node->a->kind == N_REGEX) ||
+        (node->kind == N_CALL && yx_call_has_regexp(node)))
+        return yx_wrong_arguments_error(state, node);
     /* A name that stands for a function (a `with` declaration), read
      * without a call: a value of type function, at the name. */
     if (node->function_alias && !node->alias_value && node->name &&
@@ -14563,10 +14647,13 @@ static void yx_validate_operands_first(const yx_node *node,
             if (ok && node->b && node->b->kind != N_REGEX)
                 ok = yx_validate_node(node->b, state, inside_for_of, scope);
         } else {
-            ok = node->kind != N_READ ||
+            /* A regexp literal argument compiles; the call rejects it. */
+            ok = node->kind != N_READ || !node->a ||
+                 node->a->kind == N_REGEX ||
                  yx_validate_node(node->a, state, inside_for_of, scope);
             for (size_t i = 0; ok && i < node->item_count; ++i)
-                ok = yx_validate_node(node->items[i], state, inside_for_of, scope);
+                ok = node->items[i]->kind == N_REGEX ||
+                     yx_validate_node(node->items[i], state, inside_for_of, scope);
         }
         if (ok) memcpy(state->error, saved, length + 1);
         free(saved);

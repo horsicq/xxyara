@@ -1638,7 +1638,10 @@ static yx_ser_result yx_physical_load_part(const yx_physical_parts_job *job,size
         yx_chain_archive *literal=calloc(1,sizeof(*literal));
         if(!literal){status=YX_SER_NO_MEMORY;goto done;}
         if(!yx_chain_frames_reserve(literal,1)){free(literal);status=YX_SER_NO_MEMORY;goto done;}
-        literal->atoms=calloc(YX_CHAIN_MAX_ATOMS,sizeof(*literal->atoms));
+        /* Room for every atom yx_literal_frame_atoms may add; it writes each
+         * atom whole, so the block needs no zeroing (the pages it never
+         * reaches stay untouched). */
+        literal->atoms=malloc(YX_CHAIN_MAX_ATOMS*sizeof(*literal->atoms));
         if(!literal->atoms){yx_chain_storage_destroy(literal);free(literal);status=YX_SER_NO_MEMORY;goto done;}
         for(size_t i=0;i<one->frame_count;++i) {
             if(!one->frames[i].anchored)continue;

@@ -1257,6 +1257,9 @@ static int yx_parse_modifiers(yx_parser *p, YRX_PATTERN *pattern)
         char *word = yx_ident(p);
         if (!word) return 1;
         const char *modifier_start = p->at - strlen(word);
+        /* The modifier's span ends with its word, or with the `)` closing
+         * its arguments: never past whitespace or a comment after it. */
+        const char *token_end = p->at;
         unsigned bit = 0;
         if (strcmp(word, "ascii") == 0) bit = YX_MOD_ASCII;
         else if (strcmp(word, "wide") == 0) bit = YX_MOD_WIDE;
@@ -1363,6 +1366,7 @@ static int yx_parse_modifiers(yx_parser *p, YRX_PATTERN *pattern)
                     free(word);
                     return 0;
                 }
+                token_end = p->at;
             }
         }
         if (bit == YX_MOD_XOR) {
@@ -1408,14 +1412,12 @@ static int yx_parse_modifiers(yx_parser *p, YRX_PATTERN *pattern)
                     free(word);
                     return 0;
                 }
+                token_end = p->at;
                 pattern->xor_min = (uint8_t)min;
                 pattern->xor_max = (uint8_t)max;
             }
         }
-        const char *modifier_end = p->at;
-        while (modifier_end > modifier_start &&
-               isspace((unsigned char)modifier_end[-1])) --modifier_end;
-        p->modifier_end[modifier_index] = modifier_end;
+        p->modifier_end[modifier_index] = token_end;
         free(word);
     }
 }
