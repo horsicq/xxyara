@@ -222,6 +222,9 @@ typedef struct yx_node {
      * expression operand. */
     bool paren_bool;
     size_t paren_open; /* offset of the outermost '(' of a paren_bool term */
+    /* The end of the outermost ')' around a parenthesized node, 0 when it
+     * has none. */
+    size_t paren_close;
     /* A read function called with other than one argument. */
     bool read_arity_error;
     /* What YARA-X reports when this node's variable frame does not fit
@@ -411,6 +414,22 @@ bool yx_condition_run_deep(const yx_condition *condition, void (*call)(void *), 
 {
     size_t depth = condition ? condition->depth : 0;
     if (depth < YX_DEEP_TREE_DEPTH) return false;
+    return yx_run_deep(depth, call, data);
+}
+/* Whether the current thread is a deep one (yx_run_deep) with room for a
+ * walk `depth` levels deep. */
+bool yx_deep_stack_ready(size_t depth)
+{
+    size_t minimum = depth <= (SIZE_MAX - ((size_t)32 << 20)) / YX_DEEP_LEVEL_MINIMUM ?
+                     depth * YX_DEEP_LEVEL_MINIMUM + ((size_t)32 << 20) : SIZE_MAX;
+    return minimum != SIZE_MAX && yx_deep_room() >= minimum;
+}
+/* Runs call(data) on a stack that holds a walk `depth` levels deep: in
+ * place when the current one does (yx_deep_stack_ready), else on a thread
+ * joined before this returns. False when it could not run. */
+bool yx_run_deep_walk(size_t depth, void (*call)(void *), void *data)
+{
+    if (depth < YX_DEEP_TREE_DEPTH) depth = YX_DEEP_TREE_DEPTH;
     return yx_run_deep(depth, call, data);
 }
 
@@ -3997,6 +4016,7 @@ static yx_node *yx_parse_primary(yx_parser *p)
         node = yx_parse_expr(p, 1);
         if (!node || !yx_expect(p, TK_RPAREN, "')'")) return NULL;
         node->parenthesized = true;
+        node->paren_close = p->previous_token.offset + p->previous_token.length;
         if (yx_boolean_term(node)) {
             node->paren_bool = true;
             node->paren_open = token.offset;
@@ -6113,8 +6133,12 @@ int yx_condition_alias_free_text(const char *expression, char **text)
                     /* That operand is the IR of `(true and (A and B)) and
                      * C` (`false or` for `or`): the neutral constant that
                      * the n-ary operation drops keeps the body apart. */
-                    if (frame || body != node->body) goto done;
+                    /* A statement that keeps its frame keeps it around
+                     * that operand: `with ? : (true and (A and B))`. */
+                    if (body != node->body) goto done;
                     yx_alias_text_add(&edits, node->with_start, node->with_colon + 1,
+                        frame ? yx_alias_text_markers("with ", aliases, false,
+                                    node->alias_chain_parent == 1 ? " : (true and" : " : (false or") :
                         yx_copy(node->alias_chain_parent == 1 ? "(true and" : "(false or", 9));
                     yx_alias_text_add(&edits, node->with_close + 1, node->with_close + 1,
                                       yx_copy(")", 1));
@@ -6607,6 +6631,10 @@ typedef struct {
     size_t error_capacity;
     /* Nodes whose validation has failed; see yx_validate_operands_first. */
     size_t failures;
+    /* The pattern names hashed without their `$` (index + 1, 0 empty), so
+     * that a pattern reference is found without a pass over all of them. */
+    size_t *pattern_slots;
+    size_t pattern_slot_mask;
     /* The end of the innermost node whose own check failed (0 unknown):
      * YARA-X has converted the operands up to there when it reports the
      * error, an operation's operands before their types. */
@@ -14293,7 +14321,19 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
             }
         } else {
             found = false;
-            for (i = 0; i < state->pattern_count; i++) {
+            if (state->pattern_slots) {
+                size_t at = (size_t)yx_scope_hash(node->name, strlen(node->name)) &
+                            state->pattern_slot_mask;
+                for (; state->pattern_slots[at]; at = (at + 1) & state->pattern_slot_mask) {
+                    size_t index = state->pattern_slots[at] - 1;
+                    const char *actual = state->pattern_names[index];
+                    if (actual[0] == '$') actual++;
+                    if (strcmp(actual, node->name) == 0) {
+                        state->used[index] = true;
+                        found = true;
+                    }
+                }
+            } else for (i = 0; i < state->pattern_count; i++) {
                 const char *actual = state->pattern_names[i];
                 if (actual && actual[0] == '$') actual++;
                 if (actual && strcmp(actual, node->name) == 0) {
@@ -14534,6 +14574,8 @@ static void yx_validate_operands_first(const yx_node *node,
     }
 }
 
+static size_t yx_node_extent_end(const yx_node *node);
+
 /* and, or, +, -, *, / and % are n-ary in YARA-X: `a + b + c` is one
  * operation, and so is `(a + b) + c` (a left operand of the same operator
  * takes the next one in). gen_n_ary_operation converts every operand
@@ -14617,8 +14659,7 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
     /* The next link of an n-ary chain whose operands are validated, and
      * where that chain ends (all of its operands are converted before a
      * link's types are checked). */
-    const yx_node *chain = NULL;
-    size_t chain_end = 0;
+    const yx_node *chain = NULL, *chain_top = NULL;
     while (node) {
         const yx_node *spine;
         size_t failures;
@@ -14628,8 +14669,7 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
             ok = false;
             break;
         }
-        if (node != chain && yx_nary_operation(node))
-            chain_end = node->span_end != SIZE_MAX ? node->span_end : 0;
+        if (node != chain && yx_nary_operation(node)) chain_top = node;
         chain = yx_nary_link(node) ? node->a : NULL;
         failures = state->failures;
         state->converted_end = 0;
@@ -14640,7 +14680,7 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
          * the node's operands are converted. */
         if (!step && state->failures == failures) {
             size_t own_end = state->converted_end ? state->converted_end :
-                             node->span_end != SIZE_MAX ? node->span_end : 0;
+                             yx_node_extent_end(node);
             ++state->failures;
             state->converted_end = 0;
             yx_validate_operands_first(node, state, inside_for_of, scope);
@@ -14650,8 +14690,10 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state,
         /* A link of an n-ary chain fails in its types' check, after every
          * operand of the chain was converted (even when an inner validation
          * of the link reports it). */
-        if (!step && yx_nary_operation(node) && chain_end > state->converted_end)
-            state->converted_end = chain_end;
+        if (!step && yx_nary_operation(node) && chain_top) {
+            size_t chain_end = yx_node_extent_end(chain_top);
+            if (chain_end > state->converted_end) state->converted_end = chain_end;
+        }
         if (!step || !yx_validate_folded_bounds(node, state)) {
             ok = false;
             break;
@@ -14844,6 +14886,22 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
         if (error && error_capacity) snprintf(error, error_capacity, "out of memory");
         return false;
     }
+    if (pattern_count > 16) {
+        /* Without the table (no memory) the names are searched in turn. */
+        size_t slots = 32;
+        while (slots < pattern_count * 2) slots *= 2;
+        state.pattern_slots = (size_t *)calloc(slots, sizeof(size_t));
+        state.pattern_slot_mask = slots - 1;
+        for (i = 0; state.pattern_slots && i < pattern_count; ++i) {
+            const char *bare = pattern_names[i];
+            size_t at;
+            if (!bare) continue;
+            if (bare[0] == '$') ++bare;
+            for (at = (size_t)yx_scope_hash(bare, strlen(bare)) & state.pattern_slot_mask;
+                 state.pattern_slots[at]; at = (at + 1) & state.pattern_slot_mask) {}
+            state.pattern_slots[at] = i + 1;
+        }
+    }
     rules_scope.name = "";
     rules_scope.rule_exists = yx_validation_rule_exists;
     rules_scope.rule_user_data = &state;
@@ -14852,7 +14910,7 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
         global_scopes = (yx_scope_name *) calloc(global_count,
                                                  sizeof(*global_scopes));
         if (!global_scopes) {
-            free(state.used);
+            free(state.used); free(state.pattern_slots);
             if (error && error_capacity) snprintf(error, error_capacity,
                                                   "out of memory");
             return false;
@@ -14898,7 +14956,7 @@ static bool yx_condition_validate_impl(const yx_condition *condition,
             }
         }
     }
-    free(state.used);
+    free(state.used); free(state.pattern_slots);
     free(global_scopes);
     if (converted_end) *converted_end = valid ? 0 : state.converted_end;
     return valid;
@@ -15629,6 +15687,10 @@ static bool yx_visit_type_warnings_at(const yx_node *node, const yx_scope_name *
         size_t chain_end = yx_node_extent_end(node->b);
         if (node->span_end != SIZE_MAX && node->span_end > chain_end)
             chain_end = node->span_end;
+        /* A parenthesized last operand ends at its `)`: a chain inside it
+         * ends (and warns) first. */
+        if (node->b && node->b->paren_close > chain_end)
+            chain_end = node->b->paren_close;
         if (!chain_end) chain_end = SIZE_MAX;
         ok = yx_visit_type_warnings(chain[count - 1]->a, scope, callback, user, partial);
         for (size_t i = count; ok && i-- > 0;)
@@ -17671,10 +17733,10 @@ bool yx_condition_pattern_fixed_at(const yx_condition *condition,
     return job.result;
 }
 
-static bool yx_fast_count_comparison(const yx_node *node,
-                                     const char *pattern_name,
-                                     size_t *threshold,
-                                     bool current_pattern_matches)
+/* A count compared with a constant (`#a > 3`) whose match limit is known:
+ * the count node and the limit. Which pattern it counts is the caller's. */
+static bool yx_fast_count_shape(const yx_node *node, const yx_node **count_node,
+                                size_t *threshold)
 {
     const yx_node *count, *bound;
     yx_token_kind operation;
@@ -17699,9 +17761,6 @@ static bool yx_fast_count_comparison(const yx_node *node,
     }
     /* The bound must be an i64 constant (try_as_const_integer). */
     if (count->filter != FILTER_NONE ||
-        !(count->name && count->name[0] ?
-          yx_name_matches(pattern_name, count->name) :
-          current_pattern_matches) ||
         (bound->is_unsigned && bound->number > INT64_MAX))
         return false;
     switch (operation) {
@@ -17721,6 +17780,23 @@ static bool yx_fast_count_comparison(const yx_node *node,
     if (limit < 1) limit = 1;
     if ((uint64_t)limit > UINT32_MAX) return false;
     *threshold = (size_t)limit;
+    *count_node = count;
+    return true;
+}
+
+static bool yx_fast_count_comparison(const yx_node *node,
+                                     const char *pattern_name,
+                                     size_t *threshold,
+                                     bool current_pattern_matches)
+{
+    const yx_node *count;
+    size_t limit;
+    if (!yx_fast_count_shape(node, &count, &limit) ||
+        !(count->name && count->name[0] ?
+          yx_name_matches(pattern_name, count->name) :
+          current_pattern_matches))
+        return false;
+    *threshold = limit;
     return true;
 }
 
@@ -17876,6 +17952,351 @@ bool yx_condition_pattern_nonanchorable(const yx_condition *condition,
     /* The anchor walk does not recurse: no deep thread per pattern. */
     yx_pattern_query_thunk(&job);
     return job.result;
+}
+
+/* The scanner's per-pattern condition queries (yx_condition_pattern_
+ * requires_all_matches, _fast_count, _fixed_at and _nonanchorable) for every
+ * pattern of a rule in a few walks over the condition, instead of walks per
+ * pattern. Each walk applies a node's effect to the patterns it refers to:
+ * a named reference looks its pattern up by name, a set enumerates its
+ * items, an anonymous reference (`#`, `@`, `!`, `$` in a `for .. of` body)
+ * takes the members of the innermost `for .. of`. The effects do not depend
+ * on the visiting order, so the answers are those of the per-pattern
+ * functions, which stay the reference (YX_CONDITION_QUERY_CHECK). */
+typedef struct {
+    const char *const *names;   /* the rule's pattern identifiers */
+    size_t count;
+    size_t *slots;              /* hash of names: index + 1, 0 empty */
+    size_t slot_mask;
+    unsigned *stamp;            /* dedup of a node's members */
+    unsigned epoch;
+    size_t *members;            /* the members of the node at hand */
+    size_t member_count;
+    bool failed;
+    yx_condition_pattern_answers *out;
+    /* fast_count: disqualified patterns and whether a limit was found */
+    bool *fc_bad, *fc_found;
+    /* anchors */
+    bool *top_level, *anchored;
+} yx_pq;
+
+static size_t yx_pq_hash(const char *name, size_t length)
+{
+    return (size_t)yx_scope_hash(name, length);
+}
+
+static const char *yx_pq_bare(const char *name)
+{
+    return name && name[0] == '$' ? name + 1 : name;
+}
+
+static void yx_pq_add(yx_pq *q, size_t index)
+{
+    if (q->stamp[index] == q->epoch) return;
+    q->stamp[index] = q->epoch;
+    q->members[q->member_count++] = index;
+}
+
+static void yx_pq_begin(yx_pq *q)
+{
+    q->member_count = 0;
+    if (!++q->epoch) {
+        memset(q->stamp, 0, q->count * sizeof(*q->stamp));
+        q->epoch = 1;
+    }
+}
+
+/* The patterns a selector names (yx_name_matches): one by its hash, or
+ * every one a trailing `*` prefix matches. */
+static void yx_pq_add_selector(yx_pq *q, const char *selector)
+{
+    size_t length;
+    if (!selector) return;
+    length = strlen(selector);
+    if (length && selector[length - 1] == '*') {
+        for (size_t i = 0; i < q->count; ++i) {
+            const char *bare = yx_pq_bare(q->names[i]);
+            if (bare && strncmp(bare, selector, length - 1) == 0) yx_pq_add(q, i);
+        }
+        return;
+    }
+    for (size_t at = yx_pq_hash(selector, length) & q->slot_mask;; at = (at + 1) & q->slot_mask) {
+        size_t slot = q->slots[at];
+        if (!slot) return;
+        if (strcmp(yx_pq_bare(q->names[slot - 1]), selector) == 0) {
+            yx_pq_add(q, slot - 1);
+            return;
+        }
+    }
+}
+
+/* The members of a pattern set (yx_in_set). */
+static void yx_pq_set(yx_pq *q, const yx_node *node)
+{
+    yx_pq_begin(q);
+    if (node->set_all) {
+        for (size_t i = 0; i < q->count; ++i) yx_pq_add(q, i);
+        return;
+    }
+    for (size_t i = 0; i < node->set_count; ++i) yx_pq_add_selector(q, node->set_names[i]);
+}
+
+/* The members of the innermost `for .. of` around a node, taken once
+ * when the walk enters its body (as the per-pattern analyzers carry
+ * current_pattern_matches). */
+typedef struct { const size_t *members; size_t count; } yx_pq_current;
+
+/* The patterns a node refers to: its name, or the current `for .. of`
+ * members (`current`, NULL outside one) when it has none. */
+static void yx_pq_refers(yx_pq *q, const yx_node *node, const yx_pq_current *current)
+{
+    yx_pq_begin(q);
+    if (node->name && node->name[0]) yx_pq_add_selector(q, node->name);
+    else if (current)
+        for (size_t i = 0; i < current->count; ++i) yx_pq_add(q, current->members[i]);
+}
+
+/* yx_node_requires_all_matches and yx_fast_count_analyze_node for every
+ * pattern: `current` is the innermost `for .. of` around the node. */
+static void yx_pq_walk(yx_pq *q, const yx_node *node, const yx_pq_current *current,
+                       bool boolean_context)
+{
+    const yx_node *count;
+    size_t limit;
+    bool boolean_operands;
+    if (!node || q->failed) return;
+    /* fast_count: a compared count limits its patterns there (and nothing
+     * below it reads another pattern). requires_all still sees the count. */
+    if (yx_fast_count_shape(node, &count, &limit)) {
+        yx_pq_refers(q, count, current);
+        for (size_t i = 0; i < q->member_count; ++i) {
+            size_t p = q->members[i];
+            if (limit > q->out[p].fast_count_threshold) q->out[p].fast_count_threshold = limit;
+            q->fc_found[p] = true;
+            q->out[p].requires_all = true;
+        }
+        return;
+    }
+    if (node->kind == N_COUNT || node->kind == N_OFFSET || node->kind == N_LENGTH) {
+        yx_pq_refers(q, node, current);
+        for (size_t i = 0; i < q->member_count; ++i) {
+            size_t p = q->members[i];
+            q->out[p].requires_all = true;
+            if (node->kind == N_COUNT && node->filter == FILTER_NONE && boolean_context) {
+                if (q->out[p].fast_count_threshold < 1) q->out[p].fast_count_threshold = 1;
+                q->fc_found[p] = true;
+            } else {
+                q->fc_bad[p] = true;
+            }
+        }
+    } else if (node->kind == N_PATTERN && node->filter != FILTER_NONE) {
+        yx_pq_refers(q, node, current);
+        for (size_t i = 0; i < q->member_count; ++i) {
+            q->out[q->members[i]].requires_all = true;
+            q->fc_bad[q->members[i]] = true;
+        }
+    } else if (node->kind == N_OF && node->filter != FILTER_NONE) {
+        yx_pq_set(q, node);
+        for (size_t i = 0; i < q->member_count; ++i) {
+            q->out[q->members[i]].requires_all = true;
+            q->fc_bad[q->members[i]] = true;
+        }
+    }
+    boolean_operands =
+        (node->kind == N_BINARY &&
+         (node->operation == TK_AND || node->operation == TK_OR)) ||
+        (node->kind == N_UNARY && node->operation == TK_NOT);
+    yx_pq_walk(q, node->a, current, boolean_operands);
+    yx_pq_walk(q, node->b, current, boolean_operands);
+    yx_pq_walk(q, node->c, current, false);
+    for (size_t i = 0; i < node->item_count; ++i)
+        yx_pq_walk(q, node->items[i], current, node->kind == N_OF_EXPR);
+    if (node->kind == N_FOR_OF && node->body) {
+        yx_pq_current members;
+        size_t *copy;
+        yx_pq_set(q, node);
+        copy = (size_t *)malloc((q->member_count ? q->member_count : 1) * sizeof(*copy));
+        if (!copy) { q->failed = true; return; }
+        memcpy(copy, q->members, q->member_count * sizeof(*copy));
+        members.members = copy;
+        members.count = q->member_count;
+        yx_pq_walk(q, node->body, &members, true);
+        free(copy);
+    } else {
+        yx_pq_walk(q, node->body, current, true);
+    }
+}
+
+/* yx_anchor_top_level for every pattern. */
+static void yx_pq_anchor_top_level(yx_pq *q, const yx_node *root)
+{
+    yx_anchor_state state = {0};
+    yx_anchor_stack stack = {NULL, 0, 0};
+    size_t offset;
+    yx_anchor_push(&stack, root, &state);
+    while (stack.count && !state.failed) {
+        const yx_node *node = stack.items[--stack.count];
+        if (yx_ir_constant(node)) continue;
+        if (node->kind == N_BINARY && node->operation == TK_AND) {
+            if (!yx_ir_dropped_operand(node, node->b))
+                yx_anchor_push(&stack, node->b, &state);
+            if (!yx_ir_dropped_operand(node, node->a))
+                yx_anchor_push(&stack, node->a, &state);
+        } else if (node->kind == N_WITH) {
+            yx_anchor_push(&stack, node->body, &state);
+        } else if (node->kind == N_OF_EXPR) {
+            if (node->filter == FILTER_NONE &&
+                yx_ir_quantifier_requires_all(node, node->item_count))
+                for (size_t i = node->item_count; i-- > 0;)
+                    yx_anchor_push(&stack, node->items[i], &state);
+        } else if (node->kind == N_PATTERN) {
+            if (node->filter == FILTER_AT && node->name && node->name[0] &&
+                yx_ir_const_offset(node->b, &offset)) {
+                yx_pq_refers(q, node, NULL);
+                for (size_t i = 0; i < q->member_count; ++i) q->top_level[q->members[i]] = true;
+            }
+        } else if (node->kind == N_OF) {
+            if (node->filter == FILTER_AT &&
+                yx_ir_quantifier_requires_all(node, yx_ir_set_items(node)) &&
+                yx_ir_const_offset(node->b, &offset)) {
+                yx_pq_set(q, node);
+                for (size_t i = 0; i < q->member_count; ++i) q->top_level[q->members[i]] = true;
+            }
+        }
+    }
+    free((void *)stack.items);
+    if (state.failed) q->failed = true;
+}
+
+/* yx_anchor_at for the patterns at hand. */
+static void yx_pq_anchor_at(yx_pq *q, const yx_node *offset_node)
+{
+    size_t offset;
+    bool constant = yx_ir_const_offset(offset_node, &offset);
+    for (size_t i = 0; i < q->member_count; ++i) {
+        size_t p = q->members[i];
+        if (!constant) q->out[p].nonanchorable = true;
+        else if (q->anchored[p] && q->out[p].fixed_at_offset != offset)
+            q->out[p].nonanchorable = true;
+        else {
+            q->anchored[p] = true;
+            q->out[p].fixed_at_offset = offset;
+        }
+    }
+}
+
+static void yx_pq_nonanchorable(yx_pq *q, bool all)
+{
+    for (size_t i = 0; i < q->member_count; ++i) {
+        size_t p = q->members[i];
+        if (all || !q->top_level[p]) q->out[p].nonanchorable = true;
+    }
+}
+
+/* yx_anchor_uses for every pattern. */
+static void yx_pq_anchor_uses(yx_pq *q, const yx_node *root)
+{
+    yx_anchor_state state = {0};
+    yx_anchor_stack stack = {NULL, 0, 0};
+    yx_anchor_push(&stack, root, &state);
+    while (stack.count && !state.failed) {
+        const yx_node *node = stack.items[--stack.count];
+        if (yx_ir_constant(node)) continue;
+        if (node->kind == N_PATTERN || node->kind == N_OF) {
+            if (node->kind == N_PATTERN) {
+                if (node->name && node->name[0]) yx_pq_refers(q, node, NULL);
+                else yx_pq_begin(q);
+            } else {
+                yx_pq_set(q, node);
+            }
+            if (node->filter == FILTER_AT) yx_pq_anchor_at(q, node->b);
+            else yx_pq_nonanchorable(q, node->filter != FILTER_NONE);
+        } else if (node->kind == N_FOR_OF) {
+            yx_pq_set(q, node);
+            yx_pq_nonanchorable(q, true);
+        } else if (node->kind == N_COUNT || node->kind == N_OFFSET ||
+                   node->kind == N_LENGTH) {
+            if (node->name && node->name[0]) {
+                yx_pq_refers(q, node, NULL);
+                yx_pq_nonanchorable(q, true);
+            }
+        }
+        yx_anchor_push(&stack, node->body, &state);
+        for (size_t i = node->item_count; i-- > 0;)
+            yx_anchor_push(&stack, node->items[i], &state);
+        yx_anchor_push(&stack, node->c, &state);
+        if (!yx_ir_dropped_operand(node, node->b))
+            yx_anchor_push(&stack, node->b, &state);
+        if (!yx_ir_dropped_operand(node, node->a))
+            yx_anchor_push(&stack, node->a, &state);
+    }
+    free((void *)stack.items);
+    if (state.failed) q->failed = true;
+}
+
+typedef struct { const yx_condition *condition; yx_pq *q; } yx_pq_job;
+static void yx_pq_walk_thunk(void *data)
+{
+    yx_pq_job *job = data;
+    /* The rule condition itself is evaluated as a Boolean. */
+    yx_pq_walk(job->q, job->condition->root, NULL, true);
+}
+
+bool yx_condition_pattern_queries(const yx_condition *condition,
+                                  const char *const *pattern_names, size_t pattern_count,
+                                  yx_condition_pattern_answers *answers)
+{
+    yx_pq q;
+    size_t slots = 16, i;
+    bool ok = false;
+    if (!answers || (pattern_count && !pattern_names)) return false;
+    memset(answers, 0, pattern_count * sizeof(*answers));
+    if (!condition || !condition->root) {
+        for (i = 0; i < pattern_count; ++i) answers[i].requires_all = true;
+        return true;
+    }
+    if (!pattern_count) return true;
+    while (slots < pattern_count * 2) slots *= 2;
+    memset(&q, 0, sizeof(q));
+    q.names = pattern_names;
+    q.count = pattern_count;
+    q.out = answers;
+    q.slot_mask = slots - 1;
+    q.slots = calloc(slots, sizeof(*q.slots));
+    q.stamp = calloc(pattern_count, sizeof(*q.stamp));
+    q.members = malloc(pattern_count * sizeof(*q.members));
+    q.fc_bad = calloc(pattern_count, sizeof(bool));
+    q.fc_found = calloc(pattern_count, sizeof(bool));
+    q.top_level = calloc(pattern_count, sizeof(bool));
+    q.anchored = calloc(pattern_count, sizeof(bool));
+    if (!q.slots || !q.stamp || !q.members || !q.fc_bad || !q.fc_found ||
+        !q.top_level || !q.anchored) goto done;
+    for (i = 0; i < pattern_count; ++i) {
+        const char *bare = yx_pq_bare(pattern_names[i]);
+        size_t at;
+        if (!bare) continue;
+        for (at = yx_pq_hash(bare, strlen(bare)) & q.slot_mask; q.slots[at];
+             at = (at + 1) & q.slot_mask) {}
+        q.slots[at] = i + 1;
+    }
+    {
+        yx_pq_job job = {condition, &q};
+        yx_run_deep(condition->depth, yx_pq_walk_thunk, &job);
+    }
+    yx_pq_anchor_top_level(&q, condition->root);
+    if (!q.failed) yx_pq_anchor_uses(&q, condition->root);
+    if (q.failed) goto done;
+    for (i = 0; i < pattern_count; ++i) {
+        answers[i].fast_count = !q.fc_bad[i] && q.fc_found[i];
+        if (!answers[i].fast_count) answers[i].fast_count_threshold = 0;
+        answers[i].fixed_at = q.anchored[i] && !answers[i].nonanchorable;
+        if (!answers[i].fixed_at) answers[i].fixed_at_offset = 0;
+    }
+    ok = true;
+done:
+    free(q.slots); free(q.stamp); free(q.members); free(q.fc_bad);
+    free(q.fc_found); free(q.top_level); free(q.anchored);
+    return ok;
 }
 
 bool yx_condition_uses_only_module_field(const yx_condition *condition,

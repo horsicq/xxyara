@@ -626,11 +626,22 @@ static bool yx_physical_set_condition(const yx_physical_archive *a,char **source
 {
     /* Fixed keyword forms are common and do not require guessing a numeric
      * threshold. Try them before the bounded numeric search. */
+    /* `N of them` for 2 <= N < count differs only in N's constants: its
+     * module's length is within a few bytes of `2 of them`'s. A profile whose
+     * length is not is not tried for every N (the search is per pattern). */
+    bool similar[4]={true,true,true,true};
+    if(a->logical>3)for(uint8_t p=0;p<4;++p) {
+        uint8_t *wasm=NULL;size_t length=0;
+        if(yx_physical_set_wasm(a,0,2,p,&wasm,&length))
+            similar[p]=length+32>=a->wasm_length&&a->wasm_length+32>=length;
+        free(wasm);
+    }
     for(unsigned choice=0;choice<5;++choice) {
         unsigned kind=choice<4?choice+1:0;
         uint64_t maximum=kind?0:a->logical;
         for(uint64_t required=0;required<=maximum;++required)for(uint8_t p=0;p<4;++p) {
             uint8_t *wasm=NULL;size_t length=0;
+            if(!kind&&required>=2&&required<a->logical&&!similar[p])continue;
             bool exact=yx_physical_set_wasm(a,kind,required,p,&wasm,&length)&&
                 length==a->wasm_length&&!memcmp(wasm,a->wasm,length);
             free(wasm);if(!exact)continue;

@@ -53,6 +53,43 @@ typedef struct yx_archive_symbol_order {
 #include "serialization_capi_order.h"
 
 #define YX_MODULE_IMPORTS 128
+/* How deep the module-expression walks recurse. Upstream's IR has no such
+ * limit (a condition nests as deep as its 2048 variables allow); the levels
+ * past YX_MODULE_SWITCH_DEPTH run on a deep stack. */
+#define YX_MODULE_DEPTH 1024
+/* A walk that gets YX_MODULE_SWITCH_DEPTH levels deep goes on on a deep
+ * stack (yx_run_deep_walk) unless it already runs on one: the caller's
+ * thread (a library caller's, 1 MiB or less) holds only those first levels. */
+#define YX_MODULE_SWITCH_DEPTH 48
+#define YX_MODULE_DEEP(depth) ((depth) >= YX_MODULE_SWITCH_DEPTH && !yx_deep_stack_ready(YX_MODULE_DEPTH))
+/* Set when a walk could not get its deep stack (no thread): its answer is
+ * then not the walk's, and yx_ser_encode / yx_ser_decode_many fail with
+ * YX_SER_NO_MEMORY instead of using it. */
+static _Thread_local bool yx_module_deep_failed;
+/* Set when an and/with walk (yx_and_leaves) or a rule-constraint walk ran
+ * out of memory: its answer is incomplete, and the same entry points fail
+ * with YX_SER_NO_MEMORY. */
+static _Thread_local bool yx_walk_no_memory;
+/* The walk on the deep stack runs on another thread: its failure flags are
+ * that thread's, and come back here with the job. */
+typedef struct { void (*call)(void *); void *data; bool walk_no_memory, deep_failed; } yx_module_deep_job;
+static void yx_module_deep_thunk(void *data)
+{
+    yx_module_deep_job *job = data;
+    bool walk = yx_walk_no_memory, deep = yx_module_deep_failed;
+    yx_walk_no_memory = false; yx_module_deep_failed = false;
+    job->call(job->data);
+    job->walk_no_memory = yx_walk_no_memory; job->deep_failed = yx_module_deep_failed;
+    yx_walk_no_memory = walk || job->walk_no_memory; yx_module_deep_failed = deep || job->deep_failed;
+}
+static bool yx_module_deep_walk(size_t depth, void (*call)(void *), void *data)
+{
+    yx_module_deep_job job = {call, data, false, false};
+    bool ran = yx_run_deep_walk(depth, yx_module_deep_thunk, &job);
+    if (job.walk_no_memory) yx_walk_no_memory = true;
+    if (job.deep_failed || !ran) yx_module_deep_failed = true;
+    return ran;
+}
 
 static bool yx_expect_uint(yx_reader *r, uint64_t expected);
 
@@ -94,6 +131,8 @@ typedef struct yx_module_program {
     size_t import_count;
     size_t *calls, call_count, call_capacity;
     bool memory, filesize, divisor, failed, no_match, two_locals;
+    /* An allocation of the composed codec failed (yx_composed_options). */
+    bool no_memory;
     yx_literal *literals;
     size_t literal_count, literal_capacity;
     /* The archive's regexp pool (RegexpId order) that regexp arguments are
@@ -116,6 +155,9 @@ typedef struct yx_module_program {
     int slot_values[YX_ARCHIVE_MAX_VARS];
     /* The variable nodes decoded for each slot since its binding (saturating). */
     uint8_t slot_uses[YX_ARCHIVE_MAX_VARS];
+    /* Decoding: the slot's `with` statement is in scope (its body is being
+     * decoded). */
+    bool slot_open[YX_ARCHIVE_MAX_VARS];
     bool slot_defined[YX_ARCHIVE_MAX_VARS];
     const yx_archive_module_field *slot_fields[YX_ARCHIVE_MAX_VARS];
     int undefined_slot;
@@ -606,11 +648,19 @@ static const char *yx_module_read_name(uint8_t type)
     return type<YX_INTEGER_READ_COUNT?yx_integer_codec_read_name(type):
         type<YX_MODULE_READ_COUNT?floats[type-YX_INTEGER_READ_COUNT]:NULL;
 }
+static int yx_module_primary(yx_module_program *p, unsigned depth);
+typedef struct { yx_module_program *p; unsigned depth; int result; } yx_module_primary_job;
+static void yx_module_primary_thunk(void *data)
+{ yx_module_primary_job *j = data; j->result = yx_module_primary(j->p, j->depth); }
 static int yx_module_primary(yx_module_program *p, unsigned depth)
 {
     const unsigned char *start;
     int n;
-    if (depth > 128) return -1;
+    if (depth > YX_MODULE_DEPTH) return -1;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_primary_job job = {p, depth, -1};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_primary_thunk, &job) ? job.result : -1;
+    }
     yx_bool_skip_space(&p->parser);
     if (p->parse_primary) {
         const unsigned char *saved = p->parser.at;
@@ -805,7 +855,10 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         for (size_t i = p->binding_count; i > 0; --i)
             if (p->bindings[i - 1].length == length - 4 && !memcmp(p->bindings[i - 1].name, path, length - 4)) {
                 const yx_module_node *value = &p->nodes[p->bindings[i - 1].value];
-                if (value->op != YX_ME_VARIABLE || (value->type != 4 && value->type != 7 && value->type != 8)) break;
+                /* A variable bound to a string literal is that literal
+                 * (RuntimeString::Literal): len() takes it directly. */
+                if ((value->op != YX_ME_VARIABLE && value->op != YX_ME_STRING) ||
+                    (value->type != 4 && value->type != 7 && value->type != 8)) break;
                 p->parser.at = call_end;
                 n = yx_module_node_new(p, YX_ME_LENGTH, 3);
                 if (n >= 0) p->nodes[n].args[0] = p->bindings[i - 1].value;
@@ -1126,9 +1179,17 @@ static bool yx_module_variable(yx_writer *w, int64_t slot, uint8_t type, int und
 /* emit_with records an undefined bitmap only when its initializer can throw.
  * A defined scalar call and its defined arguments use the same direct store
  * and load path as an object lookup. */
+static bool yx_module_definite_value(const yx_module_program *p,int index,unsigned depth);
+typedef struct { const yx_module_program *p; int index; unsigned depth; bool result; } yx_module_definite_job;
+static void yx_module_definite_thunk(void *data)
+{ yx_module_definite_job *j = data; j->result = yx_module_definite_value(j->p, j->index, j->depth); }
 static bool yx_module_definite_value(const yx_module_program *p,int index,unsigned depth)
 {
-    if(depth>128||index<0||(size_t)index>=p->count)return false;
+    if(depth>YX_MODULE_DEPTH||index<0||(size_t)index>=p->count)return false;
+    if(YX_MODULE_DEEP(depth)) {
+        yx_module_definite_job job={p,index,depth,false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH,yx_module_definite_thunk,&job)&&job.result;
+    }
     const yx_module_node *n=&p->nodes[index];
     if(n->constant)return true;
     if(n->op>=32)return p->definite_primary&&p->definite_primary(p,index,depth);
@@ -1310,10 +1371,19 @@ static bool yx_module_map_loop_prefix(yx_module_program *p, yx_writer *w, int64_
         yx_put_u8(w, 2) && yx_put_u8(w, catching ? 0x40 : 0x7f);
 }
 static bool yx_module_arithmetic(yx_module_program *p, int index, yx_writer *w, uint8_t parent,
+                                  unsigned depth, bool float_chain);
+typedef struct { yx_module_program *p; int index; yx_writer *w; uint8_t parent; unsigned depth; bool float_chain, result; } yx_module_arithmetic_job;
+static void yx_module_arithmetic_thunk(void *data)
+{ yx_module_arithmetic_job *j = data; j->result = yx_module_arithmetic(j->p, j->index, j->w, j->parent, j->depth, j->float_chain); }
+static bool yx_module_arithmetic(yx_module_program *p, int index, yx_writer *w, uint8_t parent,
                                   unsigned depth, bool float_chain)
 {
     const yx_module_node *n = &p->nodes[index];
-    if (depth > 128) return false;
+    if (depth > YX_MODULE_DEPTH) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_arithmetic_job job = {p, index, w, parent, depth, float_chain, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_arithmetic_thunk, &job) && job.result;
+    }
     if (n->op != YX_ME_ARITH) return yx_module_emit(p, index, w, depth + 1);
     bool chain = n->comparison == parent && (parent == 0x7c || parent == 0x7d || parent == 0x7e);
     if (n->constant && !chain)
@@ -1364,10 +1434,18 @@ static bool yx_module_boolean(yx_module_program *p, int index, yx_writer *w, uns
  * is dropped for `i32.const 1`; an undefined operand gives 0. The block exists
  * only when an undefined value can reach it (not for a definite operand).
  * Writes the block's content. */
+static bool yx_module_defined_body(yx_module_program *p, int index, yx_writer *w, unsigned depth);
+typedef struct { yx_module_program *p; int index; yx_writer *w; unsigned depth; bool result; } yx_module_defined_job;
+static void yx_module_defined_thunk(void *data)
+{ yx_module_defined_job *j = data; j->result = yx_module_defined_body(j->p, j->index, j->w, j->depth); }
 static bool yx_module_defined_body(yx_module_program *p, int index, yx_writer *w, unsigned depth)
 {
     const yx_module_node *n = &p->nodes[index];
-    if (depth > 128) return false;
+    if (depth > YX_MODULE_DEPTH) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_defined_job job = {p, index, w, depth, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_defined_thunk, &job) && job.result;
+    }
     int saved = p->undefined_slot; p->undefined_slot = -1;
     /* Only `and` and `or` open a lazy search scope (emit_expr): the first
      * pattern operand of the operand shares the enclosing scope's search. */
@@ -1412,10 +1490,18 @@ static int *yx_module_left_chain(const yx_module_program *p, int index,
     items[0] = at;
     return items;
 }
+static bool yx_module_boolean_operands(yx_module_program *p, int index, uint8_t op, yx_writer *w, bool flatten, unsigned depth);
+typedef struct { yx_module_program *p; int index; uint8_t op; yx_writer *w; bool flatten; unsigned depth; bool result; } yx_module_operands_job;
+static void yx_module_operands_thunk(void *data)
+{ yx_module_operands_job *j = data; j->result = yx_module_boolean_operands(j->p, j->index, j->op, j->w, j->flatten, j->depth); }
 static bool yx_module_boolean_operands(yx_module_program *p, int index, uint8_t op, yx_writer *w, bool flatten, unsigned depth)
 {
     const yx_module_node *n = &p->nodes[index];
-    if (depth > 128) return false;
+    if (depth > YX_MODULE_DEPTH) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_operands_job job = {p, index, op, w, flatten, depth, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_operands_thunk, &job) && job.result;
+    }
     /* IR::and/or drop neutral constants; the plain module codec has no
      * one-operand form and leaves such conditions to the composed codec. */
     if(yx_module_operand_truth(p,index)==(op==YX_ME_AND?1:0))return p->boolean_scope!=NULL;
@@ -1442,9 +1528,17 @@ static bool yx_module_non_negative(const yx_module_node *node)
         (node->op == YX_ME_READ && (node->integer <= 2 ||
             (node->integer >= 8 && node->integer <= 10)));
 }
+static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsigned depth);
+typedef struct { yx_module_program *p; int index; yx_writer *w; unsigned depth; bool result; } yx_module_emit_job;
+static void yx_module_emit_thunk(void *data)
+{ yx_module_emit_job *j = data; j->result = yx_module_emit(j->p, j->index, j->w, j->depth); }
 static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsigned depth)
 {
-    if (depth > 128 || index < 0 || (size_t)index >= p->count) return false;
+    if (depth > YX_MODULE_DEPTH || index < 0 || (size_t)index >= p->count) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_emit_job job = {p, index, w, depth, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_emit_thunk, &job) && job.result;
+    }
     const yx_module_node *n = &p->nodes[index];
     if (n->op >= 32) return p->emit_primary && p->emit_primary(p, index, w, depth);
     static const uint8_t pair64[] = {0x7e,0x7e}, lookup_args[] = {0x7e,0x7f};
@@ -2137,12 +2231,30 @@ static int yx_module_decode_binding(yx_reader *r, size_t end, yx_module_program 
     p->slot_types[*slot] = type;
     p->slot_unsigned[*slot] = p->nodes[value].unsigned_value;
     p->slot_integer_kinds[*slot] = p->nodes[value].integer_kind;
-    p->slot_values[*slot] = value + 1; p->slot_uses[*slot] = 0;
+    p->slot_values[*slot] = value + 1; p->slot_uses[*slot] = 0; p->slot_open[*slot] = true;
     p->slot_fields[*slot] = p->nodes[value].field;
     return value;
 }
+/* The innermost `with` slot in scope whose value is the literal with this
+ * RuntimeString (still an integer when decoded, or already a string), and
+ * that the body never loads: a string variable's uses are its literal. */
+static int yx_module_literal_slot(const yx_module_program *p, int64_t runtime_string)
+{
+    for (int slot = YX_ARCHIVE_MAX_VARS; slot-- > 0;) {
+        const yx_module_node *value;
+        if (!p->slot_open[slot] || !p->slot_values[slot] || p->slot_uses[slot] ||
+            (size_t)p->slot_values[slot] > p->count) continue;
+        value = &p->nodes[p->slot_values[slot] - 1];
+        if ((value->op == YX_ME_INT && !value->unsigned_value) || value->op == YX_ME_STRING)
+            if (value->integer == runtime_string) return slot;
+    }
+    return -1;
+}
 static int yx_module_bind_nodes(yx_module_program *p, int body, const int *values, const int *slots, size_t count)
 {
+    /* The statement's scope ends here. */
+    for (size_t i = 0; i < count; ++i)
+        if (slots[i] >= 0 && slots[i] < YX_ARCHIVE_MAX_VARS) p->slot_open[slots[i]] = false;
     while (count) {
         --count;
         int bind = yx_module_node_new(p, YX_ME_BIND, p->nodes[body].type);
@@ -2155,10 +2267,18 @@ static int yx_module_bind_nodes(yx_module_program *p, int body, const int *value
 static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_program *p,
                                         unsigned depth, int *stack, size_t stack_capacity,
                                         int *bindings, int *slots, size_t binding_capacity);
+static int yx_module_decode_block(yx_reader *r, size_t end, yx_module_program *p, unsigned depth);
+typedef struct { yx_reader *r; size_t end; yx_module_program *p; unsigned depth; int result; } yx_module_decode_job;
+static void yx_module_decode_thunk(void *data)
+{ yx_module_decode_job *j = data; j->result = yx_module_decode_block(j->r, j->end, j->p, j->depth); }
 static int yx_module_decode_block(yx_reader *r, size_t end, yx_module_program *p, unsigned depth)
 {
-    if (depth > 128 || end < r->at || end > r->length ||
+    if (depth > YX_MODULE_DEPTH || end < r->at || end > r->length ||
         end - r->at >= SIZE_MAX / sizeof(int)) return -1;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_decode_job job = {r, end, p, depth, -1};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_decode_thunk, &job) ? job.result : -1;
+    }
     size_t capacity = end - r->at + 1;
     size_t bindings = capacity < YX_ARCHIVE_MAX_VARS ? capacity : YX_ARCHIVE_MAX_VARS;
     if (capacity > SIZE_MAX / sizeof(int) - bindings * 2) return -1;
@@ -2172,10 +2292,18 @@ static int yx_module_decode_block(yx_reader *r, size_t end, yx_module_program *p
 }
 /* The module-expression form of yx_integer_force_unsigned: marks the literal
  * that gives `index` the unsigned type an unsigned opcode asks for. */
+static bool yx_module_force_unsigned(yx_module_program *p, int index, bool strict, unsigned depth);
+typedef struct { yx_module_program *p; int index; bool strict; unsigned depth; bool result; } yx_module_unsigned_job;
+static void yx_module_unsigned_thunk(void *data)
+{ yx_module_unsigned_job *j = data; j->result = yx_module_force_unsigned(j->p, j->index, j->strict, j->depth); }
 static bool yx_module_force_unsigned(yx_module_program *p, int index, bool strict, unsigned depth)
 {
     yx_module_node *n;
-    if (index < 0 || (size_t)index >= p->count || depth > 128) return false;
+    if (index < 0 || (size_t)index >= p->count || depth > YX_MODULE_DEPTH) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_unsigned_job job = {p, index, strict, depth, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_unsigned_thunk, &job) && job.result;
+    }
     n = &p->nodes[index];
     if (n->type != 3) return false;
     if (n->unsigned_value) return true;
@@ -2231,7 +2359,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
     int joined = -1; size_t used = 0; uint8_t join_op = 0;
     size_t binding_count = 0, guards = p->decoded_guards;
     bool wrapped = false;
-    if (depth > 128) return -1;
+    if (depth > YX_MODULE_DEPTH) return -1;
     while (r->at < end) {
         size_t start = r->at;
         uint8_t marker; int node = -1;
@@ -2304,7 +2432,7 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
                         p->slot_fields[slot] = p->nodes[value_node].field;
                         p->slot_unsigned[slot] = p->nodes[value_node].unsigned_value;
                         p->slot_integer_kinds[slot] = p->nodes[value_node].integer_kind;
-                        p->slot_values[slot] = value_node + 1; p->slot_uses[slot] = 0;
+                        p->slot_values[slot] = value_node + 1; p->slot_uses[slot] = 0; p->slot_open[slot] = true;
                         slots[binding_count] = slot; bindings[binding_count++] = value_node;
                         *r = probe; continue;
                     }
@@ -2575,9 +2703,18 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
             } else if (!strcmp(entry->module, "yara_x::wasm") &&
                        (!strcmp(entry->name, "Array::len@array:i@i") || !strcmp(entry->name, "Map::len@map:i@i") ||
                         !strcmp(entry->name, "RuntimeString::len@string:s@i"))) {
+                /* RuntimeString::len of a literal: its RuntimeString as an
+                 * i64 constant, the value of the `with` variable in scope
+                 * that holds it (yx_module_literal_slot). */
+                int literal_slot = -1;
+                if (used && entry->name[0] == 'R' && p->nodes[stack[used - 1]].op == YX_ME_INT) {
+                    literal_slot = yx_module_literal_slot(p, p->nodes[stack[used - 1]].integer);
+                    if (literal_slot < 0 || !yx_module_decode_string(p, stack[used - 1]) ||
+                        !yx_module_decode_string(p, p->slot_values[literal_slot] - 1)) return -1;
+                }
                 if (!used || p->nodes[stack[used - 1]].type != (entry->name[0] == 'A' ? 7 : entry->name[0] == 'M' ? 8 : 4)) return -1;
                 node = yx_module_node_new(p, YX_ME_LENGTH, 3);
-                if (node >= 0) p->nodes[node].args[0] = stack[--used];
+                if (node >= 0) { p->nodes[node].args[0] = stack[--used]; p->nodes[node].integer = literal_slot + 1; }
             } else if (!strcmp(entry->module, "yara_x::wasm") && !strncmp(entry->name, "map_lookup_", 11) &&
                        strncmp(entry->name, "map_lookup_by_index_", 20)) {
                 /* map_lookup_<key>_<value>(map, key): a lookup by key. */
@@ -2630,9 +2767,17 @@ static int yx_module_decode_block_inner(yx_reader *r, size_t end, yx_module_prog
     }
     return -1;
 }
+static bool yx_module_print(const yx_module_program *p, int index, yx_writer *out, unsigned depth);
+typedef struct { const yx_module_program *p; int index; yx_writer *out; unsigned depth; bool result; } yx_module_print_job;
+static void yx_module_print_thunk(void *data)
+{ yx_module_print_job *j = data; j->result = yx_module_print(j->p, j->index, j->out, j->depth); }
 static bool yx_module_print(const yx_module_program *p, int index, yx_writer *out, unsigned depth)
 {
-    if (depth > 128 || index < 0 || (size_t)index >= p->count) return false;
+    if (depth > YX_MODULE_DEPTH || index < 0 || (size_t)index >= p->count) return false;
+    if (YX_MODULE_DEEP(depth)) {
+        yx_module_print_job job = {p, index, out, depth, false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH, yx_module_print_thunk, &job) && job.result;
+    }
     const yx_module_node *n = &p->nodes[index];
     if (n->op >= 32) return p->print_primary && p->print_primary(p, index, out, depth);
     char number[80]; const char *text = NULL;
@@ -2697,8 +2842,20 @@ static bool yx_module_print(const yx_module_program *p, int index, yx_writer *ou
         }
         return yx_put_u8(out, '"');
     }
-    if (n->op == YX_ME_LENGTH)
+    if (n->op == YX_ME_LENGTH) {
+        /* len() of a string literal: the source names a `with` variable
+         * bound to that literal (a literal has no methods). The text is
+         * compiled again and compared, so a binding out of scope refuses. */
+        if (n->args[0] < 0 || (size_t)n->args[0] >= p->count) return false;
+        if (p->nodes[n->args[0]].op == YX_ME_STRING) {
+            /* `integer`: 1 + the slot of the binding the decoder found in
+             * scope (yx_module_literal_slot); none, no source. */
+            if (n->integer <= 0 || n->integer > YX_ARCHIVE_MAX_VARS) return false;
+            snprintf(number, sizeof(number), "v%" PRId64 ".len()", n->integer - 1);
+            return yx_put_bytes(out, number, strlen(number));
+        }
         return yx_module_print(p, n->args[0], out, depth + 1) && yx_put_bytes(out, ".len()", 6);
+    }
     if (n->op == YX_ME_NEGATE)
         return yx_put_bytes(out, "-(", 2) && yx_module_print(p, n->args[0], out, depth + 1) && yx_put_u8(out, ')');
     if (n->op == YX_ME_REGEX) return n->bytes && yx_put_bytes(out, n->bytes, n->length);

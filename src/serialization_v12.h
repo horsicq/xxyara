@@ -974,6 +974,12 @@ static bool yx_v12_restore_template(const uint8_t *actual,size_t actual_length,
     yx_writer expected={0},code={0};yx_literal **constants=NULL;size_t *counts=NULL;
     yx_v12_origins *origins=NULL;size_t origin_count=0;
     size_t defined=0;bool ok=false;
+    /* The lowering keeps a module's functions (yx_v12_decode_archive_mode):
+     * a template of another function count is not lowered at all. */
+    uint64_t actual_functions=0,template_functions=0;
+    if(yx_v12_code_function_count(actual,actual_length,&actual_functions)&&
+       yx_v12_code_function_count(template_data,template_length,&template_functions)&&
+       actual_functions!=template_functions)return false;
     if(!yx_v12_wasm_impl(template_data,template_length,profile,&expected,mapping,64,&origins,&origin_count)||
        !yx_v12_sections(actual,actual_length,a,az)||
        !yx_v12_sections(expected.data,expected.used,e,ez)||

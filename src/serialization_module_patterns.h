@@ -51,6 +51,13 @@ typedef struct yx_module_patterns {
     /* yx_module_pattern_wasm_sized: the helper goes first whatever the
      * rule's size. */
     bool helper_tie;
+    /* The composed codec's per-rule constraints, as upstream keeps them
+     * (compiler/mod.rs rule_constraints): the filesize bounds and header
+     * pieces each of the first rule_constraint_count rules' own condition
+     * gives (without the namespace's global rules); a reference to such a
+     * rule takes them instead of walking its condition again. */
+    yx_pattern_filesize_bounds *rule_bounds; yx_header_collection *rule_headers;
+    size_t rule_constraint_count;
 } yx_module_patterns;
 static bool yx_module_pattern_relocate_helper(yx_writer *body,const size_t *offsets,size_t count,size_t id)
 {
@@ -1539,11 +1546,19 @@ static int yx_module_pattern_decode_set(yx_module_program *p,uint8_t op,int join
 /* Whether a pattern operand or loop cannot throw an undefined value: offsets
  * and lengths can, a quantity and a tuple's Boolean elements reach the
  * handler outside their loop, everything else is caught or defined. */
+static bool yx_module_pattern_definite(const yx_module_program *p,int index,unsigned depth);
+typedef struct { const yx_module_program *p; int index; unsigned depth; bool result; } yx_module_pattern_definite_job;
+static void yx_module_pattern_definite_thunk(void *data)
+{ yx_module_pattern_definite_job *j = data; j->result = yx_module_pattern_definite(j->p, j->index, j->depth); }
 static bool yx_module_pattern_definite(const yx_module_program *p,int index,unsigned depth)
 {
     const yx_module_node *n=&p->nodes[index];
     uint8_t kind=n->comparison&15;
-    if(depth>128)return false;
+    if(depth>YX_MODULE_DEPTH)return false;
+    if(YX_MODULE_DEEP(depth)) {
+        yx_module_pattern_definite_job job={p,index,depth,false};
+        return yx_module_deep_walk(YX_MODULE_DEPTH,yx_module_pattern_definite_thunk,&job)&&job.result;
+    }
     switch(n->op) {
     case YX_MP_PRESENT:case YX_MP_COUNT:case YX_MP_AT:case YX_MP_IN:case YX_MP_COUNT_IN:
         for(size_t i=0;i<n->argc;++i)if(!yx_module_definite_value(p,n->args[i],depth+1))return false;
@@ -1756,12 +1771,27 @@ static bool yx_module_pattern_wasm_sized(yx_module_program *p,int root,uint8_t *
     return yx_module_pattern_wasm(p,root,data,length);
 }
 
+static void yx_module_pattern_bounds(const yx_module_program *p,int root,yx_pattern_filesize_bounds *bounds,unsigned depth);
+typedef struct { const yx_module_program *p; int root; yx_pattern_filesize_bounds *bounds; unsigned depth; } yx_module_bounds_job;
+static void yx_module_bounds_thunk(void *data)
+{ yx_module_bounds_job *j = data; yx_module_pattern_bounds(j->p, j->root, j->bounds, j->depth); }
 static void yx_module_pattern_bounds(const yx_module_program *p,int root,yx_pattern_filesize_bounds *bounds,unsigned depth)
 {
-    if(root<0||depth>128)return;
+    if(root<0||depth>YX_MODULE_DEPTH)return;
+    if(YX_MODULE_DEEP(depth)) {
+        yx_module_bounds_job job={p,root,bounds,depth};
+        (void)yx_module_deep_walk(YX_MODULE_DEPTH,yx_module_bounds_thunk,&job);return;
+    }
     const yx_module_node *n=&p->nodes[root];
     if(n->op==YX_ME_GROUP){yx_module_pattern_bounds(p,n->args[0],bounds,depth+1);return;}
-    if(n->op==YX_ME_AND){yx_module_pattern_bounds(p,n->args[0],bounds,depth+1);yx_module_pattern_bounds(p,n->args[1],bounds,depth+1);return;}
+    /* A flat `and` chain is one level: its operands in order, however many
+     * (the parser makes a left-nested chain of them). */
+    if(n->op==YX_ME_AND) {
+        size_t count=0;int *items=yx_module_left_chain(p,root,YX_ME_AND,&count);
+        if(!items){yx_walk_no_memory=true;return;}
+        for(size_t i=0;i<count;++i)yx_module_pattern_bounds(p,items[i],bounds,depth+1);
+        free(items);return;
+    }
     if(n->op!=YX_ME_COMPARE||n->comparison<2||n->comparison>5)return;
     const yx_module_node *a=&p->nodes[n->args[0]],*b=&p->nodes[n->args[1]];
     bool reversed=b->op==YX_ME_FILESIZE;
@@ -1894,15 +1924,39 @@ static bool yx_module_pattern_limits(yx_module_program *p)
 /* Derive the same contiguous prefix constraints from the typed condition AST
  * as the integer codec, while retaining contradictions at sparse offsets. */
 static bool yx_module_header_visit(const yx_module_program *p,int root,const YRX_RULES *rules,
+    const int *roots,size_t current,yx_header_collection *out,unsigned depth);
+typedef struct { const yx_module_program *p; int root; const YRX_RULES *rules; const int *roots; size_t current;
+    yx_header_collection *out; unsigned depth; bool result; } yx_module_header_job;
+static void yx_module_header_thunk(void *data)
+{ yx_module_header_job *j = data; j->result = yx_module_header_visit(j->p, j->root, j->rules, j->roots, j->current, j->out, j->depth); }
+static bool yx_module_header_visit(const yx_module_program *p,int root,const YRX_RULES *rules,
     const int *roots,size_t current,yx_header_collection *out,unsigned depth)
 {
-    if(root<0||depth>256)return true;
+    if(root<0||depth>2*YX_MODULE_DEPTH)return true;
+    if(YX_MODULE_DEEP(depth)) {
+        yx_module_header_job job={p,root,rules,roots,current,out,depth,false};
+        return yx_module_deep_walk(2*YX_MODULE_DEPTH,yx_module_header_thunk,&job)&&job.result;
+    }
     const yx_module_node *n=&p->nodes[root];
     if(n->op==YX_ME_GROUP)return yx_module_header_visit(p,n->args[0],rules,roots,current,out,depth+1);
-    if(n->op==YX_ME_AND)return yx_module_header_visit(p,n->args[0],rules,roots,current,out,depth+1)&&
-        yx_module_header_visit(p,n->args[1],rules,roots,current,out,depth+1);
-    if(n->op==YX_GLOBAL_RULE_REFERENCE&&n->integer>=0&&(uint64_t)n->integer<current)
+    if(n->op==YX_ME_AND) {
+        /* A flat chain is one level (yx_module_pattern_bounds). */
+        size_t count=0;bool ok=true;int *items=yx_module_left_chain(p,root,YX_ME_AND,&count);
+        if(!items){yx_walk_no_memory=true;return false;}
+        for(size_t i=0;ok&&i<count;++i)ok=yx_module_header_visit(p,items[i],rules,roots,current,out,depth+1);
+        free(items);return ok;
+    }
+    if(n->op==YX_GLOBAL_RULE_REFERENCE&&n->integer>=0&&(uint64_t)n->integer<current) {
+        const yx_module_patterns *context=p->extension;
+        if(context&&context->rule_headers&&(uint64_t)n->integer<context->rule_constraint_count) {
+            const yx_header_collection *rule=&context->rule_headers[n->integer];
+            if(rule->impossible){out->impossible=true;return true;}
+            for(size_t i=0;i<rule->count;++i)
+                if(!yx_header_add(out,rule->pieces[i].offset,rule->pieces[i].bytes,rule->pieces[i].length))return false;
+            return true;
+        }
         return yx_module_header_visit(p,roots[n->integer],rules,roots,(size_t)n->integer,out,depth+1);
+    }
     if(n->op==YX_MP_AT&&n->args[0]>=0&&p->nodes[n->args[0]].op==YX_ME_INT&&!p->nodes[n->args[0]].integer) {
         const yx_module_patterns *context=p->extension;size_t logical=0;
         for(size_t i=0;i<rules->rule_count;++i)for(size_t j=0;j<rules->rules[i].pattern_count;++j,++logical)

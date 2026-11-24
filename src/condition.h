@@ -245,6 +245,11 @@ uint64_t yx_condition_wasm_size(const yx_condition *condition,
  * on which the queries below run in place; false (call not run) for a
  * shallow condition or when no such thread could be started. */
 bool yx_condition_run_deep(const yx_condition *condition, void (*call)(void *), void *data);
+/* Deep stacks for other recursive walks (the archive codecs): whether the
+ * current thread has room for `depth` levels, and call(data) run where it
+ * has (false: it could not run). */
+bool yx_deep_stack_ready(size_t depth);
+bool yx_run_deep_walk(size_t depth, void (*call)(void *), void *data);
 /* True when a condition can inspect more than a pattern's mere existence. */
 bool yx_condition_pattern_requires_all_matches(const yx_condition *condition,
                                                 const char *pattern_name);
@@ -327,6 +332,22 @@ bool yx_rule_constraints_equal(const yx_rule_constraints *a, const yx_rule_const
 bool yx_condition_pattern_fast_count(const yx_condition *condition,
                                      const char *pattern_name,
                                      size_t *minimum_count);
+/* The four pattern queries above for every pattern of a rule at once:
+ * requires_all is yx_condition_pattern_requires_all_matches, fast_count and
+ * its threshold yx_condition_pattern_fast_count, fixed_at and its offset
+ * yx_condition_pattern_fixed_at, nonanchorable
+ * yx_condition_pattern_nonanchorable. False when out of memory. */
+typedef struct {
+    bool requires_all;
+    bool fast_count;
+    size_t fast_count_threshold;
+    bool fixed_at;
+    size_t fixed_at_offset;
+    bool nonanchorable;
+} yx_condition_pattern_answers;
+bool yx_condition_pattern_queries(const yx_condition *condition,
+                                  const char *const *pattern_names, size_t pattern_count,
+                                  yx_condition_pattern_answers *answers);
 /* Whether every parsed reference to a module reads exactly one field. */
 bool yx_condition_uses_only_module_field(const yx_condition *condition,
                                          const char *module,

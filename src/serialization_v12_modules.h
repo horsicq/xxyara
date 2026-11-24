@@ -125,6 +125,36 @@ static bool yx_module_shift_wide_locals(uint8_t *body,size_t length,int delta)
 done:
     free(ins);free(buffer.data);return ok;
 }
+/* For each `br` / `br_if` i < count: targets[i], the block `argument`
+ * steps up its parent chain (SIZE_MAX past the outermost), and
+ * left_blocks[i], the boolean blocks among the `argument` blocks walked
+ * from its parent. One ordered pass: the last instruction seen at a depth
+ * is the open block there (everything after it, until its end, is
+ * deeper). False when out of memory or a parent does not precede its
+ * instruction. */
+static bool yx_v12_branch_targets(const yx_v12_instruction *ins,size_t count,size_t *targets,size_t *left_blocks)
+{
+    size_t *depth=malloc((count?count:1)*sizeof(*depth)),*open=malloc((count+1)*sizeof(*open));
+    size_t *booleans=malloc((count+2)*sizeof(*booleans));bool ok=depth&&open&&booleans;
+    if(ok)booleans[0]=0;
+    for(size_t i=0;ok&&i<count;++i) {
+        size_t parent=ins[i].parent;
+        if(parent!=SIZE_MAX&&parent>=i){ok=false;break;}
+        depth[i]=parent==SIZE_MAX?0:depth[parent]+1;
+        if(ins[i].op==0x0c||ins[i].op==0x0d) {
+            uint64_t steps=ins[i].argument;size_t at;
+            if(parent==SIZE_MAX){targets[i]=SIZE_MAX;left_blocks[i]=0;}
+            else {
+                at=depth[parent];
+                /* booleans[k]: boolean blocks among open[0..k-1]. */
+                targets[i]=steps>at?SIZE_MAX:open[at-(size_t)steps];
+                left_blocks[i]=booleans[at+1]-booleans[steps>at?0:at+1-(size_t)steps];
+            }
+        }
+        open[depth[i]]=i;booleans[depth[i]+1]=booleans[depth[i]]+(ins[i].boolean_block?1:0);
+    }
+    free(depth);free(open);free(booleans);return ok;
+}
 /* `or_marker`: the module writer's plain OR keeps its last test as an OR
  * guard plus `i32.const 0`, and a pattern-set `any` (no such tail) keeps its
  * last range without a result block. */
@@ -133,7 +163,7 @@ static bool yx_v12_module_expression(const uint8_t *body,yx_v12_instruction *ins
                                       size_t imports,const size_t mapping[4],size_t defined,yx_writer *out,
                                       bool or_marker)
 {
-    yx_writer expression={0};bool ok=false;
+    yx_writer expression={0};bool ok=false;size_t *targets=NULL,*left_blocks=NULL;
     bool *or_open=calloc(count?count:1,sizeof(*or_open)),*or_close=calloc(count?count:1,sizeof(*or_close));
     if(!or_open||!or_close||first>=finish||finish>count)goto done;
     /* The codec adds an untargeted result block around every condition.
@@ -175,10 +205,15 @@ static bool yx_v12_module_expression(const uint8_t *body,yx_v12_instruction *ins
             ins[end+1].end-ins[end+1].start==2&&!body[ins[end+1].start+1];
         if(p->or_last)ins[end+1].remove=true;
     }
+    /* Each branch's target and the result blocks it leaves (the parent
+     * chain `argument` steps up), from one ordered pass: an emit_switch
+     * nests a block per case, and walking the chain per branch is
+     * quadratic in the cases. */
+    targets=malloc((count?count:1)*sizeof(*targets));left_blocks=malloc((count?count:1)*sizeof(*left_blocks));
+    if(!targets||!left_blocks||!yx_v12_branch_targets(ins,finish,targets,left_blocks))goto done;
     for(size_t i=first;i<finish;++i) {
         if(ins[i].op!=0x0c&&ins[i].op!=0x0d)continue;
-        size_t target=ins[i].parent;
-        for(uint64_t d=0;d<ins[i].argument&&target!=SIZE_MAX;++d)target=ins[target].parent;
+        size_t target=targets[i];
         if(ins[i].remove||target==SIZE_MAX)continue;
         if(ins[target].or_operand&&ins[i].op==0x0c) {
             ins[i].catch_undef=true;continue;
@@ -217,24 +252,33 @@ static bool yx_v12_module_expression(const uint8_t *body,yx_v12_instruction *ins
     /* Defined OR operands lose their untargeted local result block during
      * reduction. Restore those blocks too: the typed decoder deliberately
      * recognizes the same operand boundaries as the private writer. */
+    /* kept[i]: instructions before i that stay (one pass, so a chain of
+     * nested blocks is not walked once per block). */
+    size_t *kept=malloc((count+1)*sizeof(*kept));
+    if(!kept)goto done;
+    kept[0]=0;
+    for(size_t i=0;i<count;++i)kept[i+1]=kept[i]+!ins[i].remove;
     for(size_t block=first;block<finish;++block) {
         if(!ins[block].boolean_block||!ins[block].short_value)continue;
         size_t end=ins[block].mate,start=block+1;
-        if(end==SIZE_MAX||end>finish)goto done;
+        if(end==SIZE_MAX||end>finish){free(kept);goto done;}
         for(size_t i=start;i<end;++i) {
             if(ins[i].parent!=block)continue;
             if(ins[i].or_operand) {start=ins[i].mate+1;i=ins[i].mate;continue;}
             if(!ins[i].remove&&ins[i].short_circuit&&ins[i].short_value) {
                 or_open[start]=true;or_close[i]=true;start=i+1;
             }
+            /* What a child block holds is not a child: go on at its end. */
+            if((ins[i].op==2||ins[i].op==3||ins[i].op==4)&&ins[i].mate!=SIZE_MAX&&
+               ins[i].mate>i&&ins[i].mate<end)i=ins[i].mate-1;
         }
         size_t last=end-1;
         if(end>=3&&ins[end-3].op==0x0d&&ins[end-3].remove&&
            ins[end-2].op==0x41&&ins[end-2].remove)last=end-3;
-        bool remaining=false;
-        for(size_t i=start;i<last;++i)remaining|=!ins[i].remove;
+        bool remaining=start<last&&kept[last]>kept[start];
         if(remaining&&!or_marker){or_open[start]=true;or_close[last]=true;}
     }
+    free(kept);
     /* The primitive-array loop writer catches an undefined body in a
      * result block. Walrus removes that block when the body is defined. Its
      * element store and the tail branch back to the enclosing loop identify
@@ -285,11 +329,7 @@ static bool yx_v12_module_expression(const uint8_t *body,yx_v12_instruction *ins
             size_t width=p->short_value?sizeof(yx_integer_or_guard):sizeof(yx_integer_and_guard);
             if(!yx_put_bytes(&expression,guard,width))goto done;
         } else if(p->op==0x0c||p->op==0x0d) {
-            size_t parent=p->parent;uint64_t adjusted=p->argument;
-            for(uint64_t d=0;d<p->argument&&parent!=SIZE_MAX;++d) {
-                if(ins[parent].boolean_block)--adjusted;
-                parent=ins[parent].parent;
-            }
+            uint64_t adjusted=p->argument-left_blocks[i];
             if(p->catch_undef&&(!yx_put_u8(&expression,0x41)||!yx_put_u8(&expression,0)))goto done;
             if(!yx_put_u8(&expression,p->op)||!yx_put_uleb(&expression,adjusted))goto done;
         } else if(p->op==0x23) {
@@ -313,6 +353,7 @@ static bool yx_v12_module_expression(const uint8_t *body,yx_v12_instruction *ins
     }
     ok=yx_put_bytes(out,expression.data,expression.used);
 done:
+    free(targets);free(left_blocks);
     free(or_open);free(or_close);free(expression.data);return ok;
 }
 

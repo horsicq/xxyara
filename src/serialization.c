@@ -20203,8 +20203,28 @@ static yx_ser_result yx_ser_encode_impl(const YRX_RULES *rules, uint8_t **data,
     return status;
 }
 
+static yx_ser_result yx_ser_encode_walks(const YRX_RULES *rules, uint8_t **data,
+                                         size_t *length);
+/* A module walk that could not get its deep stack (yx_module_deep_walk),
+ * or an and/with walk out of memory (yx_and_leaves), fails the whole
+ * encoding: its answer was not the walk's. */
 yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data,
                             size_t *length)
+{
+    bool outer = yx_module_deep_failed, outer_walk = yx_walk_no_memory;
+    yx_ser_result status;
+    yx_module_deep_failed = false; yx_walk_no_memory = false;
+    status = yx_ser_encode_walks(rules, data, length);
+    if ((yx_module_deep_failed || yx_walk_no_memory) && status == YX_SER_SUCCESS) {
+        free(*data); *data = NULL; *length = 0;
+    }
+    if ((yx_module_deep_failed || yx_walk_no_memory) && status != YX_SER_NO_MEMORY) status = YX_SER_NO_MEMORY;
+    yx_module_deep_failed = outer || yx_module_deep_failed;
+    yx_walk_no_memory = outer_walk || yx_walk_no_memory;
+    return status;
+}
+static yx_ser_result yx_ser_encode_walks(const YRX_RULES *rules, uint8_t **data,
+                                         size_t *length)
 {
     YRX_RULES spelled;
     bool failed;
@@ -25182,8 +25202,27 @@ static yx_ser_result yx_wire_normalize_v12(const uint8_t *data,
 
 /* A single rule whose codec has no tags or metadata decodes without them;
  * they are restored on the decoded rule. */
+static yx_ser_result yx_ser_decode_many_walks(const uint8_t *data, size_t length,
+                                              yx_ser_rule **rules, size_t *rule_count);
+/* As yx_ser_encode: a module walk without its deep stack fails the load. */
 yx_ser_result yx_ser_decode_many(const uint8_t *data, size_t length,
                                   yx_ser_rule **rules, size_t *rule_count)
+{
+    bool outer = yx_module_deep_failed, outer_walk = yx_walk_no_memory;
+    yx_ser_result status;
+    yx_module_deep_failed = false; yx_walk_no_memory = false;
+    status = yx_ser_decode_many_walks(data, length, rules, rule_count);
+    if ((yx_module_deep_failed || yx_walk_no_memory) && status == YX_SER_SUCCESS) {
+        yx_ser_rules_destroy(*rules, *rule_count);
+        *rules = NULL; *rule_count = 0;
+    }
+    if ((yx_module_deep_failed || yx_walk_no_memory) && status != YX_SER_NO_MEMORY) status = YX_SER_NO_MEMORY;
+    yx_module_deep_failed = outer || yx_module_deep_failed;
+    yx_walk_no_memory = outer_walk || yx_walk_no_memory;
+    return status;
+}
+static yx_ser_result yx_ser_decode_many_walks(const uint8_t *data, size_t length,
+                                              yx_ser_rule **rules, size_t *rule_count)
 {
     if (!rules || !rule_count) return YX_SER_MALFORMED;
     *rules = NULL;

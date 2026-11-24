@@ -35251,32 +35251,36 @@ typedef struct yx_cli_hex_error {
 typedef struct yx_cli_core_warning {
     size_t start;
     size_t offset; /* first label in its own origin; SIZE_MAX if none */
-    char *report;
+    char *report; /* NULL until shown when read lazily */
     char *origin;
     char *code;
+    size_t index; /* in the compiler's warnings */
 } yx_cli_core_warning;
 
-static bool yx_cli_core_warnings(const YRX_COMPILER *compiler,
-                                  const char *path,
-                                  yx_cli_core_warning **warnings,
-                                  size_t *count)
+/* The compiler's warnings, read one at a time: a report can hold a whole
+ * source line per patch, so all of them at once can take memory quadratic
+ * in a long line. `lazy` leaves report NULL; yx_cli_core_warning_report
+ * reads it when it is shown. */
+static bool yx_cli_core_warnings_read(const YRX_COMPILER *compiler,
+                                      const char *path,
+                                      yx_cli_core_warning **warnings,
+                                      size_t *count, bool lazy)
 {
-    YRX_BUFFER *buffer = NULL;
-    xx_json json;
     bool ok = false;
     *warnings = NULL;
     *count = 0;
-    if (yrx_compiler_warnings_json((YRX_COMPILER *)compiler, &buffer) !=
-        YRX_SUCCESS || !buffer) return false;
-    xx_json_init(&json, buffer->data, buffer->length);
-    if (!xx_json_array_begin(&json)) goto done;
-    if (!xx_json_array_empty(&json)) {
-        do {
+    for (size_t index = 0; index < compiler->warning_count; ++index) {
+        char *element = yx_compiler_warning_json(compiler, index);
+        xx_json json;
+        if (!element) goto done;
+        xx_json_init(&json, element, strlen(element));
+        {
             char *code = NULL, *report = NULL, *origin = NULL;
             size_t start = 0, end = 0;
             bool location = false;
             bool valid = yx_fix_json_warning(&json, &code, &report, &origin,
                                               &start, &end, &location);
+            free(element);
             if (valid && report) {
                 yx_cli_core_warning *grown;
                 if (*count == SIZE_MAX / sizeof(**warnings)) valid = false;
@@ -35290,10 +35294,11 @@ static bool yx_cli_core_warnings(const YRX_COMPILER *compiler,
                             strcmp(origin, path) == 0 ? start : SIZE_MAX;
                         (*warnings)[*count].offset = location ? start :
                                                      SIZE_MAX;
-                        (*warnings)[*count].report = report;
+                        (*warnings)[*count].report = lazy ? NULL : report;
                         (*warnings)[*count].origin = origin;
                         (*warnings)[*count].code = code;
-                        report = NULL;
+                        (*warnings)[*count].index = index;
+                        if (!lazy) report = NULL;
                         origin = NULL;
                         code = NULL;
                         ++*count;
@@ -35304,13 +35309,42 @@ static bool yx_cli_core_warnings(const YRX_COMPILER *compiler,
             xx_str_free(report);
             xx_str_free(origin);
             if (!valid) goto done;
-        } while (xx_json_more(&json));
+        }
     }
-    if (!xx_json_array_end(&json)) goto done;
     ok = true;
 done:
-    yrx_buffer_destroy(buffer);
     return ok;
+}
+
+static bool yx_cli_core_warnings(const YRX_COMPILER *compiler,
+                                  const char *path,
+                                  yx_cli_core_warning **warnings,
+                                  size_t *count)
+{
+    return yx_cli_core_warnings_read(compiler, path, warnings, count, false);
+}
+
+/* The report of a warning read lazily; NULL when out of memory. */
+static char *yx_cli_core_warning_report(const YRX_COMPILER *compiler,
+                                        const yx_cli_core_warning *warning)
+{
+    char *element = yx_compiler_warning_json(compiler, warning->index);
+    char *code = NULL, *report = NULL, *origin = NULL;
+    size_t start = 0, end = 0;
+    bool location = false, valid;
+    xx_json json;
+    if (!element) return NULL;
+    xx_json_init(&json, element, strlen(element));
+    valid = yx_fix_json_warning(&json, &code, &report, &origin, &start, &end,
+                                &location);
+    free(element);
+    xx_str_free(code);
+    xx_str_free(origin);
+    if (!valid) {
+        xx_str_free(report);
+        return NULL;
+    }
+    return report;
 }
 
 static bool yx_cli_hex_errors(const YRX_COMPILER *compiler,
@@ -35528,7 +35562,8 @@ static bool yx_cli_emit_warnings_with_imports(
     if (displayed) *displayed = 0;
     for (size_t i = 0; i < argument_count; ++i)
         if (!yx_fix_collect_rules(arguments[i], &top_files)) goto done;
-    if (!yx_cli_core_warnings(compiler, "", &core, &core_count)) goto done;
+    if (!yx_cli_core_warnings_read(compiler, "", &core, &core_count, true))
+        goto done;
     for (size_t i = 0; i < core_count; ++i)
         if (core[i].code &&
             strcmp(core[i].code, "duplicate_import") == 0)
@@ -35605,9 +35640,14 @@ static bool yx_cli_emit_warnings_with_imports(
             if (included && import_enabled && !core_import &&
                 !yx_cli_emit_included_imports("", &core[next],
                     &included_seen, &import_count, patches)) goto done;
-            if (!disable_all && core[next].code && core[next].report &&
+            if (!disable_all && core[next].code &&
                 !yx_cli_warning_disabled(core[next].code, disabled)) {
-                yx_cli_diagnostic_report(core[next].report);
+                /* Read here, so one report is held at a time. */
+                char *report = yx_cli_core_warning_report(compiler,
+                                                          &core[next]);
+                if (!report) goto done;
+                yx_cli_diagnostic_report(report);
+                xx_str_free(report);
                 if (displayed) ++*displayed;
             }
         }
@@ -36032,7 +36072,6 @@ static bool yx_cli_emit_source_warnings(
 {
     char code_field[80];
     yx_cli_paths files = {0};
-    YRX_BUFFER *warnings_json = NULL;
     bool ok = false;
     int code_length;
     if (disable_all || yx_cli_warning_disabled(code, disabled))
@@ -36041,11 +36080,8 @@ static bool yx_cli_emit_source_warnings(
                            "\"code\":\"%s\"", code);
     if (code_length < 0 || (size_t)code_length >= sizeof(code_field))
         return false;
-    if (yrx_compiler_warnings_json(compiler, &warnings_json) != YRX_SUCCESS ||
-        !warnings_json) return false;
-    if (xx_data_find_bytes_buffer_optimize(
-            warnings_json->data, warnings_json->length, 0,
-            code_field, (size_t)code_length, NULL) >= 0) {
+    /* Without building the warnings' JSON: it can be quadratic in size. */
+    if (yx_compiler_warnings_contain(compiler, code_field)) {
         ok = true;
         goto done;
     }
@@ -36065,7 +36101,6 @@ static bool yx_cli_emit_source_warnings(
     }
     ok = true;
 done:
-    yrx_buffer_destroy(warnings_json);
     yx_cli_paths_clear(&files);
     return ok;
 }
@@ -37511,7 +37546,6 @@ static bool yx_cli_emit_scan_file_warnings(
 {
     char code_field[80];
     yx_cli_paths files = {0};
-    YRX_BUFFER *warnings_json = NULL;
     bool ok = false;
     int code_length;
     if (disable_all || yx_cli_warning_disabled(code, disabled))
@@ -37520,11 +37554,8 @@ static bool yx_cli_emit_scan_file_warnings(
                            "\"code\":\"%s\"", code);
     if (code_length < 0 || (size_t)code_length >= sizeof(code_field))
         return false;
-    if (yrx_compiler_warnings_json(compiler, &warnings_json) != YRX_SUCCESS ||
-        !warnings_json) return false;
-    if (xx_data_find_bytes_buffer_optimize(
-            warnings_json->data, warnings_json->length, 0,
-            code_field, (size_t)code_length, NULL) >= 0) {
+    /* Without building the warnings' JSON: it can be quadratic in size. */
+    if (yx_compiler_warnings_contain(compiler, code_field)) {
         ok = true;
         goto done;
     }
@@ -37536,7 +37567,6 @@ static bool yx_cli_emit_scan_file_warnings(
     }
     ok = true;
 done:
-    yrx_buffer_destroy(warnings_json);
     yx_cli_paths_clear(&files);
     return ok;
 }

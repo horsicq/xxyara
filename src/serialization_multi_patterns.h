@@ -269,16 +269,19 @@ static void yx_multi_pattern_bounds_merge(yx_pattern_filesize_bounds *a,const yx
     if(b->upper_kind!=2&&(a->upper_kind==2||b->upper<a->upper||(b->upper==a->upper&&b->upper_kind==1)))
         a->upper=b->upper,a->upper_kind=b->upper_kind;
 }
+typedef struct { const yx_pattern_filesize_bounds *previous; yx_pattern_filesize_bounds *bounds; } yx_multi_bounds_walk;
+static bool yx_multi_pattern_bounds_leaf(const yx_integer_expr *t,int index,void *data)
+{
+    const yx_multi_bounds_walk *w=data;
+    const yx_integer_expr_node *n=&YX_INTEGER_NODES(t)[index];
+    if(n->op==0xd0){yx_multi_pattern_bounds_merge(w->bounds,&w->previous[n->value]);return true;}
+    return yx_pattern_filesize_leaf(t,index,w->bounds);
+}
 static void yx_multi_pattern_bounds_visit(const yx_integer_expr *t,int index,const yx_pattern_filesize_bounds *previous,
     yx_pattern_filesize_bounds *bounds,unsigned depth)
 {
-    if(index<0||depth>256)return;
-    const yx_integer_expr_node *n=&YX_INTEGER_NODES(t)[index];
-    if(n->op==0xd0){yx_multi_pattern_bounds_merge(bounds,&previous[n->value]);return;}
-    if(n->op==0xa0||n->op==0xd8) {
-        yx_multi_pattern_bounds_visit(t,n->left,previous,bounds,depth+1);
-        if(n->right!=n->left)yx_multi_pattern_bounds_visit(t,n->right,previous,bounds,depth+1);
-    } else yx_pattern_filesize_visit(t,index,bounds,depth);
+    yx_multi_bounds_walk walk={previous,bounds};
+    (void)depth;(void)yx_and_leaves(t,index,yx_multi_pattern_bounds_leaf,&walk);
 }
 /* Read rule metadata once to locate its pattern list and again after the
  * identifier/literal pools are available to create owned API values. */
@@ -366,15 +369,22 @@ static yx_ser_result yx_encode_multi_patterns(const YRX_RULES *rules,uint8_t **d
         size_t first_option=logical;
         uint8_t *marks=calloc(r->pattern_count?r->pattern_count:1,1);
         if(!marks||!yx_pattern_ir_marks(&trees[i],roots[i],marks,r->pattern_count)){free(marks);status=YX_SER_NO_MEMORY;goto done;}
+        /* anchor_patterns (ast2ir.rs), as for a single rule: every pattern
+         * of the rule from one walk. */
+        bool *anchored=malloc((r->pattern_count?r->pattern_count:1)*sizeof(*anchored));
+        uint64_t *anchor_offsets=malloc((r->pattern_count?r->pattern_count:1)*sizeof(*anchor_offsets));
+        if(!anchored||!anchor_offsets||
+           !yx_pattern_anchor_offsets(&trees[i],roots[i],r->pattern_count,anchored,anchor_offsets)) {
+            free(anchored);free(anchor_offsets);free(marks);status=YX_SER_NO_MEMORY;goto done;
+        }
         for(size_t j=0;j<r->pattern_count;++j) {
             yx_physical_pattern_options *option=&options[logical++];
             *option=(yx_physical_pattern_options){.limit=yx_pattern_limits(c)[j],.bounds=r->patterns[j].kind==YX_PATTERN_TEXT?(yx_pattern_filesize_bounds){2,2,0,0}:bounds[i]};
             if(r->patterns[j].kind!=YX_PATTERN_TEXT)option->header=headers[i];
-            /* anchor_patterns (ast2ir.rs), as for a single rule. */
-            uint64_t anchor_offset=0;
-            option->anchored=yx_pattern_anchor_offset(&trees[i],roots[i],(int64_t)j,&anchor_offset);
-            if(option->anchored)option->offset=anchor_offset;
+            option->anchored=anchored[j];
+            if(option->anchored)option->offset=anchor_offsets[j];
         }
+        free(anchored);free(anchor_offsets);
         {
             bool *unmarked=calloc(r->pattern_count?r->pattern_count:1,sizeof(*unmarked));
             if(!unmarked){free(marks);status=YX_SER_NO_MEMORY;goto done;}
@@ -677,22 +687,43 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data,size_t length,
             header_storage[i].used=0;
             if(!yx_header_integer(tree,roots[i],patterns,a->physical,headers,i,&header_storage[i],&headers[i]))goto done;
         }
+        /* A rule whose per-pattern walks (patterns x condition nodes) cost
+         * more than one walk over every physical pattern: every pattern's
+         * anchor from that walk (yx_pattern_anchor_offsets gives what
+         * yx_pattern_anchor_offset gives for each). Small rules keep the
+         * per-pattern walks, whose cost is the rule's own. */
+        bool *rule_anchored=NULL;uint64_t *rule_offsets=NULL;
+        if(counts[i]>8&&(uint64_t)counts[i]*tree->count>(uint64_t)a->physical*4) {
+            rule_anchored=malloc((a->physical?a->physical:1)*sizeof(*rule_anchored));
+            rule_offsets=malloc((a->physical?a->physical:1)*sizeof(*rule_offsets));
+            if(!rule_anchored||!rule_offsets||
+               !yx_pattern_anchor_offsets(tree,roots[i],a->physical,rule_anchored,rule_offsets)) {
+                free(rule_anchored);free(rule_offsets);status=YX_SER_NO_MEMORY;goto done;
+            }
+        }
         for(size_t j=0;j<counts[i];++j) {
             size_t k=firsts[i]+j,p=mapping[k];
             yx_pattern_filesize_bounds expected=kinds[k]==YX_PATTERN_TEXT?
                 (yx_pattern_filesize_bounds){2,2,0,0}:bounds[i];
             yx_physical_header header=kinds[k]==YX_PATTERN_TEXT?(yx_physical_header){0}:headers[i];
-            if(!yx_physical_header_equal(&header,&a->headers[p]))goto done;
             bool bounded=expected.lower_kind!=2||expected.upper_kind!=2;
-            if(a->bounded[p]!=bounded||(bounded&&!yx_physical_rule_bounds_equal(&expected,&a->bounds[p])))goto done;
+            if(!yx_physical_header_equal(&header,&a->headers[p])||
+               a->bounded[p]!=bounded||(bounded&&!yx_physical_rule_bounds_equal(&expected,&a->bounds[p]))) {
+                free(rule_anchored);free(rule_offsets);goto done;
+            }
             uint64_t offset=0;
-            bool used=true,anchored=yx_pattern_anchor_offset(tree,roots[i],(int64_t)p,&offset);
-            for(size_t q=frame_first[p];q<frame_first[p+1];++q) {
+            int anchor_state=rule_anchored?(rule_anchored[p]?1:0):yx_pattern_anchor_offset(tree,roots[i],(int64_t)p,&offset);
+            if(rule_anchored&&rule_anchored[p])offset=rule_offsets[p];
+            if(anchor_state<0){status=YX_SER_NO_MEMORY;goto done;}
+            bool used=true,anchored=anchor_state>0,frames_ok=true;
+            for(size_t q=frame_first[p];frames_ok&&q<frame_first[p+1];++q) {
                 const yx_physical_frame *frame=&a->frames[frame_list[q]];
                 bool required=used&&anchored&&frame->frame.variant==0;
-                if(frame->anchored!=required||(required&&frame->offset!=offset))goto done;
+                if(frame->anchored!=required||(required&&frame->offset!=offset))frames_ok=false;
             }
+            if(!frames_ok){free(rule_anchored);free(rule_offsets);goto done;}
         }
+        free(rule_anchored);free(rule_offsets);
         for(size_t j=0;j<counts[i];++j)patterns[mapping[firsts[i]+j]]=NULL;
         if(!yx_tree_list_close(&trees,i)){status=YX_SER_NO_MEMORY;goto done;}
     }

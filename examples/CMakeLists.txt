@@ -44,7 +44,13 @@ if(XXYARA_BUILD_TESTS AND BUILD_TESTING)
     endforeach()
     if(TARGET xxyara_shared)
         find_package(Python3 COMPONENTS Interpreter QUIET)
+        # ctypes can load the DLL only when the interpreter has the same pointer size
+        set(_example_python_bytes "")
         if(Python3_Interpreter_FOUND)
+            execute_process(COMMAND "${Python3_EXECUTABLE}" -I -c "import struct; print(struct.calcsize('P'))"
+                OUTPUT_VARIABLE _example_python_bytes OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        endif()
+        if(Python3_Interpreter_FOUND AND _example_python_bytes STREQUAL "${CMAKE_SIZEOF_VOID_P}")
             add_test(NAME xxyara_example_python
                 COMMAND ${CMAKE_COMMAND}
                     "-DCOMMAND=${Python3_EXECUTABLE}|-I|${CMAKE_CURRENT_SOURCE_DIR}/python/scan.py|${_example_data}/rules.yar|${_example_data}/sample.txt|$<TARGET_FILE:xxyara_shared>"

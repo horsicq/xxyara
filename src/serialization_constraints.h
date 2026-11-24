@@ -22,27 +22,51 @@
 typedef struct yx_pattern_filesize_bounds {
     uint8_t lower_kind,upper_kind; int64_t lower,upper;
 } yx_pattern_filesize_bounds;
-static void yx_pattern_filesize_visit(const yx_integer_expr *tree,int index,
-                                     yx_pattern_filesize_bounds *bounds,unsigned depth)
+/* Calls leaf(tree, node, data) for each operand that `and` and `with` nodes
+ * lead to, in the order of a left-to-right recursive walk, without a depth
+ * limit (a flat chain of N terms is N deep). False when leaf fails or the
+ * walk runs out of memory (then yx_walk_no_memory is set). */
+static bool yx_and_leaves(const yx_integer_expr *tree,int root,
+                          bool (*leaf)(const yx_integer_expr *,int,void *),void *data)
 {
-    if(index<0||depth>256)return;
-    const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
-    if(n->op==0xa0||n->op==0xd8) {
-        yx_pattern_filesize_visit(tree,n->left,bounds,depth+1);
-        if(n->right!=n->left)yx_pattern_filesize_visit(tree,n->right,bounds,depth+1);
-        return;
+    int inline_stack[64],*stack=inline_stack;size_t used=0,capacity=64;bool ok=true;
+    if(root<0)return true;
+    stack[used++]=root;
+    while(ok&&used) {
+        int index=stack[--used];
+        const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+        if(n->op!=0xa0&&n->op!=0xd8){ok=leaf(tree,index,data);continue;}
+        int next[2]={n->right!=n->left?n->right:-1,n->left};
+        for(int k=0;ok&&k<2;++k) {
+            if(next[k]<0)continue;
+            if(used==capacity) {
+                int *grown=capacity>SIZE_MAX/2/sizeof(*grown)?NULL:
+                    stack==inline_stack?malloc(2*capacity*sizeof(*grown)):realloc(stack,2*capacity*sizeof(*grown));
+                if(!grown){yx_walk_no_memory=true;ok=false;break;}
+                if(stack==inline_stack)memcpy(grown,inline_stack,sizeof(inline_stack));
+                stack=grown;capacity*=2;
+            }
+            stack[used++]=next[k];
+        }
     }
-    if(n->op!=0x53&&n->op!=0x55&&n->op!=0x57&&n->op!=0x59)return;
+    if(stack!=inline_stack)free(stack);
+    return ok;
+}
+static bool yx_pattern_filesize_leaf(const yx_integer_expr *tree,int index,void *data)
+{
+    yx_pattern_filesize_bounds *bounds=data;
+    const yx_integer_expr_node *n=&YX_INTEGER_NODES(tree)[index];
+    if(n->op!=0x53&&n->op!=0x55&&n->op!=0x57&&n->op!=0x59)return true;
     const yx_integer_expr_node *a=&YX_INTEGER_NODES(tree)[n->left],*b=&YX_INTEGER_NODES(tree)[n->right];
     bool reversed=b->op==0x23;const yx_integer_expr_node *constant=reversed?a:b;
-    if((reversed?a:b)->constant==false||(reversed?b:a)->op!=0x23)return;
+    if((reversed?a:b)->constant==false||(reversed?b:a)->op!=0x23)return true;
     bool lower=n->op==0x55||n->op==0x59;
     if(reversed)lower=!lower;
     bool inclusive=n->op==0x57||n->op==0x59;
     int64_t value=constant->value;
     if(constant->floating) {
         double rounded=lower?floor(constant->real):ceil(constant->real);
-        if(!isfinite(rounded))return;
+        if(!isfinite(rounded))return true;
         inclusive=inclusive&&rounded==constant->real;
         value=rounded>=(double)INT64_MAX?INT64_MAX:rounded<=(double)INT64_MIN?INT64_MIN:(int64_t)rounded;
     }
@@ -50,6 +74,12 @@ static void yx_pattern_filesize_visit(const yx_integer_expr *tree,int index,
     uint8_t *old_kind=lower?&bounds->lower_kind:&bounds->upper_kind;
     int64_t *old=lower?&bounds->lower:&bounds->upper;
     if(*old_kind==2||(lower?value>*old:value<*old)||(value==*old&&kind==1)) {*old_kind=kind;*old=value;}
+    return true;
+}
+static void yx_pattern_filesize_visit(const yx_integer_expr *tree,int index,
+                                     yx_pattern_filesize_bounds *bounds,unsigned depth)
+{
+    (void)depth;(void)yx_and_leaves(tree,index,yx_pattern_filesize_leaf,bounds);
 }
 static bool yx_pattern_filesize_span(const uint8_t *data,size_t length,size_t *start,size_t *end,size_t *physical,unsigned *regex_mask)
 {

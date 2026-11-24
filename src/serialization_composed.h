@@ -74,15 +74,98 @@ static bool yx_composed_parse_rules(yx_module_program *p,yx_module_patterns *c,c
     yx_global_rules_index_free(&c->prior);
     return true;
 }
+static void yx_composed_bounds(const yx_module_program *p,int root,const int *roots,size_t current,yx_pattern_filesize_bounds *bounds,unsigned depth);
+typedef struct { const yx_module_program *p; int root; const int *roots; size_t current; yx_pattern_filesize_bounds *bounds; unsigned depth; } yx_composed_bounds_job;
+static void yx_composed_bounds_thunk(void *data)
+{ yx_composed_bounds_job *j = data; yx_composed_bounds(j->p, j->root, j->roots, j->current, j->bounds, j->depth); }
 static void yx_composed_bounds(const yx_module_program *p,int root,const int *roots,size_t current,yx_pattern_filesize_bounds *bounds,unsigned depth)
 {
-    if(root<0||depth>128)return;
+    if(root<0||depth>YX_MODULE_DEPTH)return;
+    if(YX_MODULE_DEEP(depth)) {
+        yx_composed_bounds_job job={p,root,roots,current,bounds,depth};
+        (void)yx_module_deep_walk(YX_MODULE_DEPTH,yx_composed_bounds_thunk,&job);return;
+    }
     const yx_module_node *n=&p->nodes[root];
     if(n->op==YX_ME_GROUP){yx_composed_bounds(p,n->args[0],roots,current,bounds,depth+1);}
-    else if(n->op==YX_ME_AND){yx_composed_bounds(p,n->args[0],roots,current,bounds,depth+1);yx_composed_bounds(p,n->args[1],roots,current,bounds,depth+1);}
-    else if(n->op==YX_GLOBAL_RULE_REFERENCE&&n->integer>=0&&(uint64_t)n->integer<current)
-        yx_composed_bounds(p,roots[n->integer],roots,(size_t)n->integer,bounds,depth+1);
+    else if(n->op==YX_ME_AND) {
+        /* A flat chain is one level (yx_module_pattern_bounds). */
+        size_t count=0;int *items=yx_module_left_chain(p,root,YX_ME_AND,&count);
+        if(!items){yx_walk_no_memory=true;return;}
+        for(size_t i=0;i<count;++i)yx_composed_bounds(p,items[i],roots,current,bounds,depth+1);
+        free(items);
+    }
+    else if(n->op==YX_GLOBAL_RULE_REFERENCE&&n->integer>=0&&(uint64_t)n->integer<current) {
+        const yx_module_patterns *context=p->extension;
+        if(context&&context->rule_bounds&&(uint64_t)n->integer<context->rule_constraint_count)
+            yx_multi_pattern_bounds_merge(bounds,&context->rule_bounds[n->integer]);
+        else yx_composed_bounds(p,roots[n->integer],roots,(size_t)n->integer,bounds,depth+1);
+    }
     else yx_module_pattern_bounds(p,root,bounds,depth);
+}
+/* HeaderConstraint::merge (compiler/rules.rs): the intersection of two
+ * finished header constraints (kind 0 none, 1 unsatisfiable, 2 a prefix):
+ * prefixes that agree give the longer one. *result's bytes are written to
+ * storage (a copy). */
+static bool yx_header_constraint_merge_into(const yx_physical_header *a,const yx_physical_header *b,
+    yx_physical_header *result,yx_writer *storage)
+{
+    const yx_physical_header *pick=a;
+    *result=(yx_physical_header){0};
+    if(a->kind==1||b->kind==1){result->kind=1;return true;}
+    if(a->kind==0)pick=b;
+    else if(b->kind==2) {
+        size_t common=a->length<b->length?a->length:b->length;
+        if(common&&memcmp(a->bytes,b->bytes,common)){result->kind=1;return true;}
+        if(b->length>a->length)pick=b;
+    }
+    if(pick->kind!=2)return true;
+    if(!yx_put_bytes(storage,pick->bytes,pick->length))return false;
+    *result=(yx_physical_header){2,storage->data,storage->used};return true;
+}
+/* A namespace's global constraints take `other` in (merged into *global,
+ * whose bytes live in *storage; `merged` receives the new bytes). */
+static bool yx_header_constraint_merge(yx_physical_header *global,const yx_writer *storage,
+    const yx_physical_header *other,yx_writer *merged)
+{
+    yx_physical_header result={0};
+    (void)storage;
+    if(!yx_header_constraint_merge_into(global,other,&result,merged))return false;
+    *global=result;return true;
+}
+/* anchor_patterns (ast2ir.rs) per rule: the condition's own analysis
+ * (yx_condition_pattern_fixed_at) is the port of it. Rules are independent:
+ * each task compiles one rule's condition and writes only its patterns'
+ * answers (state 0: no answer, the node scan decides; 1: anchored at
+ * offset; 2: not anchored, with `unmarked`). */
+typedef struct {
+    const YRX_RULES *rules;const char *const *anchor_names;const size_t *starts;
+    uint8_t *state;uint64_t *offset;bool *unmarked;bool *failed;
+} yx_composed_anchor_job;
+static void yx_composed_anchor_task(size_t i,void *context)
+{
+    const yx_composed_anchor_job *job=context;const YRX_RULE *rule=&job->rules->rules[i];
+    yx_condition *anchors;const char **names;size_t first=job->starts[i];char error[64]="";
+    if(!rule->pattern_count||!rule->condition_text)return;
+    /* A condition the parser does not read leaves the node scan to decide;
+     * one it could not read for want of memory fails the encoding. */
+    if(!(anchors=yx_condition_compile(rule->condition_text,error,sizeof(error)))) {
+        if(strstr(error,"out of memory"))job->failed[i]=true;
+        return;
+    }
+    names=malloc(rule->pattern_count*sizeof(*names));
+    if(!names){yx_condition_destroy(anchors);job->failed[i]=true;return;}
+    for(size_t j=0;j<rule->pattern_count;++j)
+        names[j]=job->anchor_names?job->anchor_names[first+j]:rule->patterns[j].identifier;
+    yx_condition_bind_pattern_sets(anchors,names,rule->pattern_count);
+    (void)yx_condition_fold_modules(anchors,(const char *const *)job->rules->imports,job->rules->import_count,
+        job->rules->globals,job->rules->global_count,NULL,0);
+    for(size_t j=0;j<rule->pattern_count;++j) {
+        size_t at=0;
+        if(!names[j])continue;
+        if(yx_condition_pattern_fixed_at(anchors,names[j],&at)){job->state[first+j]=1;job->offset[first+j]=at;}
+        else {job->state[first+j]=2;job->unmarked[first+j]=!yx_condition_pattern_nonanchorable(anchors,names[j],false);}
+    }
+    free((void *)names);yx_condition_destroy(anchors);
 }
 static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,const int *roots,yx_physical_pattern_options *options,yx_writer *header_storage)
 {
@@ -95,6 +178,9 @@ static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,cons
     bool *used=calloc(physical?physical:1,sizeof(*used)),*anchor=malloc((physical?physical:1)*sizeof(*anchor));
     uint64_t *offset=calloc(physical?physical:1,sizeof(*offset));
     bool ok=used&&anchor&&offset;
+    /* Out of memory is p->no_memory: the caller fails the encoding, it does
+     * not try another codec (no archive depends on an allocation). */
+    if(!ok)p->no_memory=true;
     for(size_t id=0;ok&&id<physical;++id)anchor[id]=true;
     for(size_t n=0;ok&&n<p->count;++n) {
         const yx_module_node *node=&p->nodes[n];
@@ -123,42 +209,85 @@ static bool yx_composed_options(yx_module_program *p,const YRX_RULES *rules,cons
         else offset[id]=(uint64_t)p->nodes[node->args[0]].integer;
         used[id]=true;
     }
+    /* anchor_patterns (ast2ir.rs) decides per rule (yx_composed_anchor_task,
+     * every rule at once). The node scan above remains for a text the
+     * condition parser does not read. */
+    size_t total=0,*starts=malloc((rules->rule_count?rules->rule_count:1)*sizeof(*starts));
+    for(size_t i=0;starts&&i<rules->rule_count;++i){starts[i]=total;total+=rules->rules[i].pattern_count;}
+    uint8_t *states=calloc(total?total:1,1);uint64_t *offsets=calloc(total?total:1,sizeof(*offsets));
+    bool *unmarked=calloc(total?total:1,sizeof(*unmarked)),*failed=calloc(rules->rule_count?rules->rule_count:1,sizeof(*failed));
+    if(!(starts&&states&&offsets&&unmarked&&failed)){ok=false;p->no_memory=true;}
+    if(ok) {
+        yx_composed_anchor_job job={rules,c->anchor_names,starts,states,offsets,unmarked,failed};
+        yx_parallel_run(rules->rule_count,yx_parallel_threads(rules->rule_count,16),yx_composed_anchor_task,&job);
+        for(size_t i=0;i<rules->rule_count;++i)if(failed[i]){ok=false;p->no_memory=true;}
+    }
+    /* Each rule's constraints once, in definition order, as upstream keeps
+     * them (compiler/mod.rs rule_constraints): the condition's own (a rule
+     * reference merges the referenced rule's finished constraints, ir/mod.rs
+     * filesize_bounds / header_constraints), then the namespace's global
+     * rules' (a global rule adds its own to them and takes the result). */
+    size_t namespaces=1;
+    for(size_t i=0;i<rules->rule_count;++i)if(rules->rules[i].namespace_index>=namespaces)namespaces=rules->rules[i].namespace_index+1;
+    yx_pattern_filesize_bounds *rule_bounds=calloc(rules->rule_count?rules->rule_count:1,sizeof(*rule_bounds));
+    yx_header_collection *rule_headers=calloc(rules->rule_count?rules->rule_count:1,sizeof(*rule_headers));
+    yx_pattern_filesize_bounds *global_bounds=calloc(namespaces,sizeof(*global_bounds));
+    yx_physical_header *global_headers=calloc(namespaces,sizeof(*global_headers));
+    yx_writer *global_storage=calloc(namespaces,sizeof(*global_storage));
+    if(!rule_bounds||!rule_headers||!global_bounds||!global_headers||!global_storage){ok=false;p->no_memory=true;}
+    for(size_t n=0;global_bounds&&n<namespaces;++n)global_bounds[n]=(yx_pattern_filesize_bounds){2,2,0,0};
+    c->rule_bounds=rule_bounds;c->rule_headers=rule_headers;c->rule_constraint_count=0;
     for(size_t i=0;ok&&i<rules->rule_count;++i) {
+        size_t ns=rules->rules[i].namespace_index;
         yx_pattern_filesize_bounds bounds={2,2,0,0};yx_composed_bounds(p,roots[i],roots,i,&bounds,0);
-        for(size_t g=0;g<=i;++g)if(rules->rules[g].is_global&&rules->rules[g].namespace_index==rules->rules[i].namespace_index)
-            yx_composed_bounds(p,roots[g],roots,g,&bounds,0);
-        yx_physical_header header={0};if(!yx_module_header(p,roots[i],rules,roots,i,&header_storage[i],&header)){ok=false;break;}
-        /* anchor_patterns (ast2ir.rs) decides per rule: the condition's own
-         * analysis (yx_condition_pattern_fixed_at) is the port of it. The
-         * node scan above remains for a text it cannot parse. */
-        yx_condition *anchors=NULL;
-        if(rules->rules[i].pattern_count&&rules->rules[i].condition_text&&
-           (anchors=yx_condition_compile(rules->rules[i].condition_text,NULL,0))!=NULL) {
-            const char **names=malloc(rules->rules[i].pattern_count*sizeof(*names));
-            if(!names){yx_condition_destroy(anchors);ok=false;break;}
-            for(size_t j=0;j<rules->rules[i].pattern_count;++j)
-                names[j]=c->anchor_names?c->anchor_names[logical+j]:rules->rules[i].patterns[j].identifier;
-            yx_condition_bind_pattern_sets(anchors,names,rules->rules[i].pattern_count);
-            (void)yx_condition_fold_modules(anchors,(const char *const *)rules->imports,rules->import_count,
-                rules->globals,rules->global_count,NULL,0);
-            free((void *)names);
+        yx_header_collection pieces={0};yx_physical_header header={0};yx_writer own={0};
+        /* A header walk that fails refuses this codec, as before; what
+         * fails after it is an allocation. */
+        if(!yx_module_header_visit(p,roots[i],rules,roots,i,&pieces,0)) {
+            yx_header_collection_destroy(&pieces);ok=false;break;
         }
+        ok=yx_header_finish(&pieces,&own,&header);
+        yx_header_collection_destroy(&pieces);
+        if(ok&&rules->rules[i].is_global) {
+            yx_multi_pattern_bounds_merge(&global_bounds[ns],&bounds);bounds=global_bounds[ns];
+            yx_writer merged={0};
+            ok=yx_header_constraint_merge(&global_headers[ns],&global_storage[ns],&header,&merged);
+            if(ok){free(global_storage[ns].data);global_storage[ns]=merged;global_headers[ns].bytes=merged.data;}
+            else free(merged.data);
+            header=global_headers[ns];
+        } else if(ok) {
+            yx_multi_pattern_bounds_merge(&bounds,&global_bounds[ns]);
+            yx_writer merged={0};yx_physical_header result={0};
+            ok=yx_header_constraint_merge_into(&header,&global_headers[ns],&result,&merged);
+            if(ok){header=result;free(own.data);own=merged;header.bytes=own.data;}
+            else free(merged.data);
+        }
+        /* The rule's finished constraints: what a reference to it merges,
+         * and what its patterns get. */
+        header_storage[i].used=0;
+        if(ok&&header.kind==2&&!yx_put_bytes(&header_storage[i],header.bytes,header.length))ok=false;
+        free(own.data);
+        if(!ok){p->no_memory=true;break;}
+        if(header.kind==2)header.bytes=header_storage[i].data;
+        rule_bounds[i]=bounds;
+        if(header.kind==1)rule_headers[i].impossible=true;
+        else if(header.kind==2&&!yx_header_add(&rule_headers[i],0,header.bytes,header.length)){ok=false;p->no_memory=true;break;}
+        c->rule_constraint_count=i+1;
         for(size_t j=0;j<rules->rules[i].pattern_count;++j,++logical) {
             yx_physical_pattern_options *o=&options[logical];size_t id=c->archive->mapping[logical];
             *o=(yx_physical_pattern_options){.limit=c->archive->limits[id],.bounds=rules->rules[i].patterns[j].kind==YX_PATTERN_TEXT?(yx_pattern_filesize_bounds){2,2,0,0}:bounds};
             if(rules->rules[i].patterns[j].kind!=YX_PATTERN_TEXT)o->header=header;
             if(id<physical){o->offset=offset[id];o->anchored=used[id]&&anchor[id];}
-            const char *anchor_name=c->anchor_names?c->anchor_names[logical]:rules->rules[i].patterns[j].identifier;
-            if(anchors&&anchor_name) {
-                size_t at=0;
-                o->anchored=yx_condition_pattern_fixed_at(anchors,anchor_name,&at);
-                if(o->anchored)o->offset=at;
-                else o->unmarked=!yx_condition_pattern_nonanchorable(anchors,anchor_name,false);
-            }
+            if(states[logical]==1){o->anchored=true;o->offset=offsets[logical];}
+            else if(states[logical]==2){o->anchored=false;o->unmarked=unmarked[logical];}
         }
-        yx_condition_destroy(anchors);
     }
+    free(starts);free(states);free(offsets);free(unmarked);free(failed);
     free(used);free(anchor);free(offset);
+    for(size_t i=0;rule_headers&&i<rules->rule_count;++i)yx_header_collection_destroy(&rule_headers[i]);
+    for(size_t n=0;global_storage&&n<namespaces;++n)free(global_storage[n].data);
+    free(rule_bounds);free(rule_headers);free(global_bounds);free(global_headers);free(global_storage);
+    c->rule_bounds=NULL;c->rule_headers=NULL;c->rule_constraint_count=0;
     return ok;
 }
 /* The literals each rule's condition interns, in emission order: a dry
@@ -228,7 +357,7 @@ static yx_ser_result yx_encode_composed_rules_mode(const YRX_RULES *rules,uint8_
     provisional->physical=provisional->logical=logical;c.archive=provisional;yx_module_pattern_setup(p,&c);
     p->schema=&schema.dynamic.schema;p->profile=profile;p->capi_import_order=!rules->archive_cli&&profile==0;
     if(!yx_composed_parse_rules(p,&c,rules,roots)||!yx_composed_options(p,rules,roots,options,header_storage)||
-       !yx_composed_condition_literals(p,&c,roots,rules->rule_count,&assembly))goto done;
+       !yx_composed_condition_literals(p,&c,roots,rules->rule_count,&assembly)){if(p->no_memory)status=YX_SER_NO_MEMORY;goto done;}
     assembly.archive=calloc(1,sizeof(*assembly.archive));if(!assembly.archive){status=YX_SER_NO_MEMORY;goto done;}
     if(yx_physical_ident(assembly.archive,"default")!=0)goto done;
     assembly.archive->globals=schema.dynamic.globals.data;assembly.archive->globals_length=schema.dynamic.globals.used;

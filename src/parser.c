@@ -9392,10 +9392,14 @@ validation_failed:
                                             error_end, converted_end);
             /* YARA-X raised these while compiling the operands before the
              * failing one: keep those that end before the error. */
+            /* An operation's operands are all converted before their types
+             * are checked (converted_end). */
             first_expression_warning = p->compiler->warning_count;
-            if (!yx_condition_warn_ambiguous_zero_of(p, rule, start, error_start))
+            if (!yx_condition_warn_ambiguous_zero_of(p, rule, start,
+                    converted_end > error_start ? converted_end : error_start))
                 return yx_error(p, "out of memory recording expression warning");
-            if (!yx_condition_warn_unsatisfiable_at(p, rule, start, error_end))
+            if (!yx_condition_warn_unsatisfiable_at(p, rule, start,
+                    converted_end > error_end ? converted_end : error_end))
                 return yx_error(p, "out of memory recording expression warning");
             yx_order_of_warnings(p->compiler, first_type_warning,
                                  first_expression_warning);
@@ -9405,6 +9409,19 @@ validation_failed:
             p->too_many_variables_at = NULL;
             if (!yx_condition_warn_too_many_iterations(p, rule, start, limit))
                 return yx_error(p, "out of memory recording loop warning");
+        } else if (yx_compiler_semantic_error_span(p->compiler, error_mark,
+                                                   &error_start, &error_end) &&
+                   error_start >= (size_t)(start - p->begin)) {
+            /* for_in_expr_from_ast warns about a loop before compiling its
+             * body: the loops starting before the error, or before the end
+             * of the operands converted with it, were reported, where the
+             * conversion met them. */
+            size_t first_loop_warning = p->compiler->warning_count;
+            size_t limit = converted_end > error_start ? converted_end : error_start;
+            if (!yx_condition_warn_too_many_iterations(p, rule, start, p->begin + limit))
+                return yx_error(p, "out of memory recording loop warning");
+            yx_compiler_order_raised_warnings(p->compiler, first_type_warning,
+                                              first_loop_warning);
         }
         if (yx_compiler_semantic_error_end(p->compiler, error_mark, &error_end) &&
             !yx_compiler_warn_deprecated_before(

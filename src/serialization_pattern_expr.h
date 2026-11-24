@@ -1023,7 +1023,7 @@ static yx_ser_result yx_decode_pattern_expression(const uint8_t *data,size_t len
        !yx_get_u8(&r,&marker)||marker!=0x7e))||!yx_rule_expression_byte(&r,2)||!yx_rule_expression_byte(&r,0x7f))goto done;
     int root=yx_integer_wasm_block(&r,body_end,tree,0,-1);
     if(root<0||!c.saw_pattern)goto done;
-    if(!yx_unanchored_pattern_terms(data,length,tree,&root))goto done;
+    if(!yx_unanchored_pattern_terms(data,length,tree,&root)){status=YX_SER_NO_MEMORY;goto done;}
     if(!yx_pattern_expression_scope_fixup(tree,&root,&c))goto done;
     uint8_t profile=4;int original_root=root;
     for(unsigned variant=0;variant<3&&profile==4;++variant) {

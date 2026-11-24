@@ -363,6 +363,25 @@ typedef struct yx_patch_note {
     size_t marks[16][3];
 } yx_patch_note;
 
+/* The long rows of stored warning reports, each kept once. A report shows a
+ * patched source line in full (YARA-X prints it on Display), so a rule on
+ * one long line with a warning per pattern would otherwise store the line
+ * once per warning: quadratic memory. A stored warning that refers to rows
+ * starts with YX_WARNING_COMPACT; see yx_warning_compact in xxyara.c. */
+enum { YX_WARNING_RECENT_ROWS = 8 };
+typedef struct yx_warning_rows {
+    char **items;
+    size_t *lengths;
+    uint64_t *hashes;
+    size_t count, capacity;
+    size_t *slots; /* row id + 1 (0: empty), open addressing by hash */
+    size_t slot_capacity;
+    /* Rows referred to last: the next warning's rows are compared with
+     * them first (a patch row is a copy of one with a replacement). */
+    size_t recent[YX_WARNING_RECENT_ROWS];
+    size_t recent_count, recent_next;
+} yx_warning_rows;
+
 /* A source being parsed whose NUL bytes were escaped; see xxyara.c. */
 typedef struct yx_nul_escape_entry yx_nul_escape_entry;
 
@@ -401,6 +420,7 @@ struct YRX_COMPILER {
     char **warnings;
     size_t warning_count;
     size_t max_warnings;
+    yx_warning_rows warning_rows;
     /* For the current rule's typed warnings raised after their operands
      * (non_bool_expr, unused_identifier): the source offset at which
      * YARA-X raises each one, keyed by the warning's text. The text-based
@@ -423,6 +443,14 @@ struct YRX_COMPILER {
 };
 /* A warning the caller will not show (warnings_disabled): not rendered. */
 bool yx_compiler_warning_skipped(const YRX_COMPILER *compiler, const char *code);
+/* Warning `index` exactly as yrx_compiler_warnings_json writes it (one
+ * array element, colorized under YRX_COLORIZE_ERRORS), so a caller can show
+ * the warnings one at a time. The caller frees it; NULL: out of memory. */
+char *yx_compiler_warning_json(const YRX_COMPILER *compiler, size_t index);
+/* True when the text of some warning's JSON contains `needle`, which must
+ * lie outside a report's rendered text (a "code" field, for example). */
+bool yx_compiler_warnings_contain(const YRX_COMPILER *compiler,
+                                  const char *needle);
 
 /* Borrowed until the next scan, matching yrx_scanner_set_module_data. */
 typedef struct yx_scanner_module_data {
@@ -749,6 +777,8 @@ int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
                                        const char *source, const char *origin,
                                        size_t condition_offset, size_t limit,
                                        size_t first_type_warning);
+void yx_compiler_order_raised_warnings(YRX_COMPILER *compiler,
+                                       size_t first_type_warning, size_t first_new);
 bool yx_compiler_json_span(const YRX_COMPILER *compiler, const char *span,
                            size_t *start, size_t *end);
 bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler,

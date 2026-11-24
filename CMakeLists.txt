@@ -685,8 +685,11 @@ if(XXYARA_BUILD_TESTS AND BUILD_TESTING)
     # xx_ms_log2 (the log2 of the CRT-free layer) against the log2 of
     # Microsoft's static UCRT, bit for bit: specials, powers of two,
     # subnormals, random doubles, c/n for every n <= 4096 and 200,000 entropy
-    # sums, with the runtime's FMA3 paths on and off.
-    if(XXYARA_NO_CRT AND EXISTS "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/ms_log2_ucrt_test.c")
+    # sums, with the runtime's FMA3 paths on and off. x64 only: xx_ms_log2
+    # reproduces the x64 UCRT on every architecture and the 32-bit UCRT has
+    # another log2.
+    if(XXYARA_NO_CRT AND CMAKE_SIZEOF_VOID_P EQUAL 8
+       AND EXISTS "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/ms_log2_ucrt_test.c")
         add_executable(test_ms_log2_ucrt "${XXYARA_XXFCLIB_SOURCE_DIR}/tests/crt/ms_log2_ucrt_test.c")
         target_link_libraries(test_ms_log2_ucrt PRIVATE xxfclib::xxfclib
             $<IF:$<CONFIG:Debug>,libcmtd,libcmt> $<IF:$<CONFIG:Debug>,libvcruntimed,libvcruntime>
