@@ -39,7 +39,6 @@ typedef struct yx_cli_regex {
 /* The input remains caller-owned. A successful result owns its translated
  * pattern; release it with yx_cli_regex_free. Errors carry original UTF-8
  * byte spans, with exclusive ends. No diagnostic is printed here. */
-bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode,
-                            yx_cli_regex *result, yx_cli_regex_error *error);
+bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode, yx_cli_regex *result, yx_cli_regex_error *error);
 void yx_cli_regex_free(yx_cli_regex *result);
 #endif

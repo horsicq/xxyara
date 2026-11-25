@@ -10,14 +10,24 @@
 typedef size_t PCRE2_SIZE;
 typedef const unsigned char *PCRE2_SPTR;
 typedef struct yx_native_regex pcre2_code;
-typedef struct { int unused; } pcre2_compile_context;
-typedef struct { size_t current_position, start_match; } pcre2_callout_block;
+typedef struct {
+    int unused;
+} pcre2_compile_context;
+typedef struct {
+    size_t current_position, start_match;
+} pcre2_callout_block;
 typedef struct {
     int (*callout)(pcre2_callout_block *, void *);
     void *user;
 } pcre2_match_context;
-typedef struct { size_t *offsets; int32_t *captures; size_t count; } pcre2_match_data;
-typedef struct { uint32_t first, last; } yx_re_range;
+typedef struct {
+    size_t *offsets;
+    int32_t *captures;
+    size_t count;
+} pcre2_match_data;
+typedef struct {
+    uint32_t first, last;
+} yx_re_range;
 struct yx_scan_deadline;
 #define PCRE2_ZERO_TERMINATED SIZE_MAX
 #define PCRE2_CASELESS 1u
@@ -49,26 +59,22 @@ struct yx_scan_deadline;
 #define PCRE2_ERROR_HEAP_FAILED 121
 /* Parse one literal, class or class escape for the compiler's size model.
  * The returned sorted scalar ranges belong to the caller (free()). */
-int yx_re_class_ranges(const unsigned char *, size_t, size_t *, uint32_t,
-                       yx_re_range **, size_t *);
+int yx_re_class_ranges(const unsigned char *, size_t, size_t *, uint32_t, yx_re_range **, size_t *);
 /* The same for a Unicode class (PCRE2_UTF), as regex-syntax's ranges of
  * chars: *gap_split is set when the range ending at U+D7FF and the range
  * starting at U+E000 are two ranges of the class, not one across the
  * surrogate gap. A negated outermost class keeps its ranges unmerged. */
-int yx_re_class_ranges_gap(const unsigned char *, size_t, size_t *, uint32_t,
-                           yx_re_range **, size_t *, bool *gap_split);
+int yx_re_class_ranges_gap(const unsigned char *, size_t, size_t *, uint32_t, yx_re_range **, size_t *, bool *gap_split);
 /* UTF-8 byte expression for scalar ranges; caller frees the returned text. */
 char *yx_re_ranges_pattern(const yx_re_range *, size_t);
 /* Validate and register a capture name: 1 valid, 0 invalid/duplicate, -1 OOM.
  * The NUL-separated registry belongs to the caller and is released with free. */
-int yx_re_capture_name_append(char **, size_t *, size_t *,
-                               const unsigned char *, size_t);
+int yx_re_capture_name_append(char **, size_t *, size_t *, const unsigned char *, size_t);
 /* Compile once from the original YARA regexp, then search without captures.
  * Search returns 1/0 for match/miss, -1 for allocation failure or deadline. */
 int yx_re_code_set_source(pcre2_code *, const char *, size_t, bool, bool);
 pcre2_code *yx_re_compile_search(const char *, size_t, bool, bool, int *);
-int yx_re_code_search(const pcre2_code *, const unsigned char *, size_t,
-                       struct yx_scan_deadline *);
+int yx_re_code_search(const pcre2_code *, const unsigned char *, size_t, struct yx_scan_deadline *);
 /* Shared regex-syntax property resolver; ranges are owned by the caller. */
 int yx_re_property_ranges(const char *, size_t, int, yx_re_range **, size_t *);
 const char *yx_re_property_error(const char *, size_t);

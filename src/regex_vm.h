@@ -65,7 +65,7 @@ typedef struct yx_rx_guard {
 typedef struct yx_rx_window {
     uint8_t set[32];
     uint32_t low, high;
-    int16_t byte;   /* the only byte of set, or -1 */
+    int16_t byte; /* the only byte of set, or -1 */
     bool backward;
 } yx_rx_window;
 
@@ -135,9 +135,10 @@ void yx_rx_program_free(yx_rx_program *program);
  * hold literals only, and the exact jumps of one line add up to at most
  * YX_RX_FAST_EXACT_JUMP_LIMIT bytes (positions they produce are stored
  * without looking at the input). False also without memory. */
-enum { YX_RX_FAST_EXACT_JUMP_LIMIT = 65536 };
-bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries,
-                               size_t entry_count, bool fast);
+enum {
+    YX_RX_FAST_EXACT_JUMP_LIMIT = 65536
+};
+bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries, size_t entry_count, bool fast);
 /* Builds the search index and the atoms' windows once the atoms are final.
  * False on allocation failure (a program without memory for windows just
  * has none). */
@@ -152,26 +153,25 @@ bool yx_rx_program_set_index_skip(yx_rx_program *program, bool enable);
 /* False when the windows of the atom with flattened index `index` (in
  * sub-pattern order) rule out a match from its occurrence at `position`:
  * verifying that occurrence cannot add a match. */
-bool yx_rx_atom_possible(const yx_rx_program *program, size_t index, const uint8_t *data,
-                         size_t size, size_t position);
+bool yx_rx_atom_possible(const yx_rx_program *program, size_t index, const uint8_t *data, size_t size, size_t position);
 void yx_rx_match_list_free(yx_rx_match_list *list);
 
 /* Runs a condition regexp program over the entire input. The compiled
  * program includes its unanchored search prefix. Returns 1 for a match, 0
  * for no match, or -1 on allocation failure, invalid code or an expired
  * deadline (reported in deadline->expired). The program is read-only. */
-int yx_rx_pike_search(const uint8_t *code, size_t code_length,
-                      const uint8_t *data, size_t size, yx_scan_deadline *deadline);
+int yx_rx_pike_search(const uint8_t *code, size_t code_length, const uint8_t *data, size_t size, yx_scan_deadline *deadline);
 
 /* Search every atom occurrence in the order of YARA-X's Aho-Corasick scan and
  * verify the sub-patterns. Returns false on allocation failure or when the
  * deadline expires. */
-bool yx_rx_scan(const yx_rx_program *program, const uint8_t *data, size_t size,
-                yx_scan_deadline *deadline, yx_rx_match_list *matches);
+bool yx_rx_scan(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches);
 
 /* Atom occurrences collected by the ruleset-wide pass. The atom index is
  * flattened in sub-pattern order, as in yx_rx_scan_ordered. */
-typedef struct yx_rx_candidate { size_t index, position; } yx_rx_candidate;
+typedef struct yx_rx_candidate {
+    size_t index, position;
+} yx_rx_candidate;
 
 /* Atom order of the reference's search. With teddy, hits are ordered by
  * start, bucket and global atom id, for inputs of at least minimum_len
@@ -182,16 +182,12 @@ typedef struct yx_rx_order {
     size_t minimum_len;
     const size_t *ids, *buckets;
 } yx_rx_order;
-bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_t size,
-                        yx_scan_deadline *deadline, yx_rx_match_list *matches,
-                        const yx_rx_order *order);
+bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches, const yx_rx_order *order);
 /* Verifies the occurrences in candidates, which it reorders in place into
  * the verification order. */
-bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *data, size_t size,
-    yx_scan_deadline *deadline, yx_rx_match_list *matches, const yx_rx_order *order,
-    yx_rx_candidate *candidates, size_t count);
-void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *buckets,
-                         size_t *minimum_len);
+bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches,
+                                const yx_rx_order *order, yx_rx_candidate *candidates, size_t count);
+void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *buckets, size_t *minimum_len);
 
 /* The Literal sub-patterns of a pattern that is a whole-expression
  * alternation of literals (Compiler::c_alternation_literal): per branch the
@@ -219,9 +215,12 @@ void yx_rx_literals_free(yx_rx_literals *set);
  * the literals occurs (no literal is nocase then): the scan visits those
  * offsets instead of searching the atoms, with the same result. False on
  * allocation failure or when the deadline expires. */
-enum { YX_RX_LITERALS_AUTOMATON, YX_RX_LITERALS_TEDDY, YX_RX_LITERALS_ANCHORED };
-bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size,
-                         yx_scan_deadline *deadline, yx_rx_match_list *matches, int order,
+enum {
+    YX_RX_LITERALS_AUTOMATON,
+    YX_RX_LITERALS_TEDDY,
+    YX_RX_LITERALS_ANCHORED
+};
+bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches, int order,
                          const yx_rx_candidate *starts, size_t start_count);
 
 /* A set of short atoms, each owned by a pattern, searched in one pass to
@@ -236,8 +235,7 @@ bool yx_atom_set_add_tagged(yx_atom_set *set, const uint8_t *bytes, size_t lengt
 /* Every occurrence, by increasing start position and then atom insertion order.
  * False when the deadline expires or fn requests a stop. */
 typedef bool (*yx_atom_candidate_fn)(void *ctx, size_t owner, uint32_t tag, size_t position);
-bool yx_atom_set_scan_candidates(const yx_atom_set *set, const uint8_t *data, size_t size,
-                                 yx_scan_deadline *deadline, yx_atom_candidate_fn fn, void *ctx);
+bool yx_atom_set_scan_candidates(const yx_atom_set *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_atom_candidate_fn fn, void *ctx);
 
 bool yx_atom_set_build(yx_atom_set *set);
 size_t yx_atom_set_owner_count(const yx_atom_set *set);
@@ -245,8 +243,7 @@ size_t yx_atom_set_owner_count(const yx_atom_set *set);
 /* Sets hit[owner] for every owner with an occurrence; hit has
  * yx_atom_set_owner_count entries and is cleared first. False when the
  * deadline expires. */
-bool yx_atom_set_scan(const yx_atom_set *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline,
-                      bool *hit);
+bool yx_atom_set_scan(const yx_atom_set *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, bool *hit);
 
 #ifdef __cplusplus
 }

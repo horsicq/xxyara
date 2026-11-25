@@ -41,59 +41,28 @@ typedef xx_dotnet_yx_method yx_dotnet_method;
 typedef xx_dotnet_yx_method_parameter yx_dotnet_method_parameter;
 typedef xx_dotnet_yx_result yx_dotnet_result;
 
-bool yx_dotnet_parse(const uint8_t *data, size_t size,
-                     yx_dotnet_result *result);
-bool yx_dotnet_guid_at(const uint8_t *data, size_t size,
-                       const yx_dotnet_result *result, size_t index,
-                       char text[37]);
-bool yx_dotnet_user_string_at(const uint8_t *data, size_t size,
-                              const yx_dotnet_result *result, size_t index,
-                              const uint8_t **bytes, size_t *length);
-bool yx_dotnet_assembly_ref_at(const yx_dotnet_result *result, size_t index,
-                               yx_dotnet_assembly_ref *out);
-bool yx_dotnet_module_ref_at(const yx_dotnet_result *result, size_t index,
-                             const uint8_t **name, size_t *length);
-bool yx_dotnet_constant_at(const yx_dotnet_result *result, size_t index,
-                           const uint8_t **bytes, size_t *length);
-bool yx_dotnet_field_offset_at(const uint8_t *data, size_t size,
-                               const yx_dotnet_result *result, size_t index,
-                               uint32_t *offset);
-bool yx_dotnet_resource_at(const yx_dotnet_result *result, size_t index,
-                           yx_dotnet_resource *out);
-bool yx_dotnet_class_at(const yx_dotnet_result *result, size_t index,
-                        char *fullname_buffer, size_t buffer_capacity,
-                        yx_dotnet_class *out);
-bool yx_dotnet_class_raw_index(const yx_dotnet_result *result,
-                               size_t class_index, size_t *raw_index);
-bool yx_dotnet_type_def_or_ref_fullname(
-    const yx_dotnet_result *result, uint16_t coded, char *buffer,
-    size_t capacity, size_t *required, size_t *length);
-bool yx_dotnet_class_generic_parameter_at(
-    const yx_dotnet_result *result, size_t class_index,
-    size_t parameter_index, const uint8_t **name, size_t *length);
-bool yx_dotnet_class_base_type_at(const yx_dotnet_result *result,
-                                  size_t class_index, size_t base_index,
-                                  char *buffer, size_t buffer_capacity,
-                                  size_t *required_capacity, size_t *length);
+bool yx_dotnet_parse(const uint8_t *data, size_t size, yx_dotnet_result *result);
+bool yx_dotnet_guid_at(const uint8_t *data, size_t size, const yx_dotnet_result *result, size_t index, char text[37]);
+bool yx_dotnet_user_string_at(const uint8_t *data, size_t size, const yx_dotnet_result *result, size_t index, const uint8_t **bytes, size_t *length);
+bool yx_dotnet_assembly_ref_at(const yx_dotnet_result *result, size_t index, yx_dotnet_assembly_ref *out);
+bool yx_dotnet_module_ref_at(const yx_dotnet_result *result, size_t index, const uint8_t **name, size_t *length);
+bool yx_dotnet_constant_at(const yx_dotnet_result *result, size_t index, const uint8_t **bytes, size_t *length);
+bool yx_dotnet_field_offset_at(const uint8_t *data, size_t size, const yx_dotnet_result *result, size_t index, uint32_t *offset);
+bool yx_dotnet_resource_at(const yx_dotnet_result *result, size_t index, yx_dotnet_resource *out);
+bool yx_dotnet_class_at(const yx_dotnet_result *result, size_t index, char *fullname_buffer, size_t buffer_capacity, yx_dotnet_class *out);
+bool yx_dotnet_class_raw_index(const yx_dotnet_result *result, size_t class_index, size_t *raw_index);
+bool yx_dotnet_type_def_or_ref_fullname(const yx_dotnet_result *result, uint16_t coded, char *buffer, size_t capacity, size_t *required, size_t *length);
+bool yx_dotnet_class_generic_parameter_at(const yx_dotnet_result *result, size_t class_index, size_t parameter_index, const uint8_t **name, size_t *length);
+bool yx_dotnet_class_base_type_at(const yx_dotnet_result *result, size_t class_index, size_t base_index, char *buffer, size_t buffer_capacity, size_t *required_capacity,
+                                  size_t *length);
 
-size_t yx_dotnet_class_method_count(const yx_dotnet_result *result,
-                                    size_t class_index);
-bool yx_dotnet_class_method_at(const yx_dotnet_result *result,
-                               size_t class_index, size_t method_index,
-                               char *return_type_buffer,
-                               size_t buffer_capacity, yx_dotnet_method *out);
-bool yx_dotnet_method_parameter_at(const yx_dotnet_result *result,
-                                   const yx_dotnet_method *method,
-                                   size_t parameter_index, char *type_buffer,
-                                   size_t buffer_capacity,
+size_t yx_dotnet_class_method_count(const yx_dotnet_result *result, size_t class_index);
+bool yx_dotnet_class_method_at(const yx_dotnet_result *result, size_t class_index, size_t method_index, char *return_type_buffer, size_t buffer_capacity,
+                               yx_dotnet_method *out);
+bool yx_dotnet_method_parameter_at(const yx_dotnet_result *result, const yx_dotnet_method *method, size_t parameter_index, char *type_buffer, size_t buffer_capacity,
                                    yx_dotnet_method_parameter *out);
-bool yx_dotnet_method_generic_parameter_at(
-    const yx_dotnet_result *result, const yx_dotnet_method *method,
-    size_t parameter_index, const uint8_t **name, size_t *length);
-bool yx_dotnet_type_spec_fullname(const yx_dotnet_result *result,
-                                  size_t raw_type_spec_index,
-                                  size_t class_index, char *buffer,
-                                  size_t buffer_capacity,
+bool yx_dotnet_method_generic_parameter_at(const yx_dotnet_result *result, const yx_dotnet_method *method, size_t parameter_index, const uint8_t **name, size_t *length);
+bool yx_dotnet_type_spec_fullname(const yx_dotnet_result *result, size_t raw_type_spec_index, size_t class_index, char *buffer, size_t buffer_capacity,
                                   size_t *required_capacity, size_t *length);
 
 #endif

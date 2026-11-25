@@ -52,7 +52,6 @@ void yx_vba_result_free(yx_vba_result *result);
 /* Decode an MS-OVBA compressed stream. Exposed for focused conformance tests.
  * Caller owns *output and must free it. False means invalid or truncated data,
  * or a resource limit was reached. */
-bool yx_vba_decompress(const uint8_t *data, size_t size,
-                       uint8_t **output, size_t *output_size);
+bool yx_vba_decompress(const uint8_t *data, size_t size, uint8_t **output, size_t *output_size);
 
 #endif

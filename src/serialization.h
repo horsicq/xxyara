@@ -44,14 +44,12 @@ struct yx_rx_literals;
 struct yx_rx_literals *yx_ser_literal_set(const YRX_PATTERN *pattern);
 /* Boolean condition regexp, compiled once: 1 success, 0 unsupported/too large,
  * -1 allocation failure. The caller owns the unanchored PikeVM program. */
-int yx_ser_search_program(const char *regexp, size_t length, bool dotall,
-                           bool nocase, uint8_t **code, size_t *code_length);
+int yx_ser_search_program(const char *regexp, size_t length, bool dotall, bool nocase, uint8_t **code, size_t *code_length);
 /* Compiler::c_rule's slow_pattern decisions for a regexp or hex pattern:
  * the literal check and one entry per c_regexp call (0 not slow, 1 slow,
  * 2 slow and exceptionally extreme). 1 when modeled, 0 when not, -1 on
  * allocation failure; the caller frees *calls. */
-int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow,
-                        uint8_t **calls, size_t *call_count);
+int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow, uint8_t **calls, size_t *call_count);
 struct yx_rx_atom;
 /* The reference's automaton atoms for a pattern; false when not modeled. */
 bool yx_ser_pattern_reference_atoms(const YRX_PATTERN *pattern, struct yx_rx_atom **atoms, size_t *count);
@@ -62,8 +60,7 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, struct yx_
 int yx_ser_search_atoms_status(const YRX_PATTERN *pattern, struct yx_rx_atom **atoms, size_t *count);
 /* -2: ordinary path, -1: allocation error, 0: empty verifier, 1: owned source, 3: chain. */
 int yx_ser_lower_fast_regex(const YRX_PATTERN *pattern, char **lowered);
-int yx_ser_scan_large_fast_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    bool (*emit)(size_t offset, size_t length, void *context), void *context);
+int yx_ser_scan_large_fast_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t offset, size_t length, void *context), void *context);
 /* Chains of sub-patterns (Hir::split_at_large_gaps): hex patterns, also
  * literal-only ones, and regexps, joined as verify_chain_of_matches joins
  * them. The scans return 1, 0 on failure, -2 when the pattern is not such a
@@ -84,10 +81,8 @@ int yx_ser_regex_chain_status(const YRX_PATTERN *pattern);
  * atoms of the head sub-pattern. Branch k is (*bytes)[(*offsets)[k] .. (*offsets)[k+1]).
  * Returns the branch count, 0 when there is none, -1 on allocation failure. */
 int yx_ser_hex_chain_gate(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **offsets);
-int yx_ser_scan_hex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    bool (*emit)(size_t offset, size_t length, void *context), void *context);
-int yx_ser_scan_regex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    bool (*emit)(size_t offset, size_t length, void *context), void *context);
+int yx_ser_scan_hex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t offset, size_t length, void *context), void *context);
+int yx_ser_scan_regex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t offset, size_t length, void *context), void *context);
 /* The chain the scans above build for a pattern, built ahead (NULL when the
  * pattern is not a chain, a piece cannot be built or memory runs out; the
  * scans then build their own). */
@@ -95,9 +90,8 @@ struct yx_hc_chain *yx_ser_chain_new(const YRX_PATTERN *pattern);
 void yx_ser_chain_free(struct yx_hc_chain *chain);
 /* `greedy` reports whether a longer match replaces a shorter one that starts
  * at the same offset, as for the reference's greedy regexp sub-patterns. */
-int yx_ser_scan_large_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    bool (*emit)(size_t offset, size_t length, void *context), void *context,
-    bool *greedy);
+int yx_ser_scan_large_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t offset, size_t length, void *context), void *context,
+                            bool *greedy);
 
 /* YARA-X v1.23.0 / archive version 12 codec. Typed numeric, pattern,
  * module and external-global expressions share structural readers/writers.
@@ -127,8 +121,7 @@ enum {
     YX_SER_WIRE_BOUNDS = -2,
     YX_SER_WIRE_WASM = -3
 };
-int yx_ser_validate_v12(const uint8_t *data, size_t length,
-                         size_t *consumed);
+int yx_ser_validate_v12(const uint8_t *data, size_t length, size_t *consumed);
 /* Between begin and end (nested per thread), a valid result of
  * yx_ser_validate_v12 for exactly these bytes is computed once. */
 typedef struct yx_wire_known {
@@ -143,34 +136,26 @@ const char *yx_ser_v12_decode_error_detail(void);
 
 /* Locate one orphan UTF-8 continuation byte in an otherwise ASCII
  * identifier-pool string. The returned offset is relative to that string. */
-bool yx_ser_ascii_pool_utf8_error(const uint8_t *data, size_t length,
-                                  size_t *valid_up_to);
+bool yx_ser_ascii_pool_utf8_error(const uint8_t *data, size_t length, size_t *valid_up_to);
 /* Classify one changed identifier-pool count or namespace width byte only
  * when repairing it restores a canonical complete archive. */
-bool yx_ser_prefix_pool_utf8_error_detail(const uint8_t *data,
-                                           size_t length,
-                                           size_t *valid_up_to);
+bool yx_ser_prefix_pool_utf8_error_detail(const uint8_t *data, size_t length, size_t *valid_up_to);
 
 /* For an exact canonical base64 archive prefix cut inside its AC image,
  * report the bytes needed to complete that image. */
-bool yx_ser_base64_ac_truncation(const uint8_t *data, size_t length,
-                                 size_t *additional);
+bool yx_ser_base64_ac_truncation(const uint8_t *data, size_t length, size_t *additional);
 
 /* Diagnose a truncated, structurally valid small archive prefix through
  * its identifier and literal pools or its embedded WASM byte vector. */
 bool yx_ser_archive_capi_ordered(const uint8_t *data, size_t length);
-bool yx_ser_cli_import_order_copy(const uint8_t *data, size_t length,
-                                  uint8_t **out);
-bool yx_ser_short_prefix_truncation(const uint8_t *data, size_t length,
-                                    size_t *additional);
+bool yx_ser_cli_import_order_copy(const uint8_t *data, size_t length, uint8_t **out);
+bool yx_ser_short_prefix_truncation(const uint8_t *data, size_t length, size_t *additional);
 
 /* Build the YARA-X Aho-Corasick image for a caller-owned sequence of atoms.
  * The returned buffer belongs to the caller and must be freed with free().
  * This internal entry point also supports atom sets larger than the archive
  * codec's currently supported rule shapes. */
-bool yx_ser_build_atom_ac(const uint8_t *const *atoms, const size_t *lengths,
-                          size_t atom_count, uint8_t **out,
-                          size_t *out_length);
+bool yx_ser_build_atom_ac(const uint8_t *const *atoms, const size_t *lengths, size_t atom_count, uint8_t **out, size_t *out_length);
 /* Between begin and end (nested, per thread), built images are memoized by
  * their atom sequence; the outermost end frees them. */
 void yx_ser_ac_memo_begin(void);
@@ -212,13 +197,13 @@ typedef struct yx_ser_rule {
      * optimization layout. Retain the validated original archive on reload. */
     bool preserve_serialized_prefix;
     bool integer_comparison;
-    char *runtime_integer_condition; /* borrowed on encode, owned on decode */
-    char *runtime_pattern_declarations; /* owned source declarations on decode */
+    char *runtime_integer_condition;                           /* borrowed on encode, owned on decode */
+    char *runtime_pattern_declarations;                        /* owned source declarations on decode */
     yx_archived_literal_prefilter *runtime_literal_prefilters; /* owned per pattern */
     size_t runtime_literal_prefilter_count;
     yx_archived_regexp **runtime_regexp_programs; /* owned per pattern, entries may be NULL */
     size_t runtime_regexp_program_count;
-    char *runtime_module_name; /* owned on decode; NULL for expressions without imports */
+    char *runtime_module_name;   /* owned on decode; NULL for expressions without imports */
     char **runtime_module_names; /* owned ordered imports for composed expressions */
     size_t runtime_module_count;
     yx_global *runtime_globals; /* owned external values reconstructed from archive */
@@ -299,7 +284,7 @@ typedef struct yx_ser_rule {
     size_t pe_version_value_length;
     bool integer_global_condition;
     bool boolean_global_condition;
-    uint8_t boolean_global_blocks; /* 0: direct, 1: and true, 2: or false */
+    uint8_t boolean_global_blocks;    /* 0: direct, 1: and true, 2: or false */
     uint8_t boolean_global_negations; /* outer `not` operators, at most two */
     bool boolean_global_constant;
     bool boolean_global_constant_value;
@@ -517,14 +502,11 @@ bool yx_ser_vt_enum_constant(const char *name, uint64_t *value);
  * the vt module that enum values hang from. */
 bool yx_ser_vt_enum_scope(const char *path, size_t length);
 
-yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data,
-                            size_t *length);
-yx_ser_result yx_ser_decode_many(const uint8_t *data, size_t length,
-                                  yx_ser_rule **rules, size_t *rule_count);
+yx_ser_result yx_ser_encode(const YRX_RULES *rules, uint8_t **data, size_t *length);
+yx_ser_result yx_ser_decode_many(const uint8_t *data, size_t length, yx_ser_rule **rules, size_t *rule_count);
 /* Copy an archive with one structurally valid, noncanonical empty AC image
  * replaced by the canonical image so the strict decoder can verify it. */
-yx_ser_result yx_ser_normalize_empty_ac(const uint8_t *data, size_t length,
-                                        uint8_t **normalized);
+yx_ser_result yx_ser_normalize_empty_ac(const uint8_t *data, size_t length, uint8_t **normalized);
 /* True only when repairing one WASM magic/version byte makes the complete
  * archive a supported compiled rule. */
 bool yx_ser_has_invalid_wasm_header(const uint8_t *data, size_t length);
@@ -533,37 +515,31 @@ bool yx_ser_has_invalid_wasm_header(const uint8_t *data, size_t length);
 bool yx_ser_has_invalid_wasm_type_prefix(const uint8_t *data, size_t length);
 /* Recognize a changed one-byte import-section length in the one-pattern WASM
  * only when repairing that byte yields a strictly supported archive. */
-bool yx_ser_has_invalid_wasm_import_section_length(const uint8_t *data,
-                                                     size_t length);
+bool yx_ser_has_invalid_wasm_import_section_length(const uint8_t *data, size_t length);
 /* Recognize a zero-length final identifier-pool item only when changing its
  * length to one yields an otherwise canonical one-rule archive. */
-bool yx_ser_has_zero_length_final_identifier(const uint8_t *data,
-                                              size_t length);
+bool yx_ser_has_zero_length_final_identifier(const uint8_t *data, size_t length);
 /* Recognize an AC state-count or state-index violation only when repairing
  * one byte yields a strictly supported canonical archive. */
 bool yx_ser_has_invalid_ac_structure(const uint8_t *data, size_t length);
 /* A single damaged high byte in the 256-state, three-output AC image is
  * classified only when its repair restores a canonical complete archive. */
-bool yx_ser_has_invalid_three_atom_ac_node(const uint8_t *data,
-                                             size_t length);
+bool yx_ser_has_invalid_three_atom_ac_node(const uint8_t *data, size_t length);
 /* Classify a nonzero sub-pattern count in a canonical pattern-free rule
  * only after exact one-byte repair and re-encoding. */
-bool yx_ser_has_invalid_empty_subpattern_count(const uint8_t *data,
-                                                size_t length);
+bool yx_ser_has_invalid_empty_subpattern_count(const uint8_t *data, size_t length);
 /* True only when one invalid UTF-8 byte in a known length-prefixed WASM name
  * can be repaired to a fully supported canonical archive. */
 bool yx_ser_has_invalid_wasm_import_name(const uint8_t *data, size_t length);
 /* Normalize one valid UTF-8 byte change in a known WASM import name only
  * when repairing it yields a fully supported canonical archive. The caller
  * retains the original bytes for serialization. */
-yx_ser_result yx_ser_normalize_unknown_wasm_import_name(
-    const uint8_t *data, size_t length, uint8_t **normalized);
+yx_ser_result yx_ser_normalize_unknown_wasm_import_name(const uint8_t *data, size_t length, uint8_t **normalized);
 /* Decode an archive whose WASM function imports follow another build's link
  * order: imports are permuted into recorded rank orders (and, for at most six
  * imports, any order) with all function references renumbered, until a
  * canonical decoder accepts it. The caller keeps the original bytes. */
-yx_ser_result yx_ser_decode_reordered_imports(const uint8_t *data, size_t length,
-                                              yx_ser_rule **rules, size_t *count);
+yx_ser_result yx_ser_decode_reordered_imports(const uint8_t *data, size_t length, yx_ser_rule **rules, size_t *count);
 /* Recognize a single malformed WASM local declaration or bitmap shift byte
  * only after strict repair to a supported canonical archive. */
 bool yx_ser_has_invalid_wasm_code_byte(const uint8_t *data, size_t length);
@@ -574,21 +550,17 @@ typedef enum yx_ser_base64_wasm_error {
 } yx_ser_base64_wasm_error;
 /* Classify only the two measured single-byte WASM mutations in a direct,
  * standard-alphabet base64 archive after full canonical repaired decoding. */
-yx_ser_base64_wasm_error yx_ser_classify_base64_wasm_error(
-    const uint8_t *data, size_t length);
+yx_ser_base64_wasm_error yx_ser_classify_base64_wasm_error(const uint8_t *data, size_t length);
 /* Normalize a single-pattern bitmap-index instruction with a semantically
  * equivalent shift immediate; the caller retains the original archive. */
-yx_ser_result yx_ser_normalize_single_pattern_bitmap_shift(
-    const uint8_t *data, size_t length, uint8_t **normalized);
+yx_ser_result yx_ser_normalize_single_pattern_bitmap_shift(const uint8_t *data, size_t length, uint8_t **normalized);
 void yx_ser_rules_destroy(yx_ser_rule *rules, size_t rule_count);
 /* Compatibility wrapper for the current single-rule public decoder. */
 /* Whether the archive is exactly the one of an empty rule set. */
-bool yx_ser_is_empty_rules_archive(const uint8_t *data, size_t length,
-                                   const char ***imports, size_t *import_count);
+bool yx_ser_is_empty_rules_archive(const uint8_t *data, size_t length, const char ***imports, size_t *import_count);
 /* Locate the regex-pool policy bit independently of the condition codec. */
 bool yx_ser_archive_relaxed_syntax(const uint8_t *data, size_t length, size_t *offset);
-yx_ser_result yx_ser_decode(const uint8_t *data, size_t length,
-                            yx_ser_rule *rule);
+yx_ser_result yx_ser_decode(const uint8_t *data, size_t length, yx_ser_rule *rule);
 void yx_ser_rule_destroy(yx_ser_rule *rule);
 
 #endif

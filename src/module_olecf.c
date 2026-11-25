@@ -35,14 +35,12 @@ bool yx_olecf_is_olecf(const uint8_t *data, size_t size)
     return xx_olecf_yx_is_olecf(data, size);
 }
 
-bool yx_olecf_stream_count(const uint8_t *data, size_t size,
-                            uint64_t *count)
+bool yx_olecf_stream_count(const uint8_t *data, size_t size, uint64_t *count)
 {
     return xx_olecf_yx_stream_count(data, size, count);
 }
 
-bool yx_olecf_stream_get(const uint8_t *data, size_t size,
-                          uint64_t index, yx_olecf_stream *stream)
+bool yx_olecf_stream_get(const uint8_t *data, size_t size, uint64_t index, yx_olecf_stream *stream)
 {
     return xx_olecf_yx_stream_get(data, size, index, stream);
 }
@@ -67,15 +65,12 @@ size_t yx_olecf_entry_count(const yx_olecf_document *document)
     return xx_olecf_yx_entry_count(document);
 }
 
-const yx_olecf_stream *yx_olecf_entry(const yx_olecf_document *document,
-                                      size_t index)
+const yx_olecf_stream *yx_olecf_entry(const yx_olecf_document *document, size_t index)
 {
     return xx_olecf_yx_entry(document, index);
 }
 
-bool yx_olecf_entry_data(const yx_olecf_document *document, size_t index,
-                         const uint8_t **bytes, size_t *size,
-                         uint8_t **owner)
+bool yx_olecf_entry_data(const yx_olecf_document *document, size_t index, const uint8_t **bytes, size_t *size, uint8_t **owner)
 {
     return xx_olecf_yx_entry_data(document, index, bytes, size, owner);
 }

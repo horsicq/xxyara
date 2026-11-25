@@ -42,12 +42,10 @@ typedef xx_crx_yx_result yx_crx_result;
  * the result to zero before its first use and free it after each parse. */
 bool yx_crx_parse(const uint8_t *data, size_t size, yx_crx_result *result);
 /* Decode a validated crx.Crx protobuf provided by the scanner output API. */
-bool yx_crx_parse_output(const uint8_t *data, size_t size,
-                          yx_crx_result *result);
+bool yx_crx_parse_output(const uint8_t *data, size_t size, yx_crx_result *result);
 /* Normalize an overlong terminal CrxSignature length when the bytes at EOF
  * form a complete nested message. The caller owns the returned buffer. */
-uint8_t *yx_crx_complete_terminal_signature(const uint8_t *data, size_t size,
-                                              size_t *adjusted_size);
+uint8_t *yx_crx_complete_terminal_signature(const uint8_t *data, size_t size, size_t *adjusted_size);
 void yx_crx_result_free(yx_crx_result *result);
 
 /* SHA-256 of the concatenated required runtime permissions, in array order.

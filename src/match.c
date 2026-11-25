@@ -43,9 +43,7 @@
 #include "thread_storage.h"
 
 static pcre2_code *yx_candidate_cached_regex(const YRX_PATTERN *pattern);
-static void yx_candidate_select_window(const uint8_t *bytes,
-    const uint8_t *mask, size_t length, bool nocase,
-    size_t *selected, size_t *selected_length);
+static void yx_candidate_select_window(const uint8_t *bytes, const uint8_t *mask, size_t length, bool nocase, size_t *selected, size_t *selected_length);
 
 static int yx_match_compare(const void *left, const void *right)
 {
@@ -65,9 +63,7 @@ static bool yx_sort_matches(YRX_MATCH *matches, size_t count)
 {
     size_t i = 1;
     bool unique = true;
-    while (i < count && (matches[i - 1].offset < matches[i].offset ||
-                         (matches[i - 1].offset == matches[i].offset &&
-                          matches[i - 1].length < matches[i].length))) {
+    while (i < count && (matches[i - 1].offset < matches[i].offset || (matches[i - 1].offset == matches[i].offset && matches[i - 1].length < matches[i].length))) {
         if (matches[i - 1].offset == matches[i].offset) unique = false;
         ++i;
     }
@@ -79,17 +75,14 @@ static bool yx_sort_matches(YRX_MATCH *matches, size_t count)
 static void yx_sort_unique_limit(YRX_PATTERN *pattern, size_t limit)
 {
     size_t unique = 0;
-    if (pattern->match_count > 1 &&
-        yx_sort_matches(pattern->matches, pattern->match_count)) {
-        pattern->match_count = limit && pattern->match_count > limit ?
-                               limit : pattern->match_count;
+    if (pattern->match_count > 1 && yx_sort_matches(pattern->matches, pattern->match_count)) {
+        pattern->match_count = limit && pattern->match_count > limit ? limit : pattern->match_count;
         return;
     }
     for (size_t i = 0; i < pattern->match_count; ++i) {
         /* YARA-X reports one hit per offset. The offset/length sort keeps
            the shortest encoding when variants begin at the same byte. */
-        if (unique && pattern->matches[unique - 1].offset ==
-                      pattern->matches[i].offset) continue;
+        if (unique && pattern->matches[unique - 1].offset == pattern->matches[i].offset) continue;
         pattern->matches[unique++] = pattern->matches[i];
     }
     pattern->match_count = limit && unique > limit ? limit : unique;
@@ -100,12 +93,9 @@ static void yx_sort_unique_limit(YRX_PATTERN *pattern, size_t limit)
 static void yx_keep_longest_per_offset(YRX_PATTERN *pattern)
 {
     size_t unique = 0;
-    if (pattern->match_count > 1 &&
-        yx_sort_matches(pattern->matches, pattern->match_count)) return;
+    if (pattern->match_count > 1 && yx_sort_matches(pattern->matches, pattern->match_count)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
-        if (unique && pattern->matches[unique - 1].offset ==
-                      pattern->matches[i].offset)
-            --unique;
+        if (unique && pattern->matches[unique - 1].offset == pattern->matches[i].offset) --unique;
         pattern->matches[unique++] = pattern->matches[i];
     }
     pattern->match_count = unique;
@@ -113,29 +103,22 @@ static void yx_keep_longest_per_offset(YRX_PATTERN *pattern)
 
 static int yx_word_byte(uint8_t byte)
 {
-    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
-           (byte >= '0' && byte <= '9');
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9');
 }
 
-static int yx_fullword(const uint8_t *data, size_t size, size_t offset,
-                       size_t length, bool wide, uint8_t xor_key)
+static int yx_fullword(const uint8_t *data, size_t size, size_t offset, size_t length, bool wide, uint8_t xor_key)
 {
     if (!wide) {
         if (offset > 0 && yx_word_byte(data[offset - 1] ^ xor_key)) return 0;
-        if (offset + length < size &&
-            yx_word_byte(data[offset + length] ^ xor_key)) return 0;
+        if (offset + length < size && yx_word_byte(data[offset + length] ^ xor_key)) return 0;
         return 1;
     }
-    if (offset >= 2 && data[offset - 1] == xor_key &&
-        yx_word_byte(data[offset - 2] ^ xor_key)) return 0;
-    if (offset + length + 1 < size &&
-        data[offset + length + 1] == xor_key &&
-        yx_word_byte(data[offset + length] ^ xor_key)) return 0;
+    if (offset >= 2 && data[offset - 1] == xor_key && yx_word_byte(data[offset - 2] ^ xor_key)) return 0;
+    if (offset + length + 1 < size && data[offset + length + 1] == xor_key && yx_word_byte(data[offset + length] ^ xor_key)) return 0;
     return 1;
 }
 
-static int yx_add_match_key(YRX_PATTERN *pattern, size_t offset, size_t length,
-                            size_t limit, int16_t xor_key)
+static int yx_add_match_key(YRX_PATTERN *pattern, size_t offset, size_t length, size_t limit, int16_t xor_key)
 {
     if (yx_scan_deadline_poll(pattern->deadline)) return 0;
     if (limit && pattern->match_count >= limit) return 1;
@@ -174,9 +157,8 @@ static int yx_equal_text(const uint8_t *data, const uint8_t *pattern, size_t len
     return 1;
 }
 
-static int yx_find_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                           const uint8_t *needle, size_t length, bool wide,
-                           bool nocase, uint8_t xor_key, size_t limit)
+static int yx_find_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t size, const uint8_t *needle, size_t length, bool wide, bool nocase, uint8_t xor_key,
+                           size_t limit)
 {
     if (!length || length > size) return 1;
     bool fullword = (pattern->modifiers & YX_MOD_FULLWORD) != 0;
@@ -185,13 +167,10 @@ static int yx_find_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
         size_t start = 0;
         while (start <= size - length && (!limit || pattern->match_count < limit)) {
             if (yx_scan_deadline_poll(pattern->deadline)) return 0;
-            int64_t found = xx_data_find_bytes_buffer_optimize(data, size, start,
-                                                                 needle, length, NULL);
+            int64_t found = xx_data_find_bytes_buffer_optimize(data, size, start, needle, length, NULL);
             if (found < 0) break;
             size_t offset = (size_t)found;
-            if ((!fullword || yx_fullword(data, size, offset, length, wide,
-                                           xor_key)) &&
-                !yx_add_match_key(pattern, offset, length, limit, match_key)) return 0;
+            if ((!fullword || yx_fullword(data, size, offset, length, wide, xor_key)) && !yx_add_match_key(pattern, offset, length, limit, match_key)) return 0;
             start = offset + 1;
         }
     } else {
@@ -207,16 +186,13 @@ static int yx_find_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
             }
             /* Keep fixed 256 KiB candidate ranges, including when sparse
              * matches occur. Extra needle bytes preserve boundary matches. */
-            size_t offset = xx_literal_nocase_find(data, end + (length - 1),
-                                                   start, needle, length);
+            size_t offset = xx_literal_nocase_find(data, end + (length - 1), start, needle, length);
             if (offset == SIZE_MAX) {
                 if (yx_scan_deadline_reached(pattern->deadline)) return 0;
                 start = end;
                 continue;
             }
-            if ((!fullword || yx_fullword(data, size, offset, length, wide,
-                                            xor_key)) &&
-                !yx_add_match_key(pattern, offset, length, limit, match_key)) return 0;
+            if ((!fullword || yx_fullword(data, size, offset, length, wide, xor_key)) && !yx_add_match_key(pattern, offset, length, limit, match_key)) return 0;
             start = offset + 1;
             if (start == end && yx_scan_deadline_reached(pattern->deadline)) return 0;
         }
@@ -224,17 +200,14 @@ static int yx_find_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
     return 1;
 }
 
-static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                        size_t limit, bool first_only)
+static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool first_only)
 {
     bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool xor_mode = (pattern->modifiers & YX_MOD_XOR) != 0;
     size_t atom_width = pattern->length < 4 ? pattern->length : 4;
-    if (pattern->global_atom_count_hint &&
-        pattern->global_atom_count_hint <= 4)
-        atom_width = pattern->global_atom_count_hint;
+    if (pattern->global_atom_count_hint && pattern->global_atom_count_hint <= 4) atom_width = pattern->global_atom_count_hint;
     /* Teddy verifies the wide subpattern first. Its input threshold also
        includes the shortest atom's width. Equal four-byte literal atoms
        retain that verification order in the fallback as well. A regexp
@@ -242,11 +215,8 @@ static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
        ascii sub-pattern before the wide one (c_alternation_literal), and
        its ascii atom never ends after the wide one where both match at one
        offset: the ascii match is kept there. */
-    bool wide_tie = pattern->kind == YX_PATTERN_TEXT && !pattern->regexp &&
-                    ascii && wide &&
-                    (pattern->length >= 4 ||
-                     (atom_width && size >= 15 + atom_width &&
-                      pattern->global_atom_count_hint <= 16));
+    bool wide_tie = pattern->kind == YX_PATTERN_TEXT && !pattern->regexp && ascii && wide &&
+                    (pattern->length >= 4 || (atom_width && size >= 15 + atom_width && pattern->global_atom_count_hint <= 16));
     size_t best_offset = SIZE_MAX, best_length = 0;
     int16_t best_key = -1;
     for (int variant = 0; variant < 2; ++variant) {
@@ -302,17 +272,14 @@ static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
                 probe.matches = NULL;
                 probe.match_count = 0;
                 probe.match_capacity = 0;
-                if (!yx_find_literal(&probe, data, size, needle, length,
-                                     variant != 0, nocase, (uint8_t)key, 1)) {
+                if (!yx_find_literal(&probe, data, size, needle, length, variant != 0, nocase, (uint8_t)key, 1)) {
                     free(probe.matches);
                     free(needle);
                     return 0;
                 }
                 if (probe.match_count &&
                     (probe.matches[0].offset < best_offset ||
-                     (probe.matches[0].offset == best_offset &&
-                      (wide_tie ? probe.matches[0].length > best_length :
-                                  probe.matches[0].length < best_length)))) {
+                     (probe.matches[0].offset == best_offset && (wide_tie ? probe.matches[0].length > best_length : probe.matches[0].length < best_length)))) {
                     best_offset = probe.matches[0].offset;
                     best_length = probe.matches[0].length;
                     best_key = probe.matches[0].xor_key;
@@ -326,17 +293,13 @@ static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
                 probe.matches = NULL;
                 probe.match_count = 0;
                 probe.match_capacity = 0;
-                if (!yx_find_literal(&probe, data, size, needle, length,
-                                     variant != 0, nocase, (uint8_t)key,
-                                     limit)) {
+                if (!yx_find_literal(&probe, data, size, needle, length, variant != 0, nocase, (uint8_t)key, limit)) {
                     free(probe.matches);
                     free(needle);
                     return 0;
                 }
                 for (size_t i = 0; i < probe.match_count; ++i) {
-                    if (!yx_add_match_key(pattern, probe.matches[i].offset,
-                                          probe.matches[i].length, 0,
-                                          probe.matches[i].xor_key)) {
+                    if (!yx_add_match_key(pattern, probe.matches[i].offset, probe.matches[i].length, 0, probe.matches[i].xor_key)) {
                         free(probe.matches);
                         free(needle);
                         return 0;
@@ -345,23 +308,20 @@ static int yx_scan_text(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
                 free(probe.matches);
                 if (wide_tie) {
                     yx_keep_longest_per_offset(pattern);
-                    if (limit && pattern->match_count > limit)
-                        pattern->match_count = limit;
+                    if (limit && pattern->match_count > limit) pattern->match_count = limit;
                 } else yx_sort_unique_limit(pattern, limit);
             }
         }
         free(needle);
     }
-    if (first_only && best_offset != SIZE_MAX)
-        return yx_add_match_key(pattern, best_offset, best_length, limit, best_key);
+    if (first_only && best_offset != SIZE_MAX) return yx_add_match_key(pattern, best_offset, best_length, limit, best_key);
     return 1;
 }
 
 static int yx_hex_equal(const YRX_PATTERN *pattern, const uint8_t *candidate)
 {
     for (size_t i = 0; i < pattern->length; ++i)
-        if ((candidate[i] & pattern->mask[i]) != (pattern->bytes[i] & pattern->mask[i]))
-            return 0;
+        if ((candidate[i] & pattern->mask[i]) != (pattern->bytes[i] & pattern->mask[i])) return 0;
     return 1;
 }
 
@@ -373,8 +333,8 @@ static int yx_hex_equal(const YRX_PATTERN *pattern, const uint8_t *candidate)
  * matchers (yx_hex_equal, yx_hex_walk) decide every visited start as the
  * per-offset loops did, so matches, lengths and limits are unchanged. */
 
-#define YX_HEX_SPAN 64                 /* fixed distances examined for probes */
-#define YX_HEX_SPREAD 64               /* widest start range behind an anchor */
+#define YX_HEX_SPAN 64   /* fixed distances examined for probes */
+#define YX_HEX_SPREAD 64 /* widest start range behind an anchor */
 #define YX_HEX_UNBOUNDED UINT64_MAX
 #define YX_HEX_CHUNK ((size_t)1 << 20) /* bytes probed between clock reads */
 
@@ -395,8 +355,7 @@ static unsigned yx_hex_byte_bits(uint8_t byte)
 {
     if (!byte) return 2;
     if (byte == 0xff || byte == ' ') return 4;
-    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
-        (byte >= '0' && byte <= '9')) return 6;
+    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9')) return 6;
     return 8;
 }
 
@@ -411,8 +370,7 @@ static unsigned yx_hex_probe_bits(uint8_t mask, uint8_t value)
 
 /* Keeps the XX_MASKSCAN_MAX_PROBES most selective constrained distances
  * below known, most selective first (the earliest on ties). */
-static void yx_hex_pick_probes(const uint8_t *mask, const uint8_t *value,
-                               size_t known, yx_hex_filter *filter)
+static void yx_hex_pick_probes(const uint8_t *mask, const uint8_t *value, size_t known, yx_hex_filter *filter)
 {
     unsigned bits[XX_MASKSCAN_MAX_PROBES];
     filter->probe_count = 0;
@@ -444,8 +402,7 @@ static uint64_t yx_hex_bound_add(uint64_t total, uint64_t amount)
 }
 
 /* Fewest and most bytes a sequence can match (yx_hex_walk's jump bounds). */
-static void yx_hex_bounds(const yx_hex_atom *atoms, size_t count,
-                          uint64_t *minimum, uint64_t *maximum)
+static void yx_hex_bounds(const yx_hex_atom *atoms, size_t count, uint64_t *minimum, uint64_t *maximum)
 {
     uint64_t low = 0, high = 0;
     for (size_t i = 0; i < count; ++i) {
@@ -453,15 +410,13 @@ static void yx_hex_bounds(const yx_hex_atom *atoms, size_t count,
         uint64_t least = 1, most = 1;
         if (atom->kind == YX_HEX_JUMP) {
             least = atom->minimum;
-            most = atom->maximum == UINT32_MAX && !atom->finite_maximum ?
-                   YX_HEX_UNBOUNDED : atom->maximum;
+            most = atom->maximum == UINT32_MAX && !atom->finite_maximum ? YX_HEX_UNBOUNDED : atom->maximum;
         } else if (atom->kind == YX_HEX_ALTERNATIVE) {
             least = atom->branch_count ? YX_HEX_UNBOUNDED : 0;
             most = 0;
             for (size_t b = 0; b < atom->branch_count; ++b) {
                 uint64_t branch_low, branch_high;
-                yx_hex_bounds(atom->branches[b].atoms, atom->branches[b].count,
-                              &branch_low, &branch_high);
+                yx_hex_bounds(atom->branches[b].atoms, atom->branches[b].count, &branch_low, &branch_high);
                 if (branch_low < least) least = branch_low;
                 if (branch_high > most) most = branch_high;
             }
@@ -481,8 +436,7 @@ typedef struct yx_hex_fixed {
 /* (byte & mask[d]) == value[d] holds at each distance d < known from the
  * start of every match of the sequence. An alternative keeps the bits that
  * all its branches fix at a distance all of them reach at a fixed offset. */
-static void yx_hex_fixed_scan(const yx_hex_atom *atoms, size_t count,
-                              unsigned depth, yx_hex_fixed *out)
+static void yx_hex_fixed_scan(const yx_hex_atom *atoms, size_t count, unsigned depth, yx_hex_fixed *out)
 {
     size_t at = 0;
     memset(out, 0, sizeof(*out));
@@ -503,8 +457,7 @@ static void yx_hex_fixed_scan(const yx_hex_atom *atoms, size_t count,
             uint64_t low, high;
             if (depth >= 8 || !atom->branch_count) break;
             for (size_t b = 0; b < atom->branch_count; ++b) {
-                yx_hex_fixed_scan(atom->branches[b].atoms, atom->branches[b].count,
-                                  depth + 1, &branch);
+                yx_hex_fixed_scan(atom->branches[b].atoms, atom->branches[b].count, depth + 1, &branch);
                 if (branch.known < shared) shared = branch.known;
                 for (size_t d = 0; d < shared; ++d) {
                     uint8_t *mask = &out->mask[at + d], *value = &out->value[at + d];
@@ -520,20 +473,21 @@ static void yx_hex_fixed_scan(const yx_hex_atom *atoms, size_t count,
             /* Distances a shorter branch did not reach keep no constraint. */
             for (size_t d = at + shared; d < YX_HEX_SPAN; ++d) out->mask[d] = out->value[d] = 0;
             yx_hex_bounds(atom, 1, &low, &high);
-            if (low != high) { at += shared; break; }
+            if (low != high) {
+                at += shared;
+                break;
+            }
             at = low < YX_HEX_SPAN - at ? at + (size_t)low : YX_HEX_SPAN;
         }
     }
     out->known = at;
 }
 
-static void yx_hex_consider_run(const uint8_t *run, size_t length, uint64_t low,
-                                uint64_t high, yx_hex_filter *filter, int *best)
+static void yx_hex_consider_run(const uint8_t *run, size_t length, uint64_t low, uint64_t high, yx_hex_filter *filter, int *best)
 {
     size_t start, width;
     unsigned bits = 0, spread, steps = 0;
-    if (high == YX_HEX_UNBOUNDED || high - low > YX_HEX_SPREAD ||
-        high > (uint64_t)(SIZE_MAX / 2)) return;
+    if (high == YX_HEX_UNBOUNDED || high - low > YX_HEX_SPREAD || high > (uint64_t)(SIZE_MAX / 2)) return;
     yx_candidate_select_window(run, NULL, length, false, &start, &width);
     if (!width) return;
     for (size_t i = 0; i < width; ++i) bits += yx_hex_byte_bits(run[start + i]);
@@ -553,8 +507,7 @@ static void yx_hex_consider_run(const uint8_t *run, size_t length, uint64_t low,
 /* The best literal window (at most eight bytes, the candidate atom limit)
  * of the top-level literal runs that start at most YX_HEX_SPREAD bytes
  * apart in all matches. Runs inside alternatives are not necessary. */
-static void yx_hex_pick_anchor(const yx_hex_atom *atoms, size_t count,
-                               yx_hex_filter *filter)
+static void yx_hex_pick_anchor(const yx_hex_atom *atoms, size_t count, yx_hex_filter *filter)
 {
     uint8_t run[64];
     size_t run_length = 0;
@@ -564,15 +517,17 @@ static void yx_hex_pick_anchor(const yx_hex_atom *atoms, size_t count,
     filter->anchor_bits = 0;
     for (size_t i = 0; i <= count; ++i) {
         const yx_hex_atom *atom = i < count ? &atoms[i] : NULL;
-        bool exact = atom && atom->kind == YX_HEX_BYTE && !atom->negated &&
-                     atom->mask == 0xff;
+        bool exact = atom && atom->kind == YX_HEX_BYTE && !atom->negated && atom->mask == 0xff;
         if (run_length && (!exact || run_length == sizeof(run))) {
             yx_hex_consider_run(run, run_length, run_low, run_high, filter, &best);
             run_length = 0;
         }
         if (!atom) break;
         if (exact) {
-            if (!run_length) { run_low = low; run_high = high; }
+            if (!run_length) {
+                run_low = low;
+                run_high = high;
+            }
             run[run_length++] = atom->value;
         }
         uint64_t least, most;
@@ -584,14 +539,12 @@ static void yx_hex_pick_anchor(const yx_hex_atom *atoms, size_t count,
 
 /* Flat hex without a literal pair: the most selective masked bytes are
  * tested 16/32 offsets at a time; yx_hex_equal decides every hit. */
-static int yx_scan_hex_probes(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                              size_t limit, const yx_hex_filter *filter)
+static int yx_scan_hex_probes(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, const yx_hex_filter *filter)
 {
     size_t last = size - pattern->length, offset = 0;
     while (offset <= last && (!limit || pattern->match_count < limit)) {
         size_t end = last - offset > YX_HEX_CHUNK ? offset + YX_HEX_CHUNK : last;
-        size_t found = xx_maskscan_find(data, size, offset, end, filter->probes,
-                                        filter->probe_count);
+        size_t found = xx_maskscan_find(data, size, offset, end, filter->probes, filter->probe_count);
         if (found == SIZE_MAX) {
             if (yx_scan_deadline_reached(pattern->deadline)) return 0;
             if (end == last) break;
@@ -599,8 +552,7 @@ static int yx_scan_hex_probes(YRX_PATTERN *pattern, const uint8_t *data, size_t 
             continue;
         }
         if (yx_scan_deadline_poll(pattern->deadline)) return 0;
-        if (yx_hex_equal(pattern, data + found) &&
-            !yx_add_match(pattern, found, pattern->length, limit)) return 0;
+        if (yx_hex_equal(pattern, data + found) && !yx_add_match(pattern, found, pattern->length, limit)) return 0;
         offset = found + 1;
     }
     return 1;
@@ -611,7 +563,10 @@ static int yx_scan_hex(YRX_PATTERN *pattern, const uint8_t *data, size_t size, s
     if (pattern->length > size) return 1;
     size_t anchor = 0, anchor_length = 0;
     for (size_t i = 0; i < pattern->length;) {
-        if (pattern->mask[i] != 0xff) { ++i; continue; }
+        if (pattern->mask[i] != 0xff) {
+            ++i;
+            continue;
+        }
         size_t start = i;
         while (i < pattern->length && pattern->mask[i] == 0xff) ++i;
         if (i - start > anchor_length) {
@@ -622,30 +577,25 @@ static int yx_scan_hex(YRX_PATTERN *pattern, const uint8_t *data, size_t size, s
     if (anchor_length < 2) {
         yx_hex_filter filter;
         yx_hex_pick_probes(pattern->mask, pattern->bytes, pattern->length, &filter);
-        if (filter.probe_count && filter.probe_bits >= 4)
-            return yx_scan_hex_probes(pattern, data, size, limit, &filter);
+        if (filter.probe_count && filter.probe_bits >= 4) return yx_scan_hex_probes(pattern, data, size, limit, &filter);
     }
     if (anchor_length) {
         size_t start = anchor;
         while (start <= size - anchor_length && (!limit || pattern->match_count < limit)) {
             if (yx_scan_deadline_poll(pattern->deadline)) return 0;
-            int64_t found = xx_data_find_bytes_buffer_optimize(data, size, start,
-                    pattern->bytes + anchor, anchor_length, NULL);
+            int64_t found = xx_data_find_bytes_buffer_optimize(data, size, start, pattern->bytes + anchor, anchor_length, NULL);
             if (found < 0) break;
             size_t location = (size_t)found;
             if (location >= anchor && location - anchor <= size - pattern->length) {
                 size_t offset = location - anchor;
-                if (yx_hex_equal(pattern, data + offset) &&
-                    !yx_add_match(pattern, offset, pattern->length, limit)) return 0;
+                if (yx_hex_equal(pattern, data + offset) && !yx_add_match(pattern, offset, pattern->length, limit)) return 0;
             }
             start = location + 1;
         }
     } else {
-        for (size_t offset = 0; offset <= size - pattern->length &&
-                                (!limit || pattern->match_count < limit); ++offset) {
+        for (size_t offset = 0; offset <= size - pattern->length && (!limit || pattern->match_count < limit); ++offset) {
             if (yx_scan_deadline_poll(pattern->deadline)) return 0;
-            if (yx_hex_equal(pattern, data + offset) &&
-                !yx_add_match(pattern, offset, pattern->length, limit)) return 0;
+            if (yx_hex_equal(pattern, data + offset) && !yx_add_match(pattern, offset, pattern->length, limit)) return 0;
         }
     }
     return 1;
@@ -658,20 +608,15 @@ typedef struct yx_hex_resume {
     const struct yx_hex_resume *parent;
 } yx_hex_resume;
 
-static void yx_hex_walk(const uint8_t *data, size_t size, size_t origin,
-                        size_t position, const yx_hex_atom *atoms,
-                        size_t atom_count, size_t atom_index,
-                        const yx_hex_resume *resume, size_t *best_length,
-                        yx_scan_deadline *deadline)
+static void yx_hex_walk(const uint8_t *data, size_t size, size_t origin, size_t position, const yx_hex_atom *atoms, size_t atom_count, size_t atom_index,
+                        const yx_hex_resume *resume, size_t *best_length, yx_scan_deadline *deadline)
 {
     const yx_hex_atom *atom;
     if (yx_scan_deadline_poll(deadline)) return;
     if (*best_length != SIZE_MAX && position - origin >= *best_length) return;
     if (atom_index == atom_count) {
         if (resume) {
-            yx_hex_walk(data, size, origin, position,
-                        resume->atoms, resume->count, resume->index,
-                        resume->parent, best_length, deadline);
+            yx_hex_walk(data, size, origin, position, resume->atoms, resume->count, resume->index, resume->parent, best_length, deadline);
         } else if (position - origin < *best_length) {
             *best_length = position - origin;
         }
@@ -679,38 +624,28 @@ static void yx_hex_walk(const uint8_t *data, size_t size, size_t origin,
     }
     atom = &atoms[atom_index];
     if (atom->kind == YX_HEX_BYTE) {
-        bool equal = position < size && (data[position] & atom->mask) ==
-                                         (atom->value & atom->mask);
+        bool equal = position < size && (data[position] & atom->mask) == (atom->value & atom->mask);
         if (position < size && (atom->negated ? !equal : equal))
-            yx_hex_walk(data, size, origin, position + 1,
-                        atoms, atom_count, atom_index + 1, resume, best_length,
-                        deadline);
+            yx_hex_walk(data, size, origin, position + 1, atoms, atom_count, atom_index + 1, resume, best_length, deadline);
         return;
     }
     if (atom->kind == YX_HEX_ALTERNATIVE) {
         yx_hex_resume next = {atoms, atom_count, atom_index + 1, resume};
         for (size_t i = 0; i < atom->branch_count; ++i) {
             const yx_hex_sequence *branch = &atom->branches[i];
-            yx_hex_walk(data, size, origin, position,
-                        branch->atoms, branch->count, 0, &next, best_length,
-                        deadline);
+            yx_hex_walk(data, size, origin, position, branch->atoms, branch->count, 0, &next, best_length, deadline);
             if (deadline && deadline->expired) return;
         }
         return;
     }
-    if (atom->kind != YX_HEX_JUMP || position > size || atom->minimum > size - position)
-        return;
-    size_t largest = atom->maximum == UINT32_MAX && !atom->finite_maximum ?
-                     size - position : atom->maximum;
+    if (atom->kind != YX_HEX_JUMP || position > size || atom->minimum > size - position) return;
+    size_t largest = atom->maximum == UINT32_MAX && !atom->finite_maximum ? size - position : atom->maximum;
     if (largest > size - position) largest = size - position;
     for (size_t distance = atom->minimum; distance <= largest; ++distance) {
         /* Longer distances cannot beat the shortest match found so far;
          * each such call would return at the length check above. */
-        if (*best_length != SIZE_MAX && position + distance - origin >= *best_length)
-            break;
-        yx_hex_walk(data, size, origin, position + distance,
-                    atoms, atom_count, atom_index + 1, resume, best_length,
-                    deadline);
+        if (*best_length != SIZE_MAX && position + distance - origin >= *best_length) break;
+        yx_hex_walk(data, size, origin, position + distance, atoms, atom_count, atom_index + 1, resume, best_length, deadline);
         if (deadline && deadline->expired) return;
         if (distance == largest) break;
     }
@@ -728,15 +663,12 @@ static bool yx_hex_chain_emit(size_t offset, size_t length, void *context)
 }
 
 /* Walks the starts at which the fixed-distance probes hold. */
-static int yx_scan_hex_complex_probes(YRX_PATTERN *pattern, const uint8_t *data,
-                                      size_t size, size_t limit,
-                                      const yx_hex_filter *filter)
+static int yx_scan_hex_complex_probes(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, const yx_hex_filter *filter)
 {
     size_t last = size - pattern->length, offset = 0;
     while (offset <= last && (!limit || pattern->match_count < limit)) {
         size_t end = last - offset > YX_HEX_CHUNK ? offset + YX_HEX_CHUNK : last;
-        size_t found = xx_maskscan_find(data, size, offset, end, filter->probes,
-                                        filter->probe_count);
+        size_t found = xx_maskscan_find(data, size, offset, end, filter->probes, filter->probe_count);
         if (found == SIZE_MAX) {
             if (yx_scan_deadline_reached(pattern->deadline)) return 0;
             if (end == last) break;
@@ -744,11 +676,9 @@ static int yx_scan_hex_complex_probes(YRX_PATTERN *pattern, const uint8_t *data,
             continue;
         }
         size_t best_length = SIZE_MAX;
-        yx_hex_walk(data, size, found, found, pattern->hex_atoms,
-                    pattern->hex_atom_count, 0, NULL, &best_length, pattern->deadline);
+        yx_hex_walk(data, size, found, found, pattern->hex_atoms, pattern->hex_atom_count, 0, NULL, &best_length, pattern->deadline);
         if (pattern->deadline && pattern->deadline->expired) return 0;
-        if (best_length != SIZE_MAX &&
-            !yx_add_match(pattern, found, best_length, limit)) return 0;
+        if (best_length != SIZE_MAX && !yx_add_match(pattern, found, best_length, limit)) return 0;
         offset = found + 1;
     }
     return 1;
@@ -757,18 +687,14 @@ static int yx_scan_hex_complex_probes(YRX_PATTERN *pattern, const uint8_t *data,
 /* Walks the starts an anchor occurrence allows. Occurrences arrive in
  * increasing order, so the lowest untested start only grows: every start
  * is walked at most once and in the order of the per-offset loop. */
-static int yx_scan_hex_complex_anchor(YRX_PATTERN *pattern, const uint8_t *data,
-                                      size_t size, size_t limit,
-                                      const yx_hex_filter *filter)
+static int yx_scan_hex_complex_anchor(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, const yx_hex_filter *filter)
 {
     size_t last = size - pattern->length, next = 0;
     size_t low = (size_t)filter->anchor_minimum;
     size_t spread = (size_t)(filter->anchor_maximum - filter->anchor_minimum);
     size_t from = low;
-    while (from <= size - filter->anchor_length &&
-           (!limit || pattern->match_count < limit)) {
-        int64_t found = xx_data_find_bytes_buffer_optimize(data, size, from,
-            filter->anchor, filter->anchor_length, NULL);
+    while (from <= size - filter->anchor_length && (!limit || pattern->match_count < limit)) {
+        int64_t found = xx_data_find_bytes_buffer_optimize(data, size, from, filter->anchor, filter->anchor_length, NULL);
         if (found < 0) break;
         size_t hit = (size_t)found, high = hit - low;
         size_t start = high > spread ? high - spread : 0;
@@ -777,12 +703,9 @@ static int yx_scan_hex_complex_anchor(YRX_PATTERN *pattern, const uint8_t *data,
         if (high > last) high = last;
         for (; start <= high && (!limit || pattern->match_count < limit); ++start) {
             size_t best_length = SIZE_MAX;
-            yx_hex_walk(data, size, start, start, pattern->hex_atoms,
-                        pattern->hex_atom_count, 0, NULL, &best_length,
-                        pattern->deadline);
+            yx_hex_walk(data, size, start, start, pattern->hex_atoms, pattern->hex_atom_count, 0, NULL, &best_length, pattern->deadline);
             if (pattern->deadline && pattern->deadline->expired) return 0;
-            if (best_length != SIZE_MAX &&
-                !yx_add_match(pattern, start, best_length, limit)) return 0;
+            if (best_length != SIZE_MAX && !yx_add_match(pattern, start, best_length, limit)) return 0;
         }
         if (high >= next) next = high + 1;
         from = hit + 1;
@@ -791,8 +714,7 @@ static int yx_scan_hex_complex_anchor(YRX_PATTERN *pattern, const uint8_t *data,
     return 1;
 }
 
-static int yx_scan_hex_complex(YRX_PATTERN *pattern, const uint8_t *data,
-                               size_t size, size_t limit)
+static int yx_scan_hex_complex(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit)
 {
     if (pattern->length > size) return 1;
     {
@@ -812,33 +734,23 @@ static int yx_scan_hex_complex(YRX_PATTERN *pattern, const uint8_t *data,
     if (chain == -1) return 0;
     if (chain == 3) {
         yx_hex_chain_output output = {pattern, limit};
-        int success = yx_ser_scan_large_fast_chain(pattern, data, size,
-            yx_hex_chain_emit, &output);
+        int success = yx_ser_scan_large_fast_chain(pattern, data, size, yx_hex_chain_emit, &output);
         if (success) yx_sort_unique_limit(pattern, limit);
         return success;
     }
     yx_hex_filter filter;
     yx_hex_fixed fixed;
     yx_hex_fixed_scan(pattern->hex_atoms, pattern->hex_atom_count, 0, &fixed);
-    yx_hex_pick_probes(fixed.mask, fixed.value,
-                       fixed.known < pattern->length ? fixed.known : pattern->length,
-                       &filter);
+    yx_hex_pick_probes(fixed.mask, fixed.value, fixed.known < pattern->length ? fixed.known : pattern->length, &filter);
     yx_hex_pick_anchor(pattern->hex_atoms, pattern->hex_atom_count, &filter);
-    if (filter.probe_count && filter.probe_bits >= 4 &&
-        (filter.probe_bits >= 16 || filter.anchor_length < 2 ||
-         filter.probe_bits >= filter.anchor_bits))
+    if (filter.probe_count && filter.probe_bits >= 4 && (filter.probe_bits >= 16 || filter.anchor_length < 2 || filter.probe_bits >= filter.anchor_bits))
         return yx_scan_hex_complex_probes(pattern, data, size, limit, &filter);
-    if (filter.anchor_length >= 2)
-        return yx_scan_hex_complex_anchor(pattern, data, size, limit, &filter);
-    for (size_t offset = 0; offset <= size - pattern->length &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    if (filter.anchor_length >= 2) return yx_scan_hex_complex_anchor(pattern, data, size, limit, &filter);
+    for (size_t offset = 0; offset <= size - pattern->length && (!limit || pattern->match_count < limit); ++offset) {
         size_t best_length = SIZE_MAX;
-        yx_hex_walk(data, size, offset, offset,
-                    pattern->hex_atoms, pattern->hex_atom_count, 0,
-                    NULL, &best_length, pattern->deadline);
+        yx_hex_walk(data, size, offset, offset, pattern->hex_atoms, pattern->hex_atom_count, 0, NULL, &best_length, pattern->deadline);
         if (pattern->deadline && pattern->deadline->expired) return 0;
-        if (best_length != SIZE_MAX &&
-            !yx_add_match(pattern, offset, best_length, limit)) return 0;
+        if (best_length != SIZE_MAX && !yx_add_match(pattern, offset, best_length, limit)) return 0;
     }
     return 1;
 }
@@ -851,16 +763,14 @@ bool yx_regex_unrecognized_escape(unsigned char escaped)
     /* regex-syntax 0.8.11 treats these alphabetic escapes as errors in both
      * ordinary regexes and character classes. Other letters are assertions,
      * character classes, literals, or prefixes of longer escapes. */
-    return escaped != 0 &&
-           strchr("ceghijklmoqyCEFGHIJKLMNOQRTVXYZ", escaped) != NULL;
+    return escaped != 0 && strchr("ceghijklmoqyCEFGHIJKLMNOQRTVXYZ", escaped) != NULL;
 }
 
 /* Length of the UTF-8 sequence starting at text, or 0 when it is not a
  * complete multi-byte sequence. */
 static size_t yx_utf8_sequence_length(const unsigned char *text)
 {
-    size_t length = text[0] >= 0xc2 && text[0] <= 0xdf ? 2 : text[0] >= 0xe0 && text[0] <= 0xef ? 3 :
-                    text[0] >= 0xf0 && text[0] <= 0xf4 ? 4 : 0;
+    size_t length = text[0] >= 0xc2 && text[0] <= 0xdf ? 2 : text[0] >= 0xe0 && text[0] <= 0xef ? 3 : text[0] >= 0xf0 && text[0] <= 0xf4 ? 4 : 0;
     for (size_t i = 1; i < length; ++i)
         if ((text[i] & 0xc0) != 0x80) return 0;
     return length;
@@ -887,7 +797,9 @@ char *yx_regex_group_utf8_literals(const char *regexp)
             size_t n = yx_utf8_sequence_length(at + 1);
             if (at[1] == 'Q' && !in_class) quoted = true;
             n = n ? n + 1 : 2;
-            memcpy(out + used, regexp + i, n); used += n; i += n;
+            memcpy(out + used, regexp + i, n);
+            used += n;
+            i += n;
             continue;
         }
         if (in_class) {
@@ -895,7 +807,9 @@ char *yx_regex_group_utf8_literals(const char *regexp)
                 const char *end = strstr(regexp + i + 2, ":]");
                 if (end) {
                     size_t n = (size_t)(end + 2 - (regexp + i));
-                    memcpy(out + used, regexp + i, n); used += n; i += n;
+                    memcpy(out + used, regexp + i, n);
+                    used += n;
+                    i += n;
                     continue;
                 }
             }
@@ -912,8 +826,11 @@ char *yx_regex_group_utf8_literals(const char *regexp)
         }
         size_t n = yx_utf8_sequence_length(at);
         if (n && (at[n] == '?' || at[n] == '*' || at[n] == '+' || at[n] == '{')) {
-            memcpy(out + used, "(?:", 3); used += 3;
-            memcpy(out + used, regexp + i, n); used += n; i += n;
+            memcpy(out + used, "(?:", 3);
+            used += 3;
+            memcpy(out + used, regexp + i, n);
+            used += n;
+            i += n;
             out[used++] = ')';
             continue;
         }
@@ -925,8 +842,7 @@ char *yx_regex_group_utf8_literals(const char *regexp)
 
 static bool yx_extended_hex_digit(unsigned char ch)
 {
-    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
-           (ch >= 'A' && ch <= 'F');
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
 }
 
 /* regex-syntax's x flag ignores whitespace between hex digits, while PCRE2
@@ -939,7 +855,11 @@ char *yx_regex_compact_extended_hex(const char *regexp)
     bool extended = false, in_class = false;
     char *out = malloc(length + 1);
     unsigned char *states = malloc(length + 1);
-    if (!out || !states) { free(out); free(states); return NULL; }
+    if (!out || !states) {
+        free(out);
+        free(states);
+        return NULL;
+    }
     for (size_t i = 0; i < length; ++i) {
         char ch = regexp[i];
         if (extended && !in_class && ch == '#') {
@@ -950,12 +870,10 @@ char *yx_regex_compact_extended_hex(const char *regexp)
         }
         if (ch == '\\' && i + 1 < length) {
             char escaped = regexp[i + 1];
-            if (extended && (escaped == 'x' || escaped == 'u' ||
-                             escaped == 'U')) {
+            if (extended && (escaped == 'x' || escaped == 'u' || escaped == 'U')) {
                 size_t at = i + 2, count = 0;
                 char digits[8];
-                while (at < length && isspace((unsigned char)regexp[at]))
-                    ++at;
+                while (at < length && isspace((unsigned char)regexp[at])) ++at;
                 if (at < length && regexp[at] == '{') {
                     size_t first = ++at;
                     while (at < length) {
@@ -963,8 +881,7 @@ char *yx_regex_compact_extended_hex(const char *regexp)
                             ++at;
                             continue;
                         }
-                        if (!yx_extended_hex_digit((unsigned char)regexp[at]))
-                            break;
+                        if (!yx_extended_hex_digit((unsigned char)regexp[at])) break;
                         ++count;
                         ++at;
                     }
@@ -973,22 +890,19 @@ char *yx_regex_compact_extended_hex(const char *regexp)
                         out[used++] = escaped;
                         out[used++] = '{';
                         for (size_t j = first; j < at; ++j)
-                            if (!isspace((unsigned char)regexp[j]))
-                                out[used++] = regexp[j];
+                            if (!isspace((unsigned char)regexp[j])) out[used++] = regexp[j];
                         out[used++] = '}';
                         i = at;
                         continue;
                     }
                 } else {
-                    size_t needed = escaped == 'x' ? 2u :
-                                    escaped == 'u' ? 4u : 8u;
+                    size_t needed = escaped == 'x' ? 2u : escaped == 'u' ? 4u : 8u;
                     while (at < length && count < needed) {
                         if (isspace((unsigned char)regexp[at])) {
                             ++at;
                             continue;
                         }
-                        if (!yx_extended_hex_digit((unsigned char)regexp[at]))
-                            break;
+                        if (!yx_extended_hex_digit((unsigned char)regexp[at])) break;
                         digits[count++] = regexp[at++];
                     }
                     if (count == needed) {
@@ -1014,15 +928,16 @@ char *yx_regex_compact_extended_hex(const char *regexp)
             if (flags_only) {
                 for (; end < length; ++end) {
                     char flag = regexp[end];
-                    if (flag == '-') { negated = true; continue; }
+                    if (flag == '-') {
+                        negated = true;
+                        continue;
+                    }
                     if (flag == 'x') next_extended = !negated;
                     else if (!strchr("imsuUR", flag)) break;
                 }
             }
-            if (flags_only && end < length && end > i + 2 &&
-                (regexp[end] == ')' || regexp[end] == ':')) {
-                if (regexp[end] == ':')
-                    states[depth++] = (unsigned char)extended;
+            if (flags_only && end < length && end > i + 2 && (regexp[end] == ')' || regexp[end] == ':')) {
+                if (regexp[end] == ':') states[depth++] = (unsigned char)extended;
                 extended = next_extended;
                 memcpy(out + used, regexp + i, end - i + 1);
                 used += end - i + 1;
@@ -1040,8 +955,7 @@ char *yx_regex_compact_extended_hex(const char *regexp)
     return out;
 }
 
-static size_t yx_regex_repeat_skip_space(const char *regexp, size_t length,
-                                         size_t at)
+static size_t yx_regex_repeat_skip_space(const char *regexp, size_t length, size_t at)
 {
     while (at < length) {
         const unsigned char *s = (const unsigned char *)regexp + at;
@@ -1049,10 +963,9 @@ static size_t yx_regex_repeat_skip_space(const char *regexp, size_t length,
         if (*s == 32 || (*s >= 9 && *s <= 13)) width = 1;
         else if (left >= 2 && s[0] == 0xc2 && (s[1] == 0x85 || s[1] == 0xa0)) width = 2;
         else if (left >= 3 && ((s[0] == 0xe1 && s[1] == 0x9a && s[2] == 0x80) ||
-            (s[0] == 0xe2 && s[1] == 0x80 && ((s[2] >= 0x80 && s[2] <= 0x8a) ||
-             s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf)) ||
-            (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) ||
-            (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80))) width = 3;
+                               (s[0] == 0xe2 && s[1] == 0x80 && ((s[2] >= 0x80 && s[2] <= 0x8a) || s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf)) ||
+                               (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) || (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80)))
+            width = 3;
         if (!width) break;
         at += width;
     }
@@ -1067,13 +980,11 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
     for (size_t i = 0; regexp[i]; ++i) {
         if (regexp[i] == '\\' && regexp[i + 1]) {
             char escaped = regexp[++i];
-            if (yx_regex_unrecognized_escape((unsigned char)escaped))
-                return 1;
+            if (yx_regex_unrecognized_escape((unsigned char)escaped)) return 1;
             if (escaped >= '0' && escaped <= '9') return 1;
             /* PCRE2 accepts these escapes, but YARA-X's regex syntax does
                not. Keep them from silently changing the meaning of rules. */
-            if (strchr("ZGKQERNhHVec0CX", escaped))
-                return 1;
+            if (strchr("ZGKQERNhHVec0CX", escaped)) return 1;
             if (escaped == 'p' || escaped == 'P') {
                 /* The native Unicode translator validates property names. */
                 if (regexp[i + 1] == '{') {
@@ -1082,22 +993,27 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
                 } else if (regexp[i + 1]) ++i;
                 continue;
             }
-            if ((escaped == 'x' || escaped == 'u' ||
-                 escaped == 'U' || escaped == 'b') &&
-                regexp[i + 1] == '{') {
+            if ((escaped == 'x' || escaped == 'u' || escaped == 'U' || escaped == 'b') && regexp[i + 1] == '{') {
                 const char *end = strchr(regexp + i + 2, '}');
                 if (end) i = (size_t)(end - regexp);
             }
             continue;
         }
-        if (regexp[i] == '[' && !in_class) { in_class = true; continue; }
-        if (regexp[i] == ']' && in_class) { in_class = false; continue; }
+        if (regexp[i] == '[' && !in_class) {
+            in_class = true;
+            continue;
+        }
+        if (regexp[i] == ']' && in_class) {
+            in_class = false;
+            continue;
+        }
         if (!in_class && regexp[i] == '{') {
             size_t at = i + 1;
             bool before = false, after = false, comma = false;
             at = yx_regex_repeat_skip_space(regexp, length, at);
             while (isdigit((unsigned char)regexp[at])) {
-                before = true; ++at;
+                before = true;
+                ++at;
             }
             at = yx_regex_repeat_skip_space(regexp, length, at);
             if (regexp[at] == ',') {
@@ -1105,12 +1021,12 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
                 ++at;
                 at = yx_regex_repeat_skip_space(regexp, length, at);
                 while (isdigit((unsigned char)regexp[at])) {
-                    after = true; ++at;
+                    after = true;
+                    ++at;
                 }
                 at = yx_regex_repeat_skip_space(regexp, length, at);
             }
-            if (regexp[at] != '}' || (!before && !after) ||
-                (!comma && !before)) return 1;
+            if (regexp[at] != '}' || (!before && !after) || (!comma && !before)) return 1;
             i = at;
             if (regexp[i + 1] == '?') {
                 lazy_repeat = true;
@@ -1119,9 +1035,7 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
             continue;
         }
         if (!in_class && regexp[i] == '}') return 1;
-        if (!in_class && (regexp[i] == '*' || regexp[i] == '+' ||
-                          (regexp[i] == '?' &&
-                           (i == 0 || regexp[i - 1] != '(')))) {
+        if (!in_class && (regexp[i] == '*' || regexp[i] == '+' || (regexp[i] == '?' && (i == 0 || regexp[i - 1] != '(')))) {
             if (regexp[i + 1] == '?') {
                 lazy_repeat = true;
                 ++i;
@@ -1129,12 +1043,9 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
             continue;
         }
         if (!in_class && regexp[i] == '(' && regexp[i + 1] == '?' &&
-            (regexp[i + 2] == '=' || regexp[i + 2] == '!' ||
-             regexp[i + 2] == '>' || regexp[i + 2] == '|' ||
-             regexp[i + 2] == '#' || regexp[i + 2] == '\'' ||
-             (regexp[i + 2] == '<' &&
-              (regexp[i + 3] == '=' || regexp[i + 3] == '!')) ||
-             regexp[i + 2] == 'J' || regexp[i + 2] == 'n')) return 1;
+            (regexp[i + 2] == '=' || regexp[i + 2] == '!' || regexp[i + 2] == '>' || regexp[i + 2] == '|' || regexp[i + 2] == '#' || regexp[i + 2] == '\'' ||
+             (regexp[i + 2] == '<' && (regexp[i + 3] == '=' || regexp[i + 3] == '!')) || regexp[i + 2] == 'J' || regexp[i + 2] == 'n'))
+            return 1;
     }
     return greedy_repeat && lazy_repeat;
 }
@@ -1143,22 +1054,27 @@ static int yx_regex_has_unsupported_construct(const char *regexp)
  * flags, repeated negation, and a trailing negation in the same group.
  * PCRE2 accepts several of those after R is removed by our normalizer.
  * Keep this check limited to flag groups containing R. */
-int yx_regex_inline_r_flag_error(const char *regexp, size_t length,
-                                 size_t *error_at, const char **error_label)
+int yx_regex_inline_r_flag_error(const char *regexp, size_t length, size_t *error_at, const char **error_label)
 {
     static const char flags[] = "imsuUxR";
     bool in_class = false;
     for (size_t i = 0; i + 2 < length; ++i) {
-        if (regexp[i] == '\\' && i + 1 < length) { ++i; continue; }
-        if (regexp[i] == '[' && !in_class) { in_class = true; continue; }
-        if (regexp[i] == ']' && in_class) { in_class = false; continue; }
-        if (in_class || regexp[i] != '(' || regexp[i + 1] != '?' ||
-            !strchr("imsuUxR-", regexp[i + 2])) continue;
+        if (regexp[i] == '\\' && i + 1 < length) {
+            ++i;
+            continue;
+        }
+        if (regexp[i] == '[' && !in_class) {
+            in_class = true;
+            continue;
+        }
+        if (regexp[i] == ']' && in_class) {
+            in_class = false;
+            continue;
+        }
+        if (in_class || regexp[i] != '(' || regexp[i + 1] != '?' || !strchr("imsuUxR-", regexp[i + 2])) continue;
         size_t begin = i + 2, end = begin;
-        while (end < length && regexp[end] != ':' && regexp[end] != ')' &&
-               regexp[end] != '(') ++end;
-        if (end == length || regexp[end] == '(' ||
-            !memchr(regexp + begin, 'R', end - begin)) continue;
+        while (end < length && regexp[end] != ':' && regexp[end] != ')' && regexp[end] != '(') ++end;
+        if (end == length || regexp[end] == '(' || !memchr(regexp + begin, 'R', end - begin)) continue;
         unsigned seen = 0;
         bool negated = false;
         size_t last_negation = SIZE_MAX;
@@ -1185,8 +1101,7 @@ int yx_regex_inline_r_flag_error(const char *regexp, size_t length,
         }
         if (last_negation != SIZE_MAX) {
             if (error_at) *error_at = last_negation;
-            if (error_label)
-                *error_label = "dangling flag negation operator";
+            if (error_label) *error_label = "dangling flag negation operator";
             return 1;
         }
         i = end;
@@ -1229,26 +1144,19 @@ struct yx_regex_shape_parser {
 
 static size_t yx_regex_expanded_add(size_t left, size_t right)
 {
-    if (left > YX_REGEX_EXPANSION_LIMIT -
-               (right > YX_REGEX_EXPANSION_LIMIT ?
-                YX_REGEX_EXPANSION_LIMIT : right))
-        return YX_REGEX_EXPANSION_LIMIT + 1;
+    if (left > YX_REGEX_EXPANSION_LIMIT - (right > YX_REGEX_EXPANSION_LIMIT ? YX_REGEX_EXPANSION_LIMIT : right)) return YX_REGEX_EXPANSION_LIMIT + 1;
     return left + right;
 }
 
 static size_t yx_regex_expanded_mul(size_t value, size_t count)
 {
-    if (value > YX_REGEX_EXPANSION_LIMIT ||
-        (value && count > YX_REGEX_EXPANSION_LIMIT / value))
-        return YX_REGEX_EXPANSION_LIMIT + 1;
+    if (value > YX_REGEX_EXPANSION_LIMIT || (value && count > YX_REGEX_EXPANSION_LIMIT / value)) return YX_REGEX_EXPANSION_LIMIT + 1;
     return value * count;
 }
 
-static struct yx_regex_shape yx_regex_shape_expr(
-    struct yx_regex_shape_parser *parser, bool top);
+static struct yx_regex_shape yx_regex_shape_expr(struct yx_regex_shape_parser *parser, bool top);
 
-static struct yx_regex_shape yx_regex_shape_atom(
-    struct yx_regex_shape_parser *parser)
+static struct yx_regex_shape yx_regex_shape_atom(struct yx_regex_shape_parser *parser)
 {
     const char *s = parser->src;
     struct yx_regex_shape result = {YX_REGEX_ORDINARY, 10};
@@ -1257,12 +1165,8 @@ static struct yx_regex_shape yx_regex_shape_atom(
     if (ch == '\\') {
         char escaped = s[parser->at];
         if (escaped) ++parser->at;
-        if (escaped == 'd' || escaped == 'D' || escaped == 's' ||
-            escaped == 'S' || escaped == 'w' || escaped == 'W')
-            result.expanded = 21;
-        if ((escaped == 'x' || escaped == 'u' ||
-             escaped == 'U' || escaped == 'b') &&
-            s[parser->at] == '{') {
+        if (escaped == 'd' || escaped == 'D' || escaped == 's' || escaped == 'S' || escaped == 'w' || escaped == 'W') result.expanded = 21;
+        if ((escaped == 'x' || escaped == 'u' || escaped == 'U' || escaped == 'b') && s[parser->at] == '{') {
             const char *end = strchr(s + parser->at + 1, '}');
             if (end) parser->at = (size_t)(end - s) + 1;
         }
@@ -1315,13 +1219,11 @@ static struct yx_regex_shape yx_regex_shape_atom(
         }
     }
 
-    if (s[parser->at] == '*' || s[parser->at] == '+' ||
-        s[parser->at] == '?') {
+    if (s[parser->at] == '*' || s[parser->at] == '+' || s[parser->at] == '?') {
         bool unbounded = s[parser->at] != '?';
         ++parser->at;
         if (s[parser->at] == '?') ++parser->at;
-        if (unbounded && result.kind == YX_REGEX_ARBITRARY_DATA)
-            result.kind = YX_REGEX_ARBITRARY_RUN;
+        if (unbounded && result.kind == YX_REGEX_ARBITRARY_DATA) result.kind = YX_REGEX_ARBITRARY_RUN;
     } else if (s[parser->at] == '{') {
         size_t cursor = parser->at + 1;
         size_t lower = 0, upper = 0;
@@ -1349,8 +1251,7 @@ static struct yx_regex_shape yx_regex_shape_atom(
             size_t count = comma && has_upper ? upper : lower;
             parser->at = cursor + 1;
             if (s[parser->at] == '?') ++parser->at;
-            if (unbounded && result.kind == YX_REGEX_ARBITRARY_DATA)
-                result.kind = YX_REGEX_ARBITRARY_RUN;
+            if (unbounded && result.kind == YX_REGEX_ARBITRARY_DATA) result.kind = YX_REGEX_ARBITRARY_RUN;
             /* Unbounded repeats use loops, but their required copies still
                contribute to the compiled automaton. */
             result.expanded = yx_regex_expanded_mul(result.expanded, count);
@@ -1359,17 +1260,14 @@ static struct yx_regex_shape yx_regex_shape_atom(
     return result;
 }
 
-static struct yx_regex_shape yx_regex_shape_concat(
-    struct yx_regex_shape_parser *parser, bool top)
+static struct yx_regex_shape yx_regex_shape_concat(struct yx_regex_shape_parser *parser, bool top)
 {
     struct yx_regex_shape result = {YX_REGEX_ORDINARY, 0};
     bool all_arbitrary = true, prefix_open = true, prefix_run = false;
     size_t count = 0;
-    while (parser->src[parser->at] && parser->src[parser->at] != ')' &&
-           parser->src[parser->at] != '|') {
+    while (parser->src[parser->at] && parser->src[parser->at] != ')' && parser->src[parser->at] != '|') {
         struct yx_regex_shape item = yx_regex_shape_atom(parser);
-        result.expanded = yx_regex_expanded_add(result.expanded,
-                                                item.expanded);
+        result.expanded = yx_regex_expanded_add(result.expanded, item.expanded);
         if (item.kind == YX_REGEX_ORDINARY) {
             all_arbitrary = false;
             prefix_open = false;
@@ -1384,8 +1282,7 @@ static struct yx_regex_shape yx_regex_shape_concat(
     return result;
 }
 
-static struct yx_regex_shape yx_regex_shape_expr(
-    struct yx_regex_shape_parser *parser, bool top)
+static struct yx_regex_shape yx_regex_shape_expr(struct yx_regex_shape_parser *parser, bool top)
 {
     struct yx_regex_shape result = yx_regex_shape_concat(parser, top);
     while (parser->src[parser->at] == '|') {
@@ -1393,8 +1290,7 @@ static struct yx_regex_shape yx_regex_shape_expr(
         if (top) parser->top_alternation = true;
         ++parser->at;
         next = yx_regex_shape_concat(parser, top);
-        result.expanded = yx_regex_expanded_add(result.expanded,
-                                                next.expanded);
+        result.expanded = yx_regex_expanded_add(result.expanded, next.expanded);
         if (next.kind > result.kind) result.kind = next.kind;
     }
     return result;
@@ -1409,8 +1305,15 @@ static struct yx_regex_shape yx_regex_shape_expr(
    with E045 when they form a run. Two runs merge into ordinary data, so
    `.*.*a` passes. Alternatives yield their first run, else their last
    arbitrary item. */
-enum { YX_AP_NONE, YX_AP_DATA, YX_AP_RUN };
-typedef struct { int kind; size_t start, end; } yx_ap_kind;
+enum {
+    YX_AP_NONE,
+    YX_AP_DATA,
+    YX_AP_RUN
+};
+typedef struct {
+    int kind;
+    size_t start, end;
+} yx_ap_kind;
 typedef struct {
     const char *s;
     size_t length, at;
@@ -1432,20 +1335,16 @@ static size_t yx_ap_escape_end(const yx_ap_parser *p, size_t at)
     char kind;
     if (next >= p->length) return p->length;
     kind = p->s[next];
-    if (strchr("xuUpPb", kind) && next + 1 < p->length &&
-        p->s[next + 1] == '{') {
-        const char *close = memchr(p->s + next + 1, '}',
-                                   p->length - next - 1);
+    if (strchr("xuUpPb", kind) && next + 1 < p->length && p->s[next + 1] == '{') {
+        const char *close = memchr(p->s + next + 1, '}', p->length - next - 1);
         return close ? (size_t)(close - p->s) + 1 : p->length;
     }
     if (kind == 'x' || kind == 'u' || kind == 'U') {
         size_t digits = kind == 'x' ? 2 : kind == 'u' ? 4 : 8, end = next + 1;
-        while (digits-- && end < p->length &&
-               isxdigit((unsigned char)p->s[end])) ++end;
+        while (digits-- && end < p->length && isxdigit((unsigned char)p->s[end])) ++end;
         return end;
     }
-    if (kind == 'p' || kind == 'P')
-        return next + 1 < p->length ? yx_ap_char_end(p, next + 1) : p->length;
+    if (kind == 'p' || kind == 'P') return next + 1 < p->length ? yx_ap_char_end(p, next + 1) : p->length;
     return yx_ap_char_end(p, next);
 }
 
@@ -1457,15 +1356,15 @@ static size_t yx_ap_class_end(const yx_ap_parser *p, size_t at)
     if (i < p->length && p->s[i] == ']') ++i;
     while (i < p->length) {
         char ch = p->s[i];
-        if (ch == '\\') { i = yx_ap_escape_end(p, i); continue; }
+        if (ch == '\\') {
+            i = yx_ap_escape_end(p, i);
+            continue;
+        }
         if (ch == '[') {
             if (i + 1 < p->length && p->s[i + 1] == ':') {
                 size_t close = i + 2;
-                while (close < p->length &&
-                       (isalpha((unsigned char)p->s[close]) ||
-                        p->s[close] == '^')) ++close;
-                if (close + 1 < p->length && p->s[close] == ':' &&
-                    p->s[close + 1] == ']') {
+                while (close < p->length && (isalpha((unsigned char)p->s[close]) || p->s[close] == '^')) ++close;
+                if (close + 1 < p->length && p->s[close] == ':' && p->s[close + 1] == ']') {
                     i = close + 2;
                     continue;
                 }
@@ -1487,24 +1386,33 @@ static size_t yx_ap_class_end(const yx_ap_parser *p, size_t at)
 }
 
 /* The end of a repetition operator at `at` (lazy `?` included), 0 if none. */
-static size_t yx_ap_repetition_end(const yx_ap_parser *p, size_t at,
-                                   bool *unbounded)
+static size_t yx_ap_repetition_end(const yx_ap_parser *p, size_t at, bool *unbounded)
 {
     size_t i = at;
     if (i >= p->length) return 0;
-    if (p->s[i] == '*' || p->s[i] == '+') { *unbounded = true; ++i; }
-    else if (p->s[i] == '?') { *unbounded = false; ++i; }
-    else if (p->s[i] == '{') {
+    if (p->s[i] == '*' || p->s[i] == '+') {
+        *unbounded = true;
+        ++i;
+    } else if (p->s[i] == '?') {
+        *unbounded = false;
+        ++i;
+    } else if (p->s[i] == '{') {
         bool lower = false, comma = false, upper = false;
         ++i;
         while (i < p->length && isspace((unsigned char)p->s[i])) ++i;
-        while (i < p->length && isdigit((unsigned char)p->s[i])) { lower = true; ++i; }
+        while (i < p->length && isdigit((unsigned char)p->s[i])) {
+            lower = true;
+            ++i;
+        }
         while (i < p->length && isspace((unsigned char)p->s[i])) ++i;
         if (i < p->length && p->s[i] == ',') {
             comma = true;
             ++i;
             while (i < p->length && isspace((unsigned char)p->s[i])) ++i;
-            while (i < p->length && isdigit((unsigned char)p->s[i])) { upper = true; ++i; }
+            while (i < p->length && isdigit((unsigned char)p->s[i])) {
+                upper = true;
+                ++i;
+            }
             while (i < p->length && isspace((unsigned char)p->s[i])) ++i;
         }
         if (i >= p->length || p->s[i] != '}' || (!lower && !upper)) return 0;
@@ -1545,8 +1453,7 @@ static size_t yx_ap_skip_item(const yx_ap_parser *p, size_t at)
 static yx_ap_kind yx_ap_merge(yx_ap_kind a, yx_ap_kind b)
 {
     yx_ap_kind none = {YX_AP_NONE, 0, 0};
-    if (a.kind == YX_AP_NONE || b.kind == YX_AP_NONE ||
-        (a.kind == YX_AP_RUN && b.kind == YX_AP_RUN)) return none;
+    if (a.kind == YX_AP_NONE || b.kind == YX_AP_NONE || (a.kind == YX_AP_RUN && b.kind == YX_AP_RUN)) return none;
     a.kind = a.kind == YX_AP_RUN || b.kind == YX_AP_RUN ? YX_AP_RUN : YX_AP_DATA;
     a.end = b.end;
     return a;
@@ -1581,7 +1488,10 @@ static yx_ap_kind yx_ap_item(yx_ap_parser *p, bool nested)
         }
         p->at = inner;
         if (!flags_only) {
-            if (p->depth >= 256) { p->at = p->length; return kind; }
+            if (p->depth >= 256) {
+                p->at = p->length;
+                return kind;
+            }
             ++p->depth;
             kind = yx_ap_alternation(p, nested);
             --p->depth;
@@ -1593,8 +1503,7 @@ static yx_ap_kind yx_ap_item(yx_ap_parser *p, bool nested)
         size_t end = yx_ap_repetition_end(p, p->at, &unbounded);
         if (!end) break;
         p->at = end;
-        if (kind.kind == YX_AP_DATA && unbounded)
-            kind = (yx_ap_kind){YX_AP_RUN, start, end};
+        if (kind.kind == YX_AP_DATA && unbounded) kind = (yx_ap_kind){YX_AP_RUN, start, end};
     }
     return kind;
 }
@@ -1607,8 +1516,7 @@ static yx_ap_kind yx_ap_concat(yx_ap_parser *p, bool nested)
     {
         /* Count the items first: a single item is no concatenation. */
         size_t at = p->at;
-        while (at < p->length && p->s[at] != '|' && p->s[at] != ')' &&
-               count < 2) {
+        while (at < p->length && p->s[at] != '|' && p->s[at] != ')' && count < 2) {
             at = yx_ap_skip_item(p, at);
             ++count;
         }
@@ -1616,7 +1524,10 @@ static yx_ap_kind yx_ap_concat(yx_ap_parser *p, bool nested)
     outermost = count >= 2 && !nested;
     while (p->at < p->length && p->s[p->at] != '|' && p->s[p->at] != ')') {
         yx_ap_kind item = yx_ap_item(p, count >= 2 ? true : nested);
-        if (count < 2) { result = item; continue; }
+        if (count < 2) {
+            result = item;
+            continue;
+        }
         if (outermost) result = item;
         else result = index ? yx_ap_merge(result, item) : item;
         if (prefix_open) {
@@ -1640,7 +1551,10 @@ static yx_ap_kind yx_ap_alternation(yx_ap_parser *p, bool nested)
     {
         size_t at = p->at;
         while (at < p->length && p->s[at] != ')') {
-            if (p->s[at] == '|') { alternation = true; break; }
+            if (p->s[at] == '|') {
+                alternation = true;
+                break;
+            }
             at = yx_ap_skip_item(p, at);
         }
     }
@@ -1652,14 +1566,16 @@ static yx_ap_kind yx_ap_alternation(yx_ap_parser *p, bool nested)
             chosen_set = true;
             stop = last.kind == YX_AP_RUN;
         }
-        if (p->at < p->length && p->s[p->at] == '|') { ++p->at; continue; }
+        if (p->at < p->length && p->s[p->at] == '|') {
+            ++p->at;
+            continue;
+        }
         break;
     }
     return chosen_set ? chosen : last;
 }
 
-bool yx_regex_arbitrary_prefix(const char *regexp, size_t length, bool dotall,
-                               size_t *start, size_t *end)
+bool yx_regex_arbitrary_prefix(const char *regexp, size_t length, bool dotall, size_t *start, size_t *end)
 {
     yx_ap_parser parser = {regexp, length, 0, dotall, false, 0, 0, 0};
     if (!regexp || !dotall) return false;
@@ -1671,31 +1587,24 @@ bool yx_regex_arbitrary_prefix(const char *regexp, size_t length, bool dotall,
     return parser.found;
 }
 
-int yx_regex_validate_shape(const char *regexp, bool dotall,
-                            bool matches_expr)
+int yx_regex_validate_shape(const char *regexp, bool dotall, bool matches_expr)
 {
-    struct yx_regex_shape_parser parser = {
-        regexp, 0, 0, dotall, false, false
-    };
+    struct yx_regex_shape_parser parser = {regexp, 0, 0, dotall, false, false};
     struct yx_regex_shape shape = yx_regex_shape_expr(&parser, true);
     /* The `matches` operator builds a regex-automata NFA with a 50 MiB size
        cap. Strings patterns use the YARA-X Pike VM backend instead, whose
        limit is different. */
-    return (matches_expr && shape.expanded > YX_REGEX_EXPANSION_LIMIT) ||
-           yx_regex_arbitrary_prefix(regexp, strlen(regexp), dotall,
-                                     NULL, NULL);
+    return (matches_expr && shape.expanded > YX_REGEX_EXPANSION_LIMIT) || yx_regex_arbitrary_prefix(regexp, strlen(regexp), dotall, NULL, NULL);
 }
 
 static bool yx_plain_regex_byte(unsigned char ch)
 {
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-           (ch >= '0' && ch <= '9') || ch == '_';
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
 }
 
 static bool yx_regex_hex_byte(unsigned char ch)
 {
-    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
-           (ch >= 'A' && ch <= 'F');
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
 }
 
 /* Only atoms whose syntax and minimum width are unambiguous are handled by
@@ -1707,8 +1616,7 @@ static bool yx_simple_regex_atom(const unsigned char **at)
         *at = cursor + 1;
         return true;
     }
-    if (cursor[0] == '\\' && cursor[1] == 'x' &&
-        yx_regex_hex_byte(cursor[2]) && yx_regex_hex_byte(cursor[3])) {
+    if (cursor[0] == '\\' && cursor[1] == 'x' && yx_regex_hex_byte(cursor[2]) && yx_regex_hex_byte(cursor[3])) {
         *at = cursor + 4;
         return true;
     }
@@ -1774,13 +1682,11 @@ static bool yx_unmatchable_large_repeat(const char *regexp)
         if (*cursor != '{') continue;
         if (found) return false;
         ++cursor;
-        if (!yx_regex_repeat_count(&cursor, &lower) || lower < 4096)
-            return false;
+        if (!yx_regex_repeat_count(&cursor, &lower) || lower < 4096) return false;
         if (*cursor == ',') {
             ++cursor;
             if (*cursor >= '0' && *cursor <= '9') {
-                if (!yx_regex_repeat_count(&cursor, &upper) || upper < lower)
-                    return false;
+                if (!yx_regex_repeat_count(&cursor, &upper) || upper < lower) return false;
             }
         }
         if (*cursor != '}') return false;
@@ -1793,9 +1699,7 @@ static bool yx_unmatchable_large_repeat(const char *regexp)
 /* A top-level alternation can still match through a short literal branch.
    Keep the large branch grammar above and require exactly one plain literal
    branch, so every reported hit has the same offset and length as YARA-X. */
-static bool yx_large_repeat_literal_alt(const char *regexp,
-                                        const uint8_t **literal,
-                                        size_t *literal_length)
+static bool yx_large_repeat_literal_alt(const char *regexp, const uint8_t **literal, size_t *literal_length)
 {
     const char *bar = regexp ? strchr(regexp, '|') : NULL;
     if (!bar || strchr(bar + 1, '|')) return false;
@@ -1822,8 +1726,7 @@ static bool yx_large_repeat_literal_alt(const char *regexp,
     }
     if (short_length > 64) return false;
     for (size_t i = 0; i < short_length; ++i)
-        if (!yx_plain_regex_byte((unsigned char)short_branch[i]))
-            return false;
+        if (!yx_plain_regex_byte((unsigned char)short_branch[i])) return false;
     *literal = (const uint8_t *)short_branch;
     *literal_length = short_length;
     return true;
@@ -1840,9 +1743,7 @@ static int yx_regex_hex_digit(char ch)
 /* `\xHH` names a raw byte in YARA-X, whereas `\x{...}`, `\u...`,
    and `\U...` name Unicode scalar values encoded as UTF-8.
  */
-static int yx_regex_unicode_escape(const char *regexp, size_t length,
-                                   size_t slash, uint32_t *scalar,
-                                   size_t *last)
+static int yx_regex_unicode_escape(const char *regexp, size_t length, size_t slash, uint32_t *scalar, size_t *last)
 {
     size_t at = slash + 2;
     bool braces = at < length && regexp[at] == '{';
@@ -1854,14 +1755,11 @@ static int yx_regex_unicode_escape(const char *regexp, size_t length,
     while (at < length && (braces || digits < fixed_digits)) {
         int digit = yx_regex_hex_digit(regexp[at]);
         if (digit < 0) break;
-        if (value <= 0x10ffffu)
-            value = (value << 4) | (uint32_t)digit;
+        if (value <= 0x10ffffu) value = (value << 4) | (uint32_t)digit;
         ++at;
         ++digits;
     }
-    if (!digits || (!braces && digits != fixed_digits) ||
-        (braces && (at >= length || regexp[at++] != '}')) ||
-        value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
+    if (!digits || (!braces && digits != fixed_digits) || (braces && (at >= length || regexp[at++] != '}')) || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
         return -1;
     *scalar = value;
     *last = at - 1;
@@ -1903,25 +1801,20 @@ static size_t yx_regex_append_utf8(char *out, size_t used, uint32_t scalar)
 
 /* A positive class of ASCII literals and ranges has identical byte and
    Unicode matching behavior, even when the input contains invalid UTF-8. */
-static bool yx_pcre_unicode_ascii_class(const char *regexp, size_t at,
-                                        size_t length)
+static bool yx_pcre_unicode_ascii_class(const char *regexp, size_t at, size_t length)
 {
     if (at + 2 >= length || regexp[at + 1] == '^') return false;
     for (size_t i = at + 1; i < length; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
         if (ch == ']') return i > at + 1;
-        if ((ch >= 'a' && ch <= 'z') ||
-            (ch >= 'A' && ch <= 'Z') ||
-            (ch >= '0' && ch <= '9') || ch == '_' || ch == '.') continue;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.') continue;
         if (ch == '-' && i > at + 1 && i + 1 < length) {
             unsigned char left = (unsigned char)regexp[i - 1];
             unsigned char right = (unsigned char)regexp[i + 1];
-            if (((left >= 'a' && left <= 'z') &&
-                 (right >= 'a' && right <= 'z') && left <= right) ||
-                ((left >= 'A' && left <= 'Z') &&
-                 (right >= 'A' && right <= 'Z') && left <= right) ||
-                ((left >= '0' && left <= '9') &&
-                 (right >= '0' && right <= '9') && left <= right)) continue;
+            if (((left >= 'a' && left <= 'z') && (right >= 'a' && right <= 'z') && left <= right) ||
+                ((left >= 'A' && left <= 'Z') && (right >= 'A' && right <= 'Z') && left <= right) ||
+                ((left >= '0' && left <= '9') && (right >= '0' && right <= '9') && left <= right))
+                continue;
         }
         return false;
     }
@@ -1936,8 +1829,7 @@ static bool yx_pcre_unicode_literal(const char *regexp, size_t length)
     bool non_ascii = false;
     if (length < 6) return false;
     if (strncmp(regexp, "(?u)", 4) != 0) {
-        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')')
-            return false;
+        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')') return false;
         --end;
     }
     for (size_t i = begin; i < end;) {
@@ -1954,14 +1846,10 @@ static bool yx_pcre_unicode_literal(const char *regexp, size_t length)
         else return false;
         if (end - i <= continuation) return false;
         unsigned char second = (unsigned char)regexp[i + 1];
-        if ((second & 0xc0) != 0x80 ||
-            (ch == 0xe0 && second < 0xa0) ||
-            (ch == 0xed && second >= 0xa0) ||
-            (ch == 0xf0 && second < 0x90) ||
-            (ch == 0xf4 && second >= 0x90)) return false;
+        if ((second & 0xc0) != 0x80 || (ch == 0xe0 && second < 0xa0) || (ch == 0xed && second >= 0xa0) || (ch == 0xf0 && second < 0x90) || (ch == 0xf4 && second >= 0x90))
+            return false;
         for (size_t j = 2; j <= continuation; ++j)
-            if (((unsigned char)regexp[i + j] & 0xc0) != 0x80)
-                return false;
+            if (((unsigned char)regexp[i + j] & 0xc0) != 0x80) return false;
         non_ascii = true;
         i += continuation + 1;
     }
@@ -1970,14 +1858,11 @@ static bool yx_pcre_unicode_literal(const char *regexp, size_t length)
 
 /* In byte-mode PCRE2, '+' and '+?' would repeat only the last byte of a
    UTF-8 scalar. Group one complete scalar for the whole-pattern form. */
-static bool yx_pcre_unicode_scalar_at(const char *regexp,
-                                     size_t scalar_length)
+static bool yx_pcre_unicode_scalar_at(const char *regexp, size_t scalar_length)
 {
     if (scalar_length < 2 || scalar_length > 4) return false;
     unsigned char lead = (unsigned char)regexp[4];
-    size_t expected = lead >= 0xc2 && lead <= 0xdf ? 2 :
-                      lead >= 0xe0 && lead <= 0xef ? 3 :
-                      lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+    size_t expected = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
     if (scalar_length != expected) return false;
     char literal[9];
     memcpy(literal, "(?u)", 4);
@@ -1991,21 +1876,16 @@ static size_t yx_pcre_unicode_scalar_plus_width(const char *regexp)
     size_t length = strlen(regexp), end = length;
     if (length < 7) return 0;
     if (strncmp(regexp, "(?u)", 4) != 0) {
-        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')')
-            return 0;
+        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')') return 0;
         --end;
     }
     /* The lazy form has the same scalar atom followed by "+?". */
     size_t quantifier_end = end;
     if (regexp[quantifier_end - 1] == '?') --quantifier_end;
     size_t quantifier_length;
-    if (regexp[quantifier_end - 1] == '+')
-        quantifier_length = 1;
-    else if (quantifier_end >= 8 &&
-             memcmp(regexp + quantifier_end - 4, "{1,}", 4) == 0)
-        quantifier_length = 4;
-    else
-        return 0;
+    if (regexp[quantifier_end - 1] == '+') quantifier_length = 1;
+    else if (quantifier_end >= 8 && memcmp(regexp + quantifier_end - 4, "{1,}", 4) == 0) quantifier_length = 4;
+    else return 0;
     size_t scalar_length = quantifier_end - 4 - quantifier_length;
     if (!yx_pcre_unicode_scalar_at(regexp, scalar_length)) return 0;
     return scalar_length;
@@ -2016,9 +1896,7 @@ static char *yx_pcre_unicode_scalar_plus(const char *regexp)
     size_t scalar_length = yx_pcre_unicode_scalar_plus_width(regexp);
     if (!scalar_length) return NULL;
     size_t length = strlen(regexp);
-    bool lazy = regexp[length - 1] == '?' ||
-                (length > 1 && regexp[length - 1] == ')' &&
-                 regexp[length - 2] == '?');
+    bool lazy = regexp[length - 1] == '?' || (length > 1 && regexp[length - 1] == ')' && regexp[length - 2] == '?');
     char *rewritten = malloc(scalar_length + 6 + (lazy ? 1 : 0));
     if (!rewritten) return NULL;
     memcpy(rewritten, "(?:", 3);
@@ -2035,25 +1913,20 @@ static char *yx_pcre_unicode_scalar_plus(const char *regexp)
    accounting for their lower bound. Lazy counts retain their written bounds.
    Keep the rewrite to these whole-pattern forms so byte-mode PCRE2 repeats
    the entire scalar. */
-static size_t yx_pcre_unicode_scalar_counted_width(const char *regexp,
-                                                    size_t *limited_upper,
-                                                    const char **replacement,
-                                                    size_t *replacement_length)
+static size_t yx_pcre_unicode_scalar_counted_width(const char *regexp, size_t *limited_upper, const char **replacement, size_t *replacement_length)
 {
     size_t length = strlen(regexp), end = length, quantifier_length;
     bool lazy;
     if (length < 9) return 0;
     if (strncmp(regexp, "(?u)", 4) != 0) {
-        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')')
-            return 0;
+        if (strncmp(regexp, "(?u:", 4) != 0 || regexp[length - 1] != ')') return 0;
         --end;
     }
     lazy = end > 0 && regexp[end - 1] == '?';
     if (lazy) --end;
     if (end < 7 || regexp[end - 1] != '}') return 0;
     size_t quantifier_start = end - 2;
-    while (quantifier_start > 4 && regexp[quantifier_start] != '{')
-        --quantifier_start;
+    while (quantifier_start > 4 && regexp[quantifier_start] != '{') --quantifier_start;
     if (regexp[quantifier_start] != '{') return 0;
     quantifier_length = end - quantifier_start;
     if (quantifier_length < 3 || quantifier_length > 23) return 0;
@@ -2083,8 +1956,7 @@ static size_t yx_pcre_unicode_scalar_counted_width(const char *regexp,
     }
     size_t scalar_length = end - 4 - quantifier_length;
     if (!yx_pcre_unicode_scalar_at(regexp, scalar_length)) return 0;
-    *limited_upper = !lazy && upper > lower && upper <= 10 &&
-                     (lower == 1 || scalar_length == 4) ? upper : 0;
+    *limited_upper = !lazy && upper > lower && upper <= 10 && (lower == 1 || scalar_length == 4) ? upper : 0;
     if (replacement) {
         *replacement = regexp + end - quantifier_length;
         *replacement_length = quantifier_length + (lazy ? 1 : 0);
@@ -2098,22 +1970,15 @@ static char *yx_pcre_unicode_scalar_counted(const char *regexp)
     const char *replacement = NULL;
     size_t replacement_length = 0;
     char capped_quantifier[32], expanded_quantifier[32];
-    size_t scalar_length =
-        yx_pcre_unicode_scalar_counted_width(regexp, &limited_upper,
-                                              &replacement,
-                                              &replacement_length);
+    size_t scalar_length = yx_pcre_unicode_scalar_counted_width(regexp, &limited_upper, &replacement, &replacement_length);
     if (!scalar_length) return NULL;
     if (limited_upper) {
         const char *comma = memchr(replacement, ',', replacement_length);
         size_t lower = 0;
         if (!comma) return NULL;
-        for (const char *at = replacement + 1; at < comma; ++at)
-            lower = lower * 10 + (size_t)(*at - '0');
-        int count = snprintf(expanded_quantifier,
-                             sizeof(expanded_quantifier), "{%zu,%zu}",
-                             lower, 2 * limited_upper - lower);
-        if (count < 0 || (size_t)count >= sizeof(expanded_quantifier))
-            return NULL;
+        for (const char *at = replacement + 1; at < comma; ++at) lower = lower * 10 + (size_t)(*at - '0');
+        int count = snprintf(expanded_quantifier, sizeof(expanded_quantifier), "{%zu,%zu}", lower, 2 * limited_upper - lower);
+        if (count < 0 || (size_t)count >= sizeof(expanded_quantifier)) return NULL;
         replacement = expanded_quantifier;
         replacement_length = (size_t)count;
     }
@@ -2124,17 +1989,12 @@ static char *yx_pcre_unicode_scalar_counted(const char *regexp)
         const char *comma = memchr(replacement, ',', replacement_length);
         if (comma) {
             size_t lower = 0, upper = 0;
-            for (const char *at = replacement + 1; at < comma; ++at)
-                lower = lower * 10 + (size_t)(*at - '0');
-            for (const char *at = comma + 1; *at >= '0' && *at <= '9'; ++at)
-                upper = upper * 10 + (size_t)(*at - '0');
+            for (const char *at = replacement + 1; at < comma; ++at) lower = lower * 10 + (size_t)(*at - '0');
+            for (const char *at = comma + 1; *at >= '0' && *at <= '9'; ++at) upper = upper * 10 + (size_t)(*at - '0');
             if (upper > 1024) {
                 bool lazy = replacement[replacement_length - 1] == '?';
-                int count = snprintf(capped_quantifier,
-                                     sizeof(capped_quantifier),
-                                     lazy ? "{%zu,}?" : "{%zu,}", lower);
-                if (count < 0 || (size_t)count >= sizeof(capped_quantifier))
-                    return NULL;
+                int count = snprintf(capped_quantifier, sizeof(capped_quantifier), lazy ? "{%zu,}?" : "{%zu,}", lower);
+                if (count < 0 || (size_t)count >= sizeof(capped_quantifier)) return NULL;
                 replacement = capped_quantifier;
                 replacement_length = (size_t)count;
             }
@@ -2152,8 +2012,7 @@ static char *yx_pcre_unicode_scalar_counted(const char *regexp)
 
 static bool yx_pcre_fixed_edge_byte(char c)
 {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == '-';
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
 }
 
 static char *yx_pcre_never_match(void)
@@ -2178,9 +2037,7 @@ static char *yx_pcre_unicode_scalar_fixed_edge(const YRX_PATTERN *pattern)
     size_t prefix_length = (size_t)(at - prefix);
     const char *scalar = at;
     unsigned char lead = (unsigned char)*at;
-    size_t width = lead >= 0xc2 && lead <= 0xdf ? 2 :
-                   lead >= 0xe0 && lead <= 0xef ? 3 :
-                   lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+    size_t width = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
     if (!width || strlen(at) < width + 3) return NULL;
     char literal[9];
     memcpy(literal, "(?u)", 4);
@@ -2200,27 +2057,25 @@ static char *yx_pcre_unicode_scalar_fixed_edge(const YRX_PATTERN *pattern)
     const char *suffix = at;
     while (yx_pcre_fixed_edge_byte(*at) && at - suffix < 32) ++at;
     size_t suffix_length = (size_t)(at - suffix);
-    if ((scoped ? *at != ')' || at[1] != '\0' : *at != '\0') ||
-        (!prefix_length && !suffix_length)) return NULL;
+    if ((scoped ? *at != ')' || at[1] != '\0' : *at != '\0') || (!prefix_length && !suffix_length)) return NULL;
     /* The verifier can consume at most 4095 scalar bytes before this
        mandatory ASCII edge. Larger fixed counts compile but never match. */
     if (count > 4095 / width) return yx_pcre_never_match();
     size_t fixed_span = prefix_length + (size_t)count * width + suffix_length;
-    if (fixed_span > 4096)
-        return NULL;
+    if (fixed_span > 4096) return NULL;
     /* A suffix-only expression that fills the verification window cannot
        reach its final ASCII atom, even though the scalar repeat itself fits. */
-    if (fixed_span == 4096 && prefix_length == 0)
-        return yx_pcre_never_match();
-    size_t length = prefix_length + 3 + width + 1 +
-                    quantifier_length + suffix_length + 1;
+    if (fixed_span == 4096 && prefix_length == 0) return yx_pcre_never_match();
+    size_t length = prefix_length + 3 + width + 1 + quantifier_length + suffix_length + 1;
     char *rewritten = malloc(length);
     if (!rewritten) return NULL;
     size_t used = 0;
     memcpy(rewritten + used, prefix, prefix_length);
     used += prefix_length;
-    memcpy(rewritten + used, "(?:", 3); used += 3;
-    memcpy(rewritten + used, scalar, width); used += width;
+    memcpy(rewritten + used, "(?:", 3);
+    used += 3;
+    memcpy(rewritten + used, scalar, width);
+    used += width;
     rewritten[used++] = ')';
     memcpy(rewritten + used, quantifier, quantifier_length);
     used += quantifier_length;
@@ -2233,8 +2088,7 @@ static char *yx_pcre_unicode_scalar_fixed_edge(const YRX_PATTERN *pattern)
 static char *yx_pcre_unicode_counted_unbounded(const char *regexp)
 {
     size_t limited_upper = 0;
-    size_t width = yx_pcre_unicode_scalar_counted_width(
-        regexp, &limited_upper, NULL, NULL);
+    size_t width = yx_pcre_unicode_scalar_counted_width(regexp, &limited_upper, NULL, NULL);
     if (!width || limited_upper) return NULL;
     const char *open = strrchr(regexp, '{');
     const char *comma = open ? strchr(open, ',') : NULL;
@@ -2242,13 +2096,11 @@ static char *yx_pcre_unicode_counted_unbounded(const char *regexp)
     const char *close = strchr(comma, '}');
     if (!close) return NULL;
     size_t upper = 0;
-    for (const char *at = comma + 1; at < close; ++at)
-        upper = upper * 10 + (size_t)(*at - '0');
+    for (const char *at = comma + 1; at < close; ++at) upper = upper * 10 + (size_t)(*at - '0');
     if (upper <= 1024) return NULL;
     size_t prefix_length = (size_t)(comma + 1 - regexp);
     size_t suffix_length = strlen(close);
-    if (prefix_length > SIZE_MAX - suffix_length - 1)
-        return NULL;
+    if (prefix_length > SIZE_MAX - suffix_length - 1) return NULL;
     char *capped = malloc(prefix_length + suffix_length + 1);
     if (!capped) return NULL;
     memcpy(capped, regexp, prefix_length);
@@ -2259,26 +2111,22 @@ static char *yx_pcre_unicode_counted_unbounded(const char *regexp)
 static bool yx_pcre_is_unicode_scalar_counted(const char *regexp)
 {
     size_t limited_upper = 0;
-    return yx_pcre_unicode_scalar_counted_width(
-        regexp, &limited_upper, NULL, NULL) != 0;
+    return yx_pcre_unicode_scalar_counted_width(regexp, &limited_upper, NULL, NULL) != 0;
 }
 
 static bool yx_pcre_unicode_count_unmatchable(const char *regexp)
 {
     size_t ignored_upper = 0;
-    size_t width = yx_pcre_unicode_scalar_counted_width(
-        regexp, &ignored_upper, NULL, NULL);
+    size_t width = yx_pcre_unicode_scalar_counted_width(regexp, &ignored_upper, NULL, NULL);
     if (!width) return false;
     const char *at = strrchr(regexp, '{');
     if (!at) return false;
     size_t lower = 0;
-    for (++at; *at >= '0' && *at <= '9'; ++at)
-        lower = lower * 10 + (size_t)(*at - '0');
+    for (++at; *at >= '0' && *at <= '9'; ++at) lower = lower * 10 + (size_t)(*at - '0');
     return lower > 4095 / width;
 }
 
-static bool yx_regex_is_single_dotall_dot(const char *regexp,
-                                          bool initial_dotall);
+static bool yx_regex_is_single_dotall_dot(const char *regexp, bool initial_dotall);
 
 /* The native adapter tracks Unicode per scope while its byte engine stores
    UTF-8 expansions. PCRE2 needs the narrower all-Unicode escape path. */
@@ -2306,7 +2154,10 @@ static bool yx_pcre_unicode_only_with_U(const char *regexp)
             in_class = true;
             continue;
         }
-        if (ch == ']' && in_class) { in_class = false; continue; }
+        if (ch == ']' && in_class) {
+            in_class = false;
+            continue;
+        }
         if (in_class) continue;
         if (ch == '(') {
             size_t end = i + 2;
@@ -2315,31 +2166,32 @@ static bool yx_pcre_unicode_only_with_U(const char *regexp)
             if (regexp[i + 1] == '?') {
                 for (; end < length; ++end) {
                     char flag = regexp[end];
-                    if (flag == '-') { minus = true; continue; }
+                    if (flag == '-') {
+                        minus = true;
+                        continue;
+                    }
                     if (flag == 'u') {
                         next_unicode = !minus;
                         if (next_unicode) saw_U = true;
                         continue;
                     }
-                    if (flag == 'x') { next_extended = !minus; continue; }
+                    if (flag == 'x') {
+                        next_extended = !minus;
+                        continue;
+                    }
                     if (strchr("imsUR", flag)) continue;
                     break;
                 }
             }
-            if (end > i + 2 && end < length &&
-                (regexp[end] == ')' || regexp[end] == ':')) {
-                if (regexp[end] == ':')
-                    states[depth++] = (unsigned char)((unicode ? 1 : 0) |
-                                                       (extended ? 2 : 0));
+            if (end > i + 2 && end < length && (regexp[end] == ')' || regexp[end] == ':')) {
+                if (regexp[end] == ':') states[depth++] = (unsigned char)((unicode ? 1 : 0) | (extended ? 2 : 0));
                 unicode = next_unicode;
                 extended = next_extended;
                 i = end;
                 continue;
             }
-            states[depth++] = (unsigned char)((unicode ? 1 : 0) |
-                                               (extended ? 2 : 0));
-            if (i + 2 < length && regexp[i + 1] == '?' && regexp[i + 2] == ':')
-                i += 2;
+            states[depth++] = (unsigned char)((unicode ? 1 : 0) | (extended ? 2 : 0));
+            if (i + 2 < length && regexp[i + 1] == '?' && regexp[i + 2] == ':') i += 2;
             continue;
         }
         if (ch == ')' && depth) {
@@ -2360,10 +2212,7 @@ static bool yx_pcre_unicode_only_with_U(const char *regexp)
 
 /* Repetitions of zero-width word assertions can be reduced to either one
    assertion or none before compiling with PCRE2. */
-static bool yx_pcre_word_assertion_repeat(const char *regexp, size_t length,
-                                          size_t at, bool extended,
-                                          size_t *after,
-                                          bool *minimum_is_zero)
+static bool yx_pcre_word_assertion_repeat(const char *regexp, size_t length, size_t at, bool extended, size_t *after, bool *minimum_is_zero)
 {
     if (extended)
         while (at < length && isspace((unsigned char)regexp[at])) ++at;
@@ -2373,8 +2222,7 @@ static bool yx_pcre_word_assertion_repeat(const char *regexp, size_t length,
         *after = at + 1;
         size_t lazy = *after;
         if (extended)
-            while (lazy < length && isspace((unsigned char)regexp[lazy]))
-                ++lazy;
+            while (lazy < length && isspace((unsigned char)regexp[lazy])) ++lazy;
         if (lazy < length && regexp[lazy] == '?') *after = lazy + 1;
         return true;
     }
@@ -2404,9 +2252,7 @@ static bool yx_pcre_word_assertion_repeat(const char *regexp, size_t length,
         }
         while (i < length && isspace((unsigned char)regexp[i])) ++i;
     }
-    if ((!has_lower && (!comma || !has_upper)) ||
-        i >= length || regexp[i] != '}' ||
-        (comma && has_upper && upper < lower)) return false;
+    if ((!has_lower && (!comma || !has_upper)) || i >= length || regexp[i] != '}' || (comma && has_upper && upper < lower)) return false;
     *minimum_is_zero = lower == 0;
     *after = i + 1;
     size_t lazy = *after;
@@ -2419,16 +2265,11 @@ static bool yx_pcre_word_assertion_repeat(const char *regexp, size_t length,
 /* YARA-X treats CR as a multiline anchor boundary, while an ordinary dot
    still matches CR. PCRE2 couples those two behaviors to its newline mode.
    Keep ANYCRLF for anchors and spell an ordinary dot as "not LF". */
-static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
-                                     bool initial_nocase,
-                                     bool unicode_counted_nocase,
-                                     bool unicode_escape_utf)
+static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall, bool initial_nocase, bool unicode_counted_nocase, bool unicode_escape_utf)
 {
     size_t length = strlen(regexp), used = 0, depth = 0;
-    bool unicode_literal = yx_pcre_unicode_literal(regexp, length) ||
-                           unicode_counted_nocase;
-    bool byte_wildcard = yx_regex_is_single_dotall_dot(regexp,
-                                                       initial_dotall);
+    bool unicode_literal = yx_pcre_unicode_literal(regexp, length) || unicode_counted_nocase;
+    bool byte_wildcard = yx_regex_is_single_dotall_dot(regexp, initial_dotall);
     if (length > (SIZE_MAX - 1) / 24) return NULL;
     size_t capacity = length * 24 + 1;
     for (size_t i = 0; i < length; ++i) {
@@ -2445,7 +2286,11 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
     bool in_class = false, dotall = initial_dotall, unicode = false;
     bool extended = false;
     bool nocase = initial_nocase, multiline = false, crlf = false;
-    if (!out || !states) { free(out); free(states); return NULL; }
+    if (!out || !states) {
+        free(out);
+        free(states);
+        return NULL;
+    }
     for (size_t i = 0; i < length; ++i) {
         char ch = regexp[i];
         if (extended && !in_class && ch == '#') {
@@ -2459,13 +2304,14 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
         if (!in_class && ch == '[') {
             size_t after = i, count = 0;
             yx_re_range *ranges = NULL;
-            uint32_t class_options = (unicode ? PCRE2_UTF | PCRE2_UCP : 0) |
-                                     (nocase ? PCRE2_CASELESS : 0);
-            int valid = yx_re_class_ranges((const unsigned char *)regexp,
-                                           length, &after, class_options,
-                                           &ranges, &count);
+            uint32_t class_options = (unicode ? PCRE2_UTF | PCRE2_UCP : 0) | (nocase ? PCRE2_CASELESS : 0);
+            int valid = yx_re_class_ranges((const unsigned char *)regexp, length, &after, class_options, &ranges, &count);
             free(ranges);
-            if (!valid || after <= i) { free(out); free(states); return NULL; }
+            if (!valid || after <= i) {
+                free(out);
+                free(states);
+                return NULL;
+            }
             memcpy(out + used, regexp + i, after - i);
             used += after - i;
             i = after - 1;
@@ -2473,11 +2319,14 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
         }
         if (ch == '\\' && i + 1 < length) {
             char escaped = regexp[i + 1];
-            if ((escaped == 'p' || escaped == 'P') && i + 2 < length &&
-                regexp[i + 2] == '{') {
+            if ((escaped == 'p' || escaped == 'P') && i + 2 < length && regexp[i + 2] == '{') {
                 size_t end = i + 3;
                 while (end < length && regexp[end] != '}') ++end;
-                if (end == length) { free(out); free(states); return NULL; }
+                if (end == length) {
+                    free(out);
+                    free(states);
+                    return NULL;
+                }
                 memcpy(out + used, regexp + i, end + 1 - i);
                 used += end + 1 - i;
                 i = end;
@@ -2488,32 +2337,24 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
                minimum and remove it for a zero minimum. This rewrite is
                limited to byte mode; Unicode assertions have their own
                YARA-X diagnostic. */
-            if (!in_class && !unicode &&
-                (escaped == 'b' || escaped == 'B')) {
+            if (!in_class && !unicode && (escaped == 'b' || escaped == 'B')) {
                 size_t assertion_end = i + 2, after;
                 bool minimum_is_zero;
                 const char *named = NULL;
-                if (escaped == 'b' && i + 9 <= length &&
-                    memcmp(regexp + i + 2, "{start}", 7) == 0) {
+                if (escaped == 'b' && i + 9 <= length && memcmp(regexp + i + 2, "{start}", 7) == 0) {
                     named = "(?<!\\w)(?=\\w)";
                     assertion_end = i + 9;
-                } else if (escaped == 'b' && i + 7 <= length &&
-                           memcmp(regexp + i + 2, "{end}", 5) == 0) {
+                } else if (escaped == 'b' && i + 7 <= length && memcmp(regexp + i + 2, "{end}", 5) == 0) {
                     named = "(?<=\\w)(?!\\w)";
                     assertion_end = i + 7;
                 }
-                if (yx_pcre_word_assertion_repeat(regexp, length,
-                                                  assertion_end, extended,
-                                                  &after,
-                                                  &minimum_is_zero)) {
+                if (yx_pcre_word_assertion_repeat(regexp, length, assertion_end, extended, &after, &minimum_is_zero)) {
                     size_t next_after;
                     bool next_minimum_is_zero;
                     /* regex-syntax nests consecutive repetitions. Since a
                        word assertion consumes no input, the whole chain is
                        optional if any repetition has a zero minimum. */
-                    while (yx_pcre_word_assertion_repeat(
-                               regexp, length, after, extended,
-                               &next_after, &next_minimum_is_zero)) {
+                    while (yx_pcre_word_assertion_repeat(regexp, length, after, extended, &next_after, &next_minimum_is_zero)) {
                         minimum_is_zero |= next_minimum_is_zero;
                         after = next_after;
                     }
@@ -2535,56 +2376,53 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
                In UTF mode, only scalar escapes and quoted punctuation have
                been checked against the reference matcher here. */
             if (unicode && escaped != 'v' &&
-                ((!unicode_escape_utf && escaped != 'U' &&
-                  !strchr("\\.^$*+?{}[]|()/-nrtfa", escaped)) ||
-                 (unicode_escape_utf &&
-                  !strchr("UuxdDsSwWpP\\.^$*+?{}[]|()/-nrtfa", escaped)))) {
-                free(out); free(states); return NULL;
+                ((!unicode_escape_utf && escaped != 'U' && !strchr("\\.^$*+?{}[]|()/-nrtfa", escaped)) ||
+                 (unicode_escape_utf && !strchr("UuxdDsSwWpP\\.^$*+?{}[]|()/-nrtfa", escaped)))) {
+                free(out);
+                free(states);
+                return NULL;
             }
             if (unicode && escaped == 'v') {
-                const char *vertical_tab = unicode_escape_utf ?
-                    "\\x{B}" : "\\x0B";
+                const char *vertical_tab = unicode_escape_utf ? "\\x{B}" : "\\x0B";
                 size_t size = strlen(vertical_tab);
                 memcpy(out + used, vertical_tab, size);
                 used += size;
                 ++i;
                 continue;
             }
-            if (!in_class && regexp[i + 1] == 'b' &&
-                i + 9 <= length &&
-                memcmp(regexp + i + 2, "{start}", 7) == 0) {
+            if (!in_class && regexp[i + 1] == 'b' && i + 9 <= length && memcmp(regexp + i + 2, "{start}", 7) == 0) {
                 static const char boundary[] = "(?<!\\w)(?=\\w)";
                 memcpy(out + used, boundary, sizeof(boundary) - 1);
                 used += sizeof(boundary) - 1;
                 i += 8;
                 continue;
             }
-            if (!in_class && regexp[i + 1] == 'b' &&
-                i + 7 <= length &&
-                memcmp(regexp + i + 2, "{end}", 5) == 0) {
-                static const char boundary[] =
-                    "(?<=\\w)(?!\\w)";
+            if (!in_class && regexp[i + 1] == 'b' && i + 7 <= length && memcmp(regexp + i + 2, "{end}", 5) == 0) {
+                static const char boundary[] = "(?<=\\w)(?!\\w)";
                 memcpy(out + used, boundary, sizeof(boundary) - 1);
                 used += sizeof(boundary) - 1;
                 i += 6;
                 continue;
             }
-            if (regexp[i + 1] == 'u' || regexp[i + 1] == 'U' ||
-                regexp[i + 1] == 'x') {
+            if (regexp[i + 1] == 'u' || regexp[i + 1] == 'U' || regexp[i + 1] == 'x') {
                 uint32_t scalar;
                 size_t last;
-                int parsed = yx_regex_unicode_escape(regexp, length, i,
-                                                      &scalar, &last);
-                if (parsed < 0) { free(out); free(states); return NULL; }
+                int parsed = yx_regex_unicode_escape(regexp, length, i, &scalar, &last);
+                if (parsed < 0) {
+                    free(out);
+                    free(states);
+                    return NULL;
+                }
                 if (parsed > 0) {
                     if (unicode_escape_utf && unicode) {
-                        used += (size_t)snprintf(out + used, capacity - used,
-                                                 "\\x{%X}", scalar);
+                        used += (size_t)snprintf(out + used, capacity - used, "\\x{%X}", scalar);
                         i = last;
                         continue;
                     }
                     if (in_class && scalar > 0x7f) {
-                        free(out); free(states); return NULL;
+                        free(out);
+                        free(states);
+                        return NULL;
                     }
                     if (!in_class && scalar > 0x7f) {
                         out[used++] = '(';
@@ -2601,17 +2439,12 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
             out[used++] = regexp[++i];
             continue;
         }
-        if (unicode &&
-            (((unsigned char)ch >= 0x80 && !unicode_literal &&
-              !unicode_escape_utf) ||
-             /* In an accepted Unicode + dotall scope YARA-X still treats
-                the dot as one arbitrary input byte, including invalid
-                UTF-8. Keep the byte-mode PCRE2 dot for this case. */
-             (!in_class && ch == '.' && !dotall &&
-              !unicode_escape_utf) ||
-             (!in_class && ch == '[' &&
-              !unicode_escape_utf &&
-              !yx_pcre_unicode_ascii_class(regexp, i, length)))) {
+        if (unicode && (((unsigned char)ch >= 0x80 && !unicode_literal && !unicode_escape_utf) ||
+                        /* In an accepted Unicode + dotall scope YARA-X still treats
+                           the dot as one arbitrary input byte, including invalid
+                           UTF-8. Keep the byte-mode PCRE2 dot for this case. */
+                        (!in_class && ch == '.' && !dotall && !unicode_escape_utf) ||
+                        (!in_class && ch == '[' && !unicode_escape_utf && !yx_pcre_unicode_ascii_class(regexp, i, length)))) {
             free(out);
             free(states);
             return NULL;
@@ -2628,33 +2461,49 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
             if (flags_only) {
                 for (; end < length; ++end) {
                     char flag = regexp[end];
-                    if (flag == '-') { minus = true; continue; }
-                    if (flag == 's') { next_dotall = !minus; continue; }
-                    if (flag == 'u') { next_unicode = !minus; continue; }
-                    if (flag == 'i') { next_nocase = !minus; continue; }
-                    if (flag == 'm') { next_multiline = !minus; continue; }
-                    if (flag == 'R') { next_crlf = !minus; continue; }
-                    if (flag == 'x') { next_extended = !minus; continue; }
+                    if (flag == '-') {
+                        minus = true;
+                        continue;
+                    }
+                    if (flag == 's') {
+                        next_dotall = !minus;
+                        continue;
+                    }
+                    if (flag == 'u') {
+                        next_unicode = !minus;
+                        continue;
+                    }
+                    if (flag == 'i') {
+                        next_nocase = !minus;
+                        continue;
+                    }
+                    if (flag == 'm') {
+                        next_multiline = !minus;
+                        continue;
+                    }
+                    if (flag == 'R') {
+                        next_crlf = !minus;
+                        continue;
+                    }
+                    if (flag == 'x') {
+                        next_extended = !minus;
+                        continue;
+                    }
                     if (flag == 'U') continue;
                     break;
                 }
             }
-            if (flags_only && end < length &&
-                (regexp[end] == ')' || regexp[end] == ':') && end > i + 2) {
+            if (flags_only && end < length && (regexp[end] == ')' || regexp[end] == ':') && end > i + 2) {
                 size_t flags_start = used;
                 bool emitted_minus = false;
                 /* Case folding cannot affect a whole-pattern arbitrary-byte
                    dot, including when `u` and `i` are both enabled. */
-                if (next_unicode && next_nocase && !byte_wildcard &&
-                    !unicode_counted_nocase && !unicode_escape_utf) {
+                if (next_unicode && next_nocase && !byte_wildcard && !unicode_counted_nocase && !unicode_escape_utf) {
                     free(out);
                     free(states);
                     return NULL;
                 }
-                if (regexp[end] == ':')
-                    states[depth++] = (struct yx_regex_flags){dotall, unicode,
-                                                               nocase, multiline,
-                                                               crlf, extended};
+                if (regexp[end] == ':') states[depth++] = (struct yx_regex_flags){dotall, unicode, nocase, multiline, crlf, extended};
                 dotall = next_dotall;
                 unicode = next_unicode;
                 nocase = next_nocase;
@@ -2681,18 +2530,12 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
                 i = end;
                 continue;
             }
-            states[depth++] = (struct yx_regex_flags){dotall, unicode,
-                                                       nocase, multiline, crlf,
-                                                       extended};
+            states[depth++] = (struct yx_regex_flags){dotall, unicode, nocase, multiline, crlf, extended};
             /* A capture name is verbatim: it may contain `.` or `[`. */
             if (i + 3 < length && regexp[i + 1] == '?') {
-                size_t name = (regexp[i + 2] == 'P' && regexp[i + 3] == '<') ?
-                                  i + 4 :
-                              (regexp[i + 2] == '<' && regexp[i + 3] != '=' &&
-                               regexp[i + 3] != '!') ? i + 3 : 0;
+                size_t name = (regexp[i + 2] == 'P' && regexp[i + 3] == '<') ? i + 4 : (regexp[i + 2] == '<' && regexp[i + 3] != '=' && regexp[i + 3] != '!') ? i + 3 : 0;
                 size_t close = name;
-                while (name && close < length && regexp[close] != '>')
-                    ++close;
+                while (name && close < length && regexp[close] != '>') ++close;
                 if (name && close < length) {
                     memcpy(out + used, regexp + i, close + 1 - i);
                     used += close + 1 - i;
@@ -2711,25 +2554,22 @@ static char *yx_pcre_normalize_dots(const char *regexp, bool initial_dotall,
         }
         if (!in_class && ch == '.' && dotall && unicode_escape_utf) {
             /* The scanner lowers a Unicode dotall dot to ANY_BYTE. */
-            out[used++] = '\\'; out[used++] = 'C';
+            out[used++] = '\\';
+            out[used++] = 'C';
         } else if (!in_class && ch == '.' && !dotall) {
             const char *replacement = crlf ? "[^\\r\\n]" : "[^\\x0a]";
-            if (unicode_escape_utf && !unicode)
-                replacement = crlf ? "(?:(?![\\r\\n])\\C)" :
-                                     "(?:(?!\\x0a)\\C)";
+            if (unicode_escape_utf && !unicode) replacement = crlf ? "(?:(?![\\r\\n])\\C)" : "(?:(?!\\x0a)\\C)";
             size_t replacement_length = strlen(replacement);
             memcpy(out + used, replacement, replacement_length);
             used += replacement_length;
         } else if (!in_class && ch == '^' && multiline) {
             /* YARA-X treats CRLF and LFCR as indivisible line breaks, but
                still lets character classes consume their individual bytes. */
-            static const char start[] =
-                "(?:(?<![\\r\\n])^|(?<=\\r)(?!\\n)|(?<=\\n)(?!\\r))";
+            static const char start[] = "(?:(?<![\\r\\n])^|(?<=\\r)(?!\\n)|(?<=\\n)(?!\\r))";
             memcpy(out + used, start, sizeof(start) - 1);
             used += sizeof(start) - 1;
         } else if (!in_class && ch == '$' && multiline) {
-            static const char end[] =
-                "(?:$(?![\\r\\n])|(?=\\r)(?<!\\n)|(?=\\n)(?<!\\r))";
+            static const char end[] = "(?:$(?![\\r\\n])|(?=\\r)(?<!\\n)|(?=\\n)(?<!\\r))";
             memcpy(out + used, end, sizeof(end) - 1);
             used += sizeof(end) - 1;
         } else {
@@ -2746,8 +2586,7 @@ static bool yx_regex_has_word_boundary(const char *regexp)
     bool in_class = false;
     for (size_t i = 0; regexp[i]; ++i) {
         if (regexp[i] == '\\' && regexp[i + 1]) {
-            if (!in_class && (regexp[i + 1] == 'b' || regexp[i + 1] == 'B'))
-                return true;
+            if (!in_class && (regexp[i + 1] == 'b' || regexp[i + 1] == 'B')) return true;
             ++i;
         } else if (regexp[i] == '[' && !in_class) in_class = true;
         else if (regexp[i] == ']' && in_class) in_class = false;
@@ -2761,18 +2600,33 @@ static bool yx_regex_has_greedy_variable_repeat(const char *regexp)
     /* In extended mode, a metacharacter in a comment is not a quantifier. */
     if (strchr(regexp, '#')) return false;
     for (size_t i = 0; regexp[i]; ++i) {
-        if (regexp[i] == '\\' && regexp[i + 1]) { ++i; continue; }
-        if (regexp[i] == '[' && !in_class) { in_class = true; continue; }
-        if (regexp[i] == ']' && in_class) { in_class = false; continue; }
+        if (regexp[i] == '\\' && regexp[i + 1]) {
+            ++i;
+            continue;
+        }
+        if (regexp[i] == '[' && !in_class) {
+            in_class = true;
+            continue;
+        }
+        if (regexp[i] == ']' && in_class) {
+            in_class = false;
+            continue;
+        }
         if (in_class) continue;
         if (regexp[i] == '+' || regexp[i] == '*') {
-            if (regexp[i + 1] == '?') { ++i; continue; }
+            if (regexp[i + 1] == '?') {
+                ++i;
+                continue;
+            }
             return true;
         }
         if (regexp[i] == '?') {
             /* A question mark immediately after '(' starts a group form. */
             if (i == 0 || regexp[i - 1] == '(') continue;
-            if (regexp[i + 1] == '?') { ++i; continue; }
+            if (regexp[i + 1] == '?') {
+                ++i;
+                continue;
+            }
             return true;
         }
         if (regexp[i] == '{' && i > 0) {
@@ -2817,8 +2671,7 @@ static bool yx_regex_long_wide_tie(const YRX_PATTERN *pattern)
     size_t branches = 0, shortest = SIZE_MAX, longest = 0;
     unsigned char first = 0;
     bool different = false;
-    if (end - begin >= 4 && begin[0] == '[' && end[-1] == ']' &&
-        end - begin <= 6) {
+    if (end - begin >= 4 && begin[0] == '[' && end[-1] == ']' && end - begin <= 6) {
         for (at = begin + 1; at < end - 1; ++at) {
             if (!yx_plain_regex_byte((unsigned char)*at)) return false;
             if (at > begin + 1 && *at != first) different = true;
@@ -2829,8 +2682,7 @@ static bool yx_regex_long_wide_tie(const YRX_PATTERN *pattern)
     if (end - begin >= 5 && begin[0] == '(' && end[-1] == ')') {
         ++begin;
         --end;
-        if (end - begin >= 2 && begin[0] == '?' && begin[1] == ':')
-            begin += 2;
+        if (end - begin >= 2 && begin[0] == '?' && begin[1] == ':') begin += 2;
     }
     branch = begin;
     for (at = begin; at <= end; ++at) {
@@ -2851,31 +2703,22 @@ static bool yx_regex_long_wide_tie(const YRX_PATTERN *pattern)
     }
     if (branches < 2) return false;
     if (shortest == 1 && longest == 1) return different;
-    return shortest == 1 && longest == 2 && branches == 2 &&
-           (pattern->modifiers & YX_MOD_NOCASE) != 0 &&
-           pattern->global_atom_count_hint <= 16;
+    return shortest == 1 && longest == 2 && branches == 2 && (pattern->modifiers & YX_MOD_NOCASE) != 0 && pattern->global_atom_count_hint <= 16;
 }
 
 /* This lazy bounded class pair uses the wide verifier first in the 16-byte
  * search path, provided the complete ruleset has at most 16 known atoms.
  * The short-input path and nocase variant retain the ASCII one-byte hit. */
-static bool yx_regex_long_wide_lazy_class_pair_tie(
-    const YRX_PATTERN *pattern)
+static bool yx_regex_long_wide_lazy_class_pair_tie(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
-    if (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        pattern->global_atom_count_hint > 16 || !regexp ||
-        strlen(regexp) != 18 || regexp[0] != '(' ||
-        regexp[1] != '[' || regexp[4] != ']' || regexp[5] != '|' ||
-        regexp[7] != '[' || regexp[10] != ']' || regexp[11] != ')' ||
-        memcmp(regexp + 12, "{1,2}?", 6) != 0)
+    if (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) || pattern->global_atom_count_hint > 16 || !regexp || strlen(regexp) != 18 || regexp[0] != '(' ||
+        regexp[1] != '[' || regexp[4] != ']' || regexp[5] != '|' || regexp[7] != '[' || regexp[10] != ']' || regexp[11] != ')' || memcmp(regexp + 12, "{1,2}?", 6) != 0)
         return false;
     unsigned char x = (unsigned char)regexp[2];
     unsigned char y = (unsigned char)regexp[3];
     unsigned char z = (unsigned char)regexp[9];
-    return yx_plain_regex_byte(x) && yx_plain_regex_byte(y) &&
-           yx_plain_regex_byte(z) && x != '_' && y != '_' && z != '_' &&
-           regexp[6] == (char)x &&
+    return yx_plain_regex_byte(x) && yx_plain_regex_byte(y) && yx_plain_regex_byte(z) && x != '_' && y != '_' && z != '_' && regexp[6] == (char)x &&
            regexp[8] == (char)y && x < y && y < z;
 }
 
@@ -2885,30 +2728,21 @@ static bool yx_regex_long_wide_lazy_class_pair_tie(
 static bool yx_regex_digit_prefix_wide_tie(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
-    return pattern->modifiers ==
-               (YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE) &&
-           pattern->global_atom_count_hint <= 16 && regexp &&
-           strlen(regexp) == 4 && regexp[2] == '|' &&
-           regexp[0] == regexp[3] &&
-           regexp[0] >= '0' && regexp[0] <= '9' &&
-           regexp[1] >= '0' && regexp[1] <= '9';
+    return pattern->modifiers == (YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE) && pattern->global_atom_count_hint <= 16 && regexp && strlen(regexp) == 4 &&
+           regexp[2] == '|' && regexp[0] == regexp[3] && regexp[0] >= '0' && regexp[0] <= '9' && regexp[1] >= '0' && regexp[1] <= '9';
 }
 
 /* A two-character wide atom can win over its one-character ASCII prefix
  * in the short-atom search path. The one-character wide atom does not. */
-static bool yx_regex_small_atom_complete_wide_prefix(
-    const YRX_PATTERN *pattern)
+static bool yx_regex_small_atom_complete_wide_prefix(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
-    if (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        pattern->global_atom_count_hint > 16 || !regexp ||
-        strlen(regexp) != 4 || regexp[2] != '|' ||
-        regexp[0] != regexp[3]) return false;
+    if (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) || pattern->global_atom_count_hint > 16 || !regexp || strlen(regexp) != 4 || regexp[2] != '|' ||
+        regexp[0] != regexp[3])
+        return false;
     for (size_t i = 0; i < 2; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
-        if (!((ch >= 'a' && ch <= 'z') ||
-              (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9'))) return false;
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
     }
     return true;
 }
@@ -2923,25 +2757,19 @@ static char *yx_regex_prioritize_large_atom_prefix(const YRX_PATTERN *pattern)
     size_t left, right;
     char *ordered;
     if (pattern->global_atom_count_hint <= 16 ||
-        (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) &&
-         pattern->modifiers != YX_MOD_WIDE &&
-         pattern->modifiers !=
-             (YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE) &&
+        (pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) && pattern->modifiers != YX_MOD_WIDE && pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE) &&
          pattern->modifiers != (YX_MOD_WIDE | YX_MOD_NOCASE)) ||
-        !regexp) return NULL;
+        !regexp)
+        return NULL;
     bar = strchr(regexp, '|');
     if (!bar || strchr(bar + 1, '|')) return NULL;
     left = (size_t)(bar - regexp);
     right = strlen(bar + 1);
-    if (right != 1 || left != 2 ||
-        memcmp(regexp, bar + 1, right) != 0) return NULL;
+    if (right != 1 || left != 2 || memcmp(regexp, bar + 1, right) != 0) return NULL;
     for (size_t i = 0; i < left; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
-        if (!((ch >= 'a' && ch <= 'z') ||
-              (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9'))) return NULL;
-        if ((pattern->modifiers & YX_MOD_NOCASE) &&
-            (ch < '0' || ch > '9')) return NULL;
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return NULL;
+        if ((pattern->modifiers & YX_MOD_NOCASE) && (ch < '0' || ch > '9')) return NULL;
     }
     ordered = malloc(left + right + 2);
     if (!ordered) return NULL;
@@ -2952,19 +2780,15 @@ static char *yx_regex_prioritize_large_atom_prefix(const YRX_PATTERN *pattern)
     return ordered;
 }
 
-static bool yx_regex_large_atom_two_byte_ascii_prefix(
-    const YRX_PATTERN *pattern)
+static bool yx_regex_large_atom_two_byte_ascii_prefix(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
-    if (pattern->global_atom_count_hint <= 16 ||
-        pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        !regexp || strlen(regexp) != 6 || regexp[3] != '|' ||
-        memcmp(regexp, regexp + 4, 2) != 0) return false;
+    if (pattern->global_atom_count_hint <= 16 || pattern->modifiers != (YX_MOD_ASCII | YX_MOD_WIDE) || !regexp || strlen(regexp) != 6 || regexp[3] != '|' ||
+        memcmp(regexp, regexp + 4, 2) != 0)
+        return false;
     for (size_t i = 0; i < 3; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
-        if (!((ch >= 'a' && ch <= 'z') ||
-              (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9'))) return false;
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
     }
     return true;
 }
@@ -2973,9 +2797,7 @@ static bool yx_regex_large_atom_two_byte_ascii_prefix(
  * verifies the shorter member of a literal prefix pair first. With wide
  * strings, the corresponding wide atom must have the same prefix length;
  * case-insensitive letters use a different set of atoms. */
-static size_t yx_regex_short_input_literal_prefix_length(
-    const YRX_PATTERN *pattern, size_t input_size, int variant,
-    size_t match_length)
+static size_t yx_regex_short_input_literal_prefix_length(const YRX_PATTERN *pattern, size_t input_size, int variant, size_t match_length)
 {
     const char *regexp = pattern->regexp;
     const char *bar;
@@ -2984,34 +2806,22 @@ static size_t yx_regex_short_input_literal_prefix_length(
     /* At exactly 16 bytes the fallback is used only when every known atom
        is at least two bytes long. The scanner encodes that verified case
        as hint 2; larger hints still mean too many one-byte atoms. */
-    if (input_size > 16 ||
-        (input_size == 16 && pattern->global_atom_count_hint != 2) ||
-        pattern->global_atom_count_hint > 16 || !regexp)
-        return match_length;
+    if (input_size > 16 || (input_size == 16 && pattern->global_atom_count_hint != 2) || pattern->global_atom_count_hint > 16 || !regexp) return match_length;
     bar = strchr(regexp, '|');
     if (!bar || strchr(bar + 1, '|')) return match_length;
     long_length = (size_t)(bar - regexp);
     short_length = strlen(bar + 1);
-    if (short_length + 1 != long_length ||
-        memcmp(regexp, bar + 1, short_length) != 0 ||
-        match_length != long_length * unit) return match_length;
+    if (short_length + 1 != long_length || memcmp(regexp, bar + 1, short_length) != 0 || match_length != long_length * unit) return match_length;
     for (size_t i = 0; i < long_length; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
-        if (!((ch >= 'a' && ch <= 'z') ||
-              (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9'))) return match_length;
-        if ((modifiers & YX_MOD_NOCASE) &&
-            (ch < '0' || ch > '9')) return match_length;
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return match_length;
+        if ((modifiers & YX_MOD_NOCASE) && (ch < '0' || ch > '9')) return match_length;
     }
     if (long_length == 2 && short_length == 1 &&
-        (modifiers == YX_MOD_WIDE ||
-         modifiers == (YX_MOD_ASCII | YX_MOD_WIDE) ||
-         modifiers == (YX_MOD_WIDE | YX_MOD_NOCASE) ||
+        (modifiers == YX_MOD_WIDE || modifiers == (YX_MOD_ASCII | YX_MOD_WIDE) || modifiers == (YX_MOD_WIDE | YX_MOD_NOCASE) ||
          modifiers == (YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)))
         return short_length * unit;
-    if (long_length == 3 && short_length == 2 && !variant &&
-        modifiers == (YX_MOD_ASCII | YX_MOD_WIDE))
-        return short_length;
+    if (long_length == 3 && short_length == 2 && !variant && modifiers == (YX_MOD_ASCII | YX_MOD_WIDE)) return short_length;
     return match_length;
 }
 
@@ -3031,241 +2841,267 @@ typedef struct yx_variant_parser {
     bool masked;
 } yx_variant_parser;
 
-static bool yx_variant_class_byte(yx_variant_parser *p, uint8_t set[32],
-                                  unsigned *byte, bool *is_set)
+static bool yx_variant_class_byte(yx_variant_parser *p, uint8_t set[32], unsigned *byte, bool *is_set)
 {
-    unsigned c=(unsigned char)*p->at++;
-    *is_set=false;
-    if(!c)return false;
-    if(c=='\\') {
-        c=(unsigned char)*p->at++;
-        if(!c)return false;
-        if(strchr("dDsSwW",(int)c)) {
-            *is_set=true;bool negate=c=='D'||c=='S'||c=='W';
-            for(unsigned b=0;b<256;++b) {
-                bool digit=b>='0'&&b<='9';
-                bool yes=c=='d'||c=='D'?digit:c=='s'||c=='S'?
-                    b==' '||(b>='\t'&&b<='\r'):
-                    digit||(b>='a'&&b<='z')||(b>='A'&&b<='Z')||b=='_';
-                if(yes!=negate)set[b/8]|=(uint8_t)(1u<<(b%8));
+    unsigned c = (unsigned char)*p->at++;
+    *is_set = false;
+    if (!c) return false;
+    if (c == '\\') {
+        c = (unsigned char)*p->at++;
+        if (!c) return false;
+        if (strchr("dDsSwW", (int)c)) {
+            *is_set = true;
+            bool negate = c == 'D' || c == 'S' || c == 'W';
+            for (unsigned b = 0; b < 256; ++b) {
+                bool digit = b >= '0' && b <= '9';
+                bool yes = c == 'd' || c == 'D'   ? digit
+                           : c == 's' || c == 'S' ? b == ' ' || (b >= '\t' && b <= '\r')
+                                                  : digit || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_';
+                if (yes != negate) set[b / 8] |= (uint8_t)(1u << (b % 8));
             }
             return true;
         }
-        if(c=='x') {
-            unsigned value=0;
-            for(unsigned i=0;i<2;++i) {
-                unsigned h=(unsigned char)*p->at;
-                if(!yx_regex_hex_byte((unsigned char)h))return false;
-                ++p->at;value=value*16+(h<='9'?h-'0':(h|32)-'a'+10);
+        if (c == 'x') {
+            unsigned value = 0;
+            for (unsigned i = 0; i < 2; ++i) {
+                unsigned h = (unsigned char)*p->at;
+                if (!yx_regex_hex_byte((unsigned char)h)) return false;
+                ++p->at;
+                value = value * 16 + (h <= '9' ? h - '0' : (h | 32) - 'a' + 10);
             }
-            c=value;
-        } else if(c=='n')c='\n';else if(c=='r')c='\r';else if(c=='t')c='\t';
-        else if(c=='f')c='\f';else if(c=='v')c='\v';else if(c=='a')c=7;
-        else if(isalnum((unsigned char)c))return false;
+            c = value;
+        } else if (c == 'n') c = '\n';
+        else if (c == 'r') c = '\r';
+        else if (c == 't') c = '\t';
+        else if (c == 'f') c = '\f';
+        else if (c == 'v') c = '\v';
+        else if (c == 'a') c = 7;
+        else if (isalnum((unsigned char)c)) return false;
     }
-    *byte=c;return true;
+    *byte = c;
+    return true;
 }
 
-static size_t yx_variant_multiply(size_t a,size_t b)
-{ return a&&b>SIZE_MAX/a?SIZE_MAX:a*b; }
-static bool yx_variant_sequence(yx_variant_parser *p,yx_variant_shape *result);
-static bool yx_variant_atom(yx_variant_parser *p,yx_variant_shape *result)
+static size_t yx_variant_multiply(size_t a, size_t b)
 {
-    memset(result,0,sizeof(*result));result->homogeneous=true;result->maskable=true;
-    unsigned c=(unsigned char)*p->at;
-    if(!c||strchr(")|*+?{}^$",(int)c)||p->depth>=64)return false;
-    if(c=='(') {
+    return a && b > SIZE_MAX / a ? SIZE_MAX : a * b;
+}
+static bool yx_variant_sequence(yx_variant_parser *p, yx_variant_shape *result);
+static bool yx_variant_atom(yx_variant_parser *p, yx_variant_shape *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->homogeneous = true;
+    result->maskable = true;
+    unsigned c = (unsigned char)*p->at;
+    if (!c || strchr(")|*+?{}^$", (int)c) || p->depth >= 64) return false;
+    if (c == '(') {
         ++p->at;
-        if(p->at[0]=='?'&&p->at[1]==':')p->at+=2;
-        else if(p->at[0]=='?')return false;
+        if (p->at[0] == '?' && p->at[1] == ':') p->at += 2;
+        else if (p->at[0] == '?') return false;
         ++p->depth;
-        bool ok=yx_variant_sequence(p,result);
+        bool ok = yx_variant_sequence(p, result);
         --p->depth;
-        if(!ok||*p->at++!=')')return false;
+        if (!ok || *p->at++ != ')') return false;
     } else {
-        result->minimum=result->maximum=1;
-        if(c=='.') {
-            ++p->at;memset(result->bytes,255,sizeof(result->bytes));
-            if(!p->dotall)result->bytes['\n'/8]&=(uint8_t)~(1u<<('\n'%8));
+        result->minimum = result->maximum = 1;
+        if (c == '.') {
+            ++p->at;
+            memset(result->bytes, 255, sizeof(result->bytes));
+            if (!p->dotall) result->bytes['\n' / 8] &= (uint8_t)~(1u << ('\n' % 8));
             /* The summary below, for 255 or 256 bytes starting at 0: every
              * bit varies, so only the full set is maskable; letters are all
              * present already. */
-            result->maskable=p->dotall;p->masked=true;
+            result->maskable = p->dotall;
+            p->masked = true;
             goto quantifier;
-        } else if(c!='['&&(c!='\\'||!p->at[1]||!strchr("dDsSwW",(int)(unsigned char)p->at[1]))) {
+        } else if (c != '[' && (c != '\\' || !p->at[1] || !strchr("dDsSwW", (int)(unsigned char)p->at[1]))) {
             /* One byte: a single member, no varying bits, maskable, and
              * nocase adds only its ASCII case partner. */
-            unsigned byte;bool is_set;
-            if(!yx_variant_class_byte(p,result->bytes,&byte,&is_set))return false;
-            result->bytes[byte/8]|=(uint8_t)(1u<<(byte%8));
-            if(p->nocase&&((byte>='A'&&byte<='Z')||(byte>='a'&&byte<='z'))) {
-                unsigned other=byte^32u;
-                result->bytes[other/8]|=(uint8_t)(1u<<(other%8));
+            unsigned byte;
+            bool is_set;
+            if (!yx_variant_class_byte(p, result->bytes, &byte, &is_set)) return false;
+            result->bytes[byte / 8] |= (uint8_t)(1u << (byte % 8));
+            if (p->nocase && ((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z'))) {
+                unsigned other = byte ^ 32u;
+                result->bytes[other / 8] |= (uint8_t)(1u << (other % 8));
             }
             goto quantifier;
-        } else if(c=='[') {
-            ++p->at;bool negative=*p->at=='^',first=true;
-            if(negative)++p->at;
-            while(*p->at&&(*p->at!=']'||first)) {
-                first=false;unsigned low=0,high=0;bool is_set;
-                uint8_t set[32]={0};
-                if(!yx_variant_class_byte(p,set,&low,&is_set))return false;
-                if(is_set)for(size_t i=0;i<32;++i)result->bytes[i]|=set[i];
+        } else if (c == '[') {
+            ++p->at;
+            bool negative = *p->at == '^', first = true;
+            if (negative) ++p->at;
+            while (*p->at && (*p->at != ']' || first)) {
+                first = false;
+                unsigned low = 0, high = 0;
+                bool is_set;
+                uint8_t set[32] = {0};
+                if (!yx_variant_class_byte(p, set, &low, &is_set)) return false;
+                if (is_set)
+                    for (size_t i = 0; i < 32; ++i) result->bytes[i] |= set[i];
                 else {
-                    high=low;
-                    if(p->at[0]=='-'&&p->at[1]&&p->at[1]!=']') {
+                    high = low;
+                    if (p->at[0] == '-' && p->at[1] && p->at[1] != ']') {
                         ++p->at;
-                        if(!yx_variant_class_byte(p,set,&high,&is_set)||is_set||high<low)return false;
+                        if (!yx_variant_class_byte(p, set, &high, &is_set) || is_set || high < low) return false;
                     }
-                    for(unsigned b=low;b<=high;++b)result->bytes[b/8]|=(uint8_t)(1u<<(b%8));
+                    for (unsigned b = low; b <= high; ++b) result->bytes[b / 8] |= (uint8_t)(1u << (b % 8));
                 }
             }
-            if(*p->at++!=']')return false;
-            if(negative)for(size_t i=0;i<32;++i)result->bytes[i]^=255;
+            if (*p->at++ != ']') return false;
+            if (negative)
+                for (size_t i = 0; i < 32; ++i) result->bytes[i] ^= 255;
         } else {
-            unsigned byte;bool is_set;
-            if(!yx_variant_class_byte(p,result->bytes,&byte,&is_set))return false;
-            if(!is_set)result->bytes[byte/8]|=(uint8_t)(1u<<(byte%8));
+            unsigned byte;
+            bool is_set;
+            if (!yx_variant_class_byte(p, result->bytes, &byte, &is_set)) return false;
+            if (!is_set) result->bytes[byte / 8] |= (uint8_t)(1u << (byte % 8));
         }
-        unsigned first_byte=256,varying=0,count=0;
-        for(unsigned b=0;b<256;++b)if(result->bytes[b/8]&(1u<<(b%8))) {
-            if(first_byte==256)first_byte=b;
-            varying|=first_byte^b;++count;
-        }
-        unsigned combinations=1;
-        for(unsigned b=0;b<8;++b)if(varying&(1u<<b))combinations*=2;
-        result->maskable=count==combinations;
-        if(count>1)p->masked=true;
-        if(p->nocase)for(unsigned b='A';b<='Z';++b)
-            if((result->bytes[b/8]&(1u<<(b%8)))||
-               (result->bytes[(b+32)/8]&(1u<<((b+32)%8)))) {
-                result->bytes[b/8]|=(uint8_t)(1u<<(b%8));
-                result->bytes[(b+32)/8]|=(uint8_t)(1u<<((b+32)%8));
+        unsigned first_byte = 256, varying = 0, count = 0;
+        for (unsigned b = 0; b < 256; ++b)
+            if (result->bytes[b / 8] & (1u << (b % 8))) {
+                if (first_byte == 256) first_byte = b;
+                varying |= first_byte ^ b;
+                ++count;
             }
+        unsigned combinations = 1;
+        for (unsigned b = 0; b < 8; ++b)
+            if (varying & (1u << b)) combinations *= 2;
+        result->maskable = count == combinations;
+        if (count > 1) p->masked = true;
+        if (p->nocase)
+            for (unsigned b = 'A'; b <= 'Z'; ++b)
+                if ((result->bytes[b / 8] & (1u << (b % 8))) || (result->bytes[(b + 32) / 8] & (1u << ((b + 32) % 8)))) {
+                    result->bytes[b / 8] |= (uint8_t)(1u << (b % 8));
+                    result->bytes[(b + 32) / 8] |= (uint8_t)(1u << ((b + 32) % 8));
+                }
     }
 quantifier:
-    c=(unsigned char)*p->at;
-    size_t lower=1,upper=1;
-    if(c=='?'||c=='*'||c=='+') {
-        ++p->at;lower=c=='+'?1:0;upper=c=='?'?1:SIZE_MAX;
-    } else if(c=='{') {
-        ++p->at;lower=upper=0;
-        if(!isdigit((unsigned char)*p->at))return false;
-        while(isdigit((unsigned char)*p->at)) {
-            unsigned digit=(unsigned)(*p->at++-'0');
-            if(lower>(SIZE_MAX-digit)/10)return false;
-            lower=lower*10+digit;
+    c = (unsigned char)*p->at;
+    size_t lower = 1, upper = 1;
+    if (c == '?' || c == '*' || c == '+') {
+        ++p->at;
+        lower = c == '+' ? 1 : 0;
+        upper = c == '?' ? 1 : SIZE_MAX;
+    } else if (c == '{') {
+        ++p->at;
+        lower = upper = 0;
+        if (!isdigit((unsigned char)*p->at)) return false;
+        while (isdigit((unsigned char)*p->at)) {
+            unsigned digit = (unsigned)(*p->at++ - '0');
+            if (lower > (SIZE_MAX - digit) / 10) return false;
+            lower = lower * 10 + digit;
         }
-        upper=lower;
-        if(*p->at==',') {
-            ++p->at;upper=0;
-            if(!isdigit((unsigned char)*p->at))upper=SIZE_MAX;
-            else while(isdigit((unsigned char)*p->at)) {
-                unsigned digit=(unsigned)(*p->at++-'0');
-                if(upper>(SIZE_MAX-digit)/10)return false;
-                upper=upper*10+digit;
-            }
+        upper = lower;
+        if (*p->at == ',') {
+            ++p->at;
+            upper = 0;
+            if (!isdigit((unsigned char)*p->at)) upper = SIZE_MAX;
+            else
+                while (isdigit((unsigned char)*p->at)) {
+                    unsigned digit = (unsigned)(*p->at++ - '0');
+                    if (upper > (SIZE_MAX - digit) / 10) return false;
+                    upper = upper * 10 + digit;
+                }
         }
-        if(*p->at++!='}'||upper<lower)return false;
+        if (*p->at++ != '}' || upper < lower) return false;
     } else return true;
-    if(*p->at=='?')return false; /* Lazy variants retain first-match order. */
-    if(lower!=upper)p->greedy=true;
-    result->minimum=yx_variant_multiply(result->minimum,lower);
-    result->maximum=yx_variant_multiply(result->maximum,upper);
+    if (*p->at == '?') return false; /* Lazy variants retain first-match order. */
+    if (lower != upper) p->greedy = true;
+    result->minimum = yx_variant_multiply(result->minimum, lower);
+    result->maximum = yx_variant_multiply(result->maximum, upper);
     return true;
 }
-static bool yx_variant_sequence(yx_variant_parser *p,yx_variant_shape *result)
+static bool yx_variant_sequence(yx_variant_parser *p, yx_variant_shape *result)
 {
-    if(!yx_variant_atom(p,result))return false;
-    while(*p->at&&*p->at!=')') {
+    if (!yx_variant_atom(p, result)) return false;
+    while (*p->at && *p->at != ')') {
         yx_variant_shape next;
-        if(!yx_variant_atom(p,&next))return false;
-        result->maskable=result->maskable&&next.maskable;
-        result->homogeneous=result->homogeneous&&next.homogeneous&&
-            !memcmp(result->bytes,next.bytes,32);
-        result->minimum=SIZE_MAX-result->minimum<next.minimum?SIZE_MAX:result->minimum+next.minimum;
-        result->maximum=SIZE_MAX-result->maximum<next.maximum?SIZE_MAX:result->maximum+next.maximum;
+        if (!yx_variant_atom(p, &next)) return false;
+        result->maskable = result->maskable && next.maskable;
+        result->homogeneous = result->homogeneous && next.homogeneous && !memcmp(result->bytes, next.bytes, 32);
+        result->minimum = SIZE_MAX - result->minimum < next.minimum ? SIZE_MAX : result->minimum + next.minimum;
+        result->maximum = SIZE_MAX - result->maximum < next.maximum ? SIZE_MAX : result->maximum + next.maximum;
     }
     return true;
 }
 static bool yx_variant_literal_unit(const yx_variant_shape *shape)
 {
-    unsigned count=0,first=0,second=0;
+    unsigned count = 0, first = 0, second = 0;
     /* Members in increasing order; empty bitmap bytes are skipped and a
      * third member already decides the result. */
-    for(unsigned i=0;i<32&&count<=2;++i) {
-        unsigned value=shape->bytes[i];
-        for(unsigned bit=0;value&&bit<8;++bit,value>>=1)if(value&1u) {
-            if(!count)first=i*8+bit;else second=i*8+bit;
-            ++count;
-        }
+    for (unsigned i = 0; i < 32 && count <= 2; ++i) {
+        unsigned value = shape->bytes[i];
+        for (unsigned bit = 0; value && bit < 8; ++bit, value >>= 1)
+            if (value & 1u) {
+                if (!count) first = i * 8 + bit;
+                else second = i * 8 + bit;
+                ++count;
+            }
     }
-    return shape->homogeneous&&(count==1||(count==2&&first>='A'&&first<='Z'&&second==first+32));
+    return shape->homogeneous && (count == 1 || (count == 2 && first >= 'A' && first <= 'Z' && second == first + 32));
 }
 static bool yx_regex_many_single_byte_atoms_uncached(const YRX_PATTERN *pattern)
 {
-    yx_variant_parser p={pattern->regexp,(pattern->modifiers&YX_MOD_NOCASE)!=0,
-        (pattern->modifiers&YX_MOD_DOTALL)!=0,false,0,false};
+    yx_variant_parser p = {pattern->regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0, (pattern->modifiers & YX_MOD_DOTALL) != 0, false, 0, false};
     yx_variant_shape shape;
-    if(!yx_variant_sequence(&p,&shape)||*p.at||!shape.homogeneous||
-       shape.minimum!=1||shape.maximum<=1)return false;
-    size_t count=0;
-    for(unsigned byte=0;byte<256;++byte)if(shape.bytes[byte/8]&(1u<<(byte%8)))++count;
-    return count>16;
+    if (!yx_variant_sequence(&p, &shape) || *p.at || !shape.homogeneous || shape.minimum != 1 || shape.maximum <= 1) return false;
+    size_t count = 0;
+    for (unsigned byte = 0; byte < 256; ++byte)
+        if (shape.bytes[byte / 8] & (1u << (byte % 8))) ++count;
+    return count > 16;
 }
 
 /* Scanner creation asks this twice for every regexp pattern (and for each
  * repetition of it); the answer depends on the regexp and modifiers. */
 bool yx_regex_many_single_byte_atoms(const YRX_PATTERN *pattern)
 {
-    if(!pattern||pattern->kind!=YX_PATTERN_REGEX||!pattern->regexp||
-       ((pattern->modifiers&YX_MOD_WIDE)&&!(pattern->modifiers&YX_MOD_ASCII)))return false;
-    size_t length=strlen(pattern->regexp),stored=0;
-    uint64_t tag=YX_MEMO_TAG(YX_MEMO_MANY_SINGLE_BYTE_ATOMS,0,pattern->modifiers);
-    const void *hit=yx_compile_memo_find(tag,pattern->regexp,length,&stored);
+    if (!pattern || pattern->kind != YX_PATTERN_REGEX || !pattern->regexp || ((pattern->modifiers & YX_MOD_WIDE) && !(pattern->modifiers & YX_MOD_ASCII))) return false;
+    size_t length = strlen(pattern->regexp), stored = 0;
+    uint64_t tag = YX_MEMO_TAG(YX_MEMO_MANY_SINGLE_BYTE_ATOMS, 0, pattern->modifiers);
+    const void *hit = yx_compile_memo_find(tag, pattern->regexp, length, &stored);
     bool many;
-    if(hit&&stored==sizeof(many)){memcpy(&many,hit,sizeof(many));return many;}
-    many=yx_regex_many_single_byte_atoms_uncached(pattern);
-    yx_compile_memo_store(tag,pattern->regexp,length,&many,sizeof(many));
+    if (hit && stored == sizeof(many)) {
+        memcpy(&many, hit, sizeof(many));
+        return many;
+    }
+    many = yx_regex_many_single_byte_atoms_uncached(pattern);
+    yx_compile_memo_store(tag, pattern->regexp, length, &many, sizeof(many));
     return many;
 }
-static void yx_regex_variant_policy(const YRX_PATTERN *pattern,bool *longest,
-                                    bool *optional_prefix, bool *short_single,
-                                    bool *ascii_only)
+static void yx_regex_variant_policy(const YRX_PATTERN *pattern, bool *longest, bool *optional_prefix, bool *short_single, bool *ascii_only)
 {
-    yx_variant_parser p={pattern->regexp,(pattern->modifiers&YX_MOD_NOCASE)!=0,
-        (pattern->modifiers&YX_MOD_DOTALL)!=0,false,0,false};
+    yx_variant_parser p = {pattern->regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0, (pattern->modifiers & YX_MOD_DOTALL) != 0, false, 0, false};
     yx_variant_shape shape;
-    *longest=false;*optional_prefix=false;*short_single=false;*ascii_only=false;
-    if(yx_variant_sequence(&p,&shape)&&!*p.at&&p.greedy&&shape.homogeneous&&
-       shape.minimum&&shape.maximum>shape.minimum) {
-        if(shape.bytes[0]&1) {
-            *longest=true;
+    *longest = false;
+    *optional_prefix = false;
+    *short_single = false;
+    *ascii_only = false;
+    if (yx_variant_sequence(&p, &shape) && !*p.at && p.greedy && shape.homogeneous && shape.minimum && shape.maximum > shape.minimum) {
+        if (shape.bytes[0] & 1) {
+            *longest = true;
             /* A sequence of optional copies has one forward-only empty
                atom; its ASCII verifier is visited last at each offset. */
-            if(pattern->regexp[0]=='(')*ascii_only=true;
+            if (pattern->regexp[0] == '(') *ascii_only = true;
         } else {
-            unsigned cardinality=0;
-            for(unsigned b=0;b<256;++b)cardinality+=(shape.bytes[b/8]>>(b%8))&1u;
-            *short_single=shape.minimum==1&&cardinality<=8&&pattern->global_atom_count_hint<=16;
+            unsigned cardinality = 0;
+            for (unsigned b = 0; b < 256; ++b) cardinality += (shape.bytes[b / 8] >> (b % 8)) & 1u;
+            *short_single = shape.minimum == 1 && cardinality <= 8 && pattern->global_atom_count_hint <= 16;
         }
     }
-    p.at=pattern->regexp;p.depth=0;p.greedy=false;
-    yx_variant_shape first,last;
-    if(yx_variant_atom(&p,&first)&&yx_variant_atom(&p,&last)&&!*p.at&&
-       first.minimum==0&&first.maximum&&yx_variant_literal_unit(&first)&&
-       last.minimum==1&&last.maximum==1&&yx_variant_literal_unit(&last))
-        *optional_prefix=!(pattern->modifiers&YX_MOD_NOCASE)||pattern->regexp[0]!='(';
+    p.at = pattern->regexp;
+    p.depth = 0;
+    p.greedy = false;
+    yx_variant_shape first, last;
+    if (yx_variant_atom(&p, &first) && yx_variant_atom(&p, &last) && !*p.at && first.minimum == 0 && first.maximum && yx_variant_literal_unit(&first) &&
+        last.minimum == 1 && last.maximum == 1 && yx_variant_literal_unit(&last))
+        *optional_prefix = !(pattern->modifiers & YX_MOD_NOCASE) || pattern->regexp[0] != '(';
 }
 static bool yx_regex_nocase_single_letter(const YRX_PATTERN *pattern)
 {
-    if (!(pattern->modifiers & YX_MOD_NOCASE) ||
-        pattern->global_atom_count_hint > 16) return false;
+    if (!(pattern->modifiers & YX_MOD_NOCASE) || pattern->global_atom_count_hint > 16) return false;
     yx_variant_parser p = {pattern->regexp, true, false, false, 0, false};
     yx_variant_shape shape;
-    if (!yx_variant_sequence(&p, &shape) || *p.at ||
-        shape.minimum != 1 || shape.maximum != 1 ||
-        !yx_variant_literal_unit(&shape)) return false;
+    if (!yx_variant_sequence(&p, &shape) || *p.at || shape.minimum != 1 || shape.maximum != 1 || !yx_variant_literal_unit(&shape)) return false;
     for (unsigned c = 'A'; c <= 'Z'; ++c)
         if (shape.bytes[c / 8] & (1u << (c % 8))) return true;
     return false;
@@ -3291,24 +3127,22 @@ static bool yx_regex_long_ascii_tie(const YRX_PATTERN *pattern)
         }
         if (!width || regexp[at++] != ')') return false;
     } else {
-        if (!yx_plain_regex_byte((unsigned char)regexp[at++]))
-            return false;
+        if (!yx_plain_regex_byte((unsigned char)regexp[at++])) return false;
         width = 1;
     }
     quantifier = regexp[at];
     if (quantifier == '?' || quantifier == '*') ++at;
-    else if (!grouped && quantifier == '{' && length - at >= 4 &&
-             regexp[at + 1] == '0' && regexp[at + 2] == ',') {
+    else if (!grouped && quantifier == '{' && length - at >= 4 && regexp[at + 1] == '0' && regexp[at + 2] == ',') {
         at += 3;
         if (regexp[at] < '1' || regexp[at] > '9') return false;
-        do { ++at; } while (regexp[at] >= '0' && regexp[at] <= '9');
+        do {
+            ++at;
+        } while (regexp[at] >= '0' && regexp[at] <= '9');
         if (regexp[at++] != '}') return false;
         quantifier = '?';
     } else return false;
-    if (at + 1 != length ||
-        !yx_plain_regex_byte((unsigned char)regexp[at])) return false;
-    return quantifier == '*' || width == 1 ||
-           (pattern->modifiers & YX_MOD_NOCASE) == 0;
+    if (at + 1 != length || !yx_plain_regex_byte((unsigned char)regexp[at])) return false;
+    return quantifier == '*' || width == 1 || (pattern->modifiers & YX_MOD_NOCASE) == 0;
 }
 
 /* Repeating a small explicit class, or the whitespace class, selects its
@@ -3322,10 +3156,8 @@ static bool yx_regex_long_ascii_class_repeat(const YRX_PATTERN *pattern)
     else if (*at == '[') {
         ++at;
         while (*at && *at != ']') {
-            if (*at == '\\' && (at[1] == 't' || at[1] == 'n' ||
-                                 at[1] == 'r')) at += 2;
-            else if (yx_plain_regex_byte((unsigned char)*at) || *at == ' ')
-                ++at;
+            if (*at == '\\' && (at[1] == 't' || at[1] == 'n' || at[1] == 'r')) at += 2;
+            else if (yx_plain_regex_byte((unsigned char)*at) || *at == ' ') ++at;
             else return false;
             if (++members > 16) return false;
         }
@@ -3337,7 +3169,9 @@ static bool yx_regex_long_ascii_class_repeat(const YRX_PATTERN *pattern)
     if (*at == ',') {
         ++at;
         if (*at < '1' || *at > '9') return false;
-        do { ++at; } while (*at >= '0' && *at <= '9');
+        do {
+            ++at;
+        } while (*at >= '0' && *at <= '9');
     }
     return at[0] == '}' && at[1] == '\0';
 }
@@ -3345,8 +3179,7 @@ static bool yx_regex_long_ascii_class_repeat(const YRX_PATTERN *pattern)
 /* A single dot under dotall is an arbitrary-byte atom in YARA-X. With
    `ascii wide`, its wide hit wins a same-offset tie, like a greedy regex
    atom. A fixed literal or a counted single dot follows a different path. */
-static bool yx_regex_is_single_dotall_dot(const char *regexp,
-                                          bool initial_dotall)
+static bool yx_regex_is_single_dotall_dot(const char *regexp, bool initial_dotall)
 {
     const char *at = regexp;
     bool dotall = initial_dotall;
@@ -3359,14 +3192,12 @@ static bool yx_regex_is_single_dotall_dot(const char *regexp,
                 minus = true;
             } else if (*flags == 's') {
                 next_dotall = !minus;
-            } else if (*flags != 'i' && *flags != 'm' && *flags != 'u' &&
-                       *flags != 'x' && *flags != 'U') {
+            } else if (*flags != 'i' && *flags != 'm' && *flags != 'u' && *flags != 'x' && *flags != 'U') {
                 break;
             }
             ++flags;
         }
-        if (*flags == ':' && flags[1] == '.' && flags[2] == ')' &&
-            flags[3] == '\0') return next_dotall;
+        if (*flags == ':' && flags[1] == '.' && flags[2] == ')' && flags[3] == '\0') return next_dotall;
         if (*flags != ')') break;
         dotall = next_dotall;
         at = flags + 1;
@@ -3378,11 +3209,8 @@ static bool yx_regex_ends_with_end_word_boundary(const char *regexp)
 {
     size_t length = strlen(regexp), boundary;
     if (strchr(regexp, '|')) return false;
-    if (length >= 7 && memcmp(regexp + length - 7, "\\b{end}", 7) == 0)
-        boundary = length - 7;
-    else if (length >= 2 &&
-             memcmp(regexp + length - 2, "\\b", 2) == 0)
-        boundary = length - 2;
+    if (length >= 7 && memcmp(regexp + length - 7, "\\b{end}", 7) == 0) boundary = length - 7;
+    else if (length >= 2 && memcmp(regexp + length - 2, "\\b", 2) == 0) boundary = length - 2;
     else return false;
     size_t prior_slashes = 0;
     while (boundary > 0 && regexp[boundary - 1] == '\\') {
@@ -3401,8 +3229,11 @@ static size_t yx_regex_vm_max_span(const char *regexp);
  * its recent compilations and hands out copies, which share the immutable,
  * reference-counted matcher. Only the compile-time callers (validation and
  * plan building) use it; scan-time compilations stay uncached. */
-enum { YX_PCRE_MEMO_SLOTS = 4096, YX_PCRE_MEMO_SOURCE_LIMIT = 4096,
-       YX_PCRE_MEMO_BUDGET = 1u << 20 };
+enum {
+    YX_PCRE_MEMO_SLOTS = 4096,
+    YX_PCRE_MEMO_SOURCE_LIMIT = 4096,
+    YX_PCRE_MEMO_BUDGET = 1u << 20
+};
 typedef struct {
     char *source;
     uint32_t options;
@@ -3424,14 +3255,10 @@ static void yx_pcre_memo_destroy(void *opaque)
 static _Thread_local yx_pcre_memo *yx_pcre_memo_thread;
 static yx_pcre_memo *yx_pcre_memo_get(void)
 {
-    if (!yx_pcre_memo_thread)
-        yx_pcre_memo_thread = yx_thread_storage_get(&yx_pcre_memo_storage,
-                                                    sizeof(*yx_pcre_memo_thread),
-                                                    yx_pcre_memo_destroy);
+    if (!yx_pcre_memo_thread) yx_pcre_memo_thread = yx_thread_storage_get(&yx_pcre_memo_storage, sizeof(*yx_pcre_memo_thread), yx_pcre_memo_destroy);
     return yx_pcre_memo_thread;
 }
-static pcre2_code *yx_pcre_compile_memo(const char *source, uint32_t options,
-                                        pcre2_compile_context *context)
+static pcre2_code *yx_pcre_compile_memo(const char *source, uint32_t options, pcre2_compile_context *context)
 {
     yx_pcre_memo *thread_memo = yx_pcre_memo_get();
     int error = 0;
@@ -3439,8 +3266,7 @@ static pcre2_code *yx_pcre_compile_memo(const char *source, uint32_t options,
     size_t length = strlen(source);
     yx_pcre_memo *memo = length <= YX_PCRE_MEMO_SOURCE_LIMIT ? thread_memo : NULL;
     uint64_t hash = 1469598103934665603ull ^ options;
-    for (const unsigned char *at = (const unsigned char *)source; *at; ++at)
-        hash = (hash ^ *at) * 1099511628211ull;
+    for (const unsigned char *at = (const unsigned char *)source; *at; ++at) hash = (hash ^ *at) * 1099511628211ull;
     size_t first = (size_t)(hash ^ (hash >> 32)) & (YX_PCRE_MEMO_SLOTS - 1);
     size_t slot = first;
     for (size_t probe = 0; memo && probe < 8; ++probe) {
@@ -3453,10 +3279,8 @@ static pcre2_code *yx_pcre_compile_memo(const char *source, uint32_t options,
         }
         slot = (slot + 1) & (YX_PCRE_MEMO_SLOTS - 1);
     }
-    pcre2_code *code = pcre2_compile((PCRE2_SPTR)source, PCRE2_ZERO_TERMINATED,
-                                     options, &error, &error_offset, context);
-    if (!code || !memo || memo->bytes + length + 1 > YX_PCRE_MEMO_BUDGET)
-        return code;
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)source, PCRE2_ZERO_TERMINATED, options, &error, &error_offset, context);
+    if (!code || !memo || memo->bytes + length + 1 > YX_PCRE_MEMO_BUDGET) return code;
     slot = first;
     for (size_t probe = 0; probe < 8; ++probe) {
         yx_pcre_memo_entry *entry = &memo->slots[slot];
@@ -3482,17 +3306,14 @@ static yx_thread_storage yx_compile_memo_storage = YX_THREAD_STORAGE_INIT;
 static _Thread_local yx_memo *yx_compile_memo_thread;
 static yx_memo *yx_compile_memo(void)
 {
-    if (!yx_compile_memo_thread)
-        yx_compile_memo_thread = yx_memo_get(&yx_compile_memo_storage);
+    if (!yx_compile_memo_thread) yx_compile_memo_thread = yx_memo_get(&yx_compile_memo_storage);
     return yx_compile_memo_thread;
 }
-const void *yx_compile_memo_find(uint64_t tag, const void *key, size_t key_length,
-                                 size_t *value_length)
+const void *yx_compile_memo_find(uint64_t tag, const void *key, size_t key_length, size_t *value_length)
 {
     return yx_memo_find(yx_compile_memo(), tag, key, key_length, value_length);
 }
-void yx_compile_memo_store(uint64_t tag, const void *key, size_t key_length,
-                           const void *value, size_t value_length)
+void yx_compile_memo_store(uint64_t tag, const void *key, size_t key_length, const void *value, size_t value_length)
 {
     yx_memo_store(yx_compile_memo(), tag, key, key_length, value, value_length);
 }
@@ -3548,16 +3369,14 @@ void yx_compile_memos_adopt(struct yx_compile_memos *taken)
         const yx_memo_entry *entry = &taken->memo.slots[i];
         size_t length;
         if (!entry->data || yx_memo_find(memo, entry->tag, entry->data, entry->key_length, &length)) continue;
-        yx_memo_store(memo, entry->tag, entry->data, entry->key_length, entry->data + entry->key_length,
-                      entry->value_length);
+        yx_memo_store(memo, entry->tag, entry->data, entry->key_length, entry->data + entry->key_length, entry->value_length);
     }
     yx_pcre_memo *pcre = yx_pcre_memo_get();
     for (size_t i = 0; i < taken->pcre_count; ++i) {
         yx_pcre_memo_entry *moved = &taken->pcre[i];
         size_t length = strlen(moved->source);
         uint64_t hash = 1469598103934665603ull ^ moved->options;
-        for (const unsigned char *at = (const unsigned char *)moved->source; *at; ++at)
-            hash = (hash ^ *at) * 1099511628211ull;
+        for (const unsigned char *at = (const unsigned char *)moved->source; *at; ++at) hash = (hash ^ *at) * 1099511628211ull;
         size_t slot = (size_t)(hash ^ (hash >> 32)) & (YX_PCRE_MEMO_SLOTS - 1);
         for (size_t probe = 0; pcre && probe < 8 && moved->source; ++probe) {
             yx_pcre_memo_entry *entry = &pcre->slots[slot];
@@ -3601,8 +3420,7 @@ void yx_compile_memos_release(struct yx_compile_memos *taken)
     free(taken);
 }
 
-static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern,
-                                              bool wide, bool memo);
+static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern, bool wide, bool memo);
 static pcre2_code *yx_compile_pcre_regex(const YRX_PATTERN *pattern, bool wide)
 {
     return yx_compile_pcre_regex_with(pattern, wide, false);
@@ -3613,24 +3431,18 @@ static pcre2_code *yx_compile_pcre_regex_shared(const YRX_PATTERN *pattern)
     return yx_compile_pcre_regex_with(pattern, false, true);
 }
 
-static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern,
-                                              bool wide, bool memo)
+static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern, bool wide, bool memo)
 {
     int error = 0;
     PCRE2_SIZE error_offset = 0;
     uint32_t options = PCRE2_DOLLAR_ENDONLY;
     options |= YX_RE_YARA_ESCAPES;
     char *edge_rewrite = yx_pcre_unicode_scalar_fixed_edge(pattern);
-    bool unicode_scalar_nocase =
-        (pattern->modifiers & YX_MOD_NOCASE) &&
-        (yx_pcre_is_unicode_scalar_counted(pattern->regexp) ||
-         yx_pcre_unicode_scalar_plus_width(pattern->regexp) ||
-         edge_rewrite);
-    bool unicode_escape_utf =
-        yx_pcre_unicode_only_with_U(pattern->regexp);
+    bool unicode_scalar_nocase = (pattern->modifiers & YX_MOD_NOCASE) &&
+                                 (yx_pcre_is_unicode_scalar_counted(pattern->regexp) || yx_pcre_unicode_scalar_plus_width(pattern->regexp) || edge_rewrite);
+    bool unicode_escape_utf = yx_pcre_unicode_only_with_U(pattern->regexp);
     (void)wide;
-    if (yx_regex_vm_max_span(pattern->regexp) != SIZE_MAX)
-        options |= PCRE2_AUTO_CALLOUT;
+    if (yx_regex_vm_max_span(pattern->regexp) != SIZE_MAX) options |= PCRE2_AUTO_CALLOUT;
     if (pattern->modifiers & YX_MOD_NOCASE) options |= PCRE2_CASELESS;
     if (pattern->modifiers & YX_MOD_DOTALL) options |= PCRE2_DOTALL;
     if (unicode_scalar_nocase || unicode_escape_utf) {
@@ -3642,32 +3454,19 @@ static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern,
     /* YARA-X's unmodified $ anchor means the absolute end of the scan.
        Normalize multiline anchors above so LF remains matchable inside
        CRLF while CR and LF line boundaries retain YARA-X's semantics. */
-    char *scalar_rewrite =
-        (pattern->modifiers & YX_MOD_NOCASE) ? NULL :
-        yx_pcre_unicode_scalar_plus(pattern->regexp);
+    char *scalar_rewrite = (pattern->modifiers & YX_MOD_NOCASE) ? NULL : yx_pcre_unicode_scalar_plus(pattern->regexp);
     size_t special_upper = 0;
-    bool special_nocase_count = (pattern->modifiers & YX_MOD_NOCASE) &&
-        yx_pcre_unicode_scalar_counted_width(pattern->regexp,
-                                              &special_upper,
-                                              NULL, NULL) && special_upper;
-    if (!scalar_rewrite &&
-        (!(pattern->modifiers & YX_MOD_NOCASE) || special_nocase_count))
-        scalar_rewrite = yx_pcre_unicode_scalar_counted(pattern->regexp);
+    bool special_nocase_count =
+        (pattern->modifiers & YX_MOD_NOCASE) && yx_pcre_unicode_scalar_counted_width(pattern->regexp, &special_upper, NULL, NULL) && special_upper;
+    if (!scalar_rewrite && (!(pattern->modifiers & YX_MOD_NOCASE) || special_nocase_count)) scalar_rewrite = yx_pcre_unicode_scalar_counted(pattern->regexp);
     if (!scalar_rewrite) {
         scalar_rewrite = edge_rewrite;
         edge_rewrite = NULL;
     }
-    char *counted_unbounded = unicode_scalar_nocase ?
-        yx_pcre_unicode_counted_unbounded(pattern->regexp) : NULL;
-    char *compacted = yx_regex_compact_extended_hex(
-        scalar_rewrite ? scalar_rewrite : counted_unbounded ?
-        counted_unbounded : pattern->regexp);
-    char *normalized = compacted ?
-        yx_pcre_normalize_dots(compacted,
-                               (options & PCRE2_DOTALL) != 0,
-                               (options & PCRE2_CASELESS) != 0,
-                               unicode_scalar_nocase,
-                               unicode_escape_utf) : NULL;
+    char *counted_unbounded = unicode_scalar_nocase ? yx_pcre_unicode_counted_unbounded(pattern->regexp) : NULL;
+    char *compacted = yx_regex_compact_extended_hex(scalar_rewrite ? scalar_rewrite : counted_unbounded ? counted_unbounded : pattern->regexp);
+    char *normalized =
+        compacted ? yx_pcre_normalize_dots(compacted, (options & PCRE2_DOTALL) != 0, (options & PCRE2_CASELESS) != 0, unicode_scalar_nocase, unicode_escape_utf) : NULL;
     free(compacted);
     free(scalar_rewrite);
     free(edge_rewrite);
@@ -3675,9 +3474,15 @@ static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern,
     if (!normalized) return NULL;
     if ((options & PCRE2_UTF) && !unicode_scalar_nocase) {
         size_t normalized_length = strlen(normalized);
-        if (normalized_length > SIZE_MAX - 8) { free(normalized); return NULL; }
+        if (normalized_length > SIZE_MAX - 8) {
+            free(normalized);
+            return NULL;
+        }
         char *scoped = malloc(normalized_length + 8);
-        if (!scoped) { free(normalized); return NULL; }
+        if (!scoped) {
+            free(normalized);
+            return NULL;
+        }
         memcpy(scoped, "(?-u:", 5);
         memcpy(scoped + 5, normalized, normalized_length);
         memcpy(scoped + 5 + normalized_length, ")", 2);
@@ -3685,24 +3490,27 @@ static pcre2_code *yx_compile_pcre_regex_with(const YRX_PATTERN *pattern,
         normalized = scoped;
     }
     pcre2_compile_context *context = pcre2_compile_context_create(NULL);
-    if (!context) { free(normalized); return NULL; }
+    if (!context) {
+        free(normalized);
+        return NULL;
+    }
     if (pcre2_set_newline(context, PCRE2_NEWLINE_LF) != 0) {
         pcre2_compile_context_free(context);
         free(normalized);
         return NULL;
     }
-    if (pattern->deadline && pattern->deadline->enabled)
-        options |= PCRE2_AUTO_CALLOUT;
+    if (pattern->deadline && pattern->deadline->enabled) options |= PCRE2_AUTO_CALLOUT;
     if (!(options & PCRE2_UTF)) {
         char *grouped = yx_regex_group_utf8_literals(normalized);
         free(normalized);
-        if (!grouped) { pcre2_compile_context_free(context); return NULL; }
+        if (!grouped) {
+            pcre2_compile_context_free(context);
+            return NULL;
+        }
         normalized = grouped;
     }
-    pcre2_code *code = memo ?
-        yx_pcre_compile_memo(normalized, options, context) :
-        pcre2_compile((PCRE2_SPTR)normalized, PCRE2_ZERO_TERMINATED, options,
-                      &error, &error_offset, context);
+    pcre2_code *code =
+        memo ? yx_pcre_compile_memo(normalized, options, context) : pcre2_compile((PCRE2_SPTR)normalized, PCRE2_ZERO_TERMINATED, options, &error, &error_offset, context);
     pcre2_compile_context_free(context);
     free(normalized);
     return code;
@@ -3721,28 +3529,21 @@ static bool yx_regex_all_bytes_class(const char *regexp, size_t close)
     for (size_t i = open + 1; i + 1 < close; ++i) {
         if (regexp[i] != '\\') continue;
         switch (regexp[i + 1]) {
-        case 's': classes |= 1u; break;
-        case 'S': classes |= 2u; break;
-        case 'd': classes |= 4u; break;
-        case 'D': classes |= 8u; break;
-        case 'w': classes |= 16u; break;
-        case 'W': classes |= 32u; break;
-        default: break;
+            case 's': classes |= 1u; break;
+            case 'S': classes |= 2u; break;
+            case 'd': classes |= 4u; break;
+            case 'D': classes |= 8u; break;
+            case 'w': classes |= 16u; break;
+            case 'W': classes |= 32u; break;
+            default: break;
         }
-        if (i + 9 < close && memcmp(regexp + i, "\\x00-\\x", 7) == 0 &&
-            (regexp[i + 7] == 'f' || regexp[i + 7] == 'F') &&
-            (regexp[i + 8] == 'f' || regexp[i + 8] == 'F'))
+        if (i + 9 < close && memcmp(regexp + i, "\\x00-\\x", 7) == 0 && (regexp[i + 7] == 'f' || regexp[i + 7] == 'F') && (regexp[i + 8] == 'f' || regexp[i + 8] == 'F'))
             return true;
-        if (i + 18 < close &&
-            memcmp(regexp + i, "\\x00-\\x7", 8) == 0 &&
-            (regexp[i + 8] == 'f' || regexp[i + 8] == 'F') &&
-            memcmp(regexp + i + 9, "\\x80-\\x", 7) == 0 &&
-            (regexp[i + 16] == 'f' || regexp[i + 16] == 'F') &&
-            (regexp[i + 17] == 'f' || regexp[i + 17] == 'F'))
+        if (i + 18 < close && memcmp(regexp + i, "\\x00-\\x7", 8) == 0 && (regexp[i + 8] == 'f' || regexp[i + 8] == 'F') && memcmp(regexp + i + 9, "\\x80-\\x", 7) == 0 &&
+            (regexp[i + 16] == 'f' || regexp[i + 16] == 'F') && (regexp[i + 17] == 'f' || regexp[i + 17] == 'F'))
             return true;
     }
-    return (classes & 3u) == 3u || (classes & 12u) == 12u ||
-           (classes & 48u) == 48u;
+    return (classes & 3u) == 3u || (classes & 12u) == 12u || (classes & 48u) == 48u;
 }
 
 /* An unquantified class covering every byte is also a wildcard atom in
@@ -3752,23 +3553,19 @@ static bool yx_regex_is_single_all_bytes_class(const char *regexp)
 {
     size_t begin = 0, end = strlen(regexp);
     for (;;) {
-        if (begin + 3 < end && regexp[begin] == '(' &&
-            regexp[begin + 1] == '?') {
+        if (begin + 3 < end && regexp[begin] == '(' && regexp[begin + 1] == '?') {
             size_t flags = begin + 2;
-            while (flags < end &&
-                   strchr("imsuxU-", regexp[flags]) != NULL) ++flags;
+            while (flags < end && strchr("imsuxU-", regexp[flags]) != NULL) ++flags;
             if (flags > begin + 2 && flags < end && regexp[flags] == ')') {
                 begin = flags + 1;
                 continue;
             }
         }
-        if (begin + 2 < end && regexp[begin] == '(' &&
-            regexp[end - 1] == ')') {
+        if (begin + 2 < end && regexp[begin] == '(' && regexp[end - 1] == ')') {
             size_t content = begin + 1;
             if (regexp[content] == '?') {
                 ++content;
-                while (content < end &&
-                       strchr("imsuxU-", regexp[content]) != NULL) ++content;
+                while (content < end && strchr("imsuxU-", regexp[content]) != NULL) ++content;
                 if (content >= end || regexp[content] != ':') break;
                 ++content;
             }
@@ -3778,12 +3575,14 @@ static bool yx_regex_is_single_all_bytes_class(const char *regexp)
         }
         break;
     }
-    if (begin + 2 >= end || regexp[begin] != '[' ||
-        regexp[end - 1] != ']') return false;
+    if (begin + 2 >= end || regexp[begin] != '[' || regexp[end - 1] != ']') return false;
     /* Reject concatenated classes; the helper below recognizes a class
        anywhere immediately before an index. */
     for (size_t i = begin + 1; i < end; ++i) {
-        if (regexp[i] == '\\' && i + 1 < end) { ++i; continue; }
+        if (regexp[i] == '\\' && i + 1 < end) {
+            ++i;
+            continue;
+        }
         if (regexp[i] == ']') {
             if (i != end - 1) return false;
             break;
@@ -3792,26 +3591,18 @@ static bool yx_regex_is_single_all_bytes_class(const char *regexp)
     return yx_regex_all_bytes_class(regexp + begin, end - begin);
 }
 
-static bool yx_regex_unbounded_wildcard_before(const char *regexp,
-                                                size_t quantifier)
+static bool yx_regex_unbounded_wildcard_before(const char *regexp, size_t quantifier)
 {
     if (quantifier == 0) return false;
-    if (regexp[quantifier - 1] == '.' ||
-        yx_regex_all_bytes_class(regexp, quantifier)) return true;
+    if (regexp[quantifier - 1] == '.' || yx_regex_all_bytes_class(regexp, quantifier)) return true;
     if (regexp[quantifier - 1] != ')') return false;
     /* A noncapturing group around a wildcard retains YARA-X's longer
        verification window. A capturing group consumes one VM slot. */
-    if (quantifier >= 5 &&
-        memcmp(regexp + quantifier - 5, "(?:.)", 5) == 0)
-        return true;
-    if (quantifier >= 6 &&
-        memcmp(regexp + quantifier - 6, "(?s:.)", 6) == 0)
-        return true;
+    if (quantifier >= 5 && memcmp(regexp + quantifier - 5, "(?:.)", 5) == 0) return true;
+    if (quantifier >= 6 && memcmp(regexp + quantifier - 6, "(?s:.)", 6) == 0) return true;
     size_t open = quantifier - 1;
     while (open > 0 && regexp[open] != '(') --open;
-    return regexp[open] == '(' && quantifier - open >= 5 &&
-           memcmp(regexp + open, "(?:", 3) == 0 &&
-           yx_regex_all_bytes_class(regexp, quantifier - 1);
+    return regexp[open] == '(' && quantifier - open >= 5 && memcmp(regexp + open, "(?:", 3) == 0 && yx_regex_all_bytes_class(regexp, quantifier - 1);
 }
 
 static size_t yx_regex_vm_max_span(const char *regexp)
@@ -3819,17 +3610,14 @@ static size_t yx_regex_vm_max_span(const char *regexp)
     /* A whole-pattern Unicode scalar counted repeat is verified inside the
        VM's 4096-byte input window, including when its quantifier is fixed. */
     size_t counted_upper = 0;
-    size_t counted_width = yx_pcre_unicode_scalar_counted_width(
-        regexp, &counted_upper, NULL, NULL);
+    size_t counted_width = yx_pcre_unicode_scalar_counted_width(regexp, &counted_upper, NULL, NULL);
     if (counted_width) {
         const char *open = strrchr(regexp, '{');
         const char *comma = open ? strchr(open, ',') : NULL;
         if (comma && !counted_upper) {
             size_t upper = 0;
-            for (const char *at = comma + 1; *at >= '0' && *at <= '9'; ++at)
-                upper = upper * 10 + (size_t)(*at - '0');
-            if (upper > 1024 && upper <= 4095 / counted_width)
-                return upper * counted_width;
+            for (const char *at = comma + 1; *at >= '0' && *at <= '9'; ++at) upper = upper * 10 + (size_t)(*at - '0');
+            if (upper > 1024 && upper <= 4095 / counted_width) return upper * counted_width;
         }
         return 4095;
     }
@@ -3837,8 +3625,7 @@ static size_t yx_regex_vm_max_span(const char *regexp)
        windows for a repeated two-, three-, or four-byte scalar are larger
        than the byte-mode window used by the rewritten expression. */
     size_t scalar_width = yx_pcre_unicode_scalar_plus_width(regexp);
-    if (scalar_width)
-        return scalar_width == 2 ? 8188 : scalar_width == 3 ? 8190 : 8184;
+    if (scalar_width) return scalar_width == 2 ? 8188 : scalar_width == 3 ? 8190 : 8184;
     bool in_class = false, variable = false, narrow_repeat = false;
     size_t prefix = 0;
     for (size_t i = 0; regexp[i]; ++i) {
@@ -3847,13 +3634,18 @@ static size_t yx_regex_vm_max_span(const char *regexp)
             ++i;
             continue;
         }
-        if (ch == '[' && !in_class) { in_class = true; continue; }
-        if (ch == ']' && in_class) { in_class = false; continue; }
+        if (ch == '[' && !in_class) {
+            in_class = true;
+            continue;
+        }
+        if (ch == ']' && in_class) {
+            in_class = false;
+            continue;
+        }
         if (in_class) continue;
         if (ch == '*' || ch == '+') {
             variable = true;
-            if (!yx_regex_unbounded_wildcard_before(regexp, i))
-                narrow_repeat = true;
+            if (!yx_regex_unbounded_wildcard_before(regexp, i)) narrow_repeat = true;
         }
         if (ch == '{') {
             size_t at = i + 1;
@@ -3861,23 +3653,19 @@ static size_t yx_regex_vm_max_span(const char *regexp)
             bool has_lower = false, has_upper = false;
             while (isdigit((unsigned char)regexp[at])) {
                 has_lower = true;
-                lower = lower > 4096 ? lower :
-                    lower * 10 + (unsigned)(regexp[at] - '0');
+                lower = lower > 4096 ? lower : lower * 10 + (unsigned)(regexp[at] - '0');
                 ++at;
             }
             if (regexp[at] == ',') {
                 ++at;
                 while (isdigit((unsigned char)regexp[at])) {
                     has_upper = true;
-                    upper = upper > 4096 ? upper :
-                        upper * 10 + (unsigned)(regexp[at] - '0');
+                    upper = upper > 4096 ? upper : upper * 10 + (unsigned)(regexp[at] - '0');
                     ++at;
                 }
-                if (regexp[at] == '}' && has_lower &&
-                    (!has_upper || upper > 4095)) {
+                if (regexp[at] == '}' && has_lower && (!has_upper || upper > 4095)) {
                     variable = true;
-                    if (!yx_regex_unbounded_wildcard_before(regexp, i))
-                        narrow_repeat = true;
+                    if (!yx_regex_unbounded_wildcard_before(regexp, i)) narrow_repeat = true;
                 }
             }
         }
@@ -3886,29 +3674,22 @@ static size_t yx_regex_vm_max_span(const char *regexp)
     for (size_t i = regexp[0] == '^' ? 1u : 0u; regexp[i];) {
         /* Word assertions consume no input. A literal immediately after one
            is still the one-byte leading atom in YARA-X's VM budget. */
-        if (regexp[i] == '\\' &&
-            (regexp[i + 1] == 'b' || regexp[i + 1] == 'B')) {
+        if (regexp[i] == '\\' && (regexp[i + 1] == 'b' || regexp[i + 1] == 'B')) {
             i += 2;
             continue;
         }
         if (yx_plain_regex_byte((unsigned char)regexp[i])) {
             ++prefix;
             ++i;
-        } else if (regexp[i] == '\\' && regexp[i + 1] == 'x' &&
-                   isxdigit((unsigned char)regexp[i + 2]) &&
-                   isxdigit((unsigned char)regexp[i + 3])) {
+        } else if (regexp[i] == '\\' && regexp[i + 1] == 'x' && isxdigit((unsigned char)regexp[i + 2]) && isxdigit((unsigned char)regexp[i + 3])) {
             ++prefix;
             i += 4;
-        } else if (regexp[i] == '[' &&
-                   yx_plain_regex_byte((unsigned char)regexp[i + 1]) &&
-                   regexp[i + 2] == ']') {
+        } else if (regexp[i] == '[' && yx_plain_regex_byte((unsigned char)regexp[i + 1]) && regexp[i + 2] == ']') {
             ++prefix;
             i += 3;
         } else if (regexp[i] == '(') {
-            size_t at = i + (regexp[i + 1] == '?' &&
-                             regexp[i + 2] == ':' ? 3u : 1u);
-            if (!yx_plain_regex_byte((unsigned char)regexp[at]) ||
-                regexp[at + 1] != ')') break;
+            size_t at = i + (regexp[i + 1] == '?' && regexp[i + 2] == ':' ? 3u : 1u);
+            if (!yx_plain_regex_byte((unsigned char)regexp[at]) || regexp[at + 1] != ')') break;
             ++prefix;
             i = at + 2;
         } else break;
@@ -3925,8 +3706,7 @@ static int yx_regex_limit_callout(pcre2_callout_block *block, void *opaque)
 {
     const yx_regex_match_limit *limit = opaque;
     if (yx_scan_deadline_poll(limit->deadline)) return PCRE2_ERROR_CALLOUT;
-    return block->current_position >= block->start_match &&
-           block->current_position - block->start_match > limit->span;
+    return block->current_position >= block->start_match && block->current_position - block->start_match > limit->span;
 }
 
 static int yx_validate_regex_core(const YRX_PATTERN *pattern);
@@ -3934,10 +3714,7 @@ static int yx_validate_regex_core(const YRX_PATTERN *pattern);
 static int yx_validate_regex_uncached(const YRX_PATTERN *pattern)
 {
     yx_regex_ast_err ast_error;
-    if (pattern && pattern->regexp &&
-        yx_regex_ast_error(pattern->regexp, strlen(pattern->regexp),
-                           &ast_error))
-        return -1;
+    if (pattern && pattern->regexp && yx_regex_ast_error(pattern->regexp, strlen(pattern->regexp), &ast_error)) return -1;
     return yx_validate_regex_core(pattern);
 }
 
@@ -3948,8 +3725,7 @@ static int yx_validate_regex_uncached(const YRX_PATTERN *pattern)
  * hex kind are not memoized. */
 int yx_validate_regex(const YRX_PATTERN *pattern)
 {
-    if (!pattern || !pattern->regexp || pattern->kind == YX_PATTERN_HEX || pattern->deadline)
-        return yx_validate_regex_uncached(pattern);
+    if (!pattern || !pattern->regexp || pattern->kind == YX_PATTERN_HEX || pattern->deadline) return yx_validate_regex_uncached(pattern);
     size_t length = strlen(pattern->regexp), stored = 0;
     uint64_t tag = YX_MEMO_TAG(YX_MEMO_VALIDATE_REGEX, (unsigned)pattern->kind, pattern->modifiers);
     const void *hit = yx_compile_memo_find(tag, pattern->regexp, length, &stored);
@@ -3974,48 +3750,45 @@ static int yx_validate_regex_core(const YRX_PATTERN *pattern)
     if (!pattern || !pattern->regexp) return -1;
     char *compacted = yx_regex_compact_extended_hex(pattern->regexp);
     if (!compacted) return -1;
-    int invalid = yx_regex_has_unsupported_construct(compacted) ||
-                  yx_regex_validate_shape(
-                      compacted,
-                      (pattern->modifiers & YX_MOD_DOTALL) != 0, false);
+    int invalid = yx_regex_has_unsupported_construct(compacted) || yx_regex_validate_shape(compacted, (pattern->modifiers & YX_MOD_DOTALL) != 0, false);
     free(compacted);
-    if (invalid || yx_regex_nesting_error(pattern->regexp,
-                                          strlen(pattern->regexp), NULL, NULL))
-        return -1;
+    if (invalid || yx_regex_nesting_error(pattern->regexp, strlen(pattern->regexp), NULL, NULL)) return -1;
     char *lowered = NULL;
     int fast_result = yx_ser_lower_fast_regex(pattern, &lowered);
     if (fast_result == -1) return -1;
     if (fast_result == 0 || fast_result == 3) return 1;
     if (fast_result == 1) {
-        YRX_PATTERN copy = *pattern; copy.regexp = lowered;
-        int valid = yx_validate_regex_core(&copy); free(lowered); return valid;
+        YRX_PATTERN copy = *pattern;
+        copy.regexp = lowered;
+        int valid = yx_validate_regex_core(&copy);
+        free(lowered);
+        return valid;
     }
     int large_result = yx_ser_large_regex_validate(pattern);
     if (large_result != -2) return large_result;
-    if (yx_unmatchable_large_repeat(pattern->regexp) ||
-        yx_pcre_unicode_count_unmatchable(pattern->regexp) ||
-        yx_large_repeat_literal_alt(pattern->regexp, &literal,
-                                    &literal_length)) return 1;
+    if (yx_unmatchable_large_repeat(pattern->regexp) || yx_pcre_unicode_count_unmatchable(pattern->regexp) ||
+        yx_large_repeat_literal_alt(pattern->regexp, &literal, &literal_length))
+        return 1;
     code = yx_compile_pcre_regex_shared(pattern);
     if (!code) return -1;
-    if (yx_regex_can_match_empty(pattern->regexp, strlen(pattern->regexp),
-                                  pattern->modifiers)) {
+    if (yx_regex_can_match_empty(pattern->regexp, strlen(pattern->regexp), pattern->modifiers)) {
         pcre2_code_free(code);
         return 0;
     }
     matches = pcre2_match_data_create_from_pattern(code, NULL);
-    if (!matches) { pcre2_code_free(code); return -1; }
-    result = pcre2_match(code, (PCRE2_SPTR)"", 0, 0, 0, matches, NULL);
+    if (!matches) {
+        pcre2_code_free(code);
+        return -1;
+    }
+    result = pcre2_match(code, (PCRE2_SPTR) "", 0, 0, 0, matches, NULL);
     if (result == PCRE2_ERROR_NOMATCH) {
         /* Word-boundary assertions cannot match an empty subject, but they
            still match zero bytes next to a word character. YARA-X rejects
            such patterns just like other empty-match regular expressions. */
-        result = pcre2_match(code, (PCRE2_SPTR)"a", 1, 0, 0, matches, NULL);
+        result = pcre2_match(code, (PCRE2_SPTR) "a", 1, 0, 0, matches, NULL);
         if (result >= 0) {
             PCRE2_SIZE *span = pcre2_get_ovector_pointer(matches);
-            if (span[0] != span[1])
-                result = pcre2_match(code, (PCRE2_SPTR)"a", 1, 1, 0,
-                                     matches, NULL);
+            if (span[0] != span[1]) result = pcre2_match(code, (PCRE2_SPTR) "a", 1, 1, 0, matches, NULL);
         }
     }
     if (result >= 0) {
@@ -4035,8 +3808,7 @@ static int yx_validate_regex_core(const YRX_PATTERN *pattern)
  * a lowercase final byte, 3 needs at least three bytes, 4 needs both, 5
  * needs an exact two-byte tail, 7 handles mirrored optional branches, and
  * 0x100 | byte accepts an uppercase final byte after that preceding byte. */
-static bool yx_regex_lazy_literal_gap(const char *regexp, bool nocase,
-                                      bool dotall)
+static bool yx_regex_lazy_literal_gap(const char *regexp, bool nocase, bool dotall)
 {
     yx_variant_parser p = {regexp, nocase, false, false, 0, false};
     size_t prefix = 0, suffix = 0;
@@ -4066,26 +3838,21 @@ static bool yx_regex_lazy_literal_gap(const char *regexp, bool nocase,
                 ++p.at;
                 /* Smaller bounded gaps remain in a single regexp VM;
                    only chained fragments retry distinct tail atoms. */
-                if (!unbounded && (upper < lower || upper - lower <= 200))
-                    return false;
+                if (!unbounded && (upper < lower || upper - lower <= 200)) return false;
             } else return false;
             if (*p.at != '?') return false;
             ++p.at;
             gap = true;
         } else if (*p.at == '[' && nocase) {
             yx_variant_shape shape;
-            if (!yx_variant_atom(&p, &shape) || shape.minimum != 1 ||
-                shape.maximum != 1 || !yx_variant_literal_unit(&shape))
-                return false;
+            if (!yx_variant_atom(&p, &shape) || shape.minimum != 1 || shape.maximum != 1 || !yx_variant_literal_unit(&shape)) return false;
             if (gap) ++suffix;
             else ++prefix;
         } else {
             unsigned byte;
             uint8_t set[32] = {0};
             bool is_set = false;
-            if (strchr("[]()|*+?{}^$", *p.at) ||
-                !yx_variant_class_byte(&p, set, &byte, &is_set) || is_set)
-                return false;
+            if (strchr("[]()|*+?{}^$", *p.at) || !yx_variant_class_byte(&p, set, &byte, &is_set) || is_set) return false;
             if (gap) ++suffix;
             else ++prefix;
         }
@@ -4096,103 +3863,124 @@ static bool yx_regex_lazy_literal_gap(const char *regexp, bool nocase,
 /* Chained literal fragments search the original byte stream. In wide
  * mode only the fragments are UTF-16LE; a long gap can contain arbitrary
  * bytes and can change byte alignment before the next fragment. */
-static bool yx_chain_literal_at(const uint8_t *data,size_t size,size_t at,
-    const uint8_t *literal,size_t length,bool wide,bool nocase)
+static bool yx_chain_literal_at(const uint8_t *data, size_t size, size_t at, const uint8_t *literal, size_t length, bool wide, bool nocase)
 {
-    size_t stride=wide?2:1;
-    if(at>size||length>(size-at)/stride)return false;
-    for(size_t i=0;i<length;++i) {
-        uint8_t a=data[at+i*stride],b=literal[i];
-        if((nocase?yx_fold(a)!=yx_fold(b):a!=b)||(wide&&data[at+i*stride+1]))return false;
+    size_t stride = wide ? 2 : 1;
+    if (at > size || length > (size - at) / stride) return false;
+    for (size_t i = 0; i < length; ++i) {
+        uint8_t a = data[at + i * stride], b = literal[i];
+        if ((nocase ? yx_fold(a) != yx_fold(b) : a != b) || (wide && data[at + i * stride + 1])) return false;
     }
     return true;
 }
-static int yx_scan_wide_literal_chain(YRX_PATTERN *pattern,const uint8_t *data,
-    size_t size,size_t limit,bool *handled)
+static int yx_scan_wide_literal_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
-    *handled=false;
-    if(!(pattern->modifiers&YX_MOD_DOTALL))return 1;
-    const char *regexp=pattern->regexp;size_t capacity=strlen(regexp);
-    uint8_t *literal=malloc(capacity?capacity:1);
-    if(!literal){*handled=true;return 0;}
-    yx_variant_parser p={regexp,(pattern->modifiers&YX_MOD_NOCASE)!=0,true,false,0,false};
-    size_t used=0,prefix=0;uint64_t minimum=0,maximum=UINT32_MAX;bool gap=false,greedy=true;
-    while(*p.at) {
-        if(*p.at=='.') {
-            if(gap||used<2)goto unsupported;
-            prefix=used;++p.at;
-            if(*p.at=='*')++p.at;
-            else if(*p.at=='+')minimum=1,++p.at;
-            else if(*p.at=='{') {
-                ++p.at;if(!isdigit((unsigned char)*p.at))goto unsupported;
-                while(isdigit((unsigned char)*p.at)) {
-                    minimum=minimum*10+(unsigned)(*p.at++-'0');
-                    if(minimum>UINT32_MAX)goto unsupported;
+    *handled = false;
+    if (!(pattern->modifiers & YX_MOD_DOTALL)) return 1;
+    const char *regexp = pattern->regexp;
+    size_t capacity = strlen(regexp);
+    uint8_t *literal = malloc(capacity ? capacity : 1);
+    if (!literal) {
+        *handled = true;
+        return 0;
+    }
+    yx_variant_parser p = {regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0, true, false, 0, false};
+    size_t used = 0, prefix = 0;
+    uint64_t minimum = 0, maximum = UINT32_MAX;
+    bool gap = false, greedy = true;
+    while (*p.at) {
+        if (*p.at == '.') {
+            if (gap || used < 2) goto unsupported;
+            prefix = used;
+            ++p.at;
+            if (*p.at == '*') ++p.at;
+            else if (*p.at == '+') minimum = 1, ++p.at;
+            else if (*p.at == '{') {
+                ++p.at;
+                if (!isdigit((unsigned char)*p.at)) goto unsupported;
+                while (isdigit((unsigned char)*p.at)) {
+                    minimum = minimum * 10 + (unsigned)(*p.at++ - '0');
+                    if (minimum > UINT32_MAX) goto unsupported;
                 }
-                if(*p.at++!=',')goto unsupported;
-                if(*p.at!='}') {
-                    maximum=0;
-                    while(isdigit((unsigned char)*p.at)) {
-                        maximum=maximum*10+(unsigned)(*p.at++-'0');
-                        if(maximum>UINT32_MAX)goto unsupported;
+                if (*p.at++ != ',') goto unsupported;
+                if (*p.at != '}') {
+                    maximum = 0;
+                    while (isdigit((unsigned char)*p.at)) {
+                        maximum = maximum * 10 + (unsigned)(*p.at++ - '0');
+                        if (maximum > UINT32_MAX) goto unsupported;
                     }
                 }
-                if(*p.at!='}'||maximum<minimum||maximum-minimum<=200)goto unsupported;
+                if (*p.at != '}' || maximum < minimum || maximum - minimum <= 200) goto unsupported;
                 ++p.at;
             } else goto unsupported;
-            if(*p.at=='?')greedy=false,++p.at;
-            gap=true;continue;
+            if (*p.at == '?') greedy = false, ++p.at;
+            gap = true;
+            continue;
         }
-        unsigned byte;bool is_set=false;uint8_t set[32]={0};
-        if(*p.at=='['&&p.nocase) {
+        unsigned byte;
+        bool is_set = false;
+        uint8_t set[32] = {0};
+        if (*p.at == '[' && p.nocase) {
             yx_variant_shape shape;
-            if(!yx_variant_atom(&p,&shape)||shape.minimum!=1||shape.maximum!=1||!yx_variant_literal_unit(&shape))goto unsupported;
-            for(byte=0;byte<256;++byte)if(shape.bytes[byte/8]&(1u<<(byte%8)))break;
-            if(byte==256)goto unsupported;
-        } else if(strchr("[]()|*+?{}^$",*p.at)||
-                  !yx_variant_class_byte(&p,set,&byte,&is_set)||is_set)goto unsupported;
-        literal[used++]=(uint8_t)byte;
+            if (!yx_variant_atom(&p, &shape) || shape.minimum != 1 || shape.maximum != 1 || !yx_variant_literal_unit(&shape)) goto unsupported;
+            for (byte = 0; byte < 256; ++byte)
+                if (shape.bytes[byte / 8] & (1u << (byte % 8))) break;
+            if (byte == 256) goto unsupported;
+        } else if (strchr("[]()|*+?{}^$", *p.at) || !yx_variant_class_byte(&p, set, &byte, &is_set) || is_set) goto unsupported;
+        literal[used++] = (uint8_t)byte;
     }
-    if(!gap||used-prefix<2)goto unsupported;
-    *handled=true;
-    bool has_wide=(pattern->modifiers&YX_MOD_WIDE)!=0;
-    for(unsigned variant=has_wide&&!(pattern->modifiers&YX_MOD_ASCII)?1:0;variant<(has_wide?2u:1u);++variant) {
-        bool wide=variant!=0;size_t stride=wide?2:1;
-        size_t prefix_width=prefix*stride,suffix_width=(used-prefix)*stride;
-        for(size_t start=0;start<size;++start) {
-            if(yx_scan_deadline_poll(pattern->deadline)){free(literal);return 0;}
-            if(!yx_chain_literal_at(data,size,start,literal,prefix,wide,p.nocase))continue;
-            size_t after=start+prefix_width;
-            if(minimum>size-after||suffix_width>size)continue;
-            size_t first=after+(size_t)minimum,last=size-suffix_width;
-            if(first>last)continue;
-            if(maximum!=UINT32_MAX&&maximum<last-after)last=after+(size_t)maximum;
-            size_t selected=SIZE_MAX;
-            for(size_t tail=first;tail<=last;++tail) {
-                if(!(tail&255)&&yx_scan_deadline_poll(pattern->deadline)){free(literal);return 0;}
-                if(!yx_chain_literal_at(data,size,tail,literal+prefix,used-prefix,wide,p.nocase))continue;
-                size_t width=tail+suffix_width-start;
-                if((pattern->modifiers&YX_MOD_FULLWORD)&&!yx_fullword(data,size,start,width,wide,0))continue;
-                selected=width;if(!greedy)break;
+    if (!gap || used - prefix < 2) goto unsupported;
+    *handled = true;
+    bool has_wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
+    for (unsigned variant = has_wide && !(pattern->modifiers & YX_MOD_ASCII) ? 1 : 0; variant < (has_wide ? 2u : 1u); ++variant) {
+        bool wide = variant != 0;
+        size_t stride = wide ? 2 : 1;
+        size_t prefix_width = prefix * stride, suffix_width = (used - prefix) * stride;
+        for (size_t start = 0; start < size; ++start) {
+            if (yx_scan_deadline_poll(pattern->deadline)) {
+                free(literal);
+                return 0;
             }
-            if(selected!=SIZE_MAX&&!yx_add_match(pattern,start,selected,0)){free(literal);return 0;}
+            if (!yx_chain_literal_at(data, size, start, literal, prefix, wide, p.nocase)) continue;
+            size_t after = start + prefix_width;
+            if (minimum > size - after || suffix_width > size) continue;
+            size_t first = after + (size_t)minimum, last = size - suffix_width;
+            if (first > last) continue;
+            if (maximum != UINT32_MAX && maximum < last - after) last = after + (size_t)maximum;
+            size_t selected = SIZE_MAX;
+            for (size_t tail = first; tail <= last; ++tail) {
+                if (!(tail & 255) && yx_scan_deadline_poll(pattern->deadline)) {
+                    free(literal);
+                    return 0;
+                }
+                if (!yx_chain_literal_at(data, size, tail, literal + prefix, used - prefix, wide, p.nocase)) continue;
+                size_t width = tail + suffix_width - start;
+                if ((pattern->modifiers & YX_MOD_FULLWORD) && !yx_fullword(data, size, start, width, wide, 0)) continue;
+                selected = width;
+                if (!greedy) break;
+            }
+            if (selected != SIZE_MAX && !yx_add_match(pattern, start, selected, 0)) {
+                free(literal);
+                return 0;
+            }
         }
     }
-    free(literal);yx_sort_unique_limit(pattern,limit);return 1;
-unsupported:free(literal);return 1;
+    free(literal);
+    yx_sort_unique_limit(pattern, limit);
+    return 1;
+unsupported:
+    free(literal);
+    return 1;
 }
 
-static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
-                                        bool dotall)
+static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase, bool dotall)
 {
     const unsigned char *at = (const unsigned char *)regexp;
     if (!at || !*at) return 0;
     /* Chained literal fragments test every possible tail atom. A lazy gap
        whose first tail fails fullword must still reach later tail atoms. */
     if (yx_regex_lazy_literal_gap(regexp, nocase, dotall)) return 8;
-    if (yx_word_byte(at[0]) &&
-        at[1] == '?' && at[2] == '?' &&
-        at[3] == at[0]) {
+    if (yx_word_byte(at[0]) && at[1] == '?' && at[2] == '?' && at[3] == at[0]) {
         unsigned char literal = at[0];
         size_t trailing = 0;
         at += 3;
@@ -4203,30 +3991,17 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
         /* YARA-X's two- and three-byte nocase literal atoms retry a longer
          * match only when the final subject byte is lowercase. The other
          * supported shapes verify through the next fullword boundary. */
-        if (!*at && (!nocase || (literal >= '0' && literal <= '9') ||
-                     trailing == 1 || trailing >= 4))
-            return 1;
-        if (!*at && nocase &&
-            ((literal >= 'A' && literal <= 'Z') ||
-             (literal >= 'a' && literal <= 'z')) &&
-            (trailing == 2 || trailing == 3))
-            return 2;
+        if (!*at && (!nocase || (literal >= '0' && literal <= '9') || trailing == 1 || trailing >= 4)) return 1;
+        if (!*at && nocase && ((literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) && (trailing == 2 || trailing == 3)) return 2;
         at = (const unsigned char *)regexp;
     }
     /* The fixed two-byte tail is an atom in YARA-X. Its verifier can
      * consume the lazy leading repetition until the fullword boundary. */
-    if (((at[0] >= '0' && at[0] <= '9') ||
-         (at[0] >= 'A' && at[0] <= 'Z') ||
-         (at[0] >= 'a' && at[0] <= 'z'))) {
+    if (((at[0] >= '0' && at[0] <= '9') || (at[0] >= 'A' && at[0] <= 'Z') || (at[0] >= 'a' && at[0] <= 'z'))) {
         const unsigned char *tail = NULL;
-        if ((at[1] == '*' || at[1] == '+') && at[2] == '?')
-            tail = at + 3;
-        else if (strncmp((const char *)at + 1, "{0,2}?", 6) == 0 ||
-                 strncmp((const char *)at + 1, "{1,2}?", 6) == 0)
-            tail = at + 7;
-        if (tail && tail[0] == at[0] && tail[1] == at[0] &&
-            tail[2] == '\0')
-            return 1;
+        if ((at[1] == '*' || at[1] == '+') && at[2] == '?') tail = at + 3;
+        else if (strncmp((const char *)at + 1, "{0,2}?", 6) == 0 || strncmp((const char *)at + 1, "{1,2}?", 6) == 0) tail = at + 7;
+        if (tail && tail[0] == at[0] && tail[1] == at[0] && tail[2] == '\0') return 1;
     }
     /* Noncapturing parentheses around the optional prefix, with or without
      * an outer wrapper, keep the same fixed two-byte tail atom. */
@@ -4235,28 +4010,17 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
         const unsigned char *group = outer ? at + 3 : at;
         if (strncmp((const char *)group, "(?:", 3) == 0) {
             unsigned char literal = group[3];
-            if (((literal >= '0' && literal <= '9') ||
-                 (literal >= 'A' && literal <= 'Z') ||
-                 (literal >= 'a' && literal <= 'z')) &&
-                group[4] == '?' && group[5] == '?' && group[6] == ')' &&
-                group[7] == literal && group[8] == literal &&
-                ((outer && group[9] == ')' && group[10] == '\0') ||
-                 (!outer && group[9] == '\0')))
-                return nocase &&
-                    ((literal >= 'A' && literal <= 'Z') ||
-                     (literal >= 'a' && literal <= 'z')) ? 2 : 1;
+            if (((literal >= '0' && literal <= '9') || (literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) && group[4] == '?' && group[5] == '?' &&
+                group[6] == ')' && group[7] == literal && group[8] == literal && ((outer && group[9] == ')' && group[10] == '\0') || (!outer && group[9] == '\0')))
+                return nocase && ((literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) ? 2 : 1;
         }
     }
     /* A lazy one-or-more literal after a noncapturing optional prefix
      * can likewise extend through the next fullword boundary. */
     if (strncmp((const char *)at, "(?:", 3) == 0) {
         unsigned char literal = at[3];
-        if (((literal >= '0' && literal <= '9') ||
-             (literal >= 'A' && literal <= 'Z') ||
-             (literal >= 'a' && literal <= 'z')) &&
-            at[4] == '?' && at[5] == '?' && at[6] == ')' &&
-            at[7] == literal && at[8] == '+' && at[9] == '?' &&
-            at[10] == '\0')
+        if (((literal >= '0' && literal <= '9') || (literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) && at[4] == '?' && at[5] == '?' &&
+            at[6] == ')' && at[7] == literal && at[8] == '+' && at[9] == '?' && at[10] == '\0')
             return 1;
     }
     /* The ordered c|cc branch can extend a lazy optional or repeated prefix
@@ -4265,95 +4029,62 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
         bool noncapturing = at[1] == '?' && at[2] == ':';
         const unsigned char *branch = at + (noncapturing ? 3 : 1);
         unsigned char literal = branch[0];
-        if (((literal >= '0' && literal <= '9') ||
-             (literal >= 'A' && literal <= 'Z') ||
-             (literal >= 'a' && literal <= 'z')) &&
-            branch[1] == '|' && branch[2] == literal &&
-            branch[3] == literal && branch[4] == ')' &&
-            branch[6] == '?' && branch[7] == literal &&
-            ((branch[5] == '?' &&
-              ((!noncapturing && branch[8] == '\0') ||
-               (branch[8] == literal && branch[9] == '\0'))) ||
-             (branch[5] == '*' && branch[8] == literal &&
-              branch[9] == '\0')))
+        if (((literal >= '0' && literal <= '9') || (literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) && branch[1] == '|' &&
+            branch[2] == literal && branch[3] == literal && branch[4] == ')' && branch[6] == '?' && branch[7] == literal &&
+            ((branch[5] == '?' && ((!noncapturing && branch[8] == '\0') || (branch[8] == literal && branch[9] == '\0'))) ||
+             (branch[5] == '*' && branch[8] == literal && branch[9] == '\0')))
             return 1;
     }
     /* For a lazy grouped literal, retry an anchored longer span only for
      * the branch shapes whose verifier reaches the word boundary. Optional
      * x|xx and x|xy branches make different choices with nocase enabled. */
     if (at[0] == '(') {
-        const unsigned char *branch = at +
-            (at[1] == '?' && at[2] == ':' ? 3 : 1);
+        const unsigned char *branch = at + (at[1] == '?' && at[2] == ':' ? 3 : 1);
         const unsigned char *cursor = branch;
         size_t left = 0, right = 0;
-        while (left < 2 && yx_word_byte(*cursor)) { ++left; ++cursor; }
+        while (left < 2 && yx_word_byte(*cursor)) {
+            ++left;
+            ++cursor;
+        }
         if (left && *cursor++ == '|') {
             while (right < 2 && yx_word_byte(*cursor)) {
-                ++right; ++cursor;
+                ++right;
+                ++cursor;
             }
             if (right && *cursor++ == ')') {
                 bool optional = cursor[0] == '?';
                 bool zero_or_more = cursor[0] == '*';
-                if ((cursor[0] == '?' || cursor[0] == '*' ||
-                     cursor[0] == '+') && cursor[1] == '?')
-                    cursor += 2;
-                else if (strncmp((const char *)cursor, "{1,3}?", 6) == 0)
-                    cursor += 6;
+                if ((cursor[0] == '?' || cursor[0] == '*' || cursor[0] == '+') && cursor[1] == '?') cursor += 2;
+                else if (strncmp((const char *)cursor, "{1,3}?", 6) == 0) cursor += 6;
                 else cursor = NULL;
                 if (cursor && yx_word_byte(cursor[0]) && cursor[1] == '\0') {
                     unsigned char suffix = cursor[0];
-                    bool one_two_tail =
-                        left == 1 && right == 2 &&
-                        branch[0] == branch[2] &&
-                        branch[3] != branch[0] &&
-                        suffix == branch[3];
+                    bool one_two_tail = left == 1 && right == 2 && branch[0] == branch[2] && branch[3] != branch[0] && suffix == branch[3];
                     if (optional) {
-                        bool repeated_same =
-                            ((left == 1 && right == 2 &&
-                              branch[0] == branch[2] &&
-                              branch[0] == branch[3]) ||
-                             (left == 2 && right == 1 &&
-                              branch[0] == branch[1] &&
-                              branch[0] == branch[3])) &&
-                            suffix == branch[0];
-                        bool overlapping_pair =
-                            ((left == 1 && right == 2 &&
-                              branch[0] == branch[2] &&
-                              branch[0] != branch[3]) ||
-                             (left == 2 && right == 1 &&
-                              branch[0] == branch[3] &&
-                              branch[0] != branch[1])) &&
-                            suffix == branch[0];
-                        bool mirrored_pair =
-                            left == 2 && right == 2 &&
-                            branch[0] == branch[4] &&
-                            branch[1] == branch[3] &&
-                            branch[0] != branch[1] &&
-                            (suffix == branch[0] || suffix == branch[1]);
-                        if (branch[0] >= '0' && branch[0] <= '9' &&
-                            (repeated_same || overlapping_pair)) return 1;
+                        bool repeated_same = ((left == 1 && right == 2 && branch[0] == branch[2] && branch[0] == branch[3]) ||
+                                              (left == 2 && right == 1 && branch[0] == branch[1] && branch[0] == branch[3])) &&
+                                             suffix == branch[0];
+                        bool overlapping_pair = ((left == 1 && right == 2 && branch[0] == branch[2] && branch[0] != branch[3]) ||
+                                                 (left == 2 && right == 1 && branch[0] == branch[3] && branch[0] != branch[1])) &&
+                                                suffix == branch[0];
+                        bool mirrored_pair = left == 2 && right == 2 && branch[0] == branch[4] && branch[1] == branch[3] && branch[0] != branch[1] &&
+                                             (suffix == branch[0] || suffix == branch[1]);
+                        if (branch[0] >= '0' && branch[0] <= '9' && (repeated_same || overlapping_pair)) return 1;
                         if (one_two_tail) return 1;
                         if (!nocase && repeated_same) return 1;
-                        if (nocase && overlapping_pair)
-                            return 0x100 | (left == 1 ? branch[3] : branch[1]);
+                        if (nocase && overlapping_pair) return 0x100 | (left == 1 ? branch[3] : branch[1]);
                         if (!nocase && overlapping_pair) return 3;
                         if (nocase && repeated_same) return 4;
                         if (nocase && mirrored_pair) return 7;
                     } else if (!zero_or_more && one_two_tail) {
-                        bool first_letter =
-                            (branch[0] >= 'A' && branch[0] <= 'Z') ||
-                            (branch[0] >= 'a' && branch[0] <= 'z');
-                        bool tail_letter =
-                            (suffix >= 'A' && suffix <= 'Z') ||
-                            (suffix >= 'a' && suffix <= 'z');
+                        bool first_letter = (branch[0] >= 'A' && branch[0] <= 'Z') || (branch[0] >= 'a' && branch[0] <= 'z');
+                        bool tail_letter = (suffix >= 'A' && suffix <= 'Z') || (suffix >= 'a' && suffix <= 'z');
                         /* A numeric tail has a higher atom quality than
                            a letter prefix. Otherwise a non-expanding
                            leading atom keeps the two-byte endpoint. */
-                        if (!(first_letter && !tail_letter) &&
-                            (!nocase || !first_letter)) return 5;
+                        if (!(first_letter && !tail_letter) && (!nocase || !first_letter)) return 5;
                         return 1;
-                    }
-                    else return 1;
+                    } else return 1;
                 }
             }
         }
@@ -4362,23 +4093,13 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
      * repeated group of overlapping one- and two-byte alternatives, can
      * finish inside a word. Extend the start to the fullword boundary. */
     if (at[0] == '(') {
-        const unsigned char *branch = at +
-            (at[1] == '?' && at[2] == ':' ? 3 : 1);
-        if (yx_word_byte(branch[0]) && branch[1] == '|' &&
-            yx_word_byte(branch[2]) && branch[3] == ')' &&
-            (branch[4] == '*' || branch[4] == '?' || branch[4] == '+') &&
-            branch[5] == '?' &&
-            (branch[6] == branch[0] || branch[6] == branch[2]) &&
-            branch[7] == '\0')
+        const unsigned char *branch = at + (at[1] == '?' && at[2] == ':' ? 3 : 1);
+        if (yx_word_byte(branch[0]) && branch[1] == '|' && yx_word_byte(branch[2]) && branch[3] == ')' && (branch[4] == '*' || branch[4] == '?' || branch[4] == '+') &&
+            branch[5] == '?' && (branch[6] == branch[0] || branch[6] == branch[2]) && branch[7] == '\0')
             return 1;
         if (yx_word_byte(branch[0]) &&
-            ((branch[1] == '|' && branch[2] == branch[0] &&
-              yx_word_byte(branch[3])) ||
-             (yx_word_byte(branch[1]) && branch[2] == '|' &&
-              branch[3] == branch[0])) &&
-            branch[4] == ')' && (branch[5] == '*' || branch[5] == '+') &&
-            branch[6] == '?' &&
-            branch[7] == branch[0] && branch[8] == '\0')
+            ((branch[1] == '|' && branch[2] == branch[0] && yx_word_byte(branch[3])) || (yx_word_byte(branch[1]) && branch[2] == '|' && branch[3] == branch[0])) &&
+            branch[4] == ')' && (branch[5] == '*' || branch[5] == '+') && branch[6] == '?' && branch[7] == branch[0] && branch[8] == '\0')
             return 1;
     }
     if (*at == '[' || *at == '(') {
@@ -4421,25 +4142,20 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase,
 static int yx_pcre_deadline_callout(pcre2_callout_block *block, void *data)
 {
     (void)block;
-    return yx_scan_deadline_poll((yx_scan_deadline *)data) ?
-           PCRE2_ERROR_CALLOUT : 0;
+    return yx_scan_deadline_poll((yx_scan_deadline *)data) ? PCRE2_ERROR_CALLOUT : 0;
 }
 
-static int yx_pcre_match_deadline(const YRX_PATTERN *pattern,
-                                  pcre2_code *code, PCRE2_SPTR subject,
-                                  PCRE2_SIZE size, PCRE2_SIZE start,
-                                  uint32_t options, pcre2_match_data *matches)
+static int yx_pcre_match_deadline(const YRX_PATTERN *pattern, pcre2_code *code, PCRE2_SPTR subject, PCRE2_SIZE size, PCRE2_SIZE start, uint32_t options,
+                                  pcre2_match_data *matches)
 {
     pcre2_match_context *context = NULL;
     if (pattern->deadline && pattern->deadline->enabled) {
-        if (yx_scan_deadline_reached(pattern->deadline))
-            return PCRE2_ERROR_CALLOUT;
+        if (yx_scan_deadline_reached(pattern->deadline)) return PCRE2_ERROR_CALLOUT;
         context = pcre2_match_context_create(NULL);
         if (!context) return PCRE2_ERROR_NOMEMORY;
         pcre2_set_callout(context, yx_pcre_deadline_callout, pattern->deadline);
     }
-    int result = pcre2_match(code, subject, size, start, options, matches,
-                             context);
+    int result = pcre2_match(code, subject, size, start, options, matches, context);
     pcre2_match_context_free(context);
     return result;
 }
@@ -4454,20 +4170,17 @@ static uint8_t *yx_regex_pure_literal(const YRX_PATTERN *pattern, size_t *length
     size_t used = 0, capacity;
     uint8_t *bytes;
     *length = 0;
-    if (!at || !*at || (pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_FULLWORD |
-        YX_MOD_WIDE | YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE))) return NULL;
+    if (!at || !*at || (pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_WIDE | YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE))) return NULL;
     capacity = strlen(at);
     if (capacity > 1024) return NULL;
     bytes = malloc(capacity);
     if (!bytes) return NULL;
     while (*at) {
         unsigned char ch = (unsigned char)*at;
-        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-            (ch >= '0' && ch <= '9') || ch == '_') {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_') {
             bytes[used++] = ch;
             ++at;
-        } else if (ch == '\\' && at[1] == 'x' && yx_regex_hex_digit(at[2]) >= 0 &&
-                   yx_regex_hex_digit(at[3]) >= 0 && yx_regex_hex_digit(at[2]) < 8) {
+        } else if (ch == '\\' && at[1] == 'x' && yx_regex_hex_digit(at[2]) >= 0 && yx_regex_hex_digit(at[3]) >= 0 && yx_regex_hex_digit(at[2]) < 8) {
             bytes[used++] = (uint8_t)(yx_regex_hex_digit(at[2]) * 16 + yx_regex_hex_digit(at[3]));
             at += 4;
         } else if (ch == '\\' && at[1] && strchr("\\.^$|?*+()[]{}/-", at[1])) {
@@ -4482,35 +4195,21 @@ static uint8_t *yx_regex_pure_literal(const YRX_PATTERN *pattern, size_t *length
     return bytes;
 }
 
-static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
-                                pcre2_match_data *matches,
-                                const uint8_t *data, size_t size,
-                                const uint8_t *raw, size_t raw_size,
-                                size_t origin, size_t first_start,
-                                bool wide, size_t limit,
-                                bool at_bol, bool at_eol,
-                                const uint8_t *literal, size_t literal_length)
+static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code, pcre2_match_data *matches, const uint8_t *data, size_t size, const uint8_t *raw, size_t raw_size,
+                                size_t origin, size_t first_start, bool wide, size_t limit, bool at_bol, bool at_eol, const uint8_t *literal, size_t literal_length)
 {
-    uint32_t options = (at_bol ? 0 : PCRE2_NOTBOL) |
-                       (at_eol ? 0 : PCRE2_NOTEOL);
+    uint32_t options = (at_bol ? 0 : PCRE2_NOTBOL) | (at_eol ? 0 : PCRE2_NOTEOL);
     size_t max_span = yx_regex_vm_max_span(pattern->regexp);
-    yx_variant_parser variant_parser={pattern->regexp,
-        (pattern->modifiers&YX_MOD_NOCASE)!=0,(pattern->modifiers&YX_MOD_DOTALL)!=0,false,0,false};
+    yx_variant_parser variant_parser = {pattern->regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0, (pattern->modifiers & YX_MOD_DOTALL) != 0, false, 0, false};
     yx_variant_shape variant_shape;
-    bool retry_bounded_class=(pattern->modifiers&YX_MOD_FULLWORD)&&
-        (pattern->regexp[0]=='.'||pattern->regexp[0]=='[')&&
-        yx_variant_sequence(&variant_parser,&variant_shape)&&!*variant_parser.at&&
-        variant_shape.homogeneous&&(variant_shape.bytes[0]&1)&&
-        variant_shape.minimum==1&&variant_shape.maximum>1&&variant_shape.maximum<=32;
+    bool retry_bounded_class = (pattern->modifiers & YX_MOD_FULLWORD) && (pattern->regexp[0] == '.' || pattern->regexp[0] == '[') &&
+                               yx_variant_sequence(&variant_parser, &variant_shape) && !*variant_parser.at && variant_shape.homogeneous && (variant_shape.bytes[0] & 1) &&
+                               variant_shape.minimum == 1 && variant_shape.maximum > 1 && variant_shape.maximum <= 32;
     size_t scalar_width = yx_pcre_unicode_scalar_plus_width(pattern->regexp);
     size_t counted_limited_upper = 0;
-    size_t counted_width = yx_pcre_unicode_scalar_counted_width(
-        pattern->regexp, &counted_limited_upper, NULL, NULL);
-    bool trailing_word_boundary = wide &&
-        yx_regex_ends_with_end_word_boundary(pattern->regexp);
-    int retry_lazy_fullword = yx_regex_lazy_fullword_retry(
-        pattern->regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0,
-        (pattern->modifiers & YX_MOD_DOTALL) != 0);
+    size_t counted_width = yx_pcre_unicode_scalar_counted_width(pattern->regexp, &counted_limited_upper, NULL, NULL);
+    bool trailing_word_boundary = wide && yx_regex_ends_with_end_word_boundary(pattern->regexp);
+    int retry_lazy_fullword = yx_regex_lazy_fullword_retry(pattern->regexp, (pattern->modifiers & YX_MOD_NOCASE) != 0, (pattern->modifiers & YX_MOD_DOTALL) != 0);
     size_t start = first_start;
     /* A gate plan's whole-expression literal alternation can match only at
      * a recorded branch start (yx_candidate_finalize). The leftmost match
@@ -4519,43 +4218,30 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
      * for the plan's own program over the raw input. */
     const yx_rx_candidate *gate_starts = NULL;
     size_t gate_count = 0, gate_next = 0;
-    if (pattern->candidate_gate_starts && !wide && data == raw &&
-        size == raw_size && !origin && !first_start &&
-        code == yx_candidate_cached_regex(pattern)) {
+    if (pattern->candidate_gate_starts && !wide && data == raw && size == raw_size && !origin && !first_start && code == yx_candidate_cached_regex(pattern)) {
         gate_starts = pattern->candidate_hits;
         gate_count = pattern->candidate_hit_count;
     }
     while (start <= size && (!limit || pattern->match_count < limit)) {
         int result = PCRE2_ERROR_NOMATCH;
         if (gate_starts) {
-            while (gate_next < gate_count && gate_starts[gate_next].position < start)
-                ++gate_next;
+            while (gate_next < gate_count && gate_starts[gate_next].position < start) ++gate_next;
             for (; gate_next < gate_count && result == PCRE2_ERROR_NOMATCH; ++gate_next)
                 if (gate_starts[gate_next].position <= size)
-                    result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data,
-                        size, gate_starts[gate_next].position,
-                        options | PCRE2_ANCHORED, matches);
+                    result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, size, gate_starts[gate_next].position, options | PCRE2_ANCHORED, matches);
         } else if (literal) {
             /* A one-literal regexp matches exactly at the occurrences of its
              * bytes, so the leftmost match from start is the anchored match
              * at the first occurrence at or after start. */
-            int64_t found = start <= size && literal_length <= size - start ?
-                xx_data_find_bytes_buffer_optimize(data, size, start, literal,
-                                                   literal_length, NULL) : -1;
+            int64_t found = start <= size && literal_length <= size - start ? xx_data_find_bytes_buffer_optimize(data, size, start, literal, literal_length, NULL) : -1;
             if (found < 0) {
                 if (yx_scan_deadline_poll(pattern->deadline)) return 0;
                 break;
             }
-            result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, size,
-                                            (size_t)found, options | PCRE2_ANCHORED,
-                                            matches);
-            if (result == PCRE2_ERROR_NOMATCH ||
-                (result >= 0 && pcre2_get_ovector_pointer(matches)[0] != (size_t)found))
-                result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data,
-                                                size, start, options, matches);
-        } else
-            result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data,
-                                            size, start, options, matches);
+            result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, size, (size_t)found, options | PCRE2_ANCHORED, matches);
+            if (result == PCRE2_ERROR_NOMATCH || (result >= 0 && pcre2_get_ovector_pointer(matches)[0] != (size_t)found))
+                result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, size, start, options, matches);
+        } else result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, size, start, options, matches);
         if (result == PCRE2_ERROR_NOMATCH) break;
         if (result < 0) return 0;
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(matches);
@@ -4568,8 +4254,7 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
             size_t remaining = limit - pattern->match_count;
             size_t extra_steps = remaining > 2 ? remaining - 2 : 0;
             size_t available_steps = (max_span - first_span) / scalar_width;
-            if (extra_steps < available_steps)
-                match_max_span = first_span + extra_steps * scalar_width;
+            if (extra_steps < available_steps) match_max_span = first_span + extra_steps * scalar_width;
         }
         if (counted_width && counted_limited_upper && limit) {
             size_t remaining = limit - pattern->match_count;
@@ -4580,8 +4265,7 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
                 size_t room = max_count - allowed;
                 allowed += extra < room ? extra : room;
             }
-            if (allowed * counted_width < match_max_span)
-                match_max_span = allowed * counted_width;
+            if (allowed * counted_width < match_max_span) match_max_span = allowed * counted_width;
         }
         if (match_max_span != SIZE_MAX && end - offset > match_max_span) {
             size_t capped_end = offset + match_max_span;
@@ -4590,22 +4274,17 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
             /* A UTF-mode counted scalar needs a complete final code point.
                Otherwise PCRE2 rejects the clipped subject before it can
                backtrack from the too-long greedy match. */
-            if (counted_width &&
-                (pattern->modifiers & YX_MOD_NOCASE) &&
-                yx_pcre_is_unicode_scalar_counted(pattern->regexp))
-                subject_end = offset +
-                    (match_max_span / counted_width) * counted_width;
+            if (counted_width && (pattern->modifiers & YX_MOD_NOCASE) && yx_pcre_is_unicode_scalar_counted(pattern->regexp))
+                subject_end = offset + (match_max_span / counted_width) * counted_width;
             pcre2_match_context *bounded = pcre2_match_context_create(NULL);
             yx_regex_match_limit bound = {match_max_span, pattern->deadline};
             if (!bounded) return 0;
             if (subject_end < size) bounded_options |= PCRE2_NOTEOL;
-            if (pcre2_set_callout(bounded, yx_regex_limit_callout,
-                                  &bound) != 0) {
+            if (pcre2_set_callout(bounded, yx_regex_limit_callout, &bound) != 0) {
                 pcre2_match_context_free(bounded);
                 return 0;
             }
-            result = pcre2_match(code, (PCRE2_SPTR)data, subject_end,
-                                 offset, bounded_options, matches, bounded);
+            result = pcre2_match(code, (PCRE2_SPTR)data, subject_end, offset, bounded_options, matches, bounded);
             pcre2_match_context_free(bounded);
             if (result == PCRE2_ERROR_NOMATCH) {
                 start = offset + 1;
@@ -4615,19 +4294,13 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
             ovector = pcre2_get_ovector_pointer(matches);
             end = (size_t)ovector[1];
         }
-        if ((pattern->modifiers & YX_MOD_FULLWORD) && counted_width &&
-            counted_limited_upper &&
-            end - offset > counted_limited_upper * counted_width) {
+        if ((pattern->modifiers & YX_MOD_FULLWORD) && counted_width && counted_limited_upper && end - offset > counted_limited_upper * counted_width) {
             size_t raw_start = origin + offset * (wide ? 2 : 1);
-            while (end - offset > counted_limited_upper * counted_width &&
-                   !yx_fullword(raw, raw_size, raw_start,
-                                (end - offset) * (wide ? 2 : 1), wide, 0)) {
+            while (end - offset > counted_limited_upper * counted_width && !yx_fullword(raw, raw_size, raw_start, (end - offset) * (wide ? 2 : 1), wide, 0)) {
                 size_t subject_end = end - counted_width;
                 uint32_t bounded_options = options | PCRE2_ANCHORED;
                 if (subject_end < size) bounded_options |= PCRE2_NOTEOL;
-                result = yx_pcre_match_deadline(pattern, code,
-                    (PCRE2_SPTR)data, subject_end, offset, bounded_options,
-                    matches);
+                result = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, subject_end, offset, bounded_options, matches);
                 if (result < 0) break;
                 size_t shorter = (size_t)pcre2_get_ovector_pointer(matches)[1];
                 if (shorter >= end) break;
@@ -4637,96 +4310,61 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
         if ((pattern->modifiers & YX_MOD_FULLWORD) && retry_lazy_fullword) {
             size_t raw_start = origin + offset * (wide ? 2 : 1);
             size_t raw_length = (end - offset) * (wide ? 2 : 1);
-            bool left_boundary = wide ?
-                !(raw_start >= 2 && raw[raw_start - 1] == 0 &&
-                  yx_word_byte(raw[raw_start - 2])) :
-                !(raw_start && yx_word_byte(raw[raw_start - 1]));
-            if (left_boundary &&
-                !yx_fullword(raw, raw_size, raw_start, raw_length, wide, 0)) {
+            bool left_boundary =
+                wide ? !(raw_start >= 2 && raw[raw_start - 1] == 0 && yx_word_byte(raw[raw_start - 2])) : !(raw_start && yx_word_byte(raw[raw_start - 1]));
+            if (left_boundary && !yx_fullword(raw, raw_size, raw_start, raw_length, wide, 0)) {
                 size_t last = size;
-                size_t span_limit = match_max_span == SIZE_MAX ?
-                    4096 : match_max_span;
-                if (span_limit < size - offset)
-                    last = offset + span_limit;
+                size_t span_limit = match_max_span == SIZE_MAX ? 4096 : match_max_span;
+                if (span_limit < size - offset) last = offset + span_limit;
                 /* A lazy path may stop inside a word. YARA-X verifies the
                  * same start through the next word boundary before it
                  * discards that start. Anchor both ends of the retry so
                  * PCRE2 cannot return its shorter lazy alternative. */
-                for (size_t candidate_end = end + 1;
-                     candidate_end <= last; ++candidate_end) {
-                    size_t candidate_length =
-                        (candidate_end - offset) * (wide ? 2 : 1);
-                    if (!yx_fullword(raw, raw_size, raw_start,
-                                     candidate_length, wide, 0))
-                        continue;
-                    if ((retry_lazy_fullword == 2 ||
-                         retry_lazy_fullword == 4) &&
-                        !(data[candidate_end - 1] >= 'a' &&
-                          data[candidate_end - 1] <= 'z'))
+                for (size_t candidate_end = end + 1; candidate_end <= last; ++candidate_end) {
+                    size_t candidate_length = (candidate_end - offset) * (wide ? 2 : 1);
+                    if (!yx_fullword(raw, raw_size, raw_start, candidate_length, wide, 0)) continue;
+                    if ((retry_lazy_fullword == 2 || retry_lazy_fullword == 4) && !(data[candidate_end - 1] >= 'a' && data[candidate_end - 1] <= 'z')) break;
+                    if ((retry_lazy_fullword == 3 || retry_lazy_fullword == 4) && candidate_end - offset < 3) break;
+                    if (retry_lazy_fullword == 7 && (candidate_end - offset < 3 || !((data[candidate_end - 1] >= 'a' && data[candidate_end - 1] <= 'z') ||
+                                                                                     ((data[candidate_end - 3] >= 'a' && data[candidate_end - 3] <= 'z') &&
+                                                                                      (data[candidate_end - 2] >= 'a' && data[candidate_end - 2] <= 'z')))))
                         break;
-                    if ((retry_lazy_fullword == 3 ||
-                         retry_lazy_fullword == 4) &&
-                        candidate_end - offset < 3) break;
-                    if (retry_lazy_fullword == 7 &&
-                        (candidate_end - offset < 3 ||
-                         !((data[candidate_end - 1] >= 'a' &&
-                            data[candidate_end - 1] <= 'z') ||
-                           ((data[candidate_end - 3] >= 'a' &&
-                             data[candidate_end - 3] <= 'z') &&
-                            (data[candidate_end - 2] >= 'a' &&
-                             data[candidate_end - 2] <= 'z'))))) break;
-                    if ((retry_lazy_fullword & 0x100) &&
-                        !(data[candidate_end - 1] >= 'a' &&
-                          data[candidate_end - 1] <= 'z') &&
-                        !(candidate_end - offset >= 3 &&
-                          yx_fold(data[candidate_end - 2]) ==
-                          yx_fold((uint8_t)retry_lazy_fullword))) break;
+                    if ((retry_lazy_fullword & 0x100) && !(data[candidate_end - 1] >= 'a' && data[candidate_end - 1] <= 'z') &&
+                        !(candidate_end - offset >= 3 && yx_fold(data[candidate_end - 2]) == yx_fold((uint8_t)retry_lazy_fullword)))
+                        break;
                     if (retry_lazy_fullword == 5) {
-                        const unsigned char *branch =
-                            (const unsigned char *)pattern->regexp +
-                            (pattern->regexp[1] == '?' ? 3 : 1);
+                        const unsigned char *branch = (const unsigned char *)pattern->regexp + (pattern->regexp[1] == '?' ? 3 : 1);
                         bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
                         if (candidate_end - offset < 2) break;
                         uint8_t first = data[candidate_end - 2];
                         uint8_t last_byte = data[candidate_end - 1];
-                        if ((nocase ? yx_fold(first) != yx_fold(branch[0]) :
-                                      first != branch[0]) ||
-                            (nocase ? yx_fold(last_byte) != yx_fold(branch[3]) :
-                                      last_byte != branch[3])) break;
+                        if ((nocase ? yx_fold(first) != yx_fold(branch[0]) : first != branch[0]) ||
+                            (nocase ? yx_fold(last_byte) != yx_fold(branch[3]) : last_byte != branch[3]))
+                            break;
                     }
-                    uint32_t retry_options = options | PCRE2_ANCHORED |
-                                             PCRE2_ENDANCHORED;
+                    uint32_t retry_options = options | PCRE2_ANCHORED | PCRE2_ENDANCHORED;
                     if (candidate_end < size) retry_options |= PCRE2_NOTEOL;
-                    int retry = yx_pcre_match_deadline(pattern, code,
-                        (PCRE2_SPTR)data, candidate_end, offset,
-                        retry_options, matches);
+                    int retry = yx_pcre_match_deadline(pattern, code, (PCRE2_SPTR)data, candidate_end, offset, retry_options, matches);
                     if (retry >= 0) {
-                        PCRE2_SIZE *retry_vector =
-                            pcre2_get_ovector_pointer(matches);
-                        if (retry_vector[0] == offset &&
-                            retry_vector[1] == candidate_end)
-                            end = candidate_end;
+                        PCRE2_SIZE *retry_vector = pcre2_get_ovector_pointer(matches);
+                        if (retry_vector[0] == offset && retry_vector[1] == candidate_end) end = candidate_end;
                     }
                     if (retry >= 0 || retry_lazy_fullword != 8) break;
                 }
             }
         }
         size_t raw_offset = origin + offset * (wide ? 2 : 1);
-        if(retry_bounded_class) {
-            while(end>offset+variant_shape.minimum&&
-                  !yx_fullword(raw,raw_size,raw_offset,(end-offset)*(wide?2:1),wide,0))--end;
+        if (retry_bounded_class) {
+            while (end > offset + variant_shape.minimum && !yx_fullword(raw, raw_size, raw_offset, (end - offset) * (wide ? 2 : 1), wide, 0)) --end;
         }
         size_t raw_length = (end - offset) * (wide ? 2 : 1);
         size_t raw_end = raw_offset + raw_length;
         /* A nonzero high byte ends the projected wide run, but YARA-X still
            inspects that pair's low byte for a trailing word boundary. */
-        bool boundary_ok = !trailing_word_boundary || end < size ||
-            raw_end > raw_size || raw_size - raw_end < 2 ||
-            !(yx_word_byte(raw[raw_end]) || raw[raw_end] == '_');
-        if (end > offset && boundary_ok &&
-            (!(pattern->modifiers & YX_MOD_FULLWORD) ||
-             yx_fullword(raw, raw_size, raw_offset, raw_length, wide, 0)) &&
-            !yx_add_match(pattern, raw_offset, raw_length, limit)) return 0;
+        bool boundary_ok = !trailing_word_boundary || end < size || raw_end > raw_size || raw_size - raw_end < 2 || !(yx_word_byte(raw[raw_end]) || raw[raw_end] == '_');
+        if (end > offset && boundary_ok && (!(pattern->modifiers & YX_MOD_FULLWORD) || yx_fullword(raw, raw_size, raw_offset, raw_length, wide, 0)) &&
+            !yx_add_match(pattern, raw_offset, raw_length, limit))
+            return 0;
         start = offset + 1;
     }
     return 1;
@@ -4736,73 +4374,92 @@ static int yx_scan_regex_buffer(YRX_PATTERN *pattern, pcre2_code *code,
    subpatterns. Its daachorse search observes a shorter atom first when it
    shares a prefix with a longer one. Keep this path restricted to whole
    expressions: in `(ab|a)b`, the VM preserves branch order instead. */
-static int yx_scan_literal_alternation(YRX_PATTERN *pattern,
-                                       const uint8_t *data, size_t size,
-                                       size_t limit, bool *handled)
+static int yx_scan_literal_alternation(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
-    const char *regexp=pattern->regexp;
-    size_t length=strlen(regexp),begin=0,end=length;
-    *handled=false;
-    if(pattern->modifiers&YX_MOD_WIDE)return 1;
-    if((pattern->modifiers&YX_MOD_NOCASE)&&(pattern->modifiers&YX_MOD_FULLWORD))return 1;
-    if(length>=3&&regexp[0]=='('&&regexp[length-1]==')') {
-        begin=1;end=length-1;
-        if(begin+2<=end&&regexp[begin]=='?'&&regexp[begin+1]==':')begin+=2;
+    const char *regexp = pattern->regexp;
+    size_t length = strlen(regexp), begin = 0, end = length;
+    *handled = false;
+    if (pattern->modifiers & YX_MOD_WIDE) return 1;
+    if ((pattern->modifiers & YX_MOD_NOCASE) && (pattern->modifiers & YX_MOD_FULLWORD)) return 1;
+    if (length >= 3 && regexp[0] == '(' && regexp[length - 1] == ')') {
+        begin = 1;
+        end = length - 1;
+        if (begin + 2 <= end && regexp[begin] == '?' && regexp[begin + 1] == ':') begin += 2;
     }
-    if(begin>=end)return 1;
-    uint8_t *bytes=malloc(length?length:1);
-    size_t *offsets=malloc((length+1)*sizeof(*offsets));
-    if(!bytes||!offsets){free(bytes);free(offsets);*handled=true;return 0;}
-    size_t used=0,count=0,shortest=SIZE_MAX,longest=0;
-    offsets[0]=0;
-    yx_variant_parser parser={regexp+begin,false,false,false,0,false};
-    while((size_t)(parser.at-regexp)<end) {
-        if(*parser.at=='|') {
-            size_t width=used-offsets[count];
-            if(!width)goto unsupported;
-            if(width<shortest)shortest=width;
-            if(width>longest)longest=width;
-            offsets[++count]=used;++parser.at;continue;
+    if (begin >= end) return 1;
+    uint8_t *bytes = malloc(length ? length : 1);
+    size_t *offsets = malloc((length + 1) * sizeof(*offsets));
+    if (!bytes || !offsets) {
+        free(bytes);
+        free(offsets);
+        *handled = true;
+        return 0;
+    }
+    size_t used = 0, count = 0, shortest = SIZE_MAX, longest = 0;
+    offsets[0] = 0;
+    yx_variant_parser parser = {regexp + begin, false, false, false, 0, false};
+    while ((size_t)(parser.at - regexp) < end) {
+        if (*parser.at == '|') {
+            size_t width = used - offsets[count];
+            if (!width) goto unsupported;
+            if (width < shortest) shortest = width;
+            if (width > longest) longest = width;
+            offsets[++count] = used;
+            ++parser.at;
+            continue;
         }
-        if(strchr(".^$*+?{}[]()",(unsigned char)*parser.at))goto unsupported;
-        unsigned byte;bool is_set;uint8_t set[32]={0};
-        if(!yx_variant_class_byte(&parser,set,&byte,&is_set)||is_set||
-           (size_t)(parser.at-regexp)>end)goto unsupported;
-        if((pattern->modifiers&YX_MOD_NOCASE)&&
-           ((byte>='a'&&byte<='z')||(byte>='A'&&byte<='Z')))goto unsupported;
-        bytes[used++]=(uint8_t)byte;
+        if (strchr(".^$*+?{}[]()", (unsigned char)*parser.at)) goto unsupported;
+        unsigned byte;
+        bool is_set;
+        uint8_t set[32] = {0};
+        if (!yx_variant_class_byte(&parser, set, &byte, &is_set) || is_set || (size_t)(parser.at - regexp) > end) goto unsupported;
+        if ((pattern->modifiers & YX_MOD_NOCASE) && ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z'))) goto unsupported;
+        bytes[used++] = (uint8_t)byte;
     }
-    if(!count||used==offsets[count])goto unsupported;
-    size_t width=used-offsets[count];
-    if(width<shortest)shortest=width;
-    if(width>longest)longest=width;
-    offsets[++count]=used;
+    if (!count || used == offsets[count]) goto unsupported;
+    size_t width = used - offsets[count];
+    if (width < shortest) shortest = width;
+    if (width > longest) longest = width;
+    offsets[++count] = used;
     /* Short inputs use the end-ordered automaton; longer inputs can use
        Teddy's source-order buckets. Atom widths use decoded bytes. */
-    bool source_order=pattern->fixed_at_enabled||
-        (pattern->global_atom_count_hint<=16&&count<=16*shortest&&size>=15+shortest);
-    if(longest>4||(!(pattern->modifiers&YX_MOD_FULLWORD)&&
-       (shortest==longest||source_order)))goto unsupported;
-    *handled=true;
-    for(size_t i=0;i<count;++i) {
-        YRX_PATTERN branch=*pattern;
-        branch.bytes=bytes+offsets[i];branch.length=offsets[i+1]-offsets[i];
-        branch.matches=NULL;branch.match_count=branch.match_capacity=0;
-        if(!yx_scan_text(&branch,data,size,limit,false)) {
-            free(branch.matches);free(bytes);free(offsets);return 0;
+    bool source_order = pattern->fixed_at_enabled || (pattern->global_atom_count_hint <= 16 && count <= 16 * shortest && size >= 15 + shortest);
+    if (longest > 4 || (!(pattern->modifiers & YX_MOD_FULLWORD) && (shortest == longest || source_order))) goto unsupported;
+    *handled = true;
+    for (size_t i = 0; i < count; ++i) {
+        YRX_PATTERN branch = *pattern;
+        branch.bytes = bytes + offsets[i];
+        branch.length = offsets[i + 1] - offsets[i];
+        branch.matches = NULL;
+        branch.match_count = branch.match_capacity = 0;
+        if (!yx_scan_text(&branch, data, size, limit, false)) {
+            free(branch.matches);
+            free(bytes);
+            free(offsets);
+            return 0;
         }
-        for(size_t j=0;j<branch.match_count;++j) {
-            bool present=false;
-            if(source_order)for(size_t k=0;k<pattern->match_count;++k)
-                if(pattern->matches[k].offset==branch.matches[j].offset){present=true;break;}
-            if(!present&&!yx_add_match(pattern,branch.matches[j].offset,branch.matches[j].length,0)) {
-                free(branch.matches);free(bytes);free(offsets);return 0;
+        for (size_t j = 0; j < branch.match_count; ++j) {
+            bool present = false;
+            if (source_order)
+                for (size_t k = 0; k < pattern->match_count; ++k)
+                    if (pattern->matches[k].offset == branch.matches[j].offset) {
+                        present = true;
+                        break;
+                    }
+            if (!present && !yx_add_match(pattern, branch.matches[j].offset, branch.matches[j].length, 0)) {
+                free(branch.matches);
+                free(bytes);
+                free(offsets);
+                return 0;
             }
         }
-        free(branch.matches);yx_sort_unique_limit(pattern,limit);
+        free(branch.matches);
+        yx_sort_unique_limit(pattern, limit);
     }
 unsupported:
-    free(bytes);free(offsets);return 1;
+    free(bytes);
+    free(offsets);
+    return 1;
 }
 
 /* A grouped literal branch and an ungrouped literal prefix share the same
@@ -4811,9 +4468,7 @@ unsupported:
    SIMD threshold its verifier follows regexp branch order instead. Restrict
    this shortcut to a whole two-branch expression made only of literal bytes
    and transparent groups; quantifiers and assertions have different atoms. */
-static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
-                                          const uint8_t *data, size_t size,
-                                          size_t limit, bool *handled)
+static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), bar = SIZE_MAX, depth = 0;
@@ -4821,8 +4476,7 @@ static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
     bool grouped = false, capturing = false;
     char *flat;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return 1;
     for (size_t i = 0; i < length; ++i) {
         if (regexp[i] == '(') {
             ++depth;
@@ -4834,8 +4488,7 @@ static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
             bar = i;
         }
     }
-    if (depth || bar == SIZE_MAX || bar == 0 || bar + 1 >= length)
-        return 1;
+    if (depth || bar == SIZE_MAX || bar == 0 || bar + 1 >= length) return 1;
     /* Only the first branch may contain transparent groups. */
     flat = malloc(bar + 1);
     if (!flat) return 0;
@@ -4843,8 +4496,7 @@ static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
         unsigned char ch = (unsigned char)regexp[i];
         if (ch == '(') {
             grouped = true;
-            if (i + 2 < bar && regexp[i + 1] == '?' &&
-                regexp[i + 2] == ':') i += 2;
+            if (i + 2 < bar && regexp[i + 1] == '?' && regexp[i + 2] == ':') i += 2;
             else capturing = true;
         } else if (ch == ')') {
             /* The balanced-group check above covers this delimiter. */
@@ -4856,9 +4508,7 @@ static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
         }
     }
     prefix_length = length - bar - 1;
-    if (!grouped || prefix_length >= flat_length ||
-        (capturing && prefix_length == 1 && flat_length == 2) ||
-        memcmp(flat, regexp + bar + 1, prefix_length) != 0 ||
+    if (!grouped || prefix_length >= flat_length || (capturing && prefix_length == 1 && flat_length == 2) || memcmp(flat, regexp + bar + 1, prefix_length) != 0 ||
         (size >= prefix_length && size - prefix_length >= 15)) {
         free(flat);
         return 1;
@@ -4887,8 +4537,7 @@ static int yx_scan_grouped_literal_prefix(YRX_PATTERN *pattern,
  * {1,2} and a two-byte branch ending in the short byte, the ordinary ASCII
  * path already has a different verifier and needs no rewrite. Keep this to
  * disjoint first bytes and small bounds so branch priority stays unambiguous. */
-static char *yx_regex_expand_disjoint_literal_pair_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_disjoint_literal_pair_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     const char *bar, *close, *short_branch, *long_branch;
@@ -4902,23 +4551,18 @@ static char *yx_regex_expand_disjoint_literal_pair_bound(
     length = strlen(regexp);
     bar = strchr(regexp + at, '|');
     close = strchr(regexp + at, ')');
-    if (!bar || !close || bar > close ||
-        length != (size_t)(close - regexp) + 6 ||
-        memcmp(close + 1, "{1,", 3) != 0 ||
-        close[5] != '}' || close[4] < '2' || close[4] > '4')
+    if (!bar || !close || bar > close || length != (size_t)(close - regexp) + 6 || memcmp(close + 1, "{1,", 3) != 0 || close[5] != '}' || close[4] < '2' ||
+        close[4] > '4')
         return NULL;
     upper = (unsigned char)(close[4] - '0');
     left_length = (size_t)(bar - regexp - at);
     right_length = (size_t)(close - bar - 1);
-    if ((left_length == 1 && (right_length == 2 || right_length == 3)) ||
-        (left_length == 2 && right_length == 3)) {
+    if ((left_length == 1 && (right_length == 2 || right_length == 3)) || (left_length == 2 && right_length == 3)) {
         short_branch = regexp + at;
         short_length = left_length;
         long_branch = bar + 1;
         long_length = right_length;
-    } else if ((right_length == 1 &&
-                (left_length == 2 || left_length == 3)) ||
-               (right_length == 2 && left_length == 3)) {
+    } else if ((right_length == 1 && (left_length == 2 || left_length == 3)) || (right_length == 2 && left_length == 3)) {
         short_branch = bar + 1;
         short_length = right_length;
         long_branch = regexp + at;
@@ -4930,13 +4574,9 @@ static char *yx_regex_expand_disjoint_literal_pair_bound(
         if (!yx_plain_regex_byte((unsigned char)short_branch[i])) return NULL;
     for (size_t i = 0; i < long_length; ++i)
         if (!yx_plain_regex_byte((unsigned char)long_branch[i])) return NULL;
-    if (short_length == 1 && long_length == 2 &&
-        long_branch[1] != (char)x &&
-        yx_fold((unsigned char)long_branch[1]) == yx_fold(x)) return NULL;
-    if (upper == 2 && short_length == 1 && long_length == 2 &&
-        long_branch[1] == (char)x &&
-        !(pattern->modifiers &
-          (YX_MOD_NOCASE | YX_MOD_WIDE | YX_MOD_FULLWORD))) return NULL;
+    if (short_length == 1 && long_length == 2 && long_branch[1] != (char)x && yx_fold((unsigned char)long_branch[1]) == yx_fold(x)) return NULL;
+    if (upper == 2 && short_length == 1 && long_length == 2 && long_branch[1] == (char)x && !(pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_WIDE | YX_MOD_FULLWORD)))
+        return NULL;
     expanded = malloc(length + 1);
     if (!expanded) return NULL;
     memcpy(expanded, regexp, length + 1);
@@ -4959,22 +4599,20 @@ static char *yx_regex_expand_leading_repeat(const char *regexp)
     if (!regexp) return NULL;
     /* Initial i/m/u flags change byte or anchor handling, but leave this
        leading repetition in the same atom shape. */
-    if (strncmp(regexp, "(?i)", 4) == 0 ||
-        strncmp(regexp, "(?m)", 4) == 0 ||
-        strncmp(regexp, "(?s)", 4) == 0 ||
-        strncmp(regexp, "(?u)", 4) == 0) at = 4;
-    else if (strncmp(regexp, "(?im)", 5) == 0 ||
-             strncmp(regexp, "(?mi)", 5) == 0) at = 5;
+    if (strncmp(regexp, "(?i)", 4) == 0 || strncmp(regexp, "(?m)", 4) == 0 || strncmp(regexp, "(?s)", 4) == 0 || strncmp(regexp, "(?u)", 4) == 0) at = 4;
+    else if (strncmp(regexp, "(?im)", 5) == 0 || strncmp(regexp, "(?mi)", 5) == 0) at = 5;
     if (regexp[at] == '^') ++at;
     if (yx_plain_regex_byte((unsigned char)regexp[at])) {
         ++at;
     } else if (regexp[at] == '.' || regexp[at] == '[') {
         class_atom = true;
-        if (regexp[at] == '.') { ++at; wide_class = true; }
-        else {
-            yx_variant_parser parser={regexp+at,false,false,false,0,false};
+        if (regexp[at] == '.') {
+            ++at;
+            wide_class = true;
+        } else {
+            yx_variant_parser parser = {regexp + at, false, false, false, 0, false};
             yx_variant_shape shape;
-            if(!yx_variant_atom(&parser,&shape)||!shape.homogeneous)return NULL;
+            if (!yx_variant_atom(&parser, &shape) || !shape.homogeneous) return NULL;
             {
                 unsigned members = 0;
                 for (unsigned b = 0; b < 256; ++b)
@@ -4983,25 +4621,23 @@ static char *yx_regex_expand_leading_repeat(const char *regexp)
                 wide_class = members > 128;
             }
             ++at;
-            if(regexp[at]=='^')++at;
-            if(regexp[at]==']')++at;
-            while(regexp[at]&&regexp[at]!=']') {
-                if(regexp[at]=='\\'&&regexp[at+1])++at;
+            if (regexp[at] == '^') ++at;
+            if (regexp[at] == ']') ++at;
+            while (regexp[at] && regexp[at] != ']') {
+                if (regexp[at] == '\\' && regexp[at + 1]) ++at;
                 ++at;
             }
-            if(regexp[at++]!=']')return NULL;
+            if (regexp[at++] != ']') return NULL;
         }
     } else if (regexp[at] == '(') {
         at += regexp[at + 1] == '?' && regexp[at + 2] == ':' ? 3 : 1;
-        if (!yx_plain_regex_byte((unsigned char)regexp[at]) ||
-            regexp[at + 1] != ')') return NULL;
+        if (!yx_plain_regex_byte((unsigned char)regexp[at]) || regexp[at + 1] != ')') return NULL;
         at += 2;
     } else {
         return NULL;
     }
     size_t repeat_at = at;
-    if (regexp[at] != '{' || !isdigit((unsigned char)regexp[at + 1]))
-        return NULL;
+    if (regexp[at] != '{' || !isdigit((unsigned char)regexp[at + 1])) return NULL;
     lower = 0;
     for (++at; isdigit((unsigned char)regexp[at]); ++at) {
         lower = lower * 10 + (unsigned)(regexp[at] - '0');
@@ -5034,20 +4670,15 @@ static char *yx_regex_expand_leading_repeat(const char *regexp)
     }
     if (regexp[at] == '$') ++at;
     if (regexp[at] != '\0') return NULL;
-    replacement_length = snprintf(replacement, sizeof(replacement),
-                                  "{%u,%u}", lower, upper * 2 - lower);
-    if (replacement_length < 0 ||
-        (size_t)replacement_length >= sizeof(replacement)) return NULL;
+    replacement_length = snprintf(replacement, sizeof(replacement), "{%u,%u}", lower, upper * 2 - lower);
+    if (replacement_length < 0 || (size_t)replacement_length >= sizeof(replacement)) return NULL;
     size_t suffix_length = strlen(regexp + suffix_at);
-    if (repeat_at > SIZE_MAX - (size_t)replacement_length - suffix_length - 1)
-        return NULL;
-    char *expanded = malloc(repeat_at + (size_t)replacement_length +
-                            suffix_length + 1);
+    if (repeat_at > SIZE_MAX - (size_t)replacement_length - suffix_length - 1) return NULL;
+    char *expanded = malloc(repeat_at + (size_t)replacement_length + suffix_length + 1);
     if (!expanded) return NULL;
     memcpy(expanded, regexp, repeat_at);
     memcpy(expanded + repeat_at, replacement, (size_t)replacement_length);
-    memcpy(expanded + repeat_at + (size_t)replacement_length,
-           regexp + suffix_at, suffix_length + 1);
+    memcpy(expanded + repeat_at + (size_t)replacement_length, regexp + suffix_at, suffix_length + 1);
     return expanded;
 }
 
@@ -5070,18 +4701,11 @@ static char *yx_regex_collapse_overlapping_repeat(const char *regexp)
         }
         if (regexp[i] == '[' && !in_class) in_class = true;
         else if (regexp[i] == ']' && in_class) in_class = false;
-        if (!in_class && i + 6 < length && regexp[i] == '(' &&
-            yx_plain_regex_byte((unsigned char)regexp[i + 1]) &&
-            regexp[i + 5] == ')' &&
+        if (!in_class && i + 6 < length && regexp[i] == '(' && yx_plain_regex_byte((unsigned char)regexp[i + 1]) && regexp[i + 5] == ')' &&
             (regexp[i + 6] == '*' || regexp[i + 6] == '+') &&
-            !(regexp[i + 7] == '?' && regexp[i + 2] == regexp[i + 1] &&
-              regexp[i + 8] == regexp[i + 1] && regexp[i + 9] == '\0') &&
-            ((regexp[i + 2] == '|' &&
-              regexp[i + 3] == regexp[i + 1] &&
-              regexp[i + 4] == regexp[i + 1]) ||
-             (regexp[i + 2] == regexp[i + 1] &&
-              regexp[i + 3] == '|' &&
-              regexp[i + 4] == regexp[i + 1]))) {
+            !(regexp[i + 7] == '?' && regexp[i + 2] == regexp[i + 1] && regexp[i + 8] == regexp[i + 1] && regexp[i + 9] == '\0') &&
+            ((regexp[i + 2] == '|' && regexp[i + 3] == regexp[i + 1] && regexp[i + 4] == regexp[i + 1]) ||
+             (regexp[i + 2] == regexp[i + 1] && regexp[i + 3] == '|' && regexp[i + 4] == regexp[i + 1]))) {
             collapsed[used++] = regexp[i + 1];
             i += 6;
             changed = true;
@@ -5101,8 +4725,7 @@ static char *yx_regex_collapse_overlapping_repeat(const char *regexp)
    one-byte prefix. A plus uses that order when the suffix is the preferred
    atom, and otherwise ends at the last y preceded by x. Express the chosen
    endpoint before applying fullword, in both narrow and wide matching. */
-static char *yx_regex_prioritize_repeated_literal_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_repeated_literal_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
@@ -5110,31 +4733,20 @@ static char *yx_regex_prioritize_repeated_literal_alt(
     char *ordered;
     if (regexp[0] != '(') return NULL;
     if (length >= 3 && regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 7 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 3]) ||
-        regexp[at] == regexp[at + 3] ||
-        regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] ||
-        regexp[at + 4] != ')' ||
-        (regexp[at + 5] != '*' && regexp[at + 5] != '+') ||
+    if (length != at + 7 || !yx_plain_regex_byte((unsigned char)regexp[at]) || !yx_plain_regex_byte((unsigned char)regexp[at + 3]) || regexp[at] == regexp[at + 3] ||
+        regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' || (regexp[at + 5] != '*' && regexp[at + 5] != '+') ||
         regexp[at + 6] != regexp[at + 3])
         return NULL;
-    first_letter = (regexp[at] >= 'a' && regexp[at] <= 'z') ||
-                   (regexp[at] >= 'A' && regexp[at] <= 'Z');
-    tail_letter = (regexp[at + 3] >= 'a' && regexp[at + 3] <= 'z') ||
-                  (regexp[at + 3] >= 'A' && regexp[at + 3] <= 'Z');
+    first_letter = (regexp[at] >= 'a' && regexp[at] <= 'z') || (regexp[at] >= 'A' && regexp[at] <= 'Z');
+    tail_letter = (regexp[at + 3] >= 'a' && regexp[at + 3] <= 'z') || (regexp[at + 3] >= 'A' && regexp[at + 3] <= 'Z');
     plus = first_letter && !tail_letter;
-    if ((pattern->modifiers & YX_MOD_NOCASE) && first_letter && tail_letter &&
-        yx_fold((uint8_t)regexp[at]) !=
-            yx_fold((uint8_t)regexp[at + 3])) plus = true;
+    if ((pattern->modifiers & YX_MOD_NOCASE) && first_letter && tail_letter && yx_fold((uint8_t)regexp[at]) != yx_fold((uint8_t)regexp[at + 3])) plus = true;
     if (regexp[at + 5] == '+' && !plus) {
         /* The leading atom's verifier keeps the trailing byte only when
            a new repetition follows it. Express
            that endpoint before fullword filtering, which cannot recover
            a longer span after the host matcher rejected an early end. */
-        if ((pattern->modifiers & YX_MOD_NOCASE) &&
-            yx_fold((uint8_t)regexp[at]) ==
-                yx_fold((uint8_t)regexp[at + 3])) return NULL;
+        if ((pattern->modifiers & YX_MOD_NOCASE) && yx_fold((uint8_t)regexp[at]) == yx_fold((uint8_t)regexp[at + 3])) return NULL;
         ordered = malloc(12);
         if (!ordered) return NULL;
         ordered[0] = regexp[at];
@@ -5163,36 +4775,27 @@ static char *yx_regex_prioritize_repeated_literal_alt(
 /* In a repetition of [uv]|xy followed by y, YARA-X verifies the
    two-byte branch before the one-byte class when x is in the class and y
    is outside it. Preserve the written class order for all other shapes. */
-static char *yx_regex_prioritize_repeated_class_literal_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_repeated_class_literal_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     char u, v, x, y;
     char *ordered;
-    if ((pattern->modifiers & YX_MOD_FULLWORD) || regexp[0] != '(')
-        return NULL;
+    if ((pattern->modifiers & YX_MOD_FULLWORD) || regexp[0] != '(') return NULL;
     if (length >= 3 && regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 10 || regexp[at] != '[' ||
-        regexp[at + 3] != ']' || regexp[at + 4] != '|' ||
-        regexp[at + 7] != ')' || regexp[at + 8] != '+' ||
-        regexp[at + 9] != regexp[at + 6]) return NULL;
+    if (length != at + 10 || regexp[at] != '[' || regexp[at + 3] != ']' || regexp[at + 4] != '|' || regexp[at + 7] != ')' || regexp[at + 8] != '+' ||
+        regexp[at + 9] != regexp[at + 6])
+        return NULL;
     u = regexp[at + 1];
     v = regexp[at + 2];
     x = regexp[at + 5];
     y = regexp[at + 6];
-    const unsigned char letters[] = {
-        (unsigned char)u, (unsigned char)v,
-        (unsigned char)x, (unsigned char)y
-    };
+    const unsigned char letters[] = {(unsigned char)u, (unsigned char)v, (unsigned char)x, (unsigned char)y};
     for (size_t i = 0; i < sizeof(letters); ++i)
-        if (!((letters[i] >= 'a' && letters[i] <= 'z') ||
-              (letters[i] >= 'A' && letters[i] <= 'Z'))) return NULL;
-    if (yx_fold((uint8_t)u) == yx_fold((uint8_t)v) ||
-        (yx_fold((uint8_t)x) != yx_fold((uint8_t)u) &&
-         yx_fold((uint8_t)x) != yx_fold((uint8_t)v)) ||
-        yx_fold((uint8_t)y) == yx_fold((uint8_t)u) ||
-        yx_fold((uint8_t)y) == yx_fold((uint8_t)v)) return NULL;
+        if (!((letters[i] >= 'a' && letters[i] <= 'z') || (letters[i] >= 'A' && letters[i] <= 'Z'))) return NULL;
+    if (yx_fold((uint8_t)u) == yx_fold((uint8_t)v) || (yx_fold((uint8_t)x) != yx_fold((uint8_t)u) && yx_fold((uint8_t)x) != yx_fold((uint8_t)v)) ||
+        yx_fold((uint8_t)y) == yx_fold((uint8_t)u) || yx_fold((uint8_t)y) == yx_fold((uint8_t)v))
+        return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
     memcpy(ordered, regexp, at);
@@ -5210,16 +4813,14 @@ static char *yx_regex_prioritize_repeated_class_literal_alt(
    quantifier and trailing x for this branch ordering to apply. An optional
    short-first group also favors the longer branch when x is the upper
    class member and the trailing byte is x. */
-static char *yx_regex_prioritize_repeated_class_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_repeated_class_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at, class_at, quant, suffix;
     bool short_first, greedy_bounded = false, optional = false;
     char x, u, v;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (length < 11) return NULL;
     if (regexp[0] == '^') {
         if (regexp[1] != '(') return NULL;
@@ -5229,57 +4830,40 @@ static char *yx_regex_prioritize_repeated_class_alt(
         at = 1;
     }
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length < at + 10 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at])) return NULL;
+    if (length < at + 10 || !yx_plain_regex_byte((unsigned char)regexp[at])) return NULL;
     x = regexp[at];
     short_first = regexp[at + 1] == '|';
     if (short_first) {
-        if (regexp[at + 2] != x || regexp[at + 3] != '[' ||
-            regexp[at + 6] != ']' || regexp[at + 7] != ')') return NULL;
+        if (regexp[at + 2] != x || regexp[at + 3] != '[' || regexp[at + 6] != ']' || regexp[at + 7] != ')') return NULL;
         class_at = at + 4;
     } else {
-        if (regexp[at + 1] != '[' || regexp[at + 4] != ']' ||
-            regexp[at + 5] != '|' || regexp[at + 6] != x ||
-            regexp[at + 7] != ')') return NULL;
+        if (regexp[at + 1] != '[' || regexp[at + 4] != ']' || regexp[at + 5] != '|' || regexp[at + 6] != x || regexp[at + 7] != ')') return NULL;
         class_at = at + 2;
     }
     u = regexp[class_at];
     v = regexp[class_at + 1];
-    if (!yx_plain_regex_byte((unsigned char)u) ||
-        !yx_plain_regex_byte((unsigned char)v) ||
-        u == v) return NULL;
+    if (!yx_plain_regex_byte((unsigned char)u) || !yx_plain_regex_byte((unsigned char)v) || u == v) return NULL;
     quant = at + 8;
     if (short_first) {
-        if (regexp[quant] == '?' &&
-            !(pattern->modifiers & YX_MOD_XOR)) {
+        if (regexp[quant] == '?' && !(pattern->modifiers & YX_MOD_XOR)) {
             suffix = quant + 1;
             optional = true;
-        } else if ((regexp[quant] == '*' || regexp[quant] == '+') &&
-            regexp[quant + 1] != '?') {
+        } else if ((regexp[quant] == '*' || regexp[quant] == '+') && regexp[quant + 1] != '?') {
             suffix = quant + 1;
         } else if (length >= quant + 6 &&
-                   (memcmp(regexp + quant, "{0,2}", 5) == 0 ||
-                    memcmp(regexp + quant, "{1,2}", 5) == 0 ||
-                    memcmp(regexp + quant, "{1,4}", 5) == 0)) {
+                   (memcmp(regexp + quant, "{0,2}", 5) == 0 || memcmp(regexp + quant, "{1,2}", 5) == 0 || memcmp(regexp + quant, "{1,4}", 5) == 0)) {
             suffix = quant + 5;
             greedy_bounded = true;
         } else return NULL;
-    } else if ((regexp[quant] == '*' || regexp[quant] == '+') &&
-               regexp[quant + 1] == '?') {
+    } else if ((regexp[quant] == '*' || regexp[quant] == '+') && regexp[quant + 1] == '?') {
         suffix = quant + 2;
-    } else if (length >= quant + 7 &&
-               (memcmp(regexp + quant, "{0,2}?", 6) == 0 ||
-                memcmp(regexp + quant, "{1,2}?", 6) == 0 ||
-                memcmp(regexp + quant, "{1,3}?", 6) == 0 ||
-                memcmp(regexp + quant, "{1,4}?", 6) == 0)) {
+    } else if (length >= quant + 7 && (memcmp(regexp + quant, "{0,2}?", 6) == 0 || memcmp(regexp + quant, "{1,2}?", 6) == 0 || memcmp(regexp + quant, "{1,3}?", 6) == 0 ||
+                                       memcmp(regexp + quant, "{1,4}?", 6) == 0)) {
         suffix = quant + 6;
     } else return NULL;
-    if (length != suffix + 1 ||
-        (regexp[suffix] != u && regexp[suffix] != v)) return NULL;
-    if (short_first && optional &&
-        !(u < x && v == x && regexp[suffix] == x)) return NULL;
-    if (short_first && !optional && (u == x || v == x) &&
-        !(greedy_bounded && regexp[suffix] == x)) return NULL;
+    if (length != suffix + 1 || (regexp[suffix] != u && regexp[suffix] != v)) return NULL;
+    if (short_first && optional && !(u < x && v == x && regexp[suffix] == x)) return NULL;
+    if (short_first && !optional && (u == x || v == x) && !(greedy_bounded && regexp[suffix] == x)) return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
     memcpy(ordered, regexp, length + 1);
@@ -5298,42 +4882,34 @@ static char *yx_regex_prioritize_repeated_class_alt(
 /* For this lazy grouped form, a three-letter range behaves like the
    two-byte class above: YARA-X tries x before x[u-v]. Limit the rewrite
    to an exact lowercase range and a suffix drawn from that range. */
-static char *yx_regex_prioritize_repeated_range_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_repeated_range_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1, quant, suffix_at;
     char x, lower, upper, suffix;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return NULL;
     if (length < 13) return NULL;
     if (regexp[0] == '^') {
         if (regexp[1] != '(') return NULL;
         ++at;
     } else if (regexp[0] != '(') return NULL;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length < at + 12 || regexp[at + 1] != '[' ||
-        regexp[at + 3] != '-' || regexp[at + 5] != ']' ||
-        regexp[at + 6] != '|' || regexp[at + 7] != regexp[at] ||
-        regexp[at + 8] != ')') return NULL;
+    if (length < at + 12 || regexp[at + 1] != '[' || regexp[at + 3] != '-' || regexp[at + 5] != ']' || regexp[at + 6] != '|' || regexp[at + 7] != regexp[at] ||
+        regexp[at + 8] != ')')
+        return NULL;
     quant = at + 9;
-    if (length == quant + 3 &&
-        (regexp[quant] == '*' || regexp[quant] == '+') &&
-        regexp[quant + 1] == '?') {
+    if (length == quant + 3 && (regexp[quant] == '*' || regexp[quant] == '+') && regexp[quant + 1] == '?') {
         suffix_at = quant + 2;
     } else if (length == quant + 7 &&
-               (memcmp(regexp + quant, "{0,2}?", 6) == 0 ||
-                memcmp(regexp + quant, "{1,2}?", 6) == 0 ||
-                memcmp(regexp + quant, "{1,4}?", 6) == 0)) {
+               (memcmp(regexp + quant, "{0,2}?", 6) == 0 || memcmp(regexp + quant, "{1,2}?", 6) == 0 || memcmp(regexp + quant, "{1,4}?", 6) == 0)) {
         suffix_at = quant + 6;
     } else return NULL;
     x = regexp[at];
     lower = regexp[at + 2];
     upper = regexp[at + 4];
     suffix = regexp[suffix_at];
-    if (x < 'a' || x > 'z' || lower < 'a' || lower > 'x' ||
-        upper != lower + 2 || suffix < lower || suffix > upper) return NULL;
+    if (x < 'a' || x > 'z' || lower < 'a' || lower > 'x' || upper != lower + 2 || suffix < lower || suffix > upper) return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
     memcpy(ordered, regexp, length + 1);
@@ -5346,36 +4922,30 @@ static char *yx_regex_prioritize_repeated_range_alt(
 /* A greedy bounded short-first group favors its range branch when the
    range excludes x, or when the trailing byte is x itself. Other overlaps
    can produce spans that neither fixed branch order reproduces. */
-static char *yx_regex_prioritize_bounded_range_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_bounded_range_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1, quant;
     char x, lower, upper, suffix;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return NULL;
     if (length < 16) return NULL;
     if (regexp[0] == '^') {
         if (regexp[1] != '(') return NULL;
         ++at;
     } else if (regexp[0] != '(') return NULL;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length != at + 15 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 3] != '[' ||
-        regexp[at + 5] != '-' || regexp[at + 7] != ']' ||
-        regexp[at + 8] != ')') return NULL;
+    if (length != at + 15 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 3] != '[' || regexp[at + 5] != '-' || regexp[at + 7] != ']' ||
+        regexp[at + 8] != ')')
+        return NULL;
     quant = at + 9;
-    if (memcmp(regexp + quant, "{0,2}", 5) != 0 &&
-        memcmp(regexp + quant, "{1,2}", 5) != 0 &&
-        memcmp(regexp + quant, "{1,4}", 5) != 0) return NULL;
+    if (memcmp(regexp + quant, "{0,2}", 5) != 0 && memcmp(regexp + quant, "{1,2}", 5) != 0 && memcmp(regexp + quant, "{1,4}", 5) != 0) return NULL;
     x = regexp[at];
     lower = regexp[at + 4];
     upper = regexp[at + 6];
     suffix = regexp[quant + 5];
-    if (x < 'a' || x > 'z' || lower < 'a' || lower > 'x' ||
-        upper != lower + 2 || suffix < lower || suffix > upper ||
-        (x >= lower && x <= upper && suffix != x)) return NULL;
+    if (x < 'a' || x > 'z' || lower < 'a' || lower > 'x' || upper != lower + 2 || suffix < lower || suffix > upper || (x >= lower && x <= upper && suffix != x))
+        return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
     memcpy(ordered, regexp, length + 1);
@@ -5389,9 +4959,7 @@ static char *yx_regex_prioritize_bounded_range_alt(
    at each offset. Neither PCRE2 branch order has that behavior when the
    class contains x, so solve this exact shape from right to left. The two
    saved suffix ends are the best results after consuming one or two bytes. */
-static int yx_scan_greedy_overlapping_class(YRX_PATTERN *pattern,
-                                            const uint8_t *data, size_t size,
-                                            size_t limit, bool *handled)
+static int yx_scan_greedy_overlapping_class(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
@@ -5399,26 +4967,19 @@ static int yx_scan_greedy_overlapping_class(YRX_PATTERN *pattern,
     bool anchored = regexp[0] == '^', one_or_more;
     uint8_t x, u, v, suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     if (length < 11 || regexp[anchored ? 1 : 0] != '(') return 1;
     if (anchored) ++at;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length != at + 10 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] ||
-        regexp[at + 3] != '[' || regexp[at + 6] != ']' ||
-        regexp[at + 7] != ')' ||
-        (regexp[at + 8] != '*' && regexp[at + 8] != '+') ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 4]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 5]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 9])) return 1;
+    if (length != at + 10 || !yx_plain_regex_byte((unsigned char)regexp[at]) || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 3] != '[' ||
+        regexp[at + 6] != ']' || regexp[at + 7] != ')' || (regexp[at + 8] != '*' && regexp[at + 8] != '+') || !yx_plain_regex_byte((unsigned char)regexp[at + 4]) ||
+        !yx_plain_regex_byte((unsigned char)regexp[at + 5]) || !yx_plain_regex_byte((unsigned char)regexp[at + 9]))
+        return 1;
     x = (uint8_t)regexp[at];
     u = (uint8_t)regexp[at + 4];
     v = (uint8_t)regexp[at + 5];
     suffix = (uint8_t)regexp[at + 9];
-    if (u == v || (u != x && v != x) || suffix == x ||
-        (suffix != u && suffix != v)) return 1;
+    if (u == v || (u != x && v != x) || suffix == x || (suffix != u && suffix != v)) return 1;
     one_or_more = regexp[at + 8] == '+';
     *handled = true;
     for (size_t i = size; i-- > 0;) {
@@ -5426,13 +4987,8 @@ static int yx_scan_greedy_overlapping_class(YRX_PATTERN *pattern,
         size_t repeated = SIZE_MAX;
         if (data[i] == x) {
             repeated = next_one;
-            if (i + 1 < size &&
-                (data[i + 1] == u || data[i + 1] == v) &&
-                next_two != SIZE_MAX &&
-                (repeated == SIZE_MAX || next_two > repeated))
-                repeated = next_two;
-            if (repeated != SIZE_MAX &&
-                (best == SIZE_MAX || repeated > best)) best = repeated;
+            if (i + 1 < size && (data[i + 1] == u || data[i + 1] == v) && next_two != SIZE_MAX && (repeated == SIZE_MAX || next_two > repeated)) repeated = next_two;
+            if (repeated != SIZE_MAX && (best == SIZE_MAX || repeated > best)) best = repeated;
         }
         if (!anchored || i == 0) {
             size_t end = one_or_more ? repeated : best;
@@ -5453,22 +5009,18 @@ static int yx_scan_greedy_overlapping_class(YRX_PATTERN *pattern,
    valid span when x and the trailing byte are distinct class members.
    Branch reordering alone can choose a shorter span. This small state set
    explores both one- and two-byte branches for at most four repetitions. */
-static int yx_scan_greedy_bounded_overlap(YRX_PATTERN *pattern,
-                                          const uint8_t *data, size_t size,
-                                          size_t limit, bool *handled)
+static int yx_scan_greedy_bounded_overlap(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1, class_at, close_at, quant;
     bool anchored = regexp[0] == '^', short_first, range;
     uint8_t x, lower, upper, suffix, minimum, maximum;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     if (length < 15 || regexp[anchored ? 1 : 0] != '(') return 1;
     if (anchored) ++at;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length < at + 14 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at])) return 1;
+    if (length < at + 14 || !yx_plain_regex_byte((unsigned char)regexp[at])) return 1;
     x = (uint8_t)regexp[at];
     short_first = regexp[at + 1] == '|';
     if (short_first) {
@@ -5480,20 +5032,17 @@ static int yx_scan_greedy_bounded_overlap(YRX_PATTERN *pattern,
     }
     range = regexp[class_at + 1] == '-';
     close_at = class_at + (range ? 3 : 2);
-    if (close_at + 1 >= length || regexp[close_at] != ']' ||
-        !yx_plain_regex_byte((unsigned char)regexp[class_at]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[class_at +
-                                                   (range ? 2 : 1)])) return 1;
+    if (close_at + 1 >= length || regexp[close_at] != ']' || !yx_plain_regex_byte((unsigned char)regexp[class_at]) ||
+        !yx_plain_regex_byte((unsigned char)regexp[class_at + (range ? 2 : 1)]))
+        return 1;
     lower = (uint8_t)regexp[class_at];
     upper = (uint8_t)regexp[class_at + (range ? 2 : 1)];
-    if (lower < 'a' || upper > 'z' || upper <= lower ||
-        (range && upper != lower + 2)) return 1;
+    if (lower < 'a' || upper > 'z' || upper <= lower || (range && upper != lower + 2)) return 1;
     if (short_first) {
         if (regexp[close_at + 1] != ')') return 1;
         quant = close_at + 2;
     } else {
-        if (close_at + 3 >= length || regexp[close_at + 1] != '|' ||
-            regexp[close_at + 2] != x || regexp[close_at + 3] != ')') return 1;
+        if (close_at + 3 >= length || regexp[close_at + 1] != '|' || regexp[close_at + 2] != x || regexp[close_at + 3] != ')') return 1;
         quant = close_at + 4;
     }
     if (length != quant + 6) return 1;
@@ -5509,32 +5058,24 @@ static int yx_scan_greedy_bounded_overlap(YRX_PATTERN *pattern,
     } else return 1;
     suffix = (uint8_t)regexp[quant + 5];
     if (!yx_plain_regex_byte(suffix) || suffix == x ||
-        (range ? (x < lower || x > upper ||
-                  suffix < lower || suffix > upper) :
-                 ((x != lower && x != upper) ||
-                  (suffix != lower && suffix != upper)))) return 1;
+        (range ? (x < lower || x > upper || suffix < lower || suffix > upper) : ((x != lower && x != upper) || (suffix != lower && suffix != upper))))
+        return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[9] = {true}, next[9];
         size_t available = size - offset, best = 0;
         for (unsigned count = 0; count <= maximum; ++count) {
             for (unsigned delta = 0; delta <= 2 * count; ++delta) {
-                if (reachable[delta] && count >= minimum &&
-                    delta < available && data[offset + delta] == suffix &&
-                    delta + 1 > best) best = delta + 1;
+                if (reachable[delta] && count >= minimum && delta < available && data[offset + delta] == suffix && delta + 1 > best) best = delta + 1;
             }
             if (count == maximum) break;
             memset(next, 0, sizeof(next));
             for (unsigned delta = 0; delta <= 2 * count; ++delta) {
-                if (!reachable[delta] || delta >= available ||
-                    data[offset + delta] != x) continue;
+                if (!reachable[delta] || delta >= available || data[offset + delta] != x) continue;
                 next[delta + 1] = true;
                 if (delta + 1 < available) {
                     uint8_t member = data[offset + delta + 1];
-                    if (range ? (member >= lower && member <= upper) :
-                                (member == lower || member == upper))
-                        next[delta + 2] = true;
+                    if (range ? (member >= lower && member <= upper) : (member == lower || member == upper)) next[delta + 2] = true;
                 }
             }
             memcpy(reachable, next, sizeof(reachable));
@@ -5545,9 +5086,7 @@ static int yx_scan_greedy_bounded_overlap(YRX_PATTERN *pattern,
     return 1;
 }
 
-static bool yx_parse_two_or_three_lower_class(const char *regexp,
-                                              size_t length, size_t *at,
-                                              uint32_t *mask)
+static bool yx_parse_two_or_three_lower_class(const char *regexp, size_t length, size_t *at, uint32_t *mask)
 {
     size_t pos = *at;
     bool range = false;
@@ -5557,42 +5096,32 @@ static bool yx_parse_two_or_three_lower_class(const char *regexp,
     if (regexp[pos + 3] == ']') {
         upper = regexp[pos + 2];
         *at = pos + 4;
-    } else if (pos + 4 < length && regexp[pos + 2] == '-' &&
-               regexp[pos + 4] == ']') {
+    } else if (pos + 4 < length && regexp[pos + 2] == '-' && regexp[pos + 4] == ']') {
         upper = regexp[pos + 3];
         *at = pos + 5;
         range = true;
     } else return false;
-    if (lower < 'a' || upper > 'z' || upper <= lower ||
-        (range && upper != lower + 2)) return false;
-    *mask = (UINT32_C(1) << (lower - 'a')) |
-            (UINT32_C(1) << (upper - 'a'));
+    if (lower < 'a' || upper > 'z' || upper <= lower || (range && upper != lower + 2)) return false;
+    *mask = (UINT32_C(1) << (lower - 'a')) | (UINT32_C(1) << (upper - 'a'));
     if (range) *mask |= UINT32_C(1) << (lower + 1 - 'a');
     return true;
 }
 
-static bool yx_parse_nested_one_byte_alt(const char *regexp, size_t length,
-                                         size_t *at, uint32_t *mask)
+static bool yx_parse_nested_one_byte_alt(const char *regexp, size_t length, size_t *at, uint32_t *mask)
 {
     uint32_t class_mask;
     char literal;
-    if (*at + 3 >= length || memcmp(regexp + *at, "(?:", 3) != 0)
-        return false;
+    if (*at + 3 >= length || memcmp(regexp + *at, "(?:", 3) != 0) return false;
     *at += 3;
     if (regexp[*at] == '[') {
-        if (!yx_parse_two_or_three_lower_class(regexp, length, at,
-                                               &class_mask) ||
-            *at + 2 >= length || regexp[(*at)++] != '|') return false;
+        if (!yx_parse_two_or_three_lower_class(regexp, length, at, &class_mask) || *at + 2 >= length || regexp[(*at)++] != '|') return false;
         literal = regexp[(*at)++];
     } else {
         if (*at + 2 >= length) return false;
         literal = regexp[(*at)++];
-        if (regexp[(*at)++] != '|' ||
-            !yx_parse_two_or_three_lower_class(regexp, length, at,
-                                               &class_mask)) return false;
+        if (regexp[(*at)++] != '|' || !yx_parse_two_or_three_lower_class(regexp, length, at, &class_mask)) return false;
     }
-    if (literal < 'a' || literal > 'z' || *at >= length ||
-        regexp[(*at)++] != ')') return false;
+    if (literal < 'a' || literal > 'z' || *at >= length || regexp[(*at)++] != ')') return false;
     *mask = class_mask | (UINT32_C(1) << (literal - 'a'));
     return true;
 }
@@ -5600,9 +5129,7 @@ static bool yx_parse_nested_one_byte_alt(const char *regexp, size_t length,
 /* The nested one-byte alternation and adjacent class form a two-byte unit.
    YARA-X can consume three units for {1,2} or five for {1,3}; the lazy
    {1,3}? form selects the shortest suffix-valid span within five units. */
-static int yx_scan_nested_fixed_pair(YRX_PATTERN *pattern,
-                                      const uint8_t *data, size_t size,
-                                      size_t limit, bool *handled)
+static int yx_scan_nested_fixed_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -5612,57 +5139,41 @@ static int yx_scan_nested_fixed_pair(YRX_PATTERN *pattern,
     bool lazy = false;
     char suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
     at += 3;
     if (regexp[at] == '[') {
-        if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                               &first_mask) ||
-            !yx_parse_nested_one_byte_alt(regexp, length, &at,
-                                          &second_mask)) return 1;
+        if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &first_mask) || !yx_parse_nested_one_byte_alt(regexp, length, &at, &second_mask)) return 1;
     } else {
-        if (!yx_parse_nested_one_byte_alt(regexp, length, &at,
-                                          &first_mask) ||
-            !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                               &second_mask)) return 1;
+        if (!yx_parse_nested_one_byte_alt(regexp, length, &at, &first_mask) || !yx_parse_two_or_three_lower_class(regexp, length, &at, &second_mask)) return 1;
     }
     if (at >= length || regexp[at++] != ')') return 1;
-    if (at + 6 == length && memcmp(regexp + at, "{1,2}", 5) == 0)
-        maximum = 3;
-    else if (at + 6 == length &&
-             memcmp(regexp + at, "{1,3}", 5) == 0) maximum = 5;
-    else if (at + 7 == length &&
-             memcmp(regexp + at, "{1,3}?", 6) == 0) {
+    if (at + 6 == length && memcmp(regexp + at, "{1,2}", 5) == 0) maximum = 3;
+    else if (at + 6 == length && memcmp(regexp + at, "{1,3}", 5) == 0) maximum = 5;
+    else if (at + 7 == length && memcmp(regexp + at, "{1,3}?", 6) == 0) {
         maximum = 5;
         lazy = true;
     } else return 1;
     suffix = regexp[length - 1];
     if (suffix < 'a' || suffix > 'z') return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t available = size - offset;
         for (unsigned trial = 0; trial < maximum; ++trial) {
             unsigned repetitions = lazy ? trial + 1 : maximum - trial;
-            if (available < repetitions * 2 + 1 ||
-                data[offset + repetitions * 2] != (uint8_t)suffix) continue;
+            if (available < repetitions * 2 + 1 || data[offset + repetitions * 2] != (uint8_t)suffix) continue;
             bool matched = true;
             for (unsigned pair = 0; pair < repetitions; ++pair) {
                 uint8_t first = data[offset + pair * 2];
                 uint8_t second = data[offset + pair * 2 + 1];
-                if (first < 'a' || first > 'z' ||
-                    second < 'a' || second > 'z' ||
-                    !(first_mask & (UINT32_C(1) << (first - 'a'))) ||
+                if (first < 'a' || first > 'z' || second < 'a' || second > 'z' || !(first_mask & (UINT32_C(1) << (first - 'a'))) ||
                     !(second_mask & (UINT32_C(1) << (second - 'a')))) {
                     matched = false;
                     break;
                 }
             }
             if (matched) {
-                if (!yx_add_match(pattern, offset,
-                                  repetitions * 2 + 1, limit)) return 0;
+                if (!yx_add_match(pattern, offset, repetitions * 2 + 1, limit)) return 0;
                 break;
             }
         }
@@ -5674,9 +5185,7 @@ static int yx_scan_nested_fixed_pair(YRX_PATTERN *pattern,
 /* The outer class and one-or-two-byte inner group have overlapping first
    bytes. For these three greedy outer bounds, YARA-X takes the longest
    suffix-valid span; source-order backtracking can stop earlier. */
-static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern,
-                                            const uint8_t *data, size_t size,
-                                            size_t limit, bool *handled)
+static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -5685,17 +5194,11 @@ static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern,
     unsigned minimum, maximum;
     char suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_nested_one_byte_alt(regexp, length, &at,
-                                      &inner_mask) ||
-        at + 5 >= length || memcmp(regexp + at, "{1,2}", 5) != 0)
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_nested_one_byte_alt(regexp, length, &at, &inner_mask) || at + 5 >= length || memcmp(regexp + at, "{1,2}", 5) != 0)
         return 1;
     at += 5;
     if (at + 7 != length || regexp[at++] != ')') return 1;
@@ -5712,15 +5215,12 @@ static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern,
     suffix = regexp[at + 5];
     if (suffix < 'a' || suffix > 'z') return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[7] = {true}, next[7];
         size_t available = size - offset, best = 0;
         for (unsigned count = 0; count <= maximum; ++count) {
             for (unsigned delta = 0; delta <= 2 * count; ++delta) {
-                if (reachable[delta] && count >= minimum &&
-                    delta < available && data[offset + delta] == suffix &&
-                    delta + 1 > best) best = delta + 1;
+                if (reachable[delta] && count >= minimum && delta < available && data[offset + delta] == suffix && delta + 1 > best) best = delta + 1;
             }
             if (count == maximum) break;
             memset(next, 0, sizeof(next));
@@ -5729,13 +5229,10 @@ static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern,
                 uint8_t first = data[offset + delta];
                 if (first < 'a' || first > 'z') continue;
                 uint32_t first_bit = UINT32_C(1) << (first - 'a');
-                if ((outer_mask | inner_mask) & first_bit)
-                    next[delta + 1] = true;
+                if ((outer_mask | inner_mask) & first_bit) next[delta + 1] = true;
                 if ((inner_mask & first_bit) && delta + 1 < available) {
                     uint8_t second = data[offset + delta + 1];
-                    if (second >= 'a' && second <= 'z' &&
-                        (inner_mask & (UINT32_C(1) << (second - 'a'))))
-                        next[delta + 2] = true;
+                    if (second >= 'a' && second <= 'z' && (inner_mask & (UINT32_C(1) << (second - 'a')))) next[delta + 2] = true;
                 }
             }
             memcpy(reachable, next, sizeof(reachable));
@@ -5754,9 +5251,7 @@ static int yx_scan_greedy_nested_class_alt(YRX_PATTERN *pattern,
    logical byte with its required zero high byte. With ascii wide, YARA-X's
    short-input path selects wide on a one-unit tie, while its path for inputs
    of at least 16 bytes selects ASCII. */
-static int yx_scan_bounded_overlap_class_branch(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_bounded_overlap_class_branch(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     bool anchored = regexp && regexp[0] == '^';
@@ -5768,34 +5263,23 @@ static int yx_scan_bounded_overlap_class_branch(
     size_t length;
     bool optional_suffix;
     *handled = false;
-    if (!regexp || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        regexp[anchored ? 1 : 0] != '(')
-        return 1;
+    if (!regexp || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) || regexp[anchored ? 1 : 0] != '(') return 1;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     length = strlen(regexp);
-    optional_suffix = length == at + 18 &&
-        regexp[at + 16] == regexp[at + 8] &&
-        regexp[at + 17] == '?';
-    if ((length != at + 16 && !optional_suffix) || regexp[at] != '[' ||
-        regexp[at + 3] != ']' || regexp[at + 4] != '|' ||
-        regexp[at + 6] != '[' || regexp[at + 9] != ']' ||
-        regexp[at + 10] != ')' ||
-        memcmp(regexp + at + 11, "{1,2}", 5) != 0)
+    optional_suffix = length == at + 18 && regexp[at + 16] == regexp[at + 8] && regexp[at + 17] == '?';
+    if ((length != at + 16 && !optional_suffix) || regexp[at] != '[' || regexp[at + 3] != ']' || regexp[at + 4] != '|' || regexp[at + 6] != '[' ||
+        regexp[at + 9] != ']' || regexp[at + 10] != ')' || memcmp(regexp + at + 11, "{1,2}", 5) != 0)
         return 1;
     x = (uint8_t)regexp[at + 1];
     y = (uint8_t)regexp[at + 2];
     z = (uint8_t)regexp[at + 8];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || regexp[at + 5] != (char)x ||
-        regexp[at + 7] != (char)y ||
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || regexp[at + 5] != (char)x || regexp[at + 7] != (char)y ||
         yx_fold(x) >= yx_fold(y) || yx_fold(y) >= yx_fold(z))
         return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t best_units = 0, best_span = 0;
-        for (size_t variant = 0; variant < (combined ? 2u : 1u);
-             ++variant) {
+        for (size_t variant = 0; variant < (combined ? 2u : 1u); ++variant) {
             size_t step = wide && (!combined || variant == 1) ? 2u : 1u;
             uint8_t view[5];
             size_t available = 0, span = 0;
@@ -5807,8 +5291,7 @@ static int yx_scan_bounded_overlap_class_branch(
             while (span < 3 && span < available) {
                 uint8_t byte = view[span];
                 if (nocase) byte = yx_fold(byte);
-                if (byte != (nocase ? yx_fold(x) : x) &&
-                    byte != (nocase ? yx_fold(y) : y)) break;
+                if (byte != (nocase ? yx_fold(x) : x) && byte != (nocase ? yx_fold(y) : y)) break;
                 ++span;
             }
             if (available >= 3) {
@@ -5819,25 +5302,18 @@ static int yx_scan_bounded_overlap_class_branch(
                     second = yx_fold(second);
                     third = yx_fold(third);
                 }
-                if (first == (nocase ? yx_fold(x) : x) &&
-                    (second == (nocase ? yx_fold(y) : y) ||
-                     second == (nocase ? yx_fold(z) : z)) &&
-                    (third == (nocase ? yx_fold(x) : x) ||
-                     third == (nocase ? yx_fold(y) : y))) {
+                if (first == (nocase ? yx_fold(x) : x) && (second == (nocase ? yx_fold(y) : y) || second == (nocase ? yx_fold(z) : z)) &&
+                    (third == (nocase ? yx_fold(x) : x) || third == (nocase ? yx_fold(y) : y))) {
                     size_t long_span = 3;
                     if (available >= 4) {
                         uint8_t fourth = view[3];
                         if (nocase) fourth = yx_fold(fourth);
-                        if (fourth == (nocase ? yx_fold(x) : x) ||
-                            fourth == (nocase ? yx_fold(y) : y))
-                            long_span = 4;
+                        if (fourth == (nocase ? yx_fold(x) : x) || fourth == (nocase ? yx_fold(y) : y)) long_span = 4;
                     }
                     if (long_span > span) span = long_span;
                 }
             }
-            if (span > best_units ||
-                (combined && variant == 1 && span == best_units && span &&
-                 size < 16)) {
+            if (span > best_units || (combined && variant == 1 && span == best_units && span && size < 16)) {
                 size_t total = span;
                 if (optional_suffix && total < available) {
                     uint8_t suffix_byte = view[total];
@@ -5848,8 +5324,7 @@ static int yx_scan_bounded_overlap_class_branch(
                 best_span = total * step;
             }
         }
-        if (best_span &&
-            !yx_add_match(pattern, offset, best_span, limit)) return 0;
+        if (best_span && !yx_add_match(pattern, offset, best_span, limit)) return 0;
         if (anchored) break;
     }
     return 1;
@@ -5860,44 +5335,32 @@ static int yx_scan_bounded_overlap_class_branch(
    only when the two-byte literal starts the span.
    Handle only this bounded class-first form; other alternation orders and
    modifiers use the ordinary regexp scanner. */
-static int yx_scan_bounded_class_literal_branch(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_bounded_class_literal_branch(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length, at = 1;
     uint8_t x, y, first, second;
     *handled = false;
-    if (!regexp || (pattern->modifiers != 0 &&
-                    pattern->modifiers != YX_MOD_ASCII)) return 1;
+    if (!regexp || (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII)) return 1;
     length = strlen(regexp);
     if (length < 3 || regexp[0] != '(') return 1;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 13 || regexp[at] != '[' ||
-        regexp[at + 3] != ']' || regexp[at + 4] != '|' ||
-        regexp[at + 7] != ')' ||
-        memcmp(regexp + at + 8, "{1,2}", 5) != 0) return 1;
-    x = (uint8_t) regexp[at + 1];
-    y = (uint8_t) regexp[at + 2];
-    first = (uint8_t) regexp[at + 5];
-    second = (uint8_t) regexp[at + 6];
-    if (x >= y ||
-        !((x >= 'a' && x <= 'z' && y >= 'a' && y <= 'z') ||
-          (x >= '0' && x <= '9' && y >= '0' && y <= '9')) ||
-        (first != x && first != y) ||
-        (second != x && second != y)) return 1;
+    if (length != at + 13 || regexp[at] != '[' || regexp[at + 3] != ']' || regexp[at + 4] != '|' || regexp[at + 7] != ')' || memcmp(regexp + at + 8, "{1,2}", 5) != 0)
+        return 1;
+    x = (uint8_t)regexp[at + 1];
+    y = (uint8_t)regexp[at + 2];
+    first = (uint8_t)regexp[at + 5];
+    second = (uint8_t)regexp[at + 6];
+    if (x >= y || !((x >= 'a' && x <= 'z' && y >= 'a' && y <= 'z') || (x >= '0' && x <= '9' && y >= '0' && y <= '9')) || (first != x && first != y) ||
+        (second != x && second != y))
+        return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t run = 0, span;
-        while (run < 4 && run < size - offset &&
-               (data[offset + run] == x || data[offset + run] == y))
-            ++run;
+        while (run < 4 && run < size - offset && (data[offset + run] == x || data[offset + run] == y)) ++run;
         if (!run) continue;
         span = run < 3 ? run : 3;
-        if (run == 4 && data[offset] == first &&
-            data[offset + 1] == second) span = 4;
+        if (run == 4 && data[offset] == first && data[offset + 1] == second) span = 4;
         if (!yx_add_match(pattern, offset, span, limit)) return 0;
     }
     return 1;
@@ -5906,9 +5369,7 @@ static int yx_scan_bounded_class_literal_branch(
 /* When the inner one-byte alternatives cover a, b, and c, and the outer
    class is a subset, each outer unit consumes one or two of those bytes.
    The exact {2,3} outer bound therefore covers lengths two through six. */
-static int yx_scan_greedy_nested_subset_count(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    bool *handled)
+static int yx_scan_greedy_nested_subset_count(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -5916,52 +5377,32 @@ static int yx_scan_greedy_nested_subset_count(
     uint32_t outer_mask, inner_class_mask;
     char singleton, suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at >= length || regexp[at++] != '|' ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at >= length || regexp[at++] != '|' || at + 3 >= length ||
+        memcmp(regexp + at, "(?:", 3) != 0)
         return 1;
     at += 3;
     if (regexp[at] == '[') {
-        if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                               &inner_class_mask) ||
-            at >= length || regexp[at++] != '|' || at >= length)
-            return 1;
+        if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &inner_class_mask) || at >= length || regexp[at++] != '|' || at >= length) return 1;
         singleton = regexp[at++];
     } else {
         if (at + 1 >= length) return 1;
         singleton = regexp[at++];
-        if (regexp[at++] != '|' ||
-            !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                               &inner_class_mask)) return 1;
+        if (regexp[at++] != '|' || !yx_parse_two_or_three_lower_class(regexp, length, &at, &inner_class_mask)) return 1;
     }
-    if (singleton < 'a' || singleton > 'c' ||
-        (inner_class_mask != UINT32_C(3) &&
-         inner_class_mask != UINT32_C(5) &&
-         inner_class_mask != UINT32_C(6)) ||
-        (inner_class_mask | (UINT32_C(1) << (singleton - 'a'))) !=
-            UINT32_C(7) ||
-        (outer_mask != UINT32_C(3) && outer_mask != UINT32_C(5) &&
-         outer_mask != UINT32_C(6)) ||
-        at + 13 != length || regexp[at++] != ')' ||
-        memcmp(regexp + at, "{1,2}", 5) != 0 ||
-        regexp[at + 5] != ')' ||
-        memcmp(regexp + at + 6, "{2,3}", 5) != 0)
+    if (singleton < 'a' || singleton > 'c' || (inner_class_mask != UINT32_C(3) && inner_class_mask != UINT32_C(5) && inner_class_mask != UINT32_C(6)) ||
+        (inner_class_mask | (UINT32_C(1) << (singleton - 'a'))) != UINT32_C(7) || (outer_mask != UINT32_C(3) && outer_mask != UINT32_C(5) && outer_mask != UINT32_C(6)) ||
+        at + 13 != length || regexp[at++] != ')' || memcmp(regexp + at, "{1,2}", 5) != 0 || regexp[at + 5] != ')' || memcmp(regexp + at + 6, "{2,3}", 5) != 0)
         return 1;
     suffix = regexp[at + 11];
     if (suffix != 'b' && suffix != 'c') return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t available = size - offset;
         for (unsigned count = 6; count >= 2; --count) {
-            if (available < count + 1 ||
-                data[offset + count] != (uint8_t)suffix) continue;
+            if (available < count + 1 || data[offset + count] != (uint8_t)suffix) continue;
             bool matched = true;
             for (unsigned i = 0; i < count; ++i) {
                 uint8_t ch = data[offset + i];
@@ -5971,8 +5412,7 @@ static int yx_scan_greedy_nested_subset_count(
                 }
             }
             if (matched) {
-                if (!yx_add_match(pattern, offset, count + 1, limit))
-                    return 0;
+                if (!yx_add_match(pattern, offset, count + 1, limit)) return 0;
                 break;
             }
         }
@@ -5986,19 +5426,16 @@ typedef struct {
     uint32_t masks[2];
 } YX_SMALL_REGEX_BRANCH;
 
-static bool yx_parse_small_lower_branch(const char *regexp, size_t length,
-                                        size_t *at, YX_SMALL_REGEX_BRANCH *out)
+static bool yx_parse_small_lower_branch(const char *regexp, size_t length, size_t *at, YX_SMALL_REGEX_BRANCH *out)
 {
     bool first_class = false;
     out->width = 0;
     while (*at < length && regexp[*at] != '|' && regexp[*at] != ')') {
         uint32_t mask;
         bool is_class = regexp[*at] == '[';
-        if (out->width == 2 || (out->width == 1 && first_class))
-            return false;
+        if (out->width == 2 || (out->width == 1 && first_class)) return false;
         if (is_class) {
-            if (!yx_parse_two_or_three_lower_class(regexp, length, at,
-                                                   &mask)) return false;
+            if (!yx_parse_two_or_three_lower_class(regexp, length, at, &mask)) return false;
         } else {
             char literal = regexp[(*at)++];
             if (literal < 'a' || literal > 'z') return false;
@@ -6010,15 +5447,12 @@ static bool yx_parse_small_lower_branch(const char *regexp, size_t length,
     return out->width != 0;
 }
 
-static bool yx_match_small_lower_branch(const YX_SMALL_REGEX_BRANCH *branch,
-                                        const uint8_t *data, size_t available)
+static bool yx_match_small_lower_branch(const YX_SMALL_REGEX_BRANCH *branch, const uint8_t *data, size_t available)
 {
     if (available < branch->width) return false;
     for (unsigned i = 0; i < branch->width; ++i) {
         uint8_t ch = data[i];
-        if (ch < 'a' || ch > 'z' ||
-            !(branch->masks[i] & (UINT32_C(1) << (ch - 'a'))))
-            return false;
+        if (ch < 'a' || ch > 'z' || !(branch->masks[i] & (UINT32_C(1) << (ch - 'a')))) return false;
     }
     return true;
 }
@@ -6027,9 +5461,7 @@ static bool yx_match_small_lower_branch(const YX_SMALL_REGEX_BRANCH *branch,
    produces up to four bytes per outer repetition. For these exact greedy
    bounds, YARA-X selects the longest suffix-valid path through the two
    inner repetitions and the outer class alternative. */
-static int yx_scan_greedy_nested_variable_class_alt(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    bool *handled)
+static int yx_scan_greedy_nested_variable_class_alt(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -6039,23 +5471,17 @@ static int yx_scan_greedy_nested_variable_class_alt(
     unsigned minimum, maximum;
     char suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
+    at += 3;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at >= length || regexp[at++] != '|' || at + 3 >= length ||
+        memcmp(regexp + at, "(?:", 3) != 0)
         return 1;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at >= length || regexp[at++] != '|' ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || branch[0].width + branch[1].width != 3 || at + 6 >= length || regexp[at++] != ')' ||
+        memcmp(regexp + at, "{1,2}", 5) != 0)
         return 1;
-    at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        branch[0].width + branch[1].width != 3 ||
-        at + 6 >= length || regexp[at++] != ')' ||
-        memcmp(regexp + at, "{1,2}", 5) != 0) return 1;
     at += 5;
     if (at + 7 != length || regexp[at++] != ')') return 1;
     if (memcmp(regexp + at, "{0,2}", 5) == 0) {
@@ -6071,36 +5497,26 @@ static int yx_scan_greedy_nested_variable_class_alt(
     suffix = regexp[at + 5];
     if (suffix < 'a' || suffix > 'z') return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[13] = {true}, next[13];
         size_t available = size - offset, best = 0;
         for (unsigned count = 0; count <= maximum; ++count) {
             for (unsigned delta = 0; delta <= 4 * count; ++delta) {
-                if (reachable[delta] && count >= minimum &&
-                    delta < available && data[offset + delta] == suffix &&
-                    delta + 1 > best) best = delta + 1;
+                if (reachable[delta] && count >= minimum && delta < available && data[offset + delta] == suffix && delta + 1 > best) best = delta + 1;
             }
             if (count == maximum) break;
             memset(next, 0, sizeof(next));
             for (unsigned delta = 0; delta <= 4 * count; ++delta) {
                 if (!reachable[delta] || delta >= available) continue;
                 uint8_t ch = data[offset + delta];
-                if (ch >= 'a' && ch <= 'z' &&
-                    (outer_mask & (UINT32_C(1) << (ch - 'a'))))
-                    next[delta + 1] = true;
+                if (ch >= 'a' && ch <= 'z' && (outer_mask & (UINT32_C(1) << (ch - 'a')))) next[delta + 1] = true;
                 for (unsigned first = 0; first < 2; ++first) {
                     const YX_SMALL_REGEX_BRANCH *one = &branch[first];
-                    if (!yx_match_small_lower_branch(one,
-                                                     data + offset + delta,
-                                                     available - delta))
-                        continue;
+                    if (!yx_match_small_lower_branch(one, data + offset + delta, available - delta)) continue;
                     next[delta + one->width] = true;
                     for (unsigned second = 0; second < 2; ++second) {
                         const YX_SMALL_REGEX_BRANCH *two = &branch[second];
-                        if (yx_match_small_lower_branch(
-                                two, data + offset + delta + one->width,
-                                available - delta - one->width))
+                        if (yx_match_small_lower_branch(two, data + offset + delta + one->width, available - delta - one->width))
                             next[delta + one->width + two->width] = true;
                     }
                 }
@@ -6117,79 +5533,52 @@ static int yx_scan_greedy_nested_variable_class_alt(
    suffix-valid path through the outer and inner alternatives. Keep the
    accepted syntax narrow because other nested lazy shapes have different
    verifier priorities. */
-static int yx_scan_lazy_nested_shortest_variants(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    bool *handled)
+static int yx_scan_lazy_nested_shortest_variants(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
-    static const YX_SMALL_REGEX_BRANCH first_branches[2] = {
-        {1, {UINT32_C(2), 0}},
-        {2, {UINT32_C(1), UINT32_C(6)}}
-    };
-    static const YX_SMALL_REGEX_BRANCH second_branches[2] = {
-        {1, {UINT32_C(1), 0}},
-        {2, {UINT32_C(2), UINT32_C(4)}}
-    };
+    static const YX_SMALL_REGEX_BRANCH first_branches[2] = {{1, {UINT32_C(2), 0}}, {2, {UINT32_C(1), UINT32_C(6)}}};
+    static const YX_SMALL_REGEX_BRANCH second_branches[2] = {{1, {UINT32_C(1), 0}}, {2, {UINT32_C(2), UINT32_C(4)}}};
     const char *regexp = pattern->regexp;
     const YX_SMALL_REGEX_BRANCH *branch;
     uint32_t outer_mask;
     unsigned minimum, maximum;
-    bool first_zero = strcmp(regexp,
-        "(?:[ac]|(?:b|a[bc]){1,2}?){0,2}?c") == 0;
-    bool first_one = strcmp(regexp,
-        "(?:[ac]|(?:b|a[bc]){1,2}?){1,3}?c") == 0;
-    bool second_two = strcmp(regexp,
-        "(?:[bc]|(?:a|bc){1,2}?){1,3}?c") == 0;
-    bool second_three = strcmp(regexp,
-        "(?:[a-c]|(?:bc|a){1,2}?){1,3}?c") == 0;
+    bool first_zero = strcmp(regexp, "(?:[ac]|(?:b|a[bc]){1,2}?){0,2}?c") == 0;
+    bool first_one = strcmp(regexp, "(?:[ac]|(?:b|a[bc]){1,2}?){1,3}?c") == 0;
+    bool second_two = strcmp(regexp, "(?:[bc]|(?:a|bc){1,2}?){1,3}?c") == 0;
+    bool second_three = strcmp(regexp, "(?:[a-c]|(?:bc|a){1,2}?){1,3}?c") == 0;
     *handled = false;
-    if ((!first_zero && !first_one && !second_two && !second_three) ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR))) return 1;
+    if ((!first_zero && !first_one && !second_two && !second_three) || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR))) return 1;
     branch = (first_zero || first_one) ? first_branches : second_branches;
-    outer_mask = (first_zero || first_one) ? UINT32_C(5) :
-                 (second_two ? UINT32_C(6) : UINT32_C(7));
+    outer_mask = (first_zero || first_one) ? UINT32_C(5) : (second_two ? UINT32_C(6) : UINT32_C(7));
     minimum = first_zero ? 0 : 1;
     maximum = first_zero ? 2 : 3;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[13] = {true}, next[13];
         size_t available = size - offset, best = SIZE_MAX;
         for (unsigned count = 0; count <= maximum; ++count) {
             for (unsigned delta = 0; delta <= 4 * count; ++delta) {
-                if (reachable[delta] && count >= minimum &&
-                    delta < available && data[offset + delta] == 'c' &&
-                    delta + 1 < best) best = delta + 1;
+                if (reachable[delta] && count >= minimum && delta < available && data[offset + delta] == 'c' && delta + 1 < best) best = delta + 1;
             }
             if (count == maximum) break;
             memset(next, 0, sizeof(next));
             for (unsigned delta = 0; delta <= 4 * count; ++delta) {
                 if (!reachable[delta] || delta >= available) continue;
                 uint8_t ch = data[offset + delta];
-                if (ch >= 'a' && ch <= 'z' &&
-                    (outer_mask & (UINT32_C(1) << (ch - 'a'))))
-                    next[delta + 1] = true;
+                if (ch >= 'a' && ch <= 'z' && (outer_mask & (UINT32_C(1) << (ch - 'a')))) next[delta + 1] = true;
                 for (unsigned first = 0; first < 2; ++first) {
                     const YX_SMALL_REGEX_BRANCH *one = &branch[first];
-                    if (!yx_match_small_lower_branch(one,
-                                                     data + offset + delta,
-                                                     available - delta))
-                        continue;
+                    if (!yx_match_small_lower_branch(one, data + offset + delta, available - delta)) continue;
                     size_t after_one = delta + one->width;
                     next[after_one] = true;
                     for (unsigned second = 0; second < 2; ++second) {
                         const YX_SMALL_REGEX_BRANCH *two = &branch[second];
-                        if (yx_match_small_lower_branch(
-                                two, data + offset + after_one,
-                                available - after_one))
-                            next[after_one + two->width] = true;
+                        if (yx_match_small_lower_branch(two, data + offset + after_one, available - after_one)) next[after_one + two->width] = true;
                     }
                 }
             }
             memcpy(reachable, next, sizeof(reachable));
         }
-        if (best != SIZE_MAX &&
-            !yx_add_match(pattern, offset, best, limit)) return 0;
+        if (best != SIZE_MAX && !yx_add_match(pattern, offset, best, limit)) return 0;
     }
     return 1;
 }
@@ -6198,9 +5587,7 @@ static int yx_scan_lazy_nested_shortest_variants(
    bounds when the inner branches do not form a literal x|xy prefix pair.
    That prefix pair has separate verifier behavior and remains on the regex
    engine path. */
-static int yx_scan_greedy_nested_counted_class(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    bool *handled)
+static int yx_scan_greedy_nested_counted_class(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -6209,22 +5596,15 @@ static int yx_scan_greedy_nested_counted_class(
     uint32_t class_mask;
     char suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0)
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0) return 1;
     at += 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        branch[0].width + branch[1].width > 3 ||
-        at + 6 >= length || regexp[at++] != ')' ||
-        memcmp(regexp + at, "{1,2}", 5) != 0) return 1;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || branch[0].width + branch[1].width > 3 || at + 6 >= length || regexp[at++] != ')' ||
+        memcmp(regexp + at, "{1,2}", 5) != 0)
+        return 1;
     at += 5;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask) ||
-        at + 7 != length || regexp[at++] != ')' ||
-        memcmp(regexp + at, "{1,2}", 5) != 0) return 1;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask) || at + 7 != length || regexp[at++] != ')' || memcmp(regexp + at, "{1,2}", 5) != 0) return 1;
     suffix = regexp[at + 5];
     if (suffix < 'a' || suffix > 'z') return 1;
     if (branch[0].width != branch[1].width) {
@@ -6232,20 +5612,15 @@ static int yx_scan_greedy_nested_counted_class(
         unsigned long_at = 1 - short_at;
         uint32_t single = branch[short_at].masks[0];
         uint32_t tail = branch[long_at].masks[1];
-        if ((single & (single - 1)) == 0 &&
-            (tail & (tail - 1)) == 0 &&
-            single == branch[long_at].masks[0]) return 1;
+        if ((single & (single - 1)) == 0 && (tail & (tail - 1)) == 0 && single == branch[long_at].masks[0]) return 1;
     }
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[11] = {true}, next[11];
         size_t available = size - offset, best = 0;
         for (unsigned count = 0; count <= 2; ++count) {
             for (unsigned delta = 0; delta <= 5 * count; ++delta) {
-                if (reachable[delta] && count && delta < available &&
-                    data[offset + delta] == suffix && delta + 1 > best)
-                    best = delta + 1;
+                if (reachable[delta] && count && delta < available && data[offset + delta] == suffix && delta + 1 > best) best = delta + 1;
             }
             if (count == 2) break;
             memset(next, 0, sizeof(next));
@@ -6253,28 +5628,19 @@ static int yx_scan_greedy_nested_counted_class(
                 if (!reachable[delta] || delta >= available) continue;
                 for (unsigned first = 0; first < 2; ++first) {
                     const YX_SMALL_REGEX_BRANCH *one = &branch[first];
-                    if (!yx_match_small_lower_branch(one,
-                                                     data + offset + delta,
-                                                     available - delta))
-                        continue;
+                    if (!yx_match_small_lower_branch(one, data + offset + delta, available - delta)) continue;
                     size_t after_one = delta + one->width;
                     if (after_one < available) {
                         uint8_t ch = data[offset + after_one];
-                        if (ch >= 'a' && ch <= 'z' &&
-                            (class_mask & (UINT32_C(1) << (ch - 'a'))))
-                            next[after_one + 1] = true;
+                        if (ch >= 'a' && ch <= 'z' && (class_mask & (UINT32_C(1) << (ch - 'a')))) next[after_one + 1] = true;
                     }
                     for (unsigned second = 0; second < 2; ++second) {
                         const YX_SMALL_REGEX_BRANCH *two = &branch[second];
-                        if (!yx_match_small_lower_branch(
-                                two, data + offset + after_one,
-                                available - after_one)) continue;
+                        if (!yx_match_small_lower_branch(two, data + offset + after_one, available - after_one)) continue;
                         size_t after_two = after_one + two->width;
                         if (after_two < available) {
                             uint8_t ch = data[offset + after_two];
-                            if (ch >= 'a' && ch <= 'z' &&
-                                (class_mask & (UINT32_C(1) << (ch - 'a'))))
-                                next[after_two + 1] = true;
+                            if (ch >= 'a' && ch <= 'z' && (class_mask & (UINT32_C(1) << (ch - 'a')))) next[after_two + 1] = true;
                         }
                     }
                 }
@@ -6287,24 +5653,17 @@ static int yx_scan_greedy_nested_counted_class(
     return 1;
 }
 
-static size_t yx_match_nested_pair_first_long(
-    const uint8_t *data, size_t size, size_t at,
-    const YX_SMALL_REGEX_BRANCH branch[2], uint32_t class_mask,
-    uint8_t suffix, unsigned remaining, bool first)
+static size_t yx_match_nested_pair_first_long(const uint8_t *data, size_t size, size_t at, const YX_SMALL_REGEX_BRANCH branch[2], uint32_t class_mask, uint8_t suffix,
+                                              unsigned remaining, bool first)
 {
-    if (remaining == 0)
-        return at < size && data[at] == suffix ? at + 1 : 0;
-    if (at >= size || data[at] < 'a' || data[at] > 'z' ||
-        !(class_mask & (UINT32_C(1) << (data[at] - 'a')))) return 0;
+    if (remaining == 0) return at < size && data[at] == suffix ? at + 1 : 0;
+    if (at >= size || data[at] < 'a' || data[at] > 'z' || !(class_mask & (UINT32_C(1) << (data[at] - 'a')))) return 0;
     for (unsigned choice = 0; choice < 2; ++choice) {
         unsigned index = first ? 1 - choice : choice;
         const YX_SMALL_REGEX_BRANCH *item = &branch[index];
         size_t branch_at = at + 1;
-        if (!yx_match_small_lower_branch(item, data + branch_at,
-                                         size - branch_at)) continue;
-        size_t end = yx_match_nested_pair_first_long(
-            data, size, branch_at + item->width, branch, class_mask,
-            suffix, remaining - 1, false);
+        if (!yx_match_small_lower_branch(item, data + branch_at, size - branch_at)) continue;
+        size_t end = yx_match_nested_pair_first_long(data, size, branch_at + item->width, branch, class_mask, suffix, remaining - 1, false);
         if (end) return end;
     }
     return 0;
@@ -6313,9 +5672,7 @@ static size_t yx_match_nested_pair_first_long(
 /* For disjoint branch starts, and for certain overlapping short classes,
    YARA-X takes the longest suffix-valid span through the verified effective
    bounds. */
-static int yx_scan_greedy_nested_pair(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    bool *handled)
+static int yx_scan_greedy_nested_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -6325,26 +5682,17 @@ static int yx_scan_greedy_nested_pair(
     unsigned maximum;
     char suffix;
     *handled = false;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
     at += 3;
     class_first = regexp[at] == '[';
-    if (class_first &&
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask)) return 1;
-    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return 1;
+    if (class_first && !yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask)) return 1;
+    if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return 1;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        branch[0].width + branch[1].width != 3 ||
-        at >= length || regexp[at++] != ')') return 1;
-    if (!class_first &&
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask)) return 1;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || branch[0].width + branch[1].width != 3 || at >= length || regexp[at++] != ')')
+        return 1;
+    if (!class_first && !yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask)) return 1;
     if (at + 7 != length || regexp[at++] != ')') return 1;
     if (memcmp(regexp + at, "{1,2}", 5) == 0) maximum = 3;
     else if (memcmp(regexp + at, "{1,3}", 5) == 0) maximum = 5;
@@ -6359,55 +5707,32 @@ static int yx_scan_greedy_nested_pair(
     uint32_t one_removed = single & (single - 1);
     uint32_t suffix_bit = UINT32_C(1) << (suffix - 'a');
     bool disjoint_literal = one_removed == 0 && single != first;
-    bool overlap_class = !class_first && maximum == 3 &&
-        single == class_mask && one_removed != 0 &&
-        (one_removed & (one_removed - 1)) == 0 &&
-        (single & first) != 0 && (single & tail) == 0 &&
-        (tail & (tail - 1)) == 0 &&
-        (single & suffix_bit) != 0;
-    bool anchored_class_overlap = anchored && class_first &&
-        maximum == 5 && short_at == 0 && one_removed != 0 &&
-        (one_removed & (one_removed - 1)) == 0 &&
-        (first & (first - 1)) == 0 &&
-        (tail & (tail - 1)) == 0 &&
-        (single & first) != 0 && (single & tail) == 0 &&
-        class_mask == (first | tail) && suffix_bit == first;
-    bool outer_suffix_overlap = class_first && maximum == 3 &&
-        short_at == 0 && one_removed != 0 &&
-        (one_removed & (one_removed - 1)) == 0 &&
-        (first & (first - 1)) == 0 &&
-        (tail & (tail - 1)) == 0 &&
-        first != tail && first != suffix_bit && tail != suffix_bit &&
-        single == (first | suffix_bit) &&
-        class_mask == (tail | suffix_bit);
-    if (!disjoint_literal && !overlap_class && !anchored_class_overlap &&
-        !outer_suffix_overlap)
-        return 1;
+    bool overlap_class = !class_first && maximum == 3 && single == class_mask && one_removed != 0 && (one_removed & (one_removed - 1)) == 0 && (single & first) != 0 &&
+                         (single & tail) == 0 && (tail & (tail - 1)) == 0 && (single & suffix_bit) != 0;
+    bool anchored_class_overlap = anchored && class_first && maximum == 5 && short_at == 0 && one_removed != 0 && (one_removed & (one_removed - 1)) == 0 &&
+                                  (first & (first - 1)) == 0 && (tail & (tail - 1)) == 0 && (single & first) != 0 && (single & tail) == 0 &&
+                                  class_mask == (first | tail) && suffix_bit == first;
+    bool outer_suffix_overlap = class_first && maximum == 3 && short_at == 0 && one_removed != 0 && (one_removed & (one_removed - 1)) == 0 &&
+                                (first & (first - 1)) == 0 && (tail & (tail - 1)) == 0 && first != tail && first != suffix_bit && tail != suffix_bit &&
+                                single == (first | suffix_bit) && class_mask == (tail | suffix_bit);
+    if (!disjoint_literal && !overlap_class && !anchored_class_overlap && !outer_suffix_overlap) return 1;
     *handled = true;
     if (outer_suffix_overlap) {
-        for (size_t offset = 0; offset < size &&
-                                (!limit || pattern->match_count < limit);
-             ++offset) {
+        for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
             size_t end = 0;
             for (unsigned count = 3; count != 0 && !end; --count)
-                end = yx_match_nested_pair_first_long(
-                    data, size, offset, branch, class_mask,
-                    (uint8_t)suffix, count, true);
-            if (end && !yx_add_match(pattern, offset, end - offset, limit))
-                return 0;
+                end = yx_match_nested_pair_first_long(data, size, offset, branch, class_mask, (uint8_t)suffix, count, true);
+            if (end && !yx_add_match(pattern, offset, end - offset, limit)) return 0;
             if (anchored) break;
         }
         return 1;
     }
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit); ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         bool reachable[16] = {true}, next[16];
         size_t available = size - offset, best = 0;
         for (unsigned count = 0; count <= maximum; ++count) {
             for (unsigned delta = 0; delta <= 3 * count; ++delta) {
-                if (reachable[delta] && count && delta < available &&
-                    data[offset + delta] == suffix && delta + 1 > best)
-                    best = delta + 1;
+                if (reachable[delta] && count && delta < available && data[offset + delta] == suffix && delta + 1 > best) best = delta + 1;
             }
             if (count == maximum) break;
             memset(next, 0, sizeof(next));
@@ -6417,14 +5742,9 @@ static int yx_scan_greedy_nested_pair(
                     const YX_SMALL_REGEX_BRANCH *item = &branch[b];
                     size_t branch_at = delta + (class_first ? 1 : 0);
                     size_t class_at = delta + (class_first ? 0 : item->width);
-                    if (class_at >= available || branch_at > available ||
-                        !yx_match_small_lower_branch(
-                            item, data + offset + branch_at,
-                            available - branch_at)) continue;
+                    if (class_at >= available || branch_at > available || !yx_match_small_lower_branch(item, data + offset + branch_at, available - branch_at)) continue;
                     uint8_t ch = data[offset + class_at];
-                    if (ch >= 'a' && ch <= 'z' &&
-                        (class_mask & (UINT32_C(1) << (ch - 'a'))))
-                        next[delta + item->width + 1] = true;
+                    if (ch >= 'a' && ch <= 'z' && (class_mask & (UINT32_C(1) << (ch - 'a')))) next[delta + item->width + 1] = true;
                 }
             }
             memcpy(reachable, next, sizeof(reachable));
@@ -6438,8 +5758,7 @@ static int yx_scan_greedy_nested_pair(
 /* In this short-first overlap, the verifier may consume more two-byte short
    units than the written bound. Retain existing hits and branch priority;
    extend only when a complete short-unit path and suffix match. */
-static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
-                                         const uint8_t *data, size_t size)
+static void yx_extend_nested_short_units(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 0;
@@ -6447,30 +5766,21 @@ static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
     unsigned maximum, minimum;
     uint32_t outer_mask, short_mask, first_mask, tail_mask, suffix_mask;
     YX_SMALL_REGEX_BRANCH branch[2];
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR)) return;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return;
     if (length < 20 || memcmp(regexp, "(?:", 3) != 0) return;
     at = 3;
     class_first = regexp[at] == '[';
-    if (class_first &&
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask)) return;
+    if (class_first && !yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask)) return;
     if (at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')') return;
-    if (!class_first &&
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask)) return;
-    if (at + 7 != length || regexp[at++] != ')' ||
-        regexp[at + 5] < 'a' || regexp[at + 5] > 'z' ||
-        branch[0].width != 1 || branch[1].width != 2) return;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')')
+        return;
+    if (!class_first && !yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask)) return;
+    if (at + 7 != length || regexp[at++] != ')' || regexp[at + 5] < 'a' || regexp[at + 5] > 'z' || branch[0].width != 1 || branch[1].width != 2) return;
     if (memcmp(regexp + at, "{1,2}", 5) == 0) {
         maximum = minimum = 3;
-    } else if (class_first &&
-               memcmp(regexp + at, "{1,3}", 5) == 0) {
+    } else if (class_first && memcmp(regexp + at, "{1,3}", 5) == 0) {
         maximum = 5;
         minimum = 1;
     } else return;
@@ -6478,22 +5788,14 @@ static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
     first_mask = branch[1].masks[0];
     tail_mask = branch[1].masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
-    if (short_mask == 0 ||
-        (short_mask & (short_mask - 1)) == 0 ||
-        ((short_mask & (short_mask - 1)) &
-         ((short_mask & (short_mask - 1)) - 1)) != 0 ||
-        (first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || suffix_mask != tail_mask ||
-        outer_mask != (first_mask | tail_mask) ||
-        (short_mask & first_mask) == 0 ||
-        (short_mask & tail_mask) != 0) return;
+    if (short_mask == 0 || (short_mask & (short_mask - 1)) == 0 || ((short_mask & (short_mask - 1)) & ((short_mask & (short_mask - 1)) - 1)) != 0 ||
+        (first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || suffix_mask != tail_mask ||
+        outer_mask != (first_mask | tail_mask) || (short_mask & first_mask) == 0 || (short_mask & tail_mask) != 0)
+        return;
     uint8_t first_byte = 'a', tail_byte = 'a';
     for (unsigned bit = 0; bit < 26; ++bit) {
-        if (first_mask & (UINT32_C(1) << bit))
-            first_byte = (uint8_t)('a' + bit);
-        if (tail_mask & (UINT32_C(1) << bit))
-            tail_byte = (uint8_t)('a' + bit);
+        if (first_mask & (UINT32_C(1) << bit)) first_byte = (uint8_t)('a' + bit);
+        if (tail_mask & (UINT32_C(1) << bit)) tail_byte = (uint8_t)('a' + bit);
     }
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
@@ -6504,13 +5806,9 @@ static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
             bool complete = true;
             if (size - offset < width || match->length >= width) continue;
             for (unsigned repeat = 0; repeat < count; ++repeat) {
-                uint8_t outer = data[offset + repeat * 2 +
-                                     (class_first ? 0 : 1)];
-                uint8_t short_byte = data[offset + repeat * 2 +
-                                          (class_first ? 1 : 0)];
-                if (outer < 'a' || outer > 'z' ||
-                    short_byte < 'a' || short_byte > 'z' ||
-                    !(outer_mask & (UINT32_C(1) << (outer - 'a'))) ||
+                uint8_t outer = data[offset + repeat * 2 + (class_first ? 0 : 1)];
+                uint8_t short_byte = data[offset + repeat * 2 + (class_first ? 1 : 0)];
+                if (outer < 'a' || outer > 'z' || short_byte < 'a' || short_byte > 'z' || !(outer_mask & (UINT32_C(1) << (outer - 'a'))) ||
                     !(short_mask & (UINT32_C(1) << (short_byte - 'a')))) {
                     complete = false;
                     break;
@@ -6524,8 +5822,7 @@ static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
         if (!class_first && match->length < 8 && size - offset >= 8) {
             bool repeated_pair = true;
             for (unsigned repeat = 0; repeat < 4; ++repeat)
-                if (data[offset + repeat * 2] != first_byte ||
-                    data[offset + repeat * 2 + 1] != tail_byte) {
+                if (data[offset + repeat * 2] != first_byte || data[offset + repeat * 2 + 1] != tail_byte) {
                     repeated_pair = false;
                     break;
                 }
@@ -6537,151 +5834,101 @@ static void yx_extend_nested_short_units(YRX_PATTERN *pattern,
 /* With an anchored three-byte trailing class, the short branch can consume
    three units when it starts before the long literal branch. If the long
    branch matches at the start, its priority determines a different span. */
-static void yx_extend_anchored_branch_short_units(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_anchored_branch_short_units(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     YX_SMALL_REGEX_BRANCH branch[2];
     uint32_t class_mask, short_mask, first_mask, tail_mask, suffix_mask;
-    if (size < 7 || pattern->match_count == 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        length < 20 || regexp[0] != '^' ||
-        memcmp(regexp + at, "(?:(?:", 6) != 0) return;
+    if (size < 7 || pattern->match_count == 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || length < 20 || regexp[0] != '^' ||
+        memcmp(regexp + at, "(?:(?:", 6) != 0)
+        return;
     at += 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask) ||
-        at >= length || regexp[at++] != ')' ||
-        at + 6 != length ||
-        memcmp(regexp + at, "{1,2}", 5) != 0 ||
-        regexp[at + 5] < 'a' || regexp[at + 5] > 'z' ||
-        branch[0].width != 1 || branch[1].width != 2) return;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' ||
+        !yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask) || at >= length || regexp[at++] != ')' || at + 6 != length ||
+        memcmp(regexp + at, "{1,2}", 5) != 0 || regexp[at + 5] < 'a' || regexp[at + 5] > 'z' || branch[0].width != 1 || branch[1].width != 2)
+        return;
     short_mask = branch[0].masks[0];
     first_mask = branch[1].masks[0];
     tail_mask = branch[1].masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || first_mask == suffix_mask ||
-        tail_mask == suffix_mask ||
-        short_mask != (first_mask | suffix_mask) ||
-        class_mask != (short_mask | tail_mask) ||
-        yx_match_small_lower_branch(&branch[1], data, size) ||
-        data[6] != regexp[at + 5]) return;
+    if ((first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || first_mask == suffix_mask || tail_mask == suffix_mask ||
+        short_mask != (first_mask | suffix_mask) || class_mask != (short_mask | tail_mask) || yx_match_small_lower_branch(&branch[1], data, size) ||
+        data[6] != regexp[at + 5])
+        return;
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
         uint8_t short_byte = data[repeat * 2];
         uint8_t class_byte = data[repeat * 2 + 1];
-        if (short_byte < 'a' || short_byte > 'z' ||
-            class_byte < 'a' || class_byte > 'z' ||
-            !(short_mask & (UINT32_C(1) << (short_byte - 'a'))) ||
+        if (short_byte < 'a' || short_byte > 'z' || class_byte < 'a' || class_byte > 'z' || !(short_mask & (UINT32_C(1) << (short_byte - 'a'))) ||
             !(class_mask & (UINT32_C(1) << (class_byte - 'a'))))
             return;
     }
     for (size_t i = 0; i < pattern->match_count; ++i)
-        if (pattern->matches[i].offset == 0 &&
-            pattern->matches[i].length < 7)
-            pattern->matches[i].length = 7;
+        if (pattern->matches[i].offset == 0 && pattern->matches[i].length < 7) pattern->matches[i].length = 7;
 }
 
-static size_t yx_match_three_branch_first_end(
-    const uint8_t *data, size_t size, size_t at, unsigned remaining,
-    uint32_t short_mask, uint32_t class_mask,
-    uint8_t first, uint8_t tail, uint8_t suffix)
+static size_t yx_match_three_branch_first_end(const uint8_t *data, size_t size, size_t at, unsigned remaining, uint32_t short_mask, uint32_t class_mask, uint8_t first,
+                                              uint8_t tail, uint8_t suffix)
 {
-    if (remaining == 0)
-        return at < size && data[at] == suffix ? at + 1 : 0;
+    if (remaining == 0) return at < size && data[at] == suffix ? at + 1 : 0;
     if (at >= size) return 0;
     if (size - at >= 2) {
         uint8_t short_byte = data[at], class_byte = data[at + 1];
-        if (short_byte >= 'a' && short_byte <= 'z' &&
-            class_byte >= 'a' && class_byte <= 'z' &&
-            (short_mask & (UINT32_C(1) << (short_byte - 'a'))) &&
+        if (short_byte >= 'a' && short_byte <= 'z' && class_byte >= 'a' && class_byte <= 'z' && (short_mask & (UINT32_C(1) << (short_byte - 'a'))) &&
             (class_mask & (UINT32_C(1) << (class_byte - 'a')))) {
-            size_t end = yx_match_three_branch_first_end(
-                data, size, at + 2, remaining - 1, short_mask, class_mask,
-                first, tail, suffix);
+            size_t end = yx_match_three_branch_first_end(data, size, at + 2, remaining - 1, short_mask, class_mask, first, tail, suffix);
             if (end) return end;
         }
     }
     if (size - at >= 3 && data[at] == first && data[at + 1] == tail) {
         uint8_t class_byte = data[at + 2];
-        if (class_byte >= 'a' && class_byte <= 'z' &&
-            (class_mask & (UINT32_C(1) << (class_byte - 'a'))))
-            return yx_match_three_branch_first_end(
-                data, size, at + 3, remaining - 1, short_mask, class_mask,
-                first, tail, suffix);
+        if (class_byte >= 'a' && class_byte <= 'z' && (class_mask & (UINT32_C(1) << (class_byte - 'a'))))
+            return yx_match_three_branch_first_end(data, size, at + 3, remaining - 1, short_mask, class_mask, first, tail, suffix);
     }
     return 0;
 }
 
 /* The verifier exposes some third-unit hits that PCRE2's written {1,2}
    bound misses. Preserve every existing span and add only missing offsets. */
-static int yx_add_missing_three_branch_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static int yx_add_missing_three_branch_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 0;
     YX_SMALL_REGEX_BRANCH branch[2];
     uint32_t class_mask, short_mask, first_mask, tail_mask, suffix_mask;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                              YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     if (length < 20 || memcmp(regexp, "(?:(?:", 6) != 0) return 1;
     at = 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask) ||
-        at >= length || regexp[at++] != ')' ||
-        at + 6 != length ||
-        memcmp(regexp + at, "{1,2}", 5) != 0 ||
-        regexp[at + 5] < 'a' || regexp[at + 5] > 'z' ||
-        branch[0].width != 1 || branch[1].width != 2) return 1;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' ||
+        !yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask) || at >= length || regexp[at++] != ')' || at + 6 != length ||
+        memcmp(regexp + at, "{1,2}", 5) != 0 || regexp[at + 5] < 'a' || regexp[at + 5] > 'z' || branch[0].width != 1 || branch[1].width != 2)
+        return 1;
     short_mask = branch[0].masks[0];
     first_mask = branch[1].masks[0];
     tail_mask = branch[1].masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || suffix_mask != tail_mask ||
-        class_mask != (first_mask | tail_mask) ||
-        short_mask == 0 ||
-        (short_mask & (short_mask - 1)) == 0 ||
-        ((short_mask & (short_mask - 1)) &
-         ((short_mask & (short_mask - 1)) - 1)) != 0 ||
-        (short_mask & first_mask) == 0 ||
-        (short_mask & tail_mask) != 0) return 1;
+    if ((first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || suffix_mask != tail_mask ||
+        class_mask != (first_mask | tail_mask) || short_mask == 0 || (short_mask & (short_mask - 1)) == 0 ||
+        ((short_mask & (short_mask - 1)) & ((short_mask & (short_mask - 1)) - 1)) != 0 || (short_mask & first_mask) == 0 || (short_mask & tail_mask) != 0)
+        return 1;
     size_t original_count = pattern->match_count;
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     uint8_t first = 'a', tail = 'a';
     for (unsigned bit = 0; bit < 26; ++bit) {
-        if (first_mask & (UINT32_C(1) << bit))
-            first = (uint8_t)('a' + bit);
-        if (tail_mask & (UINT32_C(1) << bit))
-            tail = (uint8_t)('a' + bit);
+        if (first_mask & (UINT32_C(1) << bit)) first = (uint8_t)('a' + bit);
+        if (tail_mask & (UINT32_C(1) << bit)) tail = (uint8_t)('a' + bit);
     }
     for (size_t offset = 0; offset < size; ++offset) {
         size_t left = 0, right = original_count;
         while (left < right) {
             size_t middle = left + (right - left) / 2;
-            if (pattern->matches[middle].offset < offset)
-                left = middle + 1;
+            if (pattern->matches[middle].offset < offset) left = middle + 1;
             else right = middle;
         }
-        if (left < original_count &&
-            pattern->matches[left].offset == offset) continue;
-        size_t end = yx_match_three_branch_first_end(
-            data, size, offset, 3, short_mask, class_mask,
-            first, tail,
-            (uint8_t)regexp[at + 5]);
+        if (left < original_count && pattern->matches[left].offset == offset) continue;
+        size_t end = yx_match_three_branch_first_end(data, size, offset, 3, short_mask, class_mask, first, tail, (uint8_t)regexp[at + 5]);
         if (end && !yx_add_match(pattern, offset, end - offset, 0)) return 0;
     }
     return 1;
@@ -6690,26 +5937,17 @@ static int yx_add_missing_three_branch_first(
 /* The verifier can expose a third two-byte unit for this bounded,
    class-first form. Keep the spans found by the regular scan and add only
    offsets for which that third short-unit path was omitted. */
-static int yx_add_missing_three_class_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static int yx_add_missing_three_class_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,2}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)))
-        return 1;
+    if (strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,2}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR))) return 1;
     size_t original_count = pattern->match_count;
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     if (size < 7) return 1;
     for (size_t offset = 0; offset <= size - 7; ++offset) {
         if (data[offset + 6] != 'c') continue;
         bool three_short_units = true;
         for (unsigned unit = 0; unit < 3; ++unit) {
-            if ((data[offset + unit * 2] != 'b' &&
-                 data[offset + unit * 2] != 'c') ||
-                (data[offset + unit * 2 + 1] != 'a' &&
-                 data[offset + unit * 2 + 1] != 'b')) {
+            if ((data[offset + unit * 2] != 'b' && data[offset + unit * 2] != 'c') || (data[offset + unit * 2 + 1] != 'a' && data[offset + unit * 2 + 1] != 'b')) {
                 three_short_units = false;
                 break;
             }
@@ -6718,12 +5956,10 @@ static int yx_add_missing_three_class_first(
         size_t left = 0, right = original_count;
         while (left < right) {
             size_t middle = left + (right - left) / 2;
-            if (pattern->matches[middle].offset < offset)
-                left = middle + 1;
+            if (pattern->matches[middle].offset < offset) left = middle + 1;
             else right = middle;
         }
-        if (left == original_count ||
-            pattern->matches[left].offset != offset) {
+        if (left == original_count || pattern->matches[left].offset != offset) {
             if (!yx_add_match(pattern, offset, 7, 0)) return 0;
         }
     }
@@ -6732,22 +5968,15 @@ static int yx_add_missing_three_class_first(
 
 /* When both repetitions use the long "bc" branch, the verifier retains
    the seven-byte path even if the host regexp chose a shorter overlap. */
-static void yx_extend_two_long_group_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_two_long_group_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 7)
+    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 7)
         return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (match->length >= 7 || offset > size - 7 ||
-            data[offset] != 'b' || data[offset + 1] != 'c' ||
-            (data[offset + 2] != 'b' && data[offset + 2] != 'c') ||
-            data[offset + 3] != 'b' || data[offset + 4] != 'c' ||
-            (data[offset + 5] != 'b' && data[offset + 5] != 'c') ||
-            data[offset + 6] != 'c')
+        if (match->length >= 7 || offset > size - 7 || data[offset] != 'b' || data[offset + 1] != 'c' || (data[offset + 2] != 'b' && data[offset + 2] != 'c') ||
+            data[offset + 3] != 'b' || data[offset + 4] != 'c' || (data[offset + 5] != 'b' && data[offset + 5] != 'c') || data[offset + 6] != 'c')
             continue;
         match->length = 7;
     }
@@ -6757,201 +5986,125 @@ static void yx_extend_two_long_group_first(
    branch takes priority over the shorter host-engine result. When the next
    byte is also 'c', the verifier stops at the six-byte suffix rather than
    extending the second long branch through that byte. */
-static void yx_adjust_long_then_short_group_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_adjust_long_then_short_group_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 6)
+    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 6)
         return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (offset > size - 6 || data[offset] != 'b' ||
-            data[offset + 1] != 'c' ||
-            (data[offset + 2] != 'b' && data[offset + 2] != 'c') ||
-            (data[offset + 3] != 'a' && data[offset + 3] != 'b') ||
-            (data[offset + 4] != 'b' && data[offset + 4] != 'c') ||
-            data[offset + 5] != 'c')
+        if (offset > size - 6 || data[offset] != 'b' || data[offset + 1] != 'c' || (data[offset + 2] != 'b' && data[offset + 2] != 'c') ||
+            (data[offset + 3] != 'a' && data[offset + 3] != 'b') || (data[offset + 4] != 'b' && data[offset + 4] != 'c') || data[offset + 5] != 'c')
             continue;
-        if (match->length < 6)
-            match->length = 6;
-        else if (match->length == 7 && size >= 7 && offset <= size - 7 &&
-                 data[offset + 3] == 'b' && data[offset + 4] == 'c' &&
-                 data[offset + 6] == 'c')
+        if (match->length < 6) match->length = 6;
+        else if (match->length == 7 && size >= 7 && offset <= size - 7 && data[offset + 3] == 'b' && data[offset + 4] == 'c' && data[offset + 6] == 'c')
             match->length = 6;
     }
 }
 
 /* The bounded group-first verifier also admits a third repetition. Its
    priority depends on which repetition uses the two-byte inner branch. */
-static void yx_extend_three_group_first_units(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_three_group_first_units(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 8)
+    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 8)
         return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (match->length >= 8 || offset > size - 8 ||
-            data[offset + 7] != 'c')
-            continue;
-        bool short_short_long =
-            (data[offset] == 'a' || data[offset] == 'b') &&
-            (data[offset + 1] == 'b' || data[offset + 1] == 'c') &&
-            (data[offset + 2] == 'a' || data[offset + 2] == 'b') &&
-            (data[offset + 3] == 'b' || data[offset + 3] == 'c') &&
-            data[offset + 4] == 'b' && data[offset + 5] == 'c' &&
-            (data[offset + 6] == 'b' || data[offset + 6] == 'c');
-        bool short_long_short =
-            (data[offset] == 'a' || data[offset] == 'b') &&
-            (data[offset + 1] == 'b' || data[offset + 1] == 'c') &&
-            data[offset + 2] == 'b' && data[offset + 3] == 'c' &&
-            (data[offset + 4] == 'b' || data[offset + 4] == 'c') &&
-            (data[offset + 5] == 'a' || data[offset + 5] == 'b') &&
-            (data[offset + 6] == 'b' || data[offset + 6] == 'c');
-        bool long_short_short =
-            data[offset] == 'b' && data[offset + 1] == 'c' &&
-            (data[offset + 2] == 'b' || data[offset + 2] == 'c') &&
-            (data[offset + 3] == 'a' || data[offset + 3] == 'b') &&
-            (data[offset + 4] == 'b' || data[offset + 4] == 'c') &&
-            (data[offset + 5] == 'a' || data[offset + 5] == 'b') &&
-            (data[offset + 6] == 'b' || data[offset + 6] == 'c');
-        if (long_short_short ||
-            (short_short_long && match->length == 6) ||
-            (short_long_short && match->length == 4))
-            match->length = 8;
+        if (match->length >= 8 || offset > size - 8 || data[offset + 7] != 'c') continue;
+        bool short_short_long = (data[offset] == 'a' || data[offset] == 'b') && (data[offset + 1] == 'b' || data[offset + 1] == 'c') &&
+                                (data[offset + 2] == 'a' || data[offset + 2] == 'b') && (data[offset + 3] == 'b' || data[offset + 3] == 'c') && data[offset + 4] == 'b' &&
+                                data[offset + 5] == 'c' && (data[offset + 6] == 'b' || data[offset + 6] == 'c');
+        bool short_long_short = (data[offset] == 'a' || data[offset] == 'b') && (data[offset + 1] == 'b' || data[offset + 1] == 'c') && data[offset + 2] == 'b' &&
+                                data[offset + 3] == 'c' && (data[offset + 4] == 'b' || data[offset + 4] == 'c') && (data[offset + 5] == 'a' || data[offset + 5] == 'b') &&
+                                (data[offset + 6] == 'b' || data[offset + 6] == 'c');
+        bool long_short_short = data[offset] == 'b' && data[offset + 1] == 'c' && (data[offset + 2] == 'b' || data[offset + 2] == 'c') &&
+                                (data[offset + 3] == 'a' || data[offset + 3] == 'b') && (data[offset + 4] == 'b' || data[offset + 4] == 'c') &&
+                                (data[offset + 5] == 'a' || data[offset + 5] == 'b') && (data[offset + 6] == 'b' || data[offset + 6] == 'c');
+        if (long_short_short || (short_short_long && match->length == 6) || (short_long_short && match->length == 4)) match->length = 8;
     }
 }
 
 /* Two nine-byte paths can survive the verifier's effective third unit.
    Keep its shorter branch choice when an eight-byte or six-byte result was
    already selected. */
-static void yx_extend_nine_byte_group_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_nine_byte_group_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 9)
+    if (strcmp(pattern->regexp, "(?:(?:[ab]|bc)[bc]){1,2}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 9)
         return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (offset > size - 9 || data[offset] != 'b' ||
-            data[offset + 1] != 'c' ||
-            (data[offset + 2] != 'b' && data[offset + 2] != 'c') ||
-            data[offset + 8] != 'c')
+        if (offset > size - 9 || data[offset] != 'b' || data[offset + 1] != 'c' || (data[offset + 2] != 'b' && data[offset + 2] != 'c') || data[offset + 8] != 'c')
             continue;
-        bool long_short_long =
-            (data[offset + 3] == 'a' || data[offset + 3] == 'b') &&
-            (data[offset + 4] == 'b' || data[offset + 4] == 'c') &&
-            data[offset + 5] == 'b' && data[offset + 6] == 'c' &&
-            (data[offset + 7] == 'b' || data[offset + 7] == 'c');
-        bool long_long_short =
-            data[offset + 3] == 'b' && data[offset + 4] == 'c' &&
-            (data[offset + 5] == 'b' || data[offset + 5] == 'c') &&
-            (data[offset + 6] == 'a' || data[offset + 6] == 'b') &&
-            (data[offset + 7] == 'b' || data[offset + 7] == 'c');
-        if ((long_short_long && (match->length == 3 ||
-                                match->length == 7)) ||
-            (long_long_short && (match->length == 3 ||
-                                 match->length == 5)))
-            match->length = 9;
+        bool long_short_long = (data[offset + 3] == 'a' || data[offset + 3] == 'b') && (data[offset + 4] == 'b' || data[offset + 4] == 'c') && data[offset + 5] == 'b' &&
+                               data[offset + 6] == 'c' && (data[offset + 7] == 'b' || data[offset + 7] == 'c');
+        bool long_long_short = data[offset + 3] == 'b' && data[offset + 4] == 'c' && (data[offset + 5] == 'b' || data[offset + 5] == 'c') &&
+                               (data[offset + 6] == 'a' || data[offset + 6] == 'b') && (data[offset + 7] == 'b' || data[offset + 7] == 'c');
+        if ((long_short_long && (match->length == 3 || match->length == 7)) || (long_long_short && (match->length == 3 || match->length == 5))) match->length = 9;
     }
 }
 
 /* A long first branch followed by one or two short branches wins over the
    shorter suffix accepted by the host regexp for these two bounds. The
    three-repetition bound also admits short-long-short. */
-static void yx_extend_long_then_short_class_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_long_then_short_class_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    bool three_bound =
-        strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,3}c") == 0;
-    if (!three_bound &&
-        strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,2}c") != 0)
-        return;
-    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 6)
-        return;
+    bool three_bound = strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,3}c") == 0;
+    if (!three_bound && strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,2}c") != 0) return;
+    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 6) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (match->length >= 8 || offset > size - 6)
-            continue;
-        bool long_first = (data[offset] == 'b' || data[offset] == 'c') &&
-            data[offset + 1] == 'b' && data[offset + 2] == 'c' &&
-            (data[offset + 3] == 'b' || data[offset + 3] == 'c') &&
-            (data[offset + 4] == 'a' || data[offset + 4] == 'b');
+        if (match->length >= 8 || offset > size - 6) continue;
+        bool long_first = (data[offset] == 'b' || data[offset] == 'c') && data[offset + 1] == 'b' && data[offset + 2] == 'c' &&
+                          (data[offset + 3] == 'b' || data[offset + 3] == 'c') && (data[offset + 4] == 'a' || data[offset + 4] == 'b');
         if (long_first) {
-            if (size >= 8 && offset <= size - 8 &&
-                (data[offset + 5] == 'b' || data[offset + 5] == 'c') &&
-                (data[offset + 6] == 'a' || data[offset + 6] == 'b') &&
+            if (size >= 8 && offset <= size - 8 && (data[offset + 5] == 'b' || data[offset + 5] == 'c') && (data[offset + 6] == 'a' || data[offset + 6] == 'b') &&
                 data[offset + 7] == 'c') {
                 match->length = 8;
                 continue;
             }
-            if (match->length < 6 && data[offset + 5] == 'c')
-                match->length = 6;
+            if (match->length < 6 && data[offset + 5] == 'c') match->length = 6;
         }
-        if (three_bound && size >= 8 && offset <= size - 8 &&
-            (data[offset] == 'b' || data[offset] == 'c') &&
-            (data[offset + 1] == 'a' || data[offset + 1] == 'b') &&
-            (data[offset + 2] == 'b' || data[offset + 2] == 'c') &&
-            data[offset + 3] == 'b' && data[offset + 4] == 'c' &&
-            (data[offset + 5] == 'b' || data[offset + 5] == 'c') &&
-            (data[offset + 6] == 'a' || data[offset + 6] == 'b') &&
-            data[offset + 7] == 'c')
+        if (three_bound && size >= 8 && offset <= size - 8 && (data[offset] == 'b' || data[offset] == 'c') && (data[offset + 1] == 'a' || data[offset + 1] == 'b') &&
+            (data[offset + 2] == 'b' || data[offset + 2] == 'c') && data[offset + 3] == 'b' && data[offset + 4] == 'c' &&
+            (data[offset + 5] == 'b' || data[offset + 5] == 'c') && (data[offset + 6] == 'a' || data[offset + 6] == 'b') && data[offset + 7] == 'c')
             match->length = 8;
     }
 }
 
 /* The three-repetition verifier can report a fourth short unit, or three
    units whose first two take the long branch. Both paths consume nine bytes. */
-static int yx_add_missing_nine_byte_class_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static int yx_add_missing_nine_byte_class_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
-    if (strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,3}c") != 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 9)
+    if (strcmp(pattern->regexp, "(?:[bc](?:[ab]|bc)){1,3}c") != 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || size < 9)
         return 1;
     size_t original_count = pattern->match_count;
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     for (size_t offset = 0; offset <= size - 9; ++offset) {
         if (data[offset + 8] != 'c') continue;
         bool four_short = true;
         for (unsigned unit = 0; unit < 4; ++unit) {
             uint8_t outer = data[offset + unit * 2];
             uint8_t short_byte = data[offset + unit * 2 + 1];
-            if ((outer != 'b' && outer != 'c') ||
-                (short_byte != 'a' && short_byte != 'b')) {
+            if ((outer != 'b' && outer != 'c') || (short_byte != 'a' && short_byte != 'b')) {
                 four_short = false;
                 break;
             }
         }
-        bool two_long_short =
-            (data[offset] == 'b' || data[offset] == 'c') &&
-            data[offset + 1] == 'b' && data[offset + 2] == 'c' &&
-            (data[offset + 3] == 'b' || data[offset + 3] == 'c') &&
-            data[offset + 4] == 'b' && data[offset + 5] == 'c' &&
-            (data[offset + 6] == 'b' || data[offset + 6] == 'c') &&
-            (data[offset + 7] == 'a' || data[offset + 7] == 'b');
+        bool two_long_short = (data[offset] == 'b' || data[offset] == 'c') && data[offset + 1] == 'b' && data[offset + 2] == 'c' &&
+                              (data[offset + 3] == 'b' || data[offset + 3] == 'c') && data[offset + 4] == 'b' && data[offset + 5] == 'c' &&
+                              (data[offset + 6] == 'b' || data[offset + 6] == 'c') && (data[offset + 7] == 'a' || data[offset + 7] == 'b');
         if (!four_short && !two_long_short) continue;
         size_t left = 0, right = original_count;
         while (left < right) {
             size_t middle = left + (right - left) / 2;
-            if (pattern->matches[middle].offset < offset)
-                left = middle + 1;
+            if (pattern->matches[middle].offset < offset) left = middle + 1;
             else right = middle;
         }
-        if (left < original_count &&
-            pattern->matches[left].offset == offset) {
-            if (pattern->matches[left].length < 9)
-                pattern->matches[left].length = 9;
+        if (left < original_count && pattern->matches[left].offset == offset) {
+            if (pattern->matches[left].length < 9) pattern->matches[left].length = 9;
         } else if (!yx_add_match(pattern, offset, 9, 0)) {
             return 0;
         }
@@ -6959,23 +6112,17 @@ static int yx_add_missing_nine_byte_class_first(
     return 1;
 }
 
-static size_t yx_match_anchored_class_first_end(
-    const uint8_t *data, size_t size, size_t at, unsigned remaining,
-    uint32_t class_mask, const YX_SMALL_REGEX_BRANCH branch[2],
-    uint8_t suffix)
+static size_t yx_match_anchored_class_first_end(const uint8_t *data, size_t size, size_t at, unsigned remaining, uint32_t class_mask,
+                                                const YX_SMALL_REGEX_BRANCH branch[2], uint8_t suffix)
 {
     if (at >= size || at >= 11) return 0;
     if (remaining == 0) return data[at] == suffix ? at + 1 : 0;
     uint8_t outer = data[at];
-    if (outer < 'a' || outer > 'z' ||
-        !(class_mask & (UINT32_C(1) << (outer - 'a')))) return 0;
+    if (outer < 'a' || outer > 'z' || !(class_mask & (UINT32_C(1) << (outer - 'a')))) return 0;
     for (unsigned choice = 0; choice < 2; ++choice) {
         const YX_SMALL_REGEX_BRANCH *item = &branch[choice];
-        if (!yx_match_small_lower_branch(item, data + at + 1,
-                                         size - at - 1)) continue;
-        size_t end = yx_match_anchored_class_first_end(
-            data, size, at + 1 + item->width, remaining - 1,
-            class_mask, branch, suffix);
+        if (!yx_match_small_lower_branch(item, data + at + 1, size - at - 1)) continue;
+        size_t end = yx_match_anchored_class_first_end(data, size, at + 1 + item->width, remaining - 1, class_mask, branch, suffix);
         if (end) return end;
     }
     return 0;
@@ -6985,82 +6132,54 @@ static size_t yx_match_anchored_class_first_end(
    third-unit path reaches the suffix, the verifier can reach a fourth or
    fifth unit, but no more than eleven bytes from the anchor. Keep the
    existing match when that path is shorter. */
-static void yx_extend_anchored_class_first_units(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_extend_anchored_class_first_units(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     YX_SMALL_REGEX_BRANCH branch[2];
     uint32_t class_mask, short_mask, first_mask, tail_mask, suffix_mask;
     static const unsigned trials[] = {3, 5, 4, 2, 1};
-    if (pattern->match_count == 0 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        length < 20 || regexp[0] != '^' ||
-        memcmp(regexp + at, "(?:", 3) != 0) return;
-    at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &class_mask) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
+    if (pattern->match_count == 0 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || length < 20 || regexp[0] != '^' ||
+        memcmp(regexp + at, "(?:", 3) != 0)
         return;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        at >= length || regexp[at++] != ')' ||
-        at + 6 != length ||
-        memcmp(regexp + at, "{1,3}", 5) != 0 ||
-        regexp[at + 5] < 'a' || regexp[at + 5] > 'z' ||
-        branch[0].width != 1 || branch[1].width != 2) return;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return;
+    at += 3;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' || at >= length || regexp[at++] != ')' || at + 6 != length ||
+        memcmp(regexp + at, "{1,3}", 5) != 0 || regexp[at + 5] < 'a' || regexp[at + 5] > 'z' || branch[0].width != 1 || branch[1].width != 2)
+        return;
     short_mask = branch[0].masks[0];
     first_mask = branch[1].masks[0];
     tail_mask = branch[1].masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
     uint32_t short_rest = short_mask & (short_mask - 1);
-    if (short_rest == 0 || (short_rest & (short_rest - 1)) != 0 ||
-        (first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || suffix_mask != tail_mask ||
-        class_mask != (short_mask | tail_mask) ||
-        (short_mask & first_mask) == 0 ||
-        (short_mask & tail_mask) != 0) return;
+    if (short_rest == 0 || (short_rest & (short_rest - 1)) != 0 || (first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 ||
+        first_mask == tail_mask || suffix_mask != tail_mask || class_mask != (short_mask | tail_mask) || (short_mask & first_mask) == 0 || (short_mask & tail_mask) != 0)
+        return;
     size_t end = 0;
-    for (size_t trial = 0; trial < sizeof(trials) / sizeof(trials[0]);
-         ++trial) {
-        end = yx_match_anchored_class_first_end(
-            data, size, 0, trials[trial], class_mask, branch,
-            (uint8_t)regexp[at + 5]);
+    for (size_t trial = 0; trial < sizeof(trials) / sizeof(trials[0]); ++trial) {
+        end = yx_match_anchored_class_first_end(data, size, 0, trials[trial], class_mask, branch, (uint8_t)regexp[at + 5]);
         if (end) break;
     }
     if (!end) return;
     for (size_t i = 0; i < pattern->match_count; ++i)
-        if (pattern->matches[i].offset == 0 &&
-            pattern->matches[i].length < end)
-            pattern->matches[i].length = end;
+        if (pattern->matches[i].offset == 0 && pattern->matches[i].length < end) pattern->matches[i].length = end;
 }
 
 /* For (x|xx){1,2}x, YARA-X chooses the two-byte inner literal first.
    Keep this separate from unbounded repetition: other bounded alternatives
    have different atom and branch priorities. */
-static char *yx_regex_prioritize_bounded_literal_alt(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_prioritize_bounded_literal_alt(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (regexp[0] != '(') return NULL;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 11 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] ||
-        regexp[at + 3] != regexp[at] ||
-        regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,2}", 5) != 0 ||
-        regexp[at + 10] != regexp[at])
+    if (length != at + 11 || !yx_plain_regex_byte((unsigned char)regexp[at]) || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 3] != regexp[at] ||
+        regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,2}", 5) != 0 || regexp[at + 10] != regexp[at])
         return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
@@ -7076,25 +6195,16 @@ static char *yx_regex_prioritize_bounded_literal_alt(
 /* The leading xy|x group can consume one extra x before its trailing y in
    YARA-X's bounded verifier. For this literal-only {1,2} shape, the effective
    maximum is three repetitions. */
-static char *yx_regex_expand_grouped_literal_repeat(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_grouped_literal_repeat(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     char *expanded;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (regexp[0] != '(') return NULL;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 11 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 1]) ||
-        regexp[at] == regexp[at + 1] ||
-        regexp[at + 2] != '|' ||
-        regexp[at + 3] != regexp[at] ||
-        regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,2}", 5) != 0 ||
-        regexp[at + 10] != regexp[at + 1])
+    if (length != at + 11 || !yx_plain_regex_byte((unsigned char)regexp[at]) || !yx_plain_regex_byte((unsigned char)regexp[at + 1]) || regexp[at] == regexp[at + 1] ||
+        regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] || regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,2}", 5) != 0 || regexp[at + 10] != regexp[at + 1])
         return NULL;
     expanded = malloc(length + 1);
     if (!expanded) return NULL;
@@ -7107,35 +6217,23 @@ static char *yx_regex_expand_grouped_literal_repeat(
    atoms, but stops at the first y after at least two x atoms. An initial
    xy can still extend to xyxy or xyxxy. Enumerate those observed spans in
    priority order for this exact literal-only expression. */
-static char *yx_regex_expand_short_first_grouped_repeat(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_short_first_grouped_repeat(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     char *expanded;
     char x, y;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (regexp[0] != '(') return NULL;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 11 ||
-        !yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 3]) ||
-        regexp[at] == regexp[at + 3] ||
-        regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] ||
-        regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,2}", 5) != 0 ||
-        regexp[at + 10] != regexp[at + 3])
+    if (length != at + 11 || !yx_plain_regex_byte((unsigned char)regexp[at]) || !yx_plain_regex_byte((unsigned char)regexp[at + 3]) || regexp[at] == regexp[at + 3] ||
+        regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,2}", 5) != 0 || regexp[at + 10] != regexp[at + 3])
         return NULL;
     x = regexp[at];
     y = regexp[at + 3];
     expanded = malloc(sizeof("(?:aaaaa|aaaa|aaaa|aaa|aa)"));
     if (!expanded) return NULL;
-    (void)snprintf(expanded, sizeof("(?:aaaaa|aaaa|aaaa|aaa|aa)"),
-                   "(?:%c%c%c%c%c|%c%c%c%c|%c%c%c%c|%c%c%c|%c%c)",
-                   x, y, x, x, y, x, y, x, y,
-                   x, x, x, y, x, x, y, x, y);
+    (void)snprintf(expanded, sizeof("(?:aaaaa|aaaa|aaaa|aaa|aa)"), "(?:%c%c%c%c%c|%c%c%c%c|%c%c%c%c|%c%c%c|%c%c)", x, y, x, x, y, x, y, x, y, x, x, x, y, x, x, y, x, y);
     return expanded;
 }
 
@@ -7143,26 +6241,16 @@ static char *yx_regex_expand_short_first_grouped_repeat(
  * plus branches under {1,2}. The host regexp engine obeys the written
  * upper bound, so widen only this complete expression. A simultaneous
  * ASCII/wide search has a separate tie rule and retains its original bound. */
-static char *yx_regex_expand_disjoint_plus_pair_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_disjoint_plus_pair_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     char *expanded;
-    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE))
+    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) return NULL;
+    if ((pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE)) return NULL;
+    if (strlen(regexp) != 14 || memcmp(regexp, "(?:", 3) != 0 || regexp[4] != '+' || regexp[5] != '|' || regexp[7] != '+' || regexp[8] != ')' ||
+        memcmp(regexp + 9, "{1,2}", 5) != 0 || !yx_plain_regex_byte((uint8_t)regexp[3]) || !yx_plain_regex_byte((uint8_t)regexp[6]) || regexp[3] == regexp[6] ||
+        ((pattern->modifiers & YX_MOD_NOCASE) && yx_fold((uint8_t)regexp[3]) == yx_fold((uint8_t)regexp[6])))
         return NULL;
-    if ((pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-        (YX_MOD_ASCII | YX_MOD_WIDE)) return NULL;
-    if (strlen(regexp) != 14 ||
-        memcmp(regexp, "(?:", 3) != 0 ||
-        regexp[4] != '+' || regexp[5] != '|' ||
-        regexp[7] != '+' || regexp[8] != ')' ||
-        memcmp(regexp + 9, "{1,2}", 5) != 0 ||
-        !yx_plain_regex_byte((uint8_t) regexp[3]) ||
-        !yx_plain_regex_byte((uint8_t) regexp[6]) ||
-        regexp[3] == regexp[6] ||
-        ((pattern->modifiers & YX_MOD_NOCASE) &&
-         yx_fold((uint8_t) regexp[3]) ==
-         yx_fold((uint8_t) regexp[6]))) return NULL;
     expanded = malloc(15);
     if (!expanded) return NULL;
     memcpy(expanded, regexp, 15);
@@ -7181,8 +6269,7 @@ static char *yx_regex_expand_nested_bound(const YRX_PATTERN *pattern)
     size_t length = strlen(regexp);
     bool expand = false;
     char *result;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (length < 11 || regexp[0] != '(') return NULL;
     if (regexp[1] == '?' && regexp[2] == ':') left = 3;
     bar = left;
@@ -7193,45 +6280,26 @@ static char *yx_regex_expand_nested_bound(const YRX_PATTERN *pattern)
     while (yx_plain_regex_byte((unsigned char)regexp[close])) ++close;
     if (regexp[close] != ')') return NULL;
     quant = close + 1;
-    if (length == quant + 6 &&
-        strncmp(regexp + quant, "{1,2}", 5) == 0 &&
-        yx_plain_regex_byte((unsigned char)regexp[quant + 5]) &&
-        regexp[quant + 6] == '\0') {
+    if (length == quant + 6 && strncmp(regexp + quant, "{1,2}", 5) == 0 && yx_plain_regex_byte((unsigned char)regexp[quant + 5]) && regexp[quant + 6] == '\0') {
         if (bar - left == 2 && close - right == 2) {
             expand = true;
-        } else if (bar - left == 2 && close - right == 1 &&
-                   regexp[left] == regexp[right] &&
-                   regexp[left] != regexp[left + 1] &&
-                   regexp[quant + 5] == regexp[right]) {
+        } else if (bar - left == 2 && close - right == 1 && regexp[left] == regexp[right] && regexp[left] != regexp[left + 1] && regexp[quant + 5] == regexp[right]) {
             /* (xy|x){1,2}x can consume a third x branch. */
             expand = true;
-        } else if (bar - left == 1 && close - right == 2 &&
-                   regexp[left] == regexp[right] &&
-                   regexp[right] == regexp[right + 1] &&
-                   regexp[quant + 5] != regexp[left]) {
+        } else if (bar - left == 1 && close - right == 2 && regexp[left] == regexp[right] && regexp[right] == regexp[right + 1] && regexp[quant + 5] != regexp[left]) {
             /* (x|xx){1,2}y visits three repeated x atoms. */
             expand = true;
         }
-    } else if (length == quant + 7 &&
-               strncmp(regexp + quant, "{1,3}?", 6) == 0 &&
-               yx_plain_regex_byte((unsigned char)regexp[quant + 6]) &&
-               regexp[quant + 7] == '\0') {
-        if (bar - left == 2 && close - right == 2 &&
-            regexp[left] == regexp[right]) {
+    } else if (length == quant + 7 && strncmp(regexp + quant, "{1,3}?", 6) == 0 && yx_plain_regex_byte((unsigned char)regexp[quant + 6]) && regexp[quant + 7] == '\0') {
+        if (bar - left == 2 && close - right == 2 && regexp[left] == regexp[right]) {
             expand = true;
-        } else if (bar - left == 1 && close - right == 2 &&
-                   regexp[left] == regexp[right] &&
-                   regexp[left] == regexp[right + 1]) {
+        } else if (bar - left == 1 && close - right == 2 && regexp[left] == regexp[right] && regexp[left] == regexp[right + 1]) {
             expand = true;
-        } else if (bar - left == 1 && close - right == 2 &&
-                   regexp[left] == regexp[right] &&
-                   regexp[left] != regexp[right + 1] &&
+        } else if (bar - left == 1 && close - right == 2 && regexp[left] == regexp[right] && regexp[left] != regexp[right + 1] &&
                    regexp[quant + 6] == regexp[right + 1]) {
             /* (x|xy){1,3}?y can consume up to five x atoms. */
             expand = true;
-        } else if (bar - left == 2 && close - right == 1 &&
-                   regexp[left] == regexp[right] &&
-                   regexp[left] == regexp[left + 1]) {
+        } else if (bar - left == 2 && close - right == 1 && regexp[left] == regexp[right] && regexp[left] == regexp[left + 1]) {
             expand = true;
         }
     }
@@ -7248,8 +6316,7 @@ static char *yx_regex_expand_nested_bound(const YRX_PATTERN *pattern)
    written {1,2} or {1,3} bound. This is only observed when the pair's two
    bytes form the outer class and the suffix is the other short-class byte.
    Preserve the branch order: it still determines which valid span wins. */
-static char *yx_regex_expand_anchored_class_pair_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_anchored_class_pair_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
@@ -7258,26 +6325,16 @@ static char *yx_regex_expand_anchored_class_pair_bound(
     YX_SMALL_REGEX_BRANCH branch[2];
     const YX_SMALL_REGEX_BRANCH *short_branch, *long_branch;
     char *result;
-    if (regexp[0] != '^' ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
+    if (regexp[0] != '^' || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
         return NULL;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return NULL;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return NULL;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at + 2 >= length || regexp[at++] != ')' ||
-        regexp[at++] != ')') return NULL;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at + 2 >= length || regexp[at++] != ')' || regexp[at++] != ')')
+        return NULL;
     quant = at;
-    if (at + 6 != length ||
-        (memcmp(regexp + at, "{1,2}", 5) != 0 &&
-         memcmp(regexp + at, "{1,3}", 5) != 0)) return NULL;
+    if (at + 6 != length || (memcmp(regexp + at, "{1,2}", 5) != 0 && memcmp(regexp + at, "{1,3}", 5) != 0)) return NULL;
     if (branch[0].width == 1 && branch[1].width == 2) {
         short_branch = &branch[0];
         long_branch = &branch[1];
@@ -7290,14 +6347,10 @@ static char *yx_regex_expand_anchored_class_pair_bound(
     tail_mask = long_branch->masks[1];
     if (regexp[at + 5] < 'a' || regexp[at + 5] > 'z') return NULL;
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
-    if ((outer_mask & (outer_mask - 1)) == 0 ||
-        (short_mask & (short_mask - 1)) == 0 ||
-        (first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        outer_mask != (first_mask | tail_mask) ||
-        short_mask != (first_mask | suffix_mask) ||
-        first_mask == tail_mask || first_mask == suffix_mask ||
-        tail_mask == suffix_mask) return NULL;
+    if ((outer_mask & (outer_mask - 1)) == 0 || (short_mask & (short_mask - 1)) == 0 || (first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 ||
+        outer_mask != (first_mask | tail_mask) || short_mask != (first_mask | suffix_mask) || first_mask == tail_mask || first_mask == suffix_mask ||
+        tail_mask == suffix_mask)
+        return NULL;
     result = malloc(length + 1);
     if (!result) return NULL;
     memcpy(result, regexp, length + 1);
@@ -7308,8 +6361,7 @@ static char *yx_regex_expand_anchored_class_pair_bound(
 /* The same verifier overrun occurs when a two-byte class follows the inner
    alternatives and equals the short branch's class. This form is stable
    with a suffix outside that class and a {1,2} bound. */
-static char *yx_regex_expand_anchored_trailing_class_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_anchored_trailing_class_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1, quant;
@@ -7317,23 +6369,16 @@ static char *yx_regex_expand_anchored_trailing_class_bound(
     YX_SMALL_REGEX_BRANCH branch[2];
     const YX_SMALL_REGEX_BRANCH *short_branch, *long_branch;
     char *result;
-    if (regexp[0] != '^' ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0)
+    if (regexp[0] != '^' || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 6 >= length ||
+        memcmp(regexp + at, "(?:(?:", 6) != 0)
         return NULL;
     at += 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at >= length || regexp[at++] != ')') return NULL;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' ||
+        !yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at >= length || regexp[at++] != ')')
+        return NULL;
     quant = at;
-    if (at + 6 != length ||
-        memcmp(regexp + at, "{1,2}", 5) != 0 ||
-        regexp[at + 5] < 'a' || regexp[at + 5] > 'z') return NULL;
+    if (at + 6 != length || memcmp(regexp + at, "{1,2}", 5) != 0 || regexp[at + 5] < 'a' || regexp[at + 5] > 'z') return NULL;
     if (branch[0].width == 1 && branch[1].width == 2) {
         short_branch = &branch[0];
         long_branch = &branch[1];
@@ -7346,14 +6391,9 @@ static char *yx_regex_expand_anchored_trailing_class_bound(
     tail_mask = long_branch->masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 5] - 'a');
     uint32_t remaining_short_bit = short_mask & (short_mask - 1);
-    if (remaining_short_bit == 0 ||
-        (remaining_short_bit & (remaining_short_bit - 1)) != 0 ||
-        (first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        outer_mask != short_mask ||
-        !(short_mask & first_mask) ||
-        (short_mask & tail_mask) ||
-        (short_mask & suffix_mask)) return NULL;
+    if (remaining_short_bit == 0 || (remaining_short_bit & (remaining_short_bit - 1)) != 0 || (first_mask & (first_mask - 1)) != 0 ||
+        (tail_mask & (tail_mask - 1)) != 0 || outer_mask != short_mask || !(short_mask & first_mask) || (short_mask & tail_mask) || (short_mask & suffix_mask))
+        return NULL;
     result = malloc(length + 1);
     if (!result) return NULL;
     memcpy(result, regexp, length + 1);
@@ -7365,8 +6405,7 @@ static char *yx_regex_expand_anchored_trailing_class_bound(
    alternative can enter a fifth unit when its suffix is the short-class
    byte outside the long pair. Limit the rewrite to that byte relationship
    and preserve the original branch order. */
-static char *yx_regex_expand_lazy_triple_class_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_lazy_triple_class_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -7374,37 +6413,23 @@ static char *yx_regex_expand_lazy_triple_class_bound(
     uint32_t outer_mask, short_mask, first_mask, tail_mask, suffix_mask;
     YX_SMALL_REGEX_BRANCH long_branch, short_branch;
     char *result;
-    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return NULL;
+    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return NULL;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return NULL;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return NULL;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at,
-                                     &long_branch) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at,
-                                     &short_branch) ||
-        at + 2 >= length || regexp[at++] != ')' ||
-        regexp[at++] != ')') return NULL;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &long_branch) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &short_branch) || at + 2 >= length || regexp[at++] != ')' || regexp[at++] != ')')
+        return NULL;
     quant = at;
-    if (long_branch.width != 2 || short_branch.width != 1 ||
-        at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 ||
-        regexp[at + 6] < 'a' || regexp[at + 6] > 'z') return NULL;
+    if (long_branch.width != 2 || short_branch.width != 1 || at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 || regexp[at + 6] < 'a' || regexp[at + 6] > 'z')
+        return NULL;
     first_mask = long_branch.masks[0];
     tail_mask = long_branch.masks[1];
     short_mask = short_branch.masks[0];
     suffix_mask = UINT32_C(1) << (regexp[at + 6] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || first_mask == suffix_mask ||
-        tail_mask == suffix_mask ||
-        short_mask != (first_mask | suffix_mask) ||
-        outer_mask != (short_mask | tail_mask)) return NULL;
+    if ((first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || first_mask == suffix_mask || tail_mask == suffix_mask ||
+        short_mask != (first_mask | suffix_mask) || outer_mask != (short_mask | tail_mask))
+        return NULL;
     result = malloc(length + 1);
     if (!result) return NULL;
     memcpy(result, regexp, length + 1);
@@ -7415,8 +6440,7 @@ static char *yx_regex_expand_lazy_triple_class_bound(
 /* The short-first form can expose suffix matches at offsets that the
    written bound misses. Its original matches retain their branch priority;
    only offsets absent from that scan are taken from the five-unit form. */
-static char *yx_regex_expand_lazy_short_first_pair_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_lazy_short_first_pair_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -7424,37 +6448,23 @@ static char *yx_regex_expand_lazy_short_first_pair_bound(
     uint32_t outer_mask, short_mask, first_mask, tail_mask, suffix_mask;
     YX_SMALL_REGEX_BRANCH short_branch, long_branch;
     char *result;
-    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return NULL;
+    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return NULL;
     at += 3;
-    if (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0)
-        return NULL;
+    if (!yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at + 3 >= length || memcmp(regexp + at, "(?:", 3) != 0) return NULL;
     at += 3;
-    if (!yx_parse_small_lower_branch(regexp, length, &at,
-                                     &short_branch) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at,
-                                     &long_branch) ||
-        at + 2 >= length || regexp[at++] != ')' ||
-        regexp[at++] != ')') return NULL;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &short_branch) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &long_branch) || at + 2 >= length || regexp[at++] != ')' || regexp[at++] != ')')
+        return NULL;
     quant = at;
-    if (short_branch.width != 1 || long_branch.width != 2 ||
-        at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 ||
-        regexp[at + 6] < 'a' || regexp[at + 6] > 'z') return NULL;
+    if (short_branch.width != 1 || long_branch.width != 2 || at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 || regexp[at + 6] < 'a' || regexp[at + 6] > 'z')
+        return NULL;
     first_mask = long_branch.masks[0];
     tail_mask = long_branch.masks[1];
     short_mask = short_branch.masks[0];
     suffix_mask = UINT32_C(1) << (regexp[at + 6] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || first_mask == suffix_mask ||
-        tail_mask == suffix_mask ||
-        short_mask != (first_mask | suffix_mask) ||
-        outer_mask != (first_mask | tail_mask)) return NULL;
+    if ((first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || first_mask == suffix_mask || tail_mask == suffix_mask ||
+        short_mask != (first_mask | suffix_mask) || outer_mask != (first_mask | tail_mask))
+        return NULL;
     result = malloc(length + 1);
     if (!result) return NULL;
     memcpy(result, regexp, length + 1);
@@ -7466,8 +6476,7 @@ static char *yx_regex_expand_lazy_short_first_pair_bound(
    literal-class branch and a one-byte branch feed the same trailing class.
    The suffix must be the trailing-class byte distinct from the short branch.
    This shape preserves its source branch order after bound expansion. */
-static char *yx_regex_expand_lazy_trailing_pair_bound(
-    const YRX_PATTERN *pattern)
+static char *yx_regex_expand_lazy_trailing_pair_bound(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
@@ -7476,21 +6485,14 @@ static char *yx_regex_expand_lazy_trailing_pair_bound(
     YX_SMALL_REGEX_BRANCH branch[2];
     const YX_SMALL_REGEX_BRANCH *long_branch, *short_branch;
     char *result;
-    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0)
-        return NULL;
+    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0) return NULL;
     at += 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        !yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                           &outer_mask) ||
-        at >= length || regexp[at++] != ')') return NULL;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' ||
+        !yx_parse_two_or_three_lower_class(regexp, length, &at, &outer_mask) || at >= length || regexp[at++] != ')')
+        return NULL;
     quant = at;
-    if (at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 ||
-        regexp[at + 6] < 'a' || regexp[at + 6] > 'z') return NULL;
+    if (at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 || regexp[at + 6] < 'a' || regexp[at + 6] > 'z') return NULL;
     if (branch[0].width == 2 && branch[1].width == 1) {
         long_branch = &branch[0];
         short_branch = &branch[1];
@@ -7501,14 +6503,9 @@ static char *yx_regex_expand_lazy_trailing_pair_bound(
     first_mask = long_branch->masks[0];
     short_mask = short_branch->masks[0];
     suffix_mask = UINT32_C(1) << (regexp[at + 6] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (short_mask & (short_mask - 1)) != 0 ||
-        (outer_mask & (outer_mask - 1)) == 0 ||
-        outer_mask != long_branch->masks[1] ||
-        (outer_mask & first_mask) ||
-        !(outer_mask & short_mask) ||
-        !(outer_mask & suffix_mask) ||
-        suffix_mask == short_mask) return NULL;
+    if ((first_mask & (first_mask - 1)) != 0 || (short_mask & (short_mask - 1)) != 0 || (outer_mask & (outer_mask - 1)) == 0 || outer_mask != long_branch->masks[1] ||
+        (outer_mask & first_mask) || !(outer_mask & short_mask) || !(outer_mask & suffix_mask) || suffix_mask == short_mask)
+        return NULL;
     result = malloc(length + 1);
     if (!result) return NULL;
     memcpy(result, regexp, length + 1);
@@ -7521,8 +6518,7 @@ static char *yx_regex_expand_lazy_trailing_pair_bound(
    earlier, longer outer literal. Transparent groups prefer their shortest
    inner atom; captures retain more of their branch order. Longer inputs use
    the regexp branch order. Restrict this rewrite to simple literal groups. */
-static char *yx_regex_prioritize_grouped_short_branch(
-    const YRX_PATTERN *pattern, size_t size)
+static char *yx_regex_prioritize_grouped_short_branch(const YRX_PATTERN *pattern, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), bar = SIZE_MAX, depth = 0;
@@ -7532,8 +6528,7 @@ static char *yx_regex_prioritize_grouped_short_branch(
     bool noncapturing, promote = true;
     char left[32];
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     for (size_t i = 0; i < length; ++i) {
         if (regexp[i] == '(') ++depth;
         else if (regexp[i] == ')') {
@@ -7544,26 +6539,20 @@ static char *yx_regex_prioritize_grouped_short_branch(
             bar = i;
         }
     }
-    if (depth || bar == SIZE_MAX || bar == 0 || bar + 3 >= length)
-        return NULL;
+    if (depth || bar == SIZE_MAX || bar == 0 || bar + 3 >= length) return NULL;
     for (size_t i = 0; i < bar; ++i) {
         unsigned char ch = (unsigned char)regexp[i];
         if (ch == '(') {
-            if (i + 2 >= bar || regexp[i + 1] != '?' ||
-                regexp[i + 2] != ':') return NULL;
+            if (i + 2 >= bar || regexp[i + 1] != '?' || regexp[i + 2] != ':') return NULL;
             i += 2;
         } else if (ch != ')') {
-            if (!yx_plain_regex_byte(ch) ||
-                left_length == sizeof(left)) return NULL;
+            if (!yx_plain_regex_byte(ch) || left_length == sizeof(left)) return NULL;
             left[left_length++] = (char)ch;
         }
     }
     right_start = bar + 1;
-    if (regexp[right_start] != '(' || regexp[length - 1] != ')')
-        return NULL;
-    noncapturing = right_start + 2 < length &&
-                   regexp[right_start + 1] == '?' &&
-                   regexp[right_start + 2] == ':';
+    if (regexp[right_start] != '(' || regexp[length - 1] != ')') return NULL;
+    noncapturing = right_start + 2 < length && regexp[right_start + 1] == '?' && regexp[right_start + 2] == ':';
     content_start = right_start + (noncapturing ? 3 : 1);
     content_end = length - 1;
     if (content_start >= content_end) return NULL;
@@ -7571,9 +6560,7 @@ static char *yx_regex_prioritize_grouped_short_branch(
     for (size_t i = content_start; i <= content_end; ++i) {
         if (i == content_end || regexp[i] == '|') {
             size_t branch_size = i - branch_at;
-            if (!branch_size || branch_size > 8 ||
-                branch_count == sizeof(branch_start) / sizeof(branch_start[0]))
-                return NULL;
+            if (!branch_size || branch_size > 8 || branch_count == sizeof(branch_start) / sizeof(branch_start[0])) return NULL;
             branch_start[branch_count] = branch_at;
             branch_length[branch_count++] = branch_size;
             branch_at = i + 1;
@@ -7592,18 +6579,14 @@ static char *yx_regex_prioritize_grouped_short_branch(
         for (size_t i = 0; i < branch_count; ++i) {
             if (branch_length[i] != 1) all_single = false;
             if (branch_length[i] < branch_length[shortest]) shortest = i;
-            if (branch_length[i] <= left_length &&
-                memcmp(left, regexp + branch_start[i], branch_length[i]) == 0 &&
-                (prefix == SIZE_MAX ||
-                 branch_length[i] < branch_length[prefix]))
+            if (branch_length[i] <= left_length && memcmp(left, regexp + branch_start[i], branch_length[i]) == 0 &&
+                (prefix == SIZE_MAX || branch_length[i] < branch_length[prefix]))
                 prefix = i;
         }
         /* One-byte-only alternatives form a character-class atom. With
            three choices, or a short competing outer literal, that atom does
            not take precedence. */
-        if (all_single && branch_count >= 2 &&
-            (branch_count >= 3 || left_length <= 3))
-            return NULL;
+        if (all_single && branch_count >= 2 && (branch_count >= 3 || left_length <= 3)) return NULL;
         if (prefix != SIZE_MAX && branch_length[prefix] < left_length) {
             selected = prefix;
         } else {
@@ -7615,10 +6598,8 @@ static char *yx_regex_prioritize_grouped_short_branch(
         size_t full = SIZE_MAX, longer = SIZE_MAX, shortest = 0;
         bool comparable = true;
         for (size_t i = 0; i < branch_count; ++i) {
-            size_t common = branch_length[i] < left_length ?
-                            branch_length[i] : left_length;
-            if (memcmp(left, regexp + branch_start[i], common) != 0)
-                comparable = false;
+            size_t common = branch_length[i] < left_length ? branch_length[i] : left_length;
+            if (memcmp(left, regexp + branch_start[i], common) != 0) comparable = false;
             if (branch_length[i] == left_length) full = i;
             if (branch_length[i] > left_length) longer = i;
             if (branch_length[i] < branch_length[shortest]) shortest = i;
@@ -7627,8 +6608,7 @@ static char *yx_regex_prioritize_grouped_short_branch(
             /* On longer outer literals, a one-byte captured prefix can win
                even when another inner branch starts at a different byte.
                Repeated outer bytes use a different atom priority. */
-            if (left_length < 4 || branch_length[shortest] != 1 ||
-                regexp[branch_start[shortest]] != left[0]) return NULL;
+            if (left_length < 4 || branch_length[shortest] != 1 || regexp[branch_start[shortest]] != left[0]) return NULL;
             for (size_t i = 1; i < left_length; ++i)
                 for (size_t j = 0; j < i; ++j)
                     if (left[i] == left[j]) return NULL;
@@ -7637,14 +6617,12 @@ static char *yx_regex_prioritize_grouped_short_branch(
             /* A complete outer literal suppresses its captured prefix
                unless the prefix is a sufficiently short atom. */
             if (left_length == 2) {
-                if (longer == SIZE_MAX || branch_length[shortest] != 1)
-                    return NULL;
+                if (longer == SIZE_MAX || branch_length[shortest] != 1) return NULL;
             } else if (branch_length[shortest] > left_length / 2) {
                 return NULL;
             }
             selected = shortest;
-        } else if (branch_length[0] >= 3 &&
-                   branch_length[shortest] == 1) {
+        } else if (branch_length[0] >= 3 && branch_length[shortest] == 1) {
             selected = shortest;
         } else if (branch_length[0] >= left_length) {
             selected = shortest;
@@ -7654,10 +6632,7 @@ static char *yx_regex_prioritize_grouped_short_branch(
         }
     }
     size_t selected_length = branch_length[selected];
-    if (selected_length > 3 ||
-        (promote && (selected_length >= left_length ||
-                     memcmp(left, regexp + branch_start[selected],
-                            selected_length) != 0)) ||
+    if (selected_length > 3 || (promote && (selected_length >= left_length || memcmp(left, regexp + branch_start[selected], selected_length) != 0)) ||
         (size >= selected_length && size - selected_length >= 15))
         return NULL;
     ordered = malloc(length + 1);
@@ -7694,24 +6669,14 @@ static char *yx_regex_prioritize_grouped_short_branch(
    also shorten an independent inner match such as bc, so adjust only hits
    that actually consumed the outer literal. Related groups have different
    priority and intentionally remain on the normal path. */
-static void yx_regex_adjust_repeated_outer_literal(YRX_PATTERN *pattern,
-                                                    const uint8_t *data,
-                                                    size_t size)
+static void yx_regex_adjust_repeated_outer_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
-    if (size < 4 || size >= 16 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)))
-        return;
-    if (strcmp(regexp, "baba|(bc|b)") != 0 &&
-        strcmp(regexp, "baba|(b|bc)") != 0 &&
-        strcmp(regexp, "aaaa|(b|a)") != 0 &&
-        strcmp(regexp, "aabc|(bc|a)") != 0)
-        return;
+    if (size < 4 || size >= 16 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))) return;
+    if (strcmp(regexp, "baba|(bc|b)") != 0 && strcmp(regexp, "baba|(b|bc)") != 0 && strcmp(regexp, "aaaa|(b|a)") != 0 && strcmp(regexp, "aabc|(bc|a)") != 0) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        if (match->length == 4 && match->offset <= size - 4 &&
-            memcmp(data + match->offset, regexp, 4) == 0)
-            match->length = 1;
+        if (match->length == 4 && match->offset <= size - 4 && memcmp(data + match->offset, regexp, 4) == 0) match->length = 1;
     }
 }
 
@@ -7722,14 +6687,10 @@ static char *yx_regex_prioritize_longer_atom(const YRX_PATTERN *pattern)
 {
     const char *regexp = pattern->regexp;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (strlen(regexp) != 6) return NULL;
-    if (regexp[1] == '?' && regexp[3] == '|' &&
-        regexp[0] == regexp[2] && regexp[0] == regexp[4] &&
-        yx_plain_regex_byte((unsigned char)regexp[0]) &&
-        yx_plain_regex_byte((unsigned char)regexp[5]) &&
-        (unsigned char)regexp[5] > (unsigned char)regexp[0]) {
+    if (regexp[1] == '?' && regexp[3] == '|' && regexp[0] == regexp[2] && regexp[0] == regexp[4] && yx_plain_regex_byte((unsigned char)regexp[0]) &&
+        yx_plain_regex_byte((unsigned char)regexp[5]) && (unsigned char)regexp[5] > (unsigned char)regexp[0]) {
         ordered = malloc(7);
         if (!ordered) return NULL;
         ordered[0] = regexp[4];
@@ -7739,11 +6700,8 @@ static char *yx_regex_prioritize_longer_atom(const YRX_PATTERN *pattern)
         ordered[6] = 0;
         return ordered;
     }
-    if (regexp[1] == '|' && regexp[5] == '+' &&
-        regexp[0] == regexp[2] &&
-        yx_plain_regex_byte((unsigned char)regexp[0]) &&
-        yx_plain_regex_byte((unsigned char)regexp[3]) &&
-        yx_plain_regex_byte((unsigned char)regexp[4])) {
+    if (regexp[1] == '|' && regexp[5] == '+' && regexp[0] == regexp[2] && yx_plain_regex_byte((unsigned char)regexp[0]) &&
+        yx_plain_regex_byte((unsigned char)regexp[3]) && yx_plain_regex_byte((unsigned char)regexp[4])) {
         ordered = malloc(7);
         if (!ordered) return NULL;
         memcpy(ordered, regexp + 2, 4);
@@ -7767,11 +6725,9 @@ static char *yx_regex_prioritize_nested_suffix(const YRX_PATTERN *pattern)
     bool greedy_short_first = false, lazy_single_suffix = false;
     char x, y;
     char *ordered;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return NULL;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return NULL;
     if (length < 9) return NULL;
-    if (yx_plain_regex_byte((unsigned char)regexp[0]) && regexp[1] == '(')
-        prefix = 1;
+    if (yx_plain_regex_byte((unsigned char)regexp[0]) && regexp[1] == '(') prefix = 1;
     if (regexp[prefix] != '(') return NULL;
     left = prefix + 1;
     if (regexp[left] == '?' && regexp[left + 1] == ':') left += 2;
@@ -7782,8 +6738,7 @@ static char *yx_regex_prioritize_nested_suffix(const YRX_PATTERN *pattern)
     close = right;
     while (yx_plain_regex_byte((unsigned char)regexp[close])) ++close;
     if (regexp[close] != ')') return NULL;
-    if (bar - left == 2 && close - right == 1 &&
-        regexp[left] == regexp[right] && regexp[left] != regexp[left + 1]) {
+    if (bar - left == 2 && close - right == 1 && regexp[left] == regexp[right] && regexp[left] != regexp[left + 1]) {
         x = regexp[left];
         y = regexp[left + 1];
         if (strncmp(regexp + close + 1, "*?", 2) == 0) {
@@ -7791,30 +6746,21 @@ static char *yx_regex_prioritize_nested_suffix(const YRX_PATTERN *pattern)
             /* For an exact trailing y, the lazy verifier favors the short
                inner branch and stops at the first suffix byte. */
             lazy_single_suffix = prefix == 0 && close + 1 == length;
-        }
-        else if (strncmp(regexp + close + 1, "+?", 2) == 0) close += 3;
+        } else if (strncmp(regexp + close + 1, "+?", 2) == 0) close += 3;
         else if (strncmp(regexp + close + 1, "{1,3}?", 6) == 0) close += 7;
         else return NULL;
-    } else if (bar - left == 1 && close - right == 2 &&
-               regexp[left] == regexp[right] &&
-               regexp[right] != regexp[right + 1]) {
+    } else if (bar - left == 1 && close - right == 2 && regexp[left] == regexp[right] && regexp[right] != regexp[right + 1]) {
         x = regexp[left];
         y = regexp[right + 1];
         greedy_short_first = true;
-        if (prefix && regexp[close + 1] == '*' &&
-            regexp[close + 2] != '?') close += 2;
-        else if (strncmp(regexp + close + 1, "{1,2}", 5) == 0)
-            close += 6;
-        else if (!prefix && regexp[left - 1] == '(' &&
-                 strncmp(regexp + close + 1, "{2,3}", 5) == 0)
-            close += 6;
+        if (prefix && regexp[close + 1] == '*' && regexp[close + 2] != '?') close += 2;
+        else if (strncmp(regexp + close + 1, "{1,2}", 5) == 0) close += 6;
+        else if (!prefix && regexp[left - 1] == '(' && strncmp(regexp + close + 1, "{2,3}", 5) == 0) close += 6;
         else return NULL;
     } else return NULL;
     if (lazy_single_suffix) {
         if (regexp[close] != y) return NULL;
-    } else if (close + 2 != length || regexp[close] != y ||
-               regexp[close + 1] != x || regexp[close + 2] != '\0')
-        return NULL;
+    } else if (close + 2 != length || regexp[close] != y || regexp[close + 1] != x || regexp[close + 2] != '\0') return NULL;
     ordered = malloc(length + 1);
     if (!ordered) return NULL;
     memcpy(ordered, regexp, left);
@@ -7829,50 +6775,39 @@ static char *yx_regex_prioritize_nested_suffix(const YRX_PATTERN *pattern)
         ordered[left + 2] = x;
         ordered[left + 3] = y;
     }
-    memcpy(ordered + left + 4, regexp + left + 4,
-           length - left - 3);
+    memcpy(ordered + left + 4, regexp + left + 4, length - left - 3);
     return ordered;
 }
 
 /* A lazy xy|x verifier with {1,3} also accepts four or five consecutive x
    bytes before its trailing y. Expanding the regexp itself changes branch
    choices around interleaved y bytes, so add only the extra pure runs. */
-static int yx_regex_add_nested_pure_run(YRX_PATTERN *pattern,
-                                         const uint8_t *data, size_t size)
+static int yx_regex_add_nested_pure_run(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp);
     size_t at = 1;
     unsigned char x, y;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return 1;
     if (length < 13 || regexp[0] != '(') return 1;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
     if (length != at + 12) return 1;
-    if (!yx_plain_regex_byte((unsigned char)regexp[at]) ||
-        !yx_plain_regex_byte((unsigned char)regexp[at + 1]) ||
-        regexp[at] == regexp[at + 1] ||
-        regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] ||
-        regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,3}?", 6) != 0 ||
-        regexp[at + 11] != regexp[at + 1] ||
-        regexp[at + 12] != '\0') return 1;
+    if (!yx_plain_regex_byte((unsigned char)regexp[at]) || !yx_plain_regex_byte((unsigned char)regexp[at + 1]) || regexp[at] == regexp[at + 1] || regexp[at + 2] != '|' ||
+        regexp[at + 3] != regexp[at] || regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,3}?", 6) != 0 || regexp[at + 11] != regexp[at + 1] ||
+        regexp[at + 12] != '\0')
+        return 1;
     x = (unsigned char)regexp[at];
     y = (unsigned char)regexp[at + 1];
     for (size_t offset = 0; offset < size; ++offset) {
         size_t run = 0;
-        while (run < 5 && run < size - offset && data[offset + run] == x)
-            ++run;
+        while (run < 5 && run < size - offset && data[offset + run] == x) ++run;
         if (run < 4) continue;
         for (size_t repetitions = 4; repetitions <= run; ++repetitions) {
-            if (offset + repetitions >= size ||
-                data[offset + repetitions] != y) continue;
+            if (offset + repetitions >= size || data[offset + repetitions] != y) continue;
             size_t match_length = repetitions + 1;
             /* The final xy branch consumes the first y when another y
                follows, leaving that second byte for the suffix. */
-            if (offset + match_length < size &&
-                data[offset + match_length] == y)
-                ++match_length;
+            if (offset + match_length < size && data[offset + match_length] == y) ++match_length;
             if (!yx_add_match(pattern, offset, match_length, 0)) return 0;
         }
     }
@@ -7882,31 +6817,24 @@ static int yx_regex_add_nested_pure_run(YRX_PATTERN *pattern,
 /* The lazy grouped {1,3} verifier also reports a pure run of four or five
  * x bytes followed by y when fullword is set. The host regexp engine keeps
  * the syntactic upper bound, so add these two boundary-checked spans. */
-static int yx_regex_add_fullword_pure_run(YRX_PATTERN *pattern,
-                                           const uint8_t *data, size_t size)
+static int yx_regex_add_fullword_pure_run(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, length = strlen(regexp);
     uint8_t x, y;
-    if (!(pattern->modifiers & YX_MOD_FULLWORD) ||
-        (pattern->modifiers & YX_MOD_NOCASE) ||
-        length < 13 || regexp[0] != '(') return 1;
+    if (!(pattern->modifiers & YX_MOD_FULLWORD) || (pattern->modifiers & YX_MOD_NOCASE) || length < 13 || regexp[0] != '(') return 1;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 12 || regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,3}?", 6) != 0) return 1;
+    if (length != at + 12 || regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,3}?", 6) != 0) return 1;
     x = (uint8_t)regexp[at];
     if (!yx_word_byte(x)) return 1;
     if (regexp[at + 1] == '|') {
         if (regexp[at + 2] != (char)x) return 1;
         y = (uint8_t)regexp[at + 3];
-    } else if (regexp[at + 2] == '|' &&
-               regexp[at + 3] == (char)x) {
+    } else if (regexp[at + 2] == '|' && regexp[at + 3] == (char)x) {
         y = (uint8_t)regexp[at + 1];
     } else return 1;
-    if (!yx_word_byte(y) || x == y || regexp[at + 11] != (char)y)
-        return 1;
-    bool ascii = (pattern->modifiers & YX_MOD_ASCII) ||
-                 !(pattern->modifiers & YX_MOD_WIDE);
+    if (!yx_word_byte(y) || x == y || regexp[at + 11] != (char)y) return 1;
+    bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     for (unsigned variant = 0; variant < 2; ++variant) {
         if ((variant == 0 && !ascii) || (variant == 1 && !wide)) continue;
@@ -7924,10 +6852,7 @@ static int yx_regex_add_fullword_pure_run(YRX_PATTERN *pattern,
                     }
                 }
                 size_t tail = offset + count * stride;
-                if (!equal || data[tail] != y ||
-                    (variant && data[tail + 1] != 0) ||
-                    !yx_fullword(data, size, offset, span, variant != 0, 0))
-                    continue;
+                if (!equal || data[tail] != y || (variant && data[tail + 1] != 0) || !yx_fullword(data, size, offset, span, variant != 0, 0)) continue;
                 if (!yx_add_match(pattern, offset, span, 0)) return 0;
             }
         }
@@ -7935,9 +6860,7 @@ static int yx_regex_add_fullword_pure_run(YRX_PATTERN *pattern,
     return 1;
 }
 
-static int yx_scan_regex_add_missing_lazy_short_first(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit,
-    const char *expanded)
+static int yx_scan_regex_add_missing_lazy_short_first(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, const char *expanded)
 {
     YRX_PATTERN found = *pattern;
     found.regexp = (char *)expanded;
@@ -7953,30 +6876,23 @@ static int yx_scan_regex_add_missing_lazy_short_first(
     }
     size_t secondary_limit = 0;
     if (limit) {
-        secondary_limit = limit > SIZE_MAX - pattern->match_count ?
-                          SIZE_MAX : limit + pattern->match_count;
+        secondary_limit = limit > SIZE_MAX - pattern->match_count ? SIZE_MAX : limit + pattern->match_count;
     }
-    int success = yx_scan_regex_buffer(&found, code, matches, data, size,
-                                       data, size, 0, 0, false,
-                                       secondary_limit, true, true, NULL, 0);
+    int success = yx_scan_regex_buffer(&found, code, matches, data, size, data, size, 0, 0, false, secondary_limit, true, true, NULL, 0);
     pcre2_match_data_free(matches);
     pcre2_code_free(code);
     if (success) {
         size_t original_count = pattern->match_count;
-        if (original_count > 1)
-            qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-                  yx_match_compare);
+        if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
         for (size_t i = 0; i < found.match_count; ++i) {
             size_t offset = found.matches[i].offset;
             size_t left = 0, right = original_count;
             while (left < right) {
                 size_t middle = left + (right - left) / 2;
-                if (pattern->matches[middle].offset < offset)
-                    left = middle + 1;
+                if (pattern->matches[middle].offset < offset) left = middle + 1;
                 else right = middle;
             }
-            if (left < original_count &&
-                pattern->matches[left].offset == offset) continue;
+            if (left < original_count && pattern->matches[left].offset == offset) continue;
             if (!yx_add_match(pattern, offset, found.matches[i].length, 0)) {
                 success = 0;
                 break;
@@ -7987,44 +6903,29 @@ static int yx_scan_regex_add_missing_lazy_short_first(
     return success;
 }
 
-static size_t yx_match_lazy_trailing_triple_end(
-    const uint8_t *data, size_t size, size_t at,
-    const YX_SMALL_REGEX_BRANCH branch[2], uint32_t class_mask,
-    uint8_t suffix, unsigned count)
+static size_t yx_match_lazy_trailing_triple_end(const uint8_t *data, size_t size, size_t at, const YX_SMALL_REGEX_BRANCH branch[2], uint32_t class_mask, uint8_t suffix,
+                                                unsigned count)
 {
     if (count && at < size && data[at] == suffix) return at + 1;
     if (count == 5) return 0;
     for (unsigned i = 0; i < 2; ++i) {
         const YX_SMALL_REGEX_BRANCH *item = &branch[i];
-        if (!yx_match_small_lower_branch(item, data + at, size - at))
-            continue;
+        if (!yx_match_small_lower_branch(item, data + at, size - at)) continue;
         size_t class_at = at + item->width;
-        if (class_at >= size || data[class_at] < 'a' ||
-            data[class_at] > 'z' ||
-            !(class_mask & (UINT32_C(1) << (data[class_at] - 'a'))))
-            continue;
-        size_t end = yx_match_lazy_trailing_triple_end(
-            data, size, class_at + 1, branch, class_mask, suffix,
-            count + 1);
+        if (class_at >= size || data[class_at] < 'a' || data[class_at] > 'z' || !(class_mask & (UINT32_C(1) << (data[class_at] - 'a')))) continue;
+        size_t end = yx_match_lazy_trailing_triple_end(data, size, class_at + 1, branch, class_mask, suffix, count + 1);
         if (end) return end;
     }
     return 0;
 }
 
-static bool yx_parse_three_literal_lower_class(
-    const char *regexp, size_t length, size_t *at, uint32_t *mask)
+static bool yx_parse_three_literal_lower_class(const char *regexp, size_t length, size_t *at, uint32_t *mask)
 {
     size_t pos = *at;
-    if (pos + 4 >= length || regexp[pos] != '[' ||
-        regexp[pos + 4] != ']' ||
-        regexp[pos + 1] < 'a' || regexp[pos + 1] > 'z' ||
-        regexp[pos + 2] <= regexp[pos + 1] ||
-        regexp[pos + 2] > 'z' ||
-        regexp[pos + 3] <= regexp[pos + 2] ||
-        regexp[pos + 3] > 'z') return false;
-    *mask = (UINT32_C(1) << (regexp[pos + 1] - 'a')) |
-            (UINT32_C(1) << (regexp[pos + 2] - 'a')) |
-            (UINT32_C(1) << (regexp[pos + 3] - 'a'));
+    if (pos + 4 >= length || regexp[pos] != '[' || regexp[pos + 4] != ']' || regexp[pos + 1] < 'a' || regexp[pos + 1] > 'z' || regexp[pos + 2] <= regexp[pos + 1] ||
+        regexp[pos + 2] > 'z' || regexp[pos + 3] <= regexp[pos + 2] || regexp[pos + 3] > 'z')
+        return false;
+    *mask = (UINT32_C(1) << (regexp[pos + 1] - 'a')) | (UINT32_C(1) << (regexp[pos + 2] - 'a')) | (UINT32_C(1) << (regexp[pos + 3] - 'a'));
     *at = pos + 5;
     return true;
 }
@@ -8032,60 +6933,41 @@ static bool yx_parse_three_literal_lower_class(
 /* This lazy trailing-class form can find a suffix at an offset omitted by
    the regular expression scan. Preserve the original branch-selected span
    wherever that scan already found a match. */
-static int yx_scan_lazy_trailing_triple_missing(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static int yx_scan_lazy_trailing_triple_missing(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = regexp[0] == '^' ? 1 : 0;
     bool anchored = at != 0;
     YX_SMALL_REGEX_BRANCH branch[2];
     uint32_t class_mask, short_mask, first_mask, tail_mask, suffix_mask;
-    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0)
-        return 1;
+    if ((pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || at + 6 >= length || memcmp(regexp + at, "(?:(?:", 6) != 0) return 1;
     at += 6;
-    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) ||
-        at >= length || regexp[at++] != '|' ||
-        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) ||
-        at >= length || regexp[at++] != ')' ||
-        (!yx_parse_two_or_three_lower_class(regexp, length, &at,
-                                            &class_mask) &&
-         !yx_parse_three_literal_lower_class(regexp, length, &at,
-                                              &class_mask)) ||
-        at >= length || regexp[at++] != ')') return 1;
-    if (branch[0].width != 1 || branch[1].width != 2 ||
-        at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 ||
-        regexp[at + 6] < 'a' || regexp[at + 6] > 'z') return 1;
+    if (!yx_parse_small_lower_branch(regexp, length, &at, &branch[0]) || at >= length || regexp[at++] != '|' ||
+        !yx_parse_small_lower_branch(regexp, length, &at, &branch[1]) || at >= length || regexp[at++] != ')' ||
+        (!yx_parse_two_or_three_lower_class(regexp, length, &at, &class_mask) && !yx_parse_three_literal_lower_class(regexp, length, &at, &class_mask)) || at >= length ||
+        regexp[at++] != ')')
+        return 1;
+    if (branch[0].width != 1 || branch[1].width != 2 || at + 7 != length || memcmp(regexp + at, "{1,3}?", 6) != 0 || regexp[at + 6] < 'a' || regexp[at + 6] > 'z')
+        return 1;
     short_mask = branch[0].masks[0];
     first_mask = branch[1].masks[0];
     tail_mask = branch[1].masks[1];
     suffix_mask = UINT32_C(1) << (regexp[at + 6] - 'a');
-    if ((first_mask & (first_mask - 1)) != 0 ||
-        (tail_mask & (tail_mask - 1)) != 0 ||
-        first_mask == tail_mask || first_mask == suffix_mask ||
-        tail_mask == suffix_mask ||
-        short_mask != (first_mask | suffix_mask) ||
-        class_mask != (short_mask | tail_mask)) return 1;
+    if ((first_mask & (first_mask - 1)) != 0 || (tail_mask & (tail_mask - 1)) != 0 || first_mask == tail_mask || first_mask == suffix_mask || tail_mask == suffix_mask ||
+        short_mask != (first_mask | suffix_mask) || class_mask != (short_mask | tail_mask))
+        return 1;
     size_t original_count = pattern->match_count;
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     for (size_t offset = 0; offset < size; ++offset) {
         size_t left = 0, right = original_count;
         while (left < right) {
             size_t middle = left + (right - left) / 2;
-            if (pattern->matches[middle].offset < offset)
-                left = middle + 1;
+            if (pattern->matches[middle].offset < offset) left = middle + 1;
             else right = middle;
         }
-        if (left == original_count ||
-            pattern->matches[left].offset != offset) {
-            size_t end = yx_match_lazy_trailing_triple_end(
-                data, size, offset, branch, class_mask,
-                (uint8_t)regexp[at + 6], 0);
-            if (end && !yx_add_match(pattern, offset, end - offset, 0))
-                return 0;
+        if (left == original_count || pattern->matches[left].offset != offset) {
+            size_t end = yx_match_lazy_trailing_triple_end(data, size, offset, branch, class_mask, (uint8_t)regexp[at + 6], 0);
+            if (end && !yx_add_match(pattern, offset, end - offset, 0)) return 0;
         }
         if (anchored) break;
     }
@@ -8096,50 +6978,30 @@ static int yx_scan_lazy_trailing_triple_missing(
    It consumes up to three class bytes, or four when a leading xy pair can be
    chosen. Keep the guard exact: nearby quantifiers and branch orders use
    different priorities. */
-static int yx_scan_nested_short_first_pair_bound(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_nested_short_first_pair_bound(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp);
     uint8_t x, y;
     *handled = false;
-    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII)
-        return 1;
-    if (length == 22 &&
-        memcmp(regexp, "(?:(?:", 6) == 0 &&
-        regexp[7] == '|' && regexp[10] == ')' && regexp[11] == '|' &&
-        regexp[12] == '[' && regexp[15] == ']' && regexp[16] == ')' &&
-        memcmp(regexp + 17, "{1,2}", 5) == 0 &&
-        regexp[6] == regexp[8] && regexp[6] == regexp[13] &&
-        regexp[9] == regexp[14]) {
-        x = (uint8_t) regexp[6];
-        y = (uint8_t) regexp[9];
-    } else if (length == 19 &&
-               memcmp(regexp, "(?:", 3) == 0 &&
-               regexp[4] == '|' &&
-               memcmp(regexp + 5, "(?:", 3) == 0 &&
-               regexp[9] == '|' && regexp[12] == ')' &&
-               regexp[13] == ')' &&
-               memcmp(regexp + 14, "{1,2}", 5) == 0 &&
-               regexp[8] == regexp[10] && regexp[3] == regexp[11]) {
-        x = (uint8_t) regexp[8];
-        y = (uint8_t) regexp[3];
+    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII) return 1;
+    if (length == 22 && memcmp(regexp, "(?:(?:", 6) == 0 && regexp[7] == '|' && regexp[10] == ')' && regexp[11] == '|' && regexp[12] == '[' && regexp[15] == ']' &&
+        regexp[16] == ')' && memcmp(regexp + 17, "{1,2}", 5) == 0 && regexp[6] == regexp[8] && regexp[6] == regexp[13] && regexp[9] == regexp[14]) {
+        x = (uint8_t)regexp[6];
+        y = (uint8_t)regexp[9];
+    } else if (length == 19 && memcmp(regexp, "(?:", 3) == 0 && regexp[4] == '|' && memcmp(regexp + 5, "(?:", 3) == 0 && regexp[9] == '|' && regexp[12] == ')' &&
+               regexp[13] == ')' && memcmp(regexp + 14, "{1,2}", 5) == 0 && regexp[8] == regexp[10] && regexp[3] == regexp[11]) {
+        x = (uint8_t)regexp[8];
+        y = (uint8_t)regexp[3];
     } else return 1;
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
-        return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t run = 0, span;
-        while (run < 4 && run < size - offset &&
-               (data[offset + run] == x || data[offset + run] == y))
-            ++run;
+        while (run < 4 && run < size - offset && (data[offset + run] == x || data[offset + run] == y)) ++run;
         if (!run) continue;
         span = run < 3 ? run : 3;
-        if (run == 4 && data[offset] == x && data[offset + 1] == y)
-            span = 4;
+        if (run == 4 && data[offset] == x && data[offset + 1] == y) span = 4;
         if (!yx_add_match(pattern, offset, span, limit)) return 0;
     }
     return 1;
@@ -8148,34 +7010,23 @@ static int yx_scan_nested_short_first_pair_bound(
 /* The bounded verifier for (?:[xy]|x+){1,2} extends a leading x run by
    two class bytes. A match beginning with y takes up to three class bytes.
    Cache the end of each x run so long inputs remain linear. */
-static int yx_scan_bounded_class_plus_branch(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_bounded_class_plus_branch(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y;
     size_t run_end = 0;
     *handled = false;
-    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII)
-        return 1;
-    if (strlen(regexp) != 16 ||
-        memcmp(regexp, "(?:[", 4) != 0 ||
-        regexp[6] != ']' || regexp[7] != '|' ||
-        regexp[9] != '+' || regexp[10] != ')' ||
+    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII) return 1;
+    if (strlen(regexp) != 16 || memcmp(regexp, "(?:[", 4) != 0 || regexp[6] != ']' || regexp[7] != '|' || regexp[9] != '+' || regexp[10] != ')' ||
         memcmp(regexp + 11, "{1,2}", 5) != 0)
         return 1;
-    x = (uint8_t) regexp[8];
-    if (regexp[4] == (char) x)
-        y = (uint8_t) regexp[5];
-    else if (regexp[5] == (char) x)
-        y = (uint8_t) regexp[4];
+    x = (uint8_t)regexp[8];
+    if (regexp[4] == (char)x) y = (uint8_t)regexp[5];
+    else if (regexp[5] == (char)x) y = (uint8_t)regexp[4];
     else return 1;
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
-        return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t span = 0;
         if (data[offset] == x) {
             if (offset >= run_end) {
@@ -8184,15 +7035,11 @@ static int yx_scan_bounded_class_plus_branch(
             }
             span = run_end - offset;
             size_t tail = 0;
-            while (tail < 2 && tail < size - run_end &&
-                   (data[run_end + tail] == x ||
-                    data[run_end + tail] == y)) ++tail;
+            while (tail < 2 && tail < size - run_end && (data[run_end + tail] == x || data[run_end + tail] == y)) ++tail;
             span += tail;
         } else if (data[offset] == y) {
             span = 1;
-            while (span < 3 && span < size - offset &&
-                   (data[offset + span] == x || data[offset + span] == y))
-                ++span;
+            while (span < 3 && span < size - offset && (data[offset + span] == x || data[offset + span] == y)) ++span;
         }
         if (span && !yx_add_match(pattern, offset, span, limit)) return 0;
     }
@@ -8202,39 +7049,26 @@ static int yx_scan_bounded_class_plus_branch(
 /* In (?:xy|x+)+, a run can include a y only immediately after x. The
    verifier keeps the longest such prefix at each x offset. Cache the first
    rejected byte so each contiguous valid region is visited only once. */
-static int yx_scan_pair_or_first_plus(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_pair_or_first_plus(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y;
     size_t valid_end = 0;
     *handled = false;
-    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII)
+    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII) return 1;
+    if (strlen(regexp) != 10 || memcmp(regexp, "(?:", 3) != 0 || regexp[5] != '|' || regexp[6] != regexp[3] || regexp[7] != '+' || regexp[8] != ')' || regexp[9] != '+')
         return 1;
-    if (strlen(regexp) != 10 ||
-        memcmp(regexp, "(?:", 3) != 0 ||
-        regexp[5] != '|' || regexp[6] != regexp[3] ||
-        regexp[7] != '+' || regexp[8] != ')' || regexp[9] != '+')
-        return 1;
-    x = (uint8_t) regexp[3];
-    y = (uint8_t) regexp[4];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
-        return 1;
+    x = (uint8_t)regexp[3];
+    y = (uint8_t)regexp[4];
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         if (data[offset] != x) continue;
         if (offset >= valid_end) {
             valid_end = offset + 1;
-            while (valid_end < size &&
-                   (data[valid_end] == x ||
-                    (data[valid_end] == y &&
-                     data[valid_end - 1] == x))) ++valid_end;
+            while (valid_end < size && (data[valid_end] == x || (data[valid_end] == y && data[valid_end - 1] == x))) ++valid_end;
         }
-        if (!yx_add_match(pattern, offset, valid_end - offset, limit))
-            return 0;
+        if (!yx_add_match(pattern, offset, valid_end - offset, limit)) return 0;
     }
     return 1;
 }
@@ -8242,41 +7076,28 @@ static int yx_scan_pair_or_first_plus(
 /* For (?:x+|(?:xy|x)){1,2}, a leading x run wins unless it is one byte
    followed by y and another x run. Only then does the verifier retain the
    longer xy + x-run path. */
-static int yx_scan_plus_or_nested_pair_bound(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_plus_or_nested_pair_bound(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y;
     size_t run_end = 0;
     *handled = false;
-    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII)
+    if (pattern->modifiers != 0 && pattern->modifiers != YX_MOD_ASCII) return 1;
+    if (strlen(regexp) != 20 || memcmp(regexp, "(?:", 3) != 0 || regexp[4] != '+' || regexp[5] != '|' || memcmp(regexp + 6, "(?:", 3) != 0 || regexp[9] != regexp[3] ||
+        regexp[11] != '|' || regexp[12] != regexp[3] || regexp[13] != ')' || regexp[14] != ')' || memcmp(regexp + 15, "{1,2}", 5) != 0)
         return 1;
-    if (strlen(regexp) != 20 ||
-        memcmp(regexp, "(?:", 3) != 0 ||
-        regexp[4] != '+' || regexp[5] != '|' ||
-        memcmp(regexp + 6, "(?:", 3) != 0 ||
-        regexp[9] != regexp[3] || regexp[11] != '|' ||
-        regexp[12] != regexp[3] || regexp[13] != ')' ||
-        regexp[14] != ')' ||
-        memcmp(regexp + 15, "{1,2}", 5) != 0)
-        return 1;
-    x = (uint8_t) regexp[3];
-    y = (uint8_t) regexp[10];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
-        return 1;
+    x = (uint8_t)regexp[3];
+    y = (uint8_t)regexp[10];
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         if (data[offset] != x) continue;
         if (offset >= run_end) {
             run_end = offset + 1;
             while (run_end < size && data[run_end] == x) ++run_end;
         }
         size_t span = run_end - offset;
-        if (span == 1 && size - run_end >= 2 &&
-            data[run_end] == y && data[run_end + 1] == x) {
+        if (span == 1 && size - run_end >= 2 && data[run_end] == y && data[run_end + 1] == x) {
             size_t tail_end = run_end + 2;
             while (tail_end < size && data[tail_end] == x) ++tail_end;
             span = tail_end - offset;
@@ -8286,10 +7107,7 @@ static int yx_scan_plus_or_nested_pair_bound(
     return 1;
 }
 
-static bool yx_match_ordered_pair_token(const uint8_t *data, size_t size,
-                                        size_t at, uint8_t first,
-                                        uint8_t second, size_t width,
-                                        bool nocase, bool wide)
+static bool yx_match_ordered_pair_token(const uint8_t *data, size_t size, size_t at, uint8_t first, uint8_t second, size_t width, bool nocase, bool wide)
 {
     size_t step = wide ? 2u : 1u;
     if (at >= size || width > (size - at) / step) return false;
@@ -8307,30 +7125,18 @@ static bool yx_match_ordered_pair_token(const uint8_t *data, size_t size,
     return true;
 }
 
-static size_t yx_nested_pair_or_reverse_span(const uint8_t *data,
-                                             size_t size, size_t offset,
-                                             const size_t widths[3],
-                                             const uint8_t first_bytes[3],
-                                             const uint8_t second_bytes[3],
-                                             bool nocase, bool wide,
-                                             size_t *two_span)
+static size_t yx_nested_pair_or_reverse_span(const uint8_t *data, size_t size, size_t offset, const size_t widths[3], const uint8_t first_bytes[3],
+                                             const uint8_t second_bytes[3], bool nocase, bool wide, size_t *two_span)
 {
     size_t step = wide ? 2u : 1u;
     size_t one_end = 0, two_end = 0, end;
     if (two_span) *two_span = 0;
     for (size_t first = 0; first < 3; ++first) {
-        if (!yx_match_ordered_pair_token(data, size, offset,
-                                         first_bytes[first],
-                                         second_bytes[first], widths[first],
-                                         nocase, wide))
-            continue;
+        if (!yx_match_ordered_pair_token(data, size, offset, first_bytes[first], second_bytes[first], widths[first], nocase, wide)) continue;
         size_t first_end = offset + widths[first] * step;
         if (!one_end) one_end = first_end;
         for (size_t second = 0; second < 3; ++second) {
-            if (yx_match_ordered_pair_token(data, size, first_end,
-                                            first_bytes[second],
-                                            second_bytes[second], widths[second],
-                                            nocase, wide)) {
+            if (yx_match_ordered_pair_token(data, size, first_end, first_bytes[second], second_bytes[second], widths[second], nocase, wide)) {
                 two_end = first_end + widths[second] * step;
                 break;
             }
@@ -8341,10 +7147,7 @@ static size_t yx_nested_pair_or_reverse_span(const uint8_t *data,
     if (two_end) {
         if (two_span) *two_span = two_end - offset;
         for (size_t third = 0; third < 3; ++third) {
-            if (yx_match_ordered_pair_token(data, size, end,
-                                            first_bytes[third],
-                                            second_bytes[third], widths[third],
-                                            nocase, wide)) {
+            if (yx_match_ordered_pair_token(data, size, end, first_bytes[third], second_bytes[third], widths[third], nocase, wide)) {
                 end += widths[third] * step;
                 break;
             }
@@ -8353,23 +7156,16 @@ static size_t yx_nested_pair_or_reverse_span(const uint8_t *data,
     return end ? end - offset : 0;
 }
 
-static size_t yx_nested_pair_or_reverse_fullword_span(
-    const uint8_t *data, size_t size, size_t offset,
-    const size_t widths[3], const uint8_t first_bytes[3],
-    const uint8_t second_bytes[3], bool nocase, bool wide,
-    bool *fell_back)
+static size_t yx_nested_pair_or_reverse_fullword_span(const uint8_t *data, size_t size, size_t offset, const size_t widths[3], const uint8_t first_bytes[3],
+                                                      const uint8_t second_bytes[3], bool nocase, bool wide, bool *fell_back)
 {
     size_t two_span = 0;
-    size_t span = yx_nested_pair_or_reverse_span(
-        data, size, offset, widths, first_bytes, second_bytes,
-        nocase, wide, &two_span);
+    size_t span = yx_nested_pair_or_reverse_span(data, size, offset, widths, first_bytes, second_bytes, nocase, wide, &two_span);
     if (fell_back) *fell_back = false;
-    if (span && yx_fullword(data, size, offset, span, wide, 0))
-        return span;
+    if (span && yx_fullword(data, size, offset, span, wide, 0)) return span;
     /* The optional third token can be abandoned when it crosses a word
        boundary, but the chosen two-token path is not shortened again. */
-    if (two_span && two_span < span &&
-        yx_fullword(data, size, offset, two_span, wide, 0)) {
+    if (two_span && two_span < span && yx_fullword(data, size, offset, two_span, wide, 0)) {
         if (fell_back) *fell_back = true;
         return two_span;
     }
@@ -8379,9 +7175,7 @@ static size_t yx_nested_pair_or_reverse_fullword_span(
 /* The nested xy|x and x|xy alternatives share the same verifier bound,
    but source order decides ties. Find the first two-token path in branch
    order, then extend it by the first available third token. */
-static int yx_scan_nested_pair_or_reverse_bound(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_nested_pair_or_reverse_bound(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y;
@@ -8389,101 +7183,63 @@ static int yx_scan_nested_pair_or_reverse_bound(
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     bool fullword = (pattern->modifiers & YX_MOD_FULLWORD) != 0;
-    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-                (YX_MOD_ASCII | YX_MOD_WIDE);
+    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE);
     *handled = false;
-    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_NOCASE |
-                               YX_MOD_WIDE | YX_MOD_FULLWORD))
+    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_NOCASE | YX_MOD_WIDE | YX_MOD_FULLWORD)) return 1;
+    if (strlen(regexp) != 20 || memcmp(regexp, "(?:(?:", 6) != 0 || regexp[10] != ')' || regexp[11] != '|' || regexp[14] != ')' || memcmp(regexp + 15, "{1,2}", 5) != 0)
         return 1;
-    if (strlen(regexp) != 20 ||
-        memcmp(regexp, "(?:(?:", 6) != 0 ||
-        regexp[10] != ')' || regexp[11] != '|' ||
-        regexp[14] != ')' ||
-        memcmp(regexp + 15, "{1,2}", 5) != 0)
-        return 1;
-    x = (uint8_t) regexp[6];
-    if (regexp[8] == '|' && regexp[9] == (char) x) {
-        y = (uint8_t) regexp[7];
+    x = (uint8_t)regexp[6];
+    if (regexp[8] == '|' && regexp[9] == (char)x) {
+        y = (uint8_t)regexp[7];
         long_first = true;
-    } else if (regexp[7] == '|' && regexp[8] == (char) x) {
-        y = (uint8_t) regexp[9];
+    } else if (regexp[7] == '|' && regexp[8] == (char)x) {
+        y = (uint8_t)regexp[9];
         long_first = false;
     } else return 1;
-    bool underscore_fullword = fullword && long_first && x == '_' &&
-                               yx_word_byte(y);
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y ||
-        (nocase && yx_fold(x) == yx_fold(y)) ||
-        (fullword && (x == '_' || y == '_') && !underscore_fullword) ||
-        (both && fullword && !underscore_fullword &&
-         (!yx_word_byte(x) || !yx_word_byte(y))) ||
-        regexp[12] != (char) y || regexp[13] != (char) x)
+    bool underscore_fullword = fullword && long_first && x == '_' && yx_word_byte(y);
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y || (nocase && yx_fold(x) == yx_fold(y)) ||
+        (fullword && (x == '_' || y == '_') && !underscore_fullword) || (both && fullword && !underscore_fullword && (!yx_word_byte(x) || !yx_word_byte(y))) ||
+        regexp[12] != (char)y || regexp[13] != (char)x)
         return 1;
-    size_t widths[3] = {long_first ? 2u : 1u,
-                        long_first ? 1u : 2u, 2u};
+    size_t widths[3] = {long_first ? 2u : 1u, long_first ? 1u : 2u, 2u};
     uint8_t first_bytes[3] = {x, x, y};
     uint8_t second_bytes[3] = {y, y, x};
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t ascii_span = 0, wide_span = 0, span;
         bool wide_fell_back = false;
         if (!wide || both) {
-            if (underscore_fullword)
-                ascii_span = yx_nested_pair_or_reverse_fullword_span(
-                    data, size, offset, widths, first_bytes, second_bytes,
-                    nocase, false, NULL);
-            else
-                ascii_span = yx_nested_pair_or_reverse_span(
-                    data, size, offset, widths, first_bytes, second_bytes,
-                    nocase, false, NULL);
+            if (underscore_fullword) ascii_span = yx_nested_pair_or_reverse_fullword_span(data, size, offset, widths, first_bytes, second_bytes, nocase, false, NULL);
+            else ascii_span = yx_nested_pair_or_reverse_span(data, size, offset, widths, first_bytes, second_bytes, nocase, false, NULL);
         }
         if (wide) {
             if (underscore_fullword)
-                wide_span = yx_nested_pair_or_reverse_fullword_span(
-                    data, size, offset, widths, first_bytes, second_bytes,
-                    nocase, true, &wide_fell_back);
-            else
-                wide_span = yx_nested_pair_or_reverse_span(
-                    data, size, offset, widths, first_bytes, second_bytes,
-                    nocase, true, NULL);
+                wide_span = yx_nested_pair_or_reverse_fullword_span(data, size, offset, widths, first_bytes, second_bytes, nocase, true, &wide_fell_back);
+            else wide_span = yx_nested_pair_or_reverse_span(data, size, offset, widths, first_bytes, second_bytes, nocase, true, NULL);
         }
         /* A rejected wide word can still leave a valid ASCII match at the
            same offset, so filter each encoding before resolving its tie. */
         if (fullword && !underscore_fullword) {
-            if (ascii_span &&
-                !yx_fullword(data, size, offset, ascii_span, false, 0))
-                ascii_span = 0;
-            if (wide_span &&
-                !yx_fullword(data, size, offset, wide_span, true, 0))
-                wide_span = 0;
+            if (ascii_span && !yx_fullword(data, size, offset, ascii_span, false, 0)) ascii_span = 0;
+            if (wide_span && !yx_fullword(data, size, offset, wide_span, true, 0)) wide_span = 0;
         }
         span = wide ? wide_span : ascii_span;
         if (both) {
             span = ascii_span;
             if (wide_span) {
-                bool same_x = wide_span == 4 &&
-                    (nocase ? yx_fold(data[offset + 2]) == yx_fold(x) :
-                              data[offset + 2] == x);
+                bool same_x = wide_span == 4 && (nocase ? yx_fold(data[offset + 2]) == yx_fold(x) : data[offset + 2] == x);
                 /* At 16 bytes the combined verifier prefers the ASCII
                    one-byte match over a terminal wide x or xy. */
-                if (!ascii_span || size < 16 ||
-                    (!wide_fell_back && (wide_span >= 6 || same_x)))
-                    span = wide_span;
+                if (!ascii_span || size < 16 || (!wide_fell_back && (wide_span >= 6 || same_x))) span = wide_span;
             }
         }
-        if (span && !yx_add_match(pattern, offset, span, limit))
-            return 0;
+        if (span && !yx_add_match(pattern, offset, span, limit)) return 0;
     }
     return 1;
 }
 
-static int yx_scan_bounded_long_first_three_byte(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled);
-static int yx_scan_bounded_long_first_pair_fullword(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled);
+static int yx_scan_bounded_long_first_three_byte(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled);
+static int yx_scan_bounded_long_first_pair_fullword(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled);
 
 static bool yx_large_regex_emit(size_t offset, size_t length, void *context)
 {
@@ -8491,19 +7247,15 @@ static bool yx_large_regex_emit(size_t offset, size_t length, void *context)
 }
 /* In Unicode mode \p{Any}, and any bracketed class that covers every scalar
  * value, is an arbitrary byte for YARA-X, exactly like (?s). . */
-static bool yx_regex_any_property_at(const char *regexp, size_t at,
-                                     size_t length)
+static bool yx_regex_any_property_at(const char *regexp, size_t at, size_t length)
 {
-    return at + 7 <= length && regexp[at] == '\\' && regexp[at + 1] == 'p' &&
-           regexp[at + 2] == '{' && (regexp[at + 3] | 0x20) == 'a' &&
-           (regexp[at + 4] | 0x20) == 'n' && (regexp[at + 5] | 0x20) == 'y' &&
-           regexp[at + 6] == '}';
+    return at + 7 <= length && regexp[at] == '\\' && regexp[at + 1] == 'p' && regexp[at + 2] == '{' && (regexp[at + 3] | 0x20) == 'a' && (regexp[at + 4] | 0x20) == 'n' &&
+           (regexp[at + 5] | 0x20) == 'y' && regexp[at + 6] == '}';
 }
 
-static bool yx_regex_full_scalar_range_at(const char *regexp, size_t at,
-                                          size_t length)
+static bool yx_regex_full_scalar_range_at(const char *regexp, size_t at, size_t length)
 {
-    static const char *const starts[] = { "\\x{0}-", "\\x{00}-", "\\x00-" };
+    static const char *const starts[] = {"\\x{0}-", "\\x{00}-", "\\x00-"};
     static const char tail[] = "\\x{10ffff}";
     for (size_t i = 0; i < sizeof(starts) / sizeof(*starts); ++i) {
         size_t start_length = strlen(starts[i]);
@@ -8511,9 +7263,7 @@ static bool yx_regex_full_scalar_range_at(const char *regexp, size_t at,
         if (memcmp(regexp + at, starts[i], start_length) != 0) continue;
         bool same = true;
         for (size_t k = 0; k < sizeof(tail) - 1; ++k)
-            if ((regexp[at + start_length + k] | 0x20) !=
-                (tail[k] | 0x20) && regexp[at + start_length + k] != tail[k])
-                same = false;
+            if ((regexp[at + start_length + k] | 0x20) != (tail[k] | 0x20) && regexp[at + start_length + k] != tail[k]) same = false;
         if (same) return true;
     }
     return false;
@@ -8549,9 +7299,7 @@ static char *yx_regex_rewrite_any_property(const char *regexp)
             if (end < length && regexp[end] == ']') ++end;
             for (; end < length && regexp[end] != ']'; ++end) {
                 if (regexp[end] == '\\' && end + 1 < length) {
-                    if (yx_regex_any_property_at(regexp, end, length) ||
-                        yx_regex_full_scalar_range_at(regexp, end, length))
-                        any = true;
+                    if (yx_regex_any_property_at(regexp, end, length) || yx_regex_full_scalar_range_at(regexp, end, length)) any = true;
                     ++end;
                 } else if (regexp[end] == '[') {
                     /* Nested classes keep the ordinary translation. */
@@ -8569,20 +7317,21 @@ static char *yx_regex_rewrite_any_property(const char *regexp)
             /* Copy the whole class untouched. */
             for (; i < length && i <= end; ++i) {
                 out[used++] = regexp[i];
-                if (regexp[i] == '\\' && i + 1 < length)
-                    out[used++] = regexp[++i];
+                if (regexp[i] == '\\' && i + 1 < length) out[used++] = regexp[++i];
             }
             continue;
         }
         out[used++] = regexp[i++];
     }
     out[used] = '\0';
-    if (!changed) { free(out); return NULL; }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
     return out;
 }
 
-static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                         size_t limit)
+static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit)
 {
     char *any_rewrite = yx_regex_rewrite_any_property(pattern->regexp);
     if (any_rewrite) {
@@ -8594,8 +7343,8 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         return success;
     }
     bool literal_chain = false;
-    int chain_success = yx_scan_wide_literal_chain(pattern,data,size,limit,&literal_chain);
-    if(literal_chain)return chain_success;
+    int chain_success = yx_scan_wide_literal_chain(pattern, data, size, limit, &literal_chain);
+    if (literal_chain) return chain_success;
     char *lowered = NULL;
     int fast_result = yx_ser_lower_fast_regex(pattern, &lowered);
     if (fast_result == -1) return 0;
@@ -8606,13 +7355,15 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         return success;
     }
     if (fast_result == 1) {
-        char *saved = pattern->regexp; pattern->regexp = lowered;
+        char *saved = pattern->regexp;
+        pattern->regexp = lowered;
         int success = yx_scan_regex(pattern, data, size, limit);
-        pattern->regexp = saved; free(lowered); return success;
+        pattern->regexp = saved;
+        free(lowered);
+        return success;
     }
     bool large_greedy = false;
-    int large_result = yx_ser_scan_large_regex(pattern, data, size, yx_large_regex_emit, pattern,
-                                               &large_greedy);
+    int large_result = yx_ser_scan_large_regex(pattern, data, size, yx_large_regex_emit, pattern, &large_greedy);
     if (large_result != -2) {
         if (large_result) {
             if (large_greedy) yx_keep_longest_per_offset(pattern);
@@ -8620,12 +7371,10 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         }
         return large_result;
     }
-    if (yx_unmatchable_large_repeat(pattern->regexp) ||
-        yx_pcre_unicode_count_unmatchable(pattern->regexp)) return 1;
+    if (yx_unmatchable_large_repeat(pattern->regexp) || yx_pcre_unicode_count_unmatchable(pattern->regexp)) return 1;
     const uint8_t *literal;
     size_t literal_length;
-    if (yx_large_repeat_literal_alt(pattern->regexp, &literal,
-                                    &literal_length)) {
+    if (yx_large_repeat_literal_alt(pattern->regexp, &literal, &literal_length)) {
         uint8_t *saved_bytes = pattern->bytes;
         size_t saved_length = pattern->length;
         pattern->bytes = (uint8_t *)literal;
@@ -8636,107 +7385,81 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         return success;
     }
     bool bounded_long_first_handled = false;
-    int bounded_long_first_success = yx_scan_bounded_long_first_three_byte(
-        pattern, data, size, limit, &bounded_long_first_handled);
+    int bounded_long_first_success = yx_scan_bounded_long_first_three_byte(pattern, data, size, limit, &bounded_long_first_handled);
     if (bounded_long_first_handled) return bounded_long_first_success;
     if (!bounded_long_first_success) return 0;
     bool bounded_pair_fullword_handled = false;
-    int bounded_pair_fullword_success =
-        yx_scan_bounded_long_first_pair_fullword(
-            pattern, data, size, limit, &bounded_pair_fullword_handled);
+    int bounded_pair_fullword_success = yx_scan_bounded_long_first_pair_fullword(pattern, data, size, limit, &bounded_pair_fullword_handled);
     if (bounded_pair_fullword_handled) return bounded_pair_fullword_success;
     if (!bounded_pair_fullword_success) return 0;
     bool nested_short_pair_handled = false;
-    int nested_short_pair_success = yx_scan_nested_short_first_pair_bound(
-        pattern, data, size, limit, &nested_short_pair_handled);
+    int nested_short_pair_success = yx_scan_nested_short_first_pair_bound(pattern, data, size, limit, &nested_short_pair_handled);
     if (nested_short_pair_handled) return nested_short_pair_success;
     if (!nested_short_pair_success) return 0;
     bool class_plus_handled = false;
-    int class_plus_success = yx_scan_bounded_class_plus_branch(
-        pattern, data, size, limit, &class_plus_handled);
+    int class_plus_success = yx_scan_bounded_class_plus_branch(pattern, data, size, limit, &class_plus_handled);
     if (class_plus_handled) return class_plus_success;
     if (!class_plus_success) return 0;
     bool pair_plus_handled = false;
-    int pair_plus_success = yx_scan_pair_or_first_plus(
-        pattern, data, size, limit, &pair_plus_handled);
+    int pair_plus_success = yx_scan_pair_or_first_plus(pattern, data, size, limit, &pair_plus_handled);
     if (pair_plus_handled) return pair_plus_success;
     if (!pair_plus_success) return 0;
     bool nested_plus_handled = false;
-    int nested_plus_success = yx_scan_plus_or_nested_pair_bound(
-        pattern, data, size, limit, &nested_plus_handled);
+    int nested_plus_success = yx_scan_plus_or_nested_pair_bound(pattern, data, size, limit, &nested_plus_handled);
     if (nested_plus_handled) return nested_plus_success;
     if (!nested_plus_success) return 0;
     bool nested_reverse_handled = false;
-    int nested_reverse_success = yx_scan_nested_pair_or_reverse_bound(
-        pattern, data, size, limit, &nested_reverse_handled);
+    int nested_reverse_success = yx_scan_nested_pair_or_reverse_bound(pattern, data, size, limit, &nested_reverse_handled);
     if (nested_reverse_handled) return nested_reverse_success;
     if (!nested_reverse_success) return 0;
     bool overlap_class_handled = false;
-    int overlap_class_success = yx_scan_bounded_overlap_class_branch(
-        pattern, data, size, limit, &overlap_class_handled);
+    int overlap_class_success = yx_scan_bounded_overlap_class_branch(pattern, data, size, limit, &overlap_class_handled);
     if (overlap_class_handled) return overlap_class_success;
     if (!overlap_class_success) return 0;
     bool class_literal_handled = false;
-    int class_literal_success = yx_scan_bounded_class_literal_branch(
-        pattern, data, size, limit, &class_literal_handled);
+    int class_literal_success = yx_scan_bounded_class_literal_branch(pattern, data, size, limit, &class_literal_handled);
     if (class_literal_handled) return class_literal_success;
     if (!class_literal_success) return 0;
     bool grouped_literal_prefix = false;
-    int grouped_success = yx_scan_grouped_literal_prefix(pattern, data, size,
-                                                          limit,
-                                                          &grouped_literal_prefix);
+    int grouped_success = yx_scan_grouped_literal_prefix(pattern, data, size, limit, &grouped_literal_prefix);
     if (grouped_literal_prefix) return grouped_success;
     if (!grouped_success) return 0;
     bool literal_alternation = false;
-    int literal_success = yx_scan_literal_alternation(pattern, data, size,
-                                                      limit,
-                                                      &literal_alternation);
+    int literal_success = yx_scan_literal_alternation(pattern, data, size, limit, &literal_alternation);
     if (literal_alternation) return literal_success;
     bool bounded_overlap_handled = false;
-    int bounded_overlap_success = yx_scan_greedy_bounded_overlap(
-        pattern, data, size, limit, &bounded_overlap_handled);
+    int bounded_overlap_success = yx_scan_greedy_bounded_overlap(pattern, data, size, limit, &bounded_overlap_handled);
     if (bounded_overlap_handled) return bounded_overlap_success;
     bool nested_pair_handled = false;
-    int nested_pair_success = yx_scan_nested_fixed_pair(
-        pattern, data, size, limit, &nested_pair_handled);
+    int nested_pair_success = yx_scan_nested_fixed_pair(pattern, data, size, limit, &nested_pair_handled);
     if (nested_pair_handled) return nested_pair_success;
     bool nested_class_handled = false;
-    int nested_class_success = yx_scan_greedy_nested_class_alt(
-        pattern, data, size, limit, &nested_class_handled);
+    int nested_class_success = yx_scan_greedy_nested_class_alt(pattern, data, size, limit, &nested_class_handled);
     if (nested_class_handled) return nested_class_success;
     bool subset_count_handled = false;
-    int subset_count_success = yx_scan_greedy_nested_subset_count(
-        pattern, data, size, limit, &subset_count_handled);
+    int subset_count_success = yx_scan_greedy_nested_subset_count(pattern, data, size, limit, &subset_count_handled);
     if (subset_count_handled) return subset_count_success;
     bool nested_variable_handled = false;
-    int nested_variable_success = yx_scan_greedy_nested_variable_class_alt(
-        pattern, data, size, limit, &nested_variable_handled);
+    int nested_variable_success = yx_scan_greedy_nested_variable_class_alt(pattern, data, size, limit, &nested_variable_handled);
     if (nested_variable_handled) return nested_variable_success;
     bool lazy_nested_handled = false;
-    int lazy_nested_success = yx_scan_lazy_nested_shortest_variants(
-        pattern, data, size, limit, &lazy_nested_handled);
+    int lazy_nested_success = yx_scan_lazy_nested_shortest_variants(pattern, data, size, limit, &lazy_nested_handled);
     if (lazy_nested_handled) return lazy_nested_success;
     bool nested_counted_handled = false;
-    int nested_counted_success = yx_scan_greedy_nested_counted_class(
-        pattern, data, size, limit, &nested_counted_handled);
+    int nested_counted_success = yx_scan_greedy_nested_counted_class(pattern, data, size, limit, &nested_counted_handled);
     if (nested_counted_handled) return nested_counted_success;
     bool disjoint_pair_handled = false;
-    int disjoint_pair_success = yx_scan_greedy_nested_pair(
-        pattern, data, size, limit, &disjoint_pair_handled);
+    int disjoint_pair_success = yx_scan_greedy_nested_pair(pattern, data, size, limit, &disjoint_pair_handled);
     if (disjoint_pair_handled) return disjoint_pair_success;
     bool greedy_class_handled = false;
-    int greedy_class_success = yx_scan_greedy_overlapping_class(
-        pattern, data, size, limit, &greedy_class_handled);
+    int greedy_class_success = yx_scan_greedy_overlapping_class(pattern, data, size, limit, &greedy_class_handled);
     if (greedy_class_handled) return greedy_class_success;
     char *expanded = yx_regex_expand_disjoint_literal_pair_bound(pattern);
     if (!expanded) expanded = yx_regex_expand_leading_repeat(pattern->regexp);
-    if (!expanded)
-        expanded = yx_regex_expand_disjoint_plus_pair_bound(pattern);
+    if (!expanded) expanded = yx_regex_expand_disjoint_plus_pair_bound(pattern);
     if (!expanded) expanded = yx_regex_expand_nested_bound(pattern);
-    if (!expanded)
-        expanded = yx_regex_expand_anchored_class_pair_bound(pattern);
-    if (!expanded)
-        expanded = yx_regex_expand_anchored_trailing_class_bound(pattern);
+    if (!expanded) expanded = yx_regex_expand_anchored_class_pair_bound(pattern);
+    if (!expanded) expanded = yx_regex_expand_anchored_trailing_class_bound(pattern);
     bool expanded_lazy_bound = false;
     if (!expanded) {
         expanded = yx_regex_expand_lazy_triple_class_bound(pattern);
@@ -8746,78 +7469,49 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         expanded = yx_regex_expand_lazy_trailing_pair_bound(pattern);
         expanded_lazy_bound = expanded != NULL;
     }
-    char *collapsed = yx_regex_collapse_overlapping_repeat(
-        expanded ? expanded : pattern->regexp);
+    char *collapsed = yx_regex_collapse_overlapping_repeat(expanded ? expanded : pattern->regexp);
     char *prioritized = NULL;
     if (!expanded && !collapsed) {
         prioritized = yx_regex_prioritize_nested_suffix(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_repeated_literal_alt(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_repeated_class_literal_alt(
-                pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_repeated_class_alt(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_repeated_range_alt(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_bounded_range_alt(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_bounded_literal_alt(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_expand_grouped_literal_repeat(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_expand_short_first_grouped_repeat(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_grouped_short_branch(pattern,
-                                                                    size);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_longer_atom(pattern);
-        if (!prioritized)
-            prioritized = yx_regex_prioritize_large_atom_prefix(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_repeated_literal_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_repeated_class_literal_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_repeated_class_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_repeated_range_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_bounded_range_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_bounded_literal_alt(pattern);
+        if (!prioritized) prioritized = yx_regex_expand_grouped_literal_repeat(pattern);
+        if (!prioritized) prioritized = yx_regex_expand_short_first_grouped_repeat(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_grouped_short_branch(pattern, size);
+        if (!prioritized) prioritized = yx_regex_prioritize_longer_atom(pattern);
+        if (!prioritized) prioritized = yx_regex_prioritize_large_atom_prefix(pattern);
     }
     YRX_PATTERN adjusted = *pattern;
     if (collapsed) adjusted.regexp = collapsed;
     else if (expanded) adjusted.regexp = expanded;
     else if (prioritized) adjusted.regexp = prioritized;
-    bool ascii = (pattern->modifiers & YX_MOD_ASCII) ||
-                 !(pattern->modifiers & YX_MOD_WIDE);
+    bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
-    bool short_ascii_large_atom =
-        yx_regex_large_atom_two_byte_ascii_prefix(pattern);
-    bool digit_prefix_wide_tie =
-        yx_regex_digit_prefix_wide_tie(pattern);
-    bool complete_wide_prefix_tie =
-        size >= 16 && yx_regex_small_atom_complete_wide_prefix(pattern);
+    bool short_ascii_large_atom = yx_regex_large_atom_two_byte_ascii_prefix(pattern);
+    bool digit_prefix_wide_tie = yx_regex_digit_prefix_wide_tie(pattern);
+    bool complete_wide_prefix_tie = size >= 16 && yx_regex_small_atom_complete_wide_prefix(pattern);
     int success = 1;
     bool longest_variant = false, optional_prefix_variant = false;
     bool short_single_variant = false, ascii_only_variant = false;
-    if (ascii && wide) yx_regex_variant_policy(pattern, &longest_variant,
-        &optional_prefix_variant, &short_single_variant, &ascii_only_variant);
-    bool wide_greedy_repeat = ascii && wide &&
-        (yx_regex_has_greedy_variable_repeat(pattern->regexp) ||
-         yx_regex_is_single_dotall_dot(pattern->regexp,
-                                       (pattern->modifiers & YX_MOD_DOTALL) != 0) ||
+    if (ascii && wide) yx_regex_variant_policy(pattern, &longest_variant, &optional_prefix_variant, &short_single_variant, &ascii_only_variant);
+    bool wide_greedy_repeat =
+        ascii && wide &&
+        (yx_regex_has_greedy_variable_repeat(pattern->regexp) || yx_regex_is_single_dotall_dot(pattern->regexp, (pattern->modifiers & YX_MOD_DOTALL) != 0) ||
          yx_regex_is_single_all_bytes_class(pattern->regexp));
     if (ascii && wide && size >= 16) {
-        if (yx_regex_long_wide_tie(pattern) ||
-            yx_regex_long_wide_lazy_class_pair_tie(pattern) ||
-            yx_regex_nocase_single_letter(pattern))
-            wide_greedy_repeat = true;
-        if (optional_prefix_variant || yx_regex_long_ascii_tie(pattern) ||
-            yx_regex_long_ascii_class_repeat(pattern))
-            wide_greedy_repeat = false;
-        if(short_single_variant)wide_greedy_repeat=true;
+        if (yx_regex_long_wide_tie(pattern) || yx_regex_long_wide_lazy_class_pair_tie(pattern) || yx_regex_nocase_single_letter(pattern)) wide_greedy_repeat = true;
+        if (optional_prefix_variant || yx_regex_long_ascii_tie(pattern) || yx_regex_long_ascii_class_repeat(pattern)) wide_greedy_repeat = false;
+        if (short_single_variant) wide_greedy_repeat = true;
     }
-    if(ascii_only_variant)wide_greedy_repeat=false;
-    bool wide_word_context = wide &&
-                             yx_regex_has_word_boundary(adjusted.regexp);
-    pcre2_code *cached_code = !collapsed && !expanded && !prioritized ?
-        yx_candidate_cached_regex(pattern) : NULL;
-    pcre2_code *ascii_code = ascii ? (cached_code ? cached_code :
-        yx_compile_pcre_regex(&adjusted, false)) : NULL;
-    pcre2_code *wide_code = wide ? (cached_code ? cached_code :
-        yx_compile_pcre_regex(&adjusted, true)) : NULL;
+    if (ascii_only_variant) wide_greedy_repeat = false;
+    bool wide_word_context = wide && yx_regex_has_word_boundary(adjusted.regexp);
+    pcre2_code *cached_code = !collapsed && !expanded && !prioritized ? yx_candidate_cached_regex(pattern) : NULL;
+    pcre2_code *ascii_code = ascii ? (cached_code ? cached_code : yx_compile_pcre_regex(&adjusted, false)) : NULL;
+    pcre2_code *wide_code = wide ? (cached_code ? cached_code : yx_compile_pcre_regex(&adjusted, true)) : NULL;
     pcre2_code *code = ascii ? ascii_code : wide_code;
     if (!code || (wide && !wide_code)) {
         if (!cached_code) {
@@ -8844,8 +7538,7 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
     /* The unrewritten one-literal regexp (chained hex pieces among others)
        searches its occurrences with the literal finder. */
     size_t pure_length = 0;
-    uint8_t *pure_literal = !collapsed && !expanded && !prioritized ?
-        yx_regex_pure_literal(pattern, &pure_length) : NULL;
+    uint8_t *pure_literal = !collapsed && !expanded && !prioritized ? yx_regex_pure_literal(pattern, &pure_length) : NULL;
 
     /* Each encoding and byte alignment has its own earliest matches. Collect
        them independently before applying the caller's shared match limit. */
@@ -8858,15 +7551,16 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
         found.match_count = 0;
         found.match_capacity = 0;
         if (variant == 0) {
-            success = yx_scan_regex_buffer(&found, ascii_code, matches, data, size,
-                                           data, size, 0, 0, false, limit,
-                                           true, true, pure_literal, pure_length);
+            success = yx_scan_regex_buffer(&found, ascii_code, matches, data, size, data, size, 0, 0, false, limit, true, true, pure_literal, pure_length);
         } else {
             size_t parity = (size_t)(variant - 1);
             uint8_t *projected = NULL;
             size_t capacity = 0, pos = parity;
             while (pos + 1 < size && (!limit || found.match_count < limit)) {
-                if (data[pos + 1] != 0) { pos += 2; continue; }
+                if (data[pos + 1] != 0) {
+                    pos += 2;
+                    continue;
+                }
                 size_t origin = pos;
                 do {
                     pos += 2;
@@ -8879,59 +7573,44 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
                 size_t projected_length = length + context_prefix;
                 if (projected_length > capacity) {
                     uint8_t *grown = realloc(projected, projected_length);
-                    if (!grown) { success = 0; break; }
+                    if (!grown) {
+                        success = 0;
+                        break;
+                    }
                     projected = grown;
                     capacity = projected_length;
                 }
                 if (context_prefix) projected[0] = data[origin - 2];
-                for (size_t i = 0; i < length; ++i)
-                    projected[i + context_prefix] = data[origin + i * 2];
-                success = yx_scan_regex_buffer(&found, wide_code, matches,
-                                               projected, projected_length,
-                                               data, size,
-                                               origin - context_prefix * 2,
-                                               context_prefix, true, limit,
-                                               origin <= 1,
-                                               size - pos <= 1, NULL, 0);
+                for (size_t i = 0; i < length; ++i) projected[i + context_prefix] = data[origin + i * 2];
+                success = yx_scan_regex_buffer(&found, wide_code, matches, projected, projected_length, data, size, origin - context_prefix * 2, context_prefix, true,
+                                               limit, origin <= 1, size - pos <= 1, NULL, 0);
                 if (!success) break;
             }
             free(projected);
         }
         if (success) {
             for (size_t i = 0; i < found.match_count; ++i) {
-                if (variant &&
-                    (wide_greedy_repeat || complete_wide_prefix_tie || ascii_only_variant)) {
+                if (variant && (wide_greedy_repeat || complete_wide_prefix_tie || ascii_only_variant)) {
                     size_t left = 0, right = ascii_match_count;
                     while (left < right) {
                         size_t middle = left + (right - left) / 2;
-                        if (pattern->matches[middle].offset <
-                            found.matches[i].offset)
-                            left = middle + 1;
+                        if (pattern->matches[middle].offset < found.matches[i].offset) left = middle + 1;
                         else right = middle;
                     }
-                    if (left < ascii_match_count &&
-                        pattern->matches[left].offset == found.matches[i].offset) {
+                    if (left < ascii_match_count && pattern->matches[left].offset == found.matches[i].offset) {
                         /* YARA-X resolves a greedy regex tie in favor of
                            wide, even when its raw span is shorter. */
-                        if ((wide_greedy_repeat &&
-                             !(short_single_variant && size>=16 && found.matches[i].length==2) &&
-                             (!digit_prefix_wide_tie ||
-                              found.matches[i].length == 4)) ||
-                            (complete_wide_prefix_tie &&
-                             pattern->matches[left].length == 1 &&
-                             found.matches[i].length == 4))
-                            if (!longest_variant || pattern->matches[left].length < found.matches[i].length)
-                                pattern->matches[left].length = found.matches[i].length;
+                        if ((wide_greedy_repeat && !(short_single_variant && size >= 16 && found.matches[i].length == 2) &&
+                             (!digit_prefix_wide_tie || found.matches[i].length == 4)) ||
+                            (complete_wide_prefix_tie && pattern->matches[left].length == 1 && found.matches[i].length == 4))
+                            if (!longest_variant || pattern->matches[left].length < found.matches[i].length) pattern->matches[left].length = found.matches[i].length;
                         continue;
                     }
                 }
                 size_t match_length = found.matches[i].length;
-                if (variant == 0 && short_ascii_large_atom &&
-                    match_length == 3) match_length = 2;
-                match_length = yx_regex_short_input_literal_prefix_length(
-                    pattern, size, variant, match_length);
-                if (!yx_add_match(pattern, found.matches[i].offset,
-                                  match_length, 0)) {
+                if (variant == 0 && short_ascii_large_atom && match_length == 3) match_length = 2;
+                match_length = yx_regex_short_input_literal_prefix_length(pattern, size, variant, match_length);
+                if (!yx_add_match(pattern, found.matches[i].offset, match_length, 0)) {
                     success = 0;
                     break;
                 }
@@ -8950,22 +7629,16 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
     free(expanded);
     free(prioritized);
     if (success) {
-        char *missing_bound =
-            yx_regex_expand_lazy_short_first_pair_bound(pattern);
+        char *missing_bound = yx_regex_expand_lazy_short_first_pair_bound(pattern);
         if (missing_bound) {
-            success = yx_scan_regex_add_missing_lazy_short_first(
-                pattern, data, size, limit, missing_bound);
+            success = yx_scan_regex_add_missing_lazy_short_first(pattern, data, size, limit, missing_bound);
             free(missing_bound);
         }
     }
-    if (success)
-        yx_regex_adjust_repeated_outer_literal(pattern, data, size);
-    if (success)
-        success = yx_regex_add_nested_pure_run(pattern, data, size);
-    if (success)
-        success = yx_regex_add_fullword_pure_run(pattern, data, size);
-    if (success)
-        success = yx_scan_lazy_trailing_triple_missing(pattern, data, size);
+    if (success) yx_regex_adjust_repeated_outer_literal(pattern, data, size);
+    if (success) success = yx_regex_add_nested_pure_run(pattern, data, size);
+    if (success) success = yx_regex_add_fullword_pure_run(pattern, data, size);
+    if (success) success = yx_scan_lazy_trailing_triple_missing(pattern, data, size);
     return success;
 }
 
@@ -8974,57 +7647,43 @@ static int yx_scan_regex(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
    input. YARA-X does not report the shorter branch there because that
    verifier cannot read its following byte. This applies to ASCII and wide
    matches, but only to the shorter branch ending at the physical EOF. */
-static void yx_discard_nocase_prefix_at_eof(YRX_PATTERN *pattern,
-                                              const uint8_t *data, size_t size)
+static void yx_discard_nocase_prefix_at_eof(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     const char *bar;
     const char *shorter;
     const char *longer;
     size_t left_length, right_length, short_length, long_length;
-    if (!(pattern->modifiers & YX_MOD_NOCASE) ||
-        (pattern->modifiers & YX_MOD_FULLWORD) || !regexp) return;
+    if (!(pattern->modifiers & YX_MOD_NOCASE) || (pattern->modifiers & YX_MOD_FULLWORD) || !regexp) return;
     bar = strchr(regexp, '|');
     if (!bar || strchr(bar + 1, '|')) return;
     left_length = (size_t)(bar - regexp);
     right_length = strlen(bar + 1);
-    if (left_length < 2 || right_length < 2 ||
-        left_length == right_length) return;
+    if (left_length < 2 || right_length < 2 || left_length == right_length) return;
     shorter = left_length < right_length ? regexp : bar + 1;
     longer = left_length < right_length ? bar + 1 : regexp;
     short_length = left_length < right_length ? left_length : right_length;
     long_length = left_length > right_length ? left_length : right_length;
     for (size_t i = 0; i < long_length; ++i) {
         unsigned char ch = (unsigned char)longer[i];
-        if (!((ch >= 'a' && ch <= 'z') ||
-              (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9'))) return;
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return;
         if (i < short_length) {
             /* Numeric atoms do not use the nocase verifier path. */
-            if (!((ch >= 'a' && ch <= 'z') ||
-                  (ch >= 'A' && ch <= 'Z')) ||
-                yx_fold(ch) != yx_fold((uint8_t)shorter[i])) return;
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) || yx_fold(ch) != yx_fold((uint8_t)shorter[i])) return;
         }
     }
     size_t out = 0;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH match = pattern->matches[i];
         bool short_at_eof = false;
-        if (match.offset <= size && match.length == short_length &&
-            match.length == size - match.offset &&
-            yx_equal_text(data + match.offset,
-                          (const uint8_t *)shorter, short_length, true)) {
+        if (match.offset <= size && match.length == short_length && match.length == size - match.offset &&
+            yx_equal_text(data + match.offset, (const uint8_t *)shorter, short_length, true)) {
             short_at_eof = true;
-        } else if ((pattern->modifiers & YX_MOD_WIDE) &&
-                   short_length <= SIZE_MAX / 2 &&
-                   match.offset <= size &&
-                   match.length == 2 * short_length &&
+        } else if ((pattern->modifiers & YX_MOD_WIDE) && short_length <= SIZE_MAX / 2 && match.offset <= size && match.length == 2 * short_length &&
                    match.length == size - match.offset) {
             short_at_eof = true;
             for (size_t j = 0; j < short_length; ++j) {
-                if (data[match.offset + 2 * j + 1] != 0 ||
-                    yx_fold(data[match.offset + 2 * j]) !=
-                        yx_fold((uint8_t)shorter[j])) {
+                if (data[match.offset + 2 * j + 1] != 0 || yx_fold(data[match.offset + 2 * j]) != yx_fold((uint8_t)shorter[j])) {
                     short_at_eof = false;
                     break;
                 }
@@ -9035,12 +7694,9 @@ static void yx_discard_nocase_prefix_at_eof(YRX_PATTERN *pattern,
     pattern->match_count = out;
 }
 
-static bool yx_repeated_literal_unit_at(const uint8_t *data, size_t size,
-                                        size_t offset, size_t width,
-                                        uint8_t value)
+static bool yx_repeated_literal_unit_at(const uint8_t *data, size_t size, size_t offset, size_t width, uint8_t value)
 {
-    return offset <= size && size - offset >= width &&
-           data[offset] == value && (width == 1 || data[offset + 1] == 0);
+    return offset <= size && size - offset >= width && data[offset] == value && (width == 1 || data[offset + 1] == 0);
 }
 
 /* For a case-sensitive (x|xy)+y, the verifier keeps xy as a repetition
@@ -9048,9 +7704,7 @@ static bool yx_repeated_literal_unit_at(const uint8_t *data, size_t size,
    finds no later suffix, it falls back to the most recent y. PCRE2's
    short-first branch stops at the first y, so adjust only the span of hits
    it already found. The same choice applies to projected wide units. */
-static void yx_adjust_greedy_repeated_literal_pair(YRX_PATTERN *pattern,
-                                                    const uint8_t *data,
-                                                    size_t size)
+static void yx_adjust_greedy_repeated_literal_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
@@ -9058,31 +7712,20 @@ static void yx_adjust_greedy_repeated_literal_pair(YRX_PATTERN *pattern,
     if (pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_FULLWORD)) return;
     if (regexp[0] != '(') return;
     if (length >= 3 && regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 7 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' ||
-        regexp[at + 5] != '+' || regexp[at + 6] != regexp[at + 3])
+    if (length != at + 7 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' || regexp[at + 5] != '+' || regexp[at + 6] != regexp[at + 3])
         return;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
-        return;
-    if (((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-        !((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z'))) return;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return;
+    if (((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && !((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z'))) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       yx_repeated_literal_unit_at(data, size, match->offset,
-                                                   2, x) ? 2 : 1;
+        size_t width = (pattern->modifiers & YX_MOD_WIDE) && yx_repeated_literal_unit_at(data, size, match->offset, 2, x) ? 2 : 1;
         size_t pos = match->offset, best = 0;
         while (yx_repeated_literal_unit_at(data, size, pos, width, x)) {
-            if (size - pos >= 2 * width &&
-                yx_repeated_literal_unit_at(data, size, pos + width,
-                                            width, y)) {
+            if (size - pos >= 2 * width && yx_repeated_literal_unit_at(data, size, pos + width, width, y)) {
                 best = pos + 2 * width - match->offset;
-                if (size - pos >= 3 * width &&
-                    yx_repeated_literal_unit_at(data, size,
-                                                pos + 2 * width,
-                                                width, x)) {
+                if (size - pos >= 3 * width && yx_repeated_literal_unit_at(data, size, pos + 2 * width, width, x)) {
                     pos += 2 * width;
                     continue;
                 }
@@ -9094,14 +7737,10 @@ static void yx_adjust_greedy_repeated_literal_pair(YRX_PATTERN *pattern,
     }
 }
 
-static bool yx_short_first_unit_at(const uint8_t *data, size_t size,
-                                   size_t offset, size_t width,
-                                   uint8_t value, bool nocase)
+static bool yx_short_first_unit_at(const uint8_t *data, size_t size, size_t offset, size_t width, uint8_t value, bool nocase)
 {
-    if (offset > size || size - offset < width ||
-        (width == 2 && data[offset + 1] != 0)) return false;
-    return nocase ? yx_fold(data[offset]) == yx_fold(value) :
-                    data[offset] == value;
+    if (offset > size || size - offset < width || (width == 2 && data[offset + 1] != 0)) return false;
+    return nocase ? yx_fold(data[offset]) == yx_fold(value) : data[offset] == value;
 }
 
 /* A long-first literal group (xyz|x){1,n} can visit 2*n-1 complete
@@ -9109,9 +7748,7 @@ static bool yx_short_first_unit_at(const uint8_t *data, size_t size,
    applying fullword: the host regexp can reject an early short x while the
    verifier would continue to a word boundary. Keep the combined-encoding
    case on the ordinary path whenever a wide match is possible. */
-static int yx_scan_bounded_long_first_three_byte(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_bounded_long_first_three_byte(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, length;
@@ -9123,14 +7760,10 @@ static int yx_scan_bounded_long_first_three_byte(
     bool fullword = (pattern->modifiers & YX_MOD_FULLWORD) != 0;
     size_t width = wide && !both ? 2 : 1;
     *handled = false;
-    if (!regexp || regexp[0] != '(' ||
-        (pattern->modifiers & YX_MOD_XOR) ||
-        (both && memchr(data, 0, size) != NULL)) return 1;
+    if (!regexp || regexp[0] != '(' || (pattern->modifiers & YX_MOD_XOR) || (both && memchr(data, 0, size) != NULL)) return 1;
     length = strlen(regexp);
     if (length >= 3 && regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 11 || regexp[at + 3] != '|' ||
-        regexp[at + 4] != regexp[at] || regexp[at + 5] != ')')
-        return 1;
+    if (length != at + 11 || regexp[at + 3] != '|' || regexp[at + 4] != regexp[at] || regexp[at + 5] != ')') return 1;
     if (strcmp(regexp + at + 6, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 6, "{1,3}") == 0) bound = 3;
     else if (strcmp(regexp + at + 6, "{1,4}") == 0) bound = 4;
@@ -9138,40 +7771,26 @@ static int yx_scan_bounded_long_first_three_byte(
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
     z = (uint8_t)regexp[at + 2];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) ||
-        yx_fold(y) == yx_fold(z)) return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t end = offset, best = 0;
         unsigned matched = 0;
         for (unsigned repeat = 0; repeat < 2 * bound - 1; ++repeat) {
-            if (!yx_short_first_unit_at(data, size, end, width, x, nocase))
-                break;
+            if (!yx_short_first_unit_at(data, size, end, width, x, nocase)) break;
             end += width;
-            if (end <= size && size - end >= 2 * width &&
-                yx_short_first_unit_at(data, size, end, width, y, nocase) &&
-                yx_short_first_unit_at(data, size, end + width,
-                                       width, z, nocase))
+            if (end <= size && size - end >= 2 * width && yx_short_first_unit_at(data, size, end, width, y, nocase) &&
+                yx_short_first_unit_at(data, size, end + width, width, z, nocase))
                 end += 2 * width;
             ++matched;
-            if (!fullword || yx_fullword(data, size, offset, end - offset,
-                                         width == 2, 0))
-                best = end - offset;
+            if (!fullword || yx_fullword(data, size, offset, end - offset, width == 2, 0)) best = end - offset;
         }
         /* The atom-search path reports an isolated final long branch via
            its one-byte prefix on a long input. The projected wide path
            switches one byte beyond the 16-byte input boundary. */
-        bool all_digits = x >= '0' && x <= '9' &&
-                          y >= '0' && y <= '9' &&
-                          z >= '0' && z <= '9';
-        if (!fullword && matched == 1 && best == 3 * width &&
-            (width == 1 ? size >= 16 : size > 16) &&
-            (!nocase || all_digits))
-            best = width;
+        bool all_digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+        if (!fullword && matched == 1 && best == 3 * width && (width == 1 ? size >= 16 : size > 16) && (!nocase || all_digits)) best = width;
         if (best && !yx_add_match(pattern, offset, best, limit)) return 0;
     }
     return 1;
@@ -9180,9 +7799,7 @@ static int yx_scan_bounded_long_first_three_byte(
 /* The fullword check for (xy|x){1,n} also belongs after the verifier has
    consumed its bounded branches. A shorter intermediate x can be inside a
    word even when the final match ends at the word boundary. */
-static int yx_scan_bounded_long_first_pair_fullword(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t limit, bool *handled)
+static int yx_scan_bounded_long_first_pair_fullword(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, length;
@@ -9193,37 +7810,25 @@ static int yx_scan_bounded_long_first_pair_fullword(
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     size_t width = wide && !both ? 2 : 1;
     *handled = false;
-    if (!regexp || regexp[0] != '(' ||
-        !(pattern->modifiers & YX_MOD_FULLWORD) ||
-        (pattern->modifiers & YX_MOD_XOR) ||
-        (both && memchr(data, 0, size) != NULL)) return 1;
+    if (!regexp || regexp[0] != '(' || !(pattern->modifiers & YX_MOD_FULLWORD) || (pattern->modifiers & YX_MOD_XOR) || (both && memchr(data, 0, size) != NULL)) return 1;
     length = strlen(regexp);
     if (length >= 3 && regexp[1] == '?' && regexp[2] == ':') at = 3;
-    if (length != at + 10 || regexp[at + 2] != '|' ||
-        regexp[at + 3] != regexp[at] || regexp[at + 4] != ')')
-        return 1;
+    if (length != at + 10 || regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] || regexp[at + 4] != ')') return 1;
     if (strcmp(regexp + at + 5, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 5, "{1,3}") == 0) bound = 3;
     else if (strcmp(regexp + at + 5, "{1,4}") == 0) bound = 4;
     else return 1;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        yx_fold(x) == yx_fold(y)) return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || yx_fold(x) == yx_fold(y)) return 1;
     *handled = true;
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t end = offset, best = 0;
         for (unsigned repeat = 0; repeat < 2 * bound - 1; ++repeat) {
-            if (!yx_short_first_unit_at(data, size, end, width, x, nocase))
-                break;
+            if (!yx_short_first_unit_at(data, size, end, width, x, nocase)) break;
             end += width;
-            if (yx_short_first_unit_at(data, size, end, width, y, nocase))
-                end += width;
-            if (yx_fullword(data, size, offset, end - offset,
-                            width == 2, 0))
-                best = end - offset;
+            if (yx_short_first_unit_at(data, size, end, width, y, nocase)) end += width;
+            if (yx_fullword(data, size, offset, end - offset, width == 2, 0)) best = end - offset;
         }
         if (best && !yx_add_match(pattern, offset, best, limit)) return 0;
     }
@@ -9234,51 +7839,33 @@ static int yx_scan_bounded_long_first_pair_fullword(
    only when another short-class byte follows. The verifier then continues
    from that byte, whereas a host regex engine can stop at its first short
    alternative. */
-static size_t yx_repeated_overlap_class_step(const uint8_t *data,
-                                              size_t size, size_t offset,
-                                              size_t width, uint8_t x,
-                                              uint8_t y, uint8_t z,
-                                              bool nocase)
+static size_t yx_repeated_overlap_class_step(const uint8_t *data, size_t size, size_t offset, size_t width, uint8_t x, uint8_t y, uint8_t z, bool nocase)
 {
-    bool first = yx_short_first_unit_at(data, size, offset, width, x,
-                                         nocase);
-    if (!first && !yx_short_first_unit_at(data, size, offset, width, y,
-                                           nocase)) return 0;
+    bool first = yx_short_first_unit_at(data, size, offset, width, x, nocase);
+    if (!first && !yx_short_first_unit_at(data, size, offset, width, y, nocase)) return 0;
     if (first && size - offset >= 3 * width &&
-        (yx_short_first_unit_at(data, size, offset + width, width, y,
-                                 nocase) ||
-         yx_short_first_unit_at(data, size, offset + width, width, z,
-                                 nocase)) &&
-        (yx_short_first_unit_at(data, size, offset + 2 * width, width,
-                                 x, nocase) ||
-         yx_short_first_unit_at(data, size, offset + 2 * width, width,
-                                 y, nocase))) return 2;
+        (yx_short_first_unit_at(data, size, offset + width, width, y, nocase) || yx_short_first_unit_at(data, size, offset + width, width, z, nocase)) &&
+        (yx_short_first_unit_at(data, size, offset + 2 * width, width, x, nocase) || yx_short_first_unit_at(data, size, offset + 2 * width, width, y, nocase)))
+        return 2;
     return 1;
 }
 
 /* Cache suffix lengths so a long run of matching bytes is scanned once,
    even though it yields a match at every starting offset. */
-static size_t *yx_repeated_overlap_class_units(const uint8_t *data,
-                                                size_t size, size_t width,
-                                                uint8_t x, uint8_t y,
-                                                uint8_t z, bool nocase)
+static size_t *yx_repeated_overlap_class_units(const uint8_t *data, size_t size, size_t width, uint8_t x, uint8_t y, uint8_t z, bool nocase)
 {
     if (size >= SIZE_MAX / sizeof(size_t)) return NULL;
     size_t *units = malloc((size + 1) * sizeof(size_t));
     if (!units) return NULL;
     units[size] = 0;
     for (size_t offset = size; offset-- > 0;) {
-        size_t step = yx_repeated_overlap_class_step(
-            data, size, offset, width, x, y, z, nocase);
+        size_t step = yx_repeated_overlap_class_step(data, size, offset, width, x, y, z, nocase);
         units[offset] = step ? step + units[offset + step * width] : 0;
     }
     return units;
 }
 
-static int yx_scan_repeated_overlap_class_branch(YRX_PATTERN *pattern,
-                                                  const uint8_t *data,
-                                                  size_t size, size_t limit,
-                                                  bool *handled)
+static int yx_scan_repeated_overlap_class_branch(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
@@ -9288,29 +7875,23 @@ static int yx_scan_repeated_overlap_class_branch(YRX_PATTERN *pattern,
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !wide;
     *handled = false;
-    if ((pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        regexp[0] != '(') return 1;
-    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':')
-        at += 2;
-    if (length < at + 12 || regexp[at] != '[' || regexp[at + 3] != ']' ||
-        regexp[at + 4] != '|' || regexp[at + 6] != '[' ||
-        regexp[at + 9] != ']' || regexp[at + 10] != ')') return 1;
+    if ((pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) || regexp[0] != '(') return 1;
+    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
+    if (length < at + 12 || regexp[at] != '[' || regexp[at + 3] != ']' || regexp[at + 4] != '|' || regexp[at + 6] != '[' || regexp[at + 9] != ']' ||
+        regexp[at + 10] != ')')
+        return 1;
     if (strcmp(regexp + at + 11, "+") == 0) minimum = 1;
     else if (strcmp(regexp + at + 11, "{2,}") == 0) minimum = 2;
     else return 1;
     x = (uint8_t)regexp[at + 1];
     y = (uint8_t)regexp[at + 2];
     z = (uint8_t)regexp[at + 8];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || regexp[at + 5] != (char)x ||
-        regexp[at + 7] != (char)y ||
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || regexp[at + 5] != (char)x || regexp[at + 7] != (char)y ||
         yx_fold(x) >= yx_fold(y) || yx_fold(y) >= yx_fold(z))
         return 1;
     *handled = true;
-    size_t *ascii_cache = ascii ? yx_repeated_overlap_class_units(
-        data, size, 1, x, y, z, nocase) : NULL;
-    size_t *wide_cache = wide ? yx_repeated_overlap_class_units(
-        data, size, 2, x, y, z, nocase) : NULL;
+    size_t *ascii_cache = ascii ? yx_repeated_overlap_class_units(data, size, 1, x, y, z, nocase) : NULL;
+    size_t *wide_cache = wide ? yx_repeated_overlap_class_units(data, size, 2, x, y, z, nocase) : NULL;
     if ((ascii && !ascii_cache) || (wide && !wide_cache)) {
         free(ascii_cache);
         free(wide_cache);
@@ -9319,25 +7900,19 @@ static int yx_scan_repeated_overlap_class_branch(YRX_PATTERN *pattern,
         *handled = false;
         return 1;
     }
-    for (size_t offset = 0; offset < size &&
-                            (!limit || pattern->match_count < limit);
-         ++offset) {
+    for (size_t offset = 0; offset < size && (!limit || pattern->match_count < limit); ++offset) {
         size_t ascii_units = ascii_cache ? ascii_cache[offset] : 0;
         size_t wide_units = wide_cache ? wide_cache[offset] : 0;
         if (minimum == 2 && ascii_units) {
-            size_t step = yx_repeated_overlap_class_step(
-                data, size, offset, 1, x, y, z, nocase);
+            size_t step = yx_repeated_overlap_class_step(data, size, offset, 1, x, y, z, nocase);
             if (!ascii_cache[offset + step]) ascii_units = 0;
         }
         if (minimum == 2 && wide_units) {
-            size_t step = yx_repeated_overlap_class_step(
-                data, size, offset, 2, x, y, z, nocase);
+            size_t step = yx_repeated_overlap_class_step(data, size, offset, 2, x, y, z, nocase);
             if (!wide_cache[offset + 2 * step]) wide_units = 0;
         }
         size_t span = ascii_units;
-        if (wide_units > ascii_units ||
-            (wide_units && wide_units == ascii_units && size < 16))
-            span = wide_units * 2;
+        if (wide_units > ascii_units || (wide_units && wide_units == ascii_units && size < 16)) span = wide_units * 2;
         if (span && !yx_add_match(pattern, offset, span, limit)) {
             free(ascii_cache);
             free(wide_cache);
@@ -9349,35 +7924,26 @@ static int yx_scan_repeated_overlap_class_branch(YRX_PATTERN *pattern,
     return 1;
 }
 
-static bool yx_short_first_token_at(const uint8_t *data, size_t size,
-                                    size_t offset, size_t width,
-                                    const uint8_t *token, size_t length,
-                                    bool nocase)
+static bool yx_short_first_token_at(const uint8_t *data, size_t size, size_t offset, size_t width, const uint8_t *token, size_t length, bool nocase)
 {
     if (offset > size || size - offset < length * width) return false;
     for (size_t i = 0; i < length; ++i)
-        if (!yx_short_first_unit_at(data, size, offset + i * width,
-                                    width, token[i], nocase)) return false;
+        if (!yx_short_first_unit_at(data, size, offset + i * width, width, token[i], nocase)) return false;
     return true;
 }
 
 /* When a literal prefix group is repeated, the short-atom search path
    selects an ASCII one-byte hit over a single wide repetition on long
    inputs. A second wide repetition gives the wide verifier priority. */
-static void yx_adjust_grouped_ascii_wide_ties(YRX_PATTERN *pattern,
-                                               const uint8_t *data,
-                                               size_t size)
+static void yx_adjust_grouped_ascii_wide_ties(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, lengths[3] = {0}, starts[3] = {0}, count = 0;
     uint8_t first;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (size < 16 ||
-        (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) !=
-            (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE |
-                                YX_MOD_NOCASE)) ||
-        regexp[0] != '(') return;
+    if (size < 16 || (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) != (YX_MOD_ASCII | YX_MOD_WIDE) ||
+        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) || regexp[0] != '(')
+        return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     first = (uint8_t)regexp[at];
     if (!yx_plain_regex_byte(first)) return;
@@ -9388,18 +7954,13 @@ static void yx_adjust_grouped_ascii_wide_ties(YRX_PATTERN *pattern,
             if (at - start == 3) return;
             ++at;
         }
-        if (!at || at - start < 1 ||
-            (nocase ? yx_fold((uint8_t)regexp[start]) != yx_fold(first) :
-                      (uint8_t)regexp[start] != first)) return;
+        if (!at || at - start < 1 || (nocase ? yx_fold((uint8_t)regexp[start]) != yx_fold(first) : (uint8_t)regexp[start] != first)) return;
         starts[count] = start;
         lengths[count++] = at - start;
         if (regexp[at] == ')') break;
         if (regexp[at++] != '|') return;
     }
-    if (count < 2 ||
-        (strcmp(regexp + at + 1, "+") != 0 &&
-         strcmp(regexp + at + 1, "{1,2}") != 0 &&
-         strcmp(regexp + at + 1, "{1,3}") != 0)) return;
+    if (count < 2 || (strcmp(regexp + at + 1, "+") != 0 && strcmp(regexp + at + 1, "{1,2}") != 0 && strcmp(regexp + at + 1, "{1,3}") != 0)) return;
     bool short_branch = false;
     for (size_t i = 0; i < count; ++i)
         if (lengths[i] == 1) short_branch = true;
@@ -9407,17 +7968,12 @@ static void yx_adjust_grouped_ascii_wide_ties(YRX_PATTERN *pattern,
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (match->length < 2 ||
-            !yx_short_first_unit_at(data, size, offset, 2, first,
-                                    nocase)) continue;
+        if (match->length < 2 || !yx_short_first_unit_at(data, size, offset, 2, first, nocase)) continue;
         bool another = false;
         for (size_t branch = 0; branch < count; ++branch) {
             const uint8_t *literal = (const uint8_t *)(regexp + starts[branch]);
             size_t next = offset + lengths[branch] * 2;
-            if (yx_short_first_token_at(data, size, offset, 2,
-                                        literal, lengths[branch], nocase) &&
-                yx_short_first_unit_at(data, size, next, 2,
-                                       first, nocase)) {
+            if (yx_short_first_token_at(data, size, offset, 2, literal, lengths[branch], nocase) && yx_short_first_unit_at(data, size, next, 2, first, nocase)) {
                 another = true;
                 break;
             }
@@ -9430,15 +7986,10 @@ static void yx_adjust_grouped_ascii_wide_ties(YRX_PATTERN *pattern,
    the group match before consuming the optional unit.
    PCRE2 can instead let the suffix choose a different group branch. Reuse
    the ordinary group verifier for this observed small-alternative family. */
-static void yx_adjust_grouped_optional_suffix_ties(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-    size_t max_matches)
+static void yx_adjust_grouped_optional_suffix_ties(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t max_matches)
 {
     const char *regexp = pattern->regexp;
-    if ((pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE |
-                                YX_MOD_NOCASE)) != 0 ||
-        !regexp || regexp[0] != '(' || strlen(regexp) < 8 ||
-        strlen(regexp) > 23) return;
+    if ((pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) != 0 || !regexp || regexp[0] != '(' || strlen(regexp) < 8 || strlen(regexp) > 23) return;
     const char *branch = regexp + 1;
     if (branch[0] == '?' && branch[1] == ':') branch += 2;
     const char *bar = strchr(branch, '|');
@@ -9447,44 +7998,30 @@ static void yx_adjust_grouped_optional_suffix_ties(
     size_t left_length = (size_t)(bar - branch);
     size_t right_length = (size_t)(close - bar - 1);
     uint8_t first, second;
-    if (left_length == 1 && right_length == 2 &&
-        branch[0] == bar[1]) {
+    if (left_length == 1 && right_length == 2 && branch[0] == bar[1]) {
         first = (uint8_t)branch[0];
         second = (uint8_t)bar[2];
-    } else if (left_length == 2 && right_length == 1 &&
-               branch[0] == bar[1]) {
+    } else if (left_length == 2 && right_length == 1 && branch[0] == bar[1]) {
         first = (uint8_t)branch[0];
         second = (uint8_t)branch[1];
     } else return;
     const char *suffix = close + 1;
-    if (strncmp(suffix, "{1,1}", 5) == 0 ||
-        strncmp(suffix, "{1,2}", 5) == 0 ||
-        strncmp(suffix, "{1,3}", 5) == 0 ||
-        strncmp(suffix, "{2,3}", 5) == 0)
-        suffix += 5;
-    else if (strncmp(suffix, "{2,}", 4) == 0)
-        suffix += 4;
+    if (strncmp(suffix, "{1,1}", 5) == 0 || strncmp(suffix, "{1,2}", 5) == 0 || strncmp(suffix, "{1,3}", 5) == 0 || strncmp(suffix, "{2,3}", 5) == 0) suffix += 5;
+    else if (strncmp(suffix, "{2,}", 4) == 0) suffix += 4;
     else if (*suffix == '+') ++suffix;
     else return;
     size_t bare_length = (size_t)(suffix - regexp);
     uint8_t class_a, class_b;
     size_t suffix_length = strlen(suffix);
-    if (((suffix_length == 5 && suffix[4] == '?') ||
-         (suffix_length == 9 &&
-          strcmp(suffix + 4, "{0,1}") == 0)) &&
-        suffix[0] == '[' && suffix[3] == ']') {
+    if (((suffix_length == 5 && suffix[4] == '?') || (suffix_length == 9 && strcmp(suffix + 4, "{0,1}") == 0)) && suffix[0] == '[' && suffix[3] == ']') {
         class_a = (uint8_t)suffix[1];
         class_b = (uint8_t)suffix[2];
     } else if (suffix_length == 2 && suffix[1] == '?') {
         class_a = class_b = (uint8_t)suffix[0];
     } else return;
-    if (!yx_plain_regex_byte(first) ||
-        !yx_plain_regex_byte(second) ||
-        !yx_plain_regex_byte(class_a) ||
-        !yx_plain_regex_byte(class_b) ||
-        first == second || second != (uint8_t)(first + 1) ||
-        (class_a != second && class_a != (uint8_t)(second + 1)) ||
-        (class_b != second && class_b != (uint8_t)(second + 1))) return;
+    if (!yx_plain_regex_byte(first) || !yx_plain_regex_byte(second) || !yx_plain_regex_byte(class_a) || !yx_plain_regex_byte(class_b) || first == second ||
+        second != (uint8_t)(first + 1) || (class_a != second && class_a != (uint8_t)(second + 1)) || (class_b != second && class_b != (uint8_t)(second + 1)))
+        return;
 
     char bare_regexp[24];
     memcpy(bare_regexp, regexp, bare_length);
@@ -9504,21 +8041,13 @@ static void yx_adjust_grouped_optional_suffix_ties(
     for (size_t i = 0; i < bare.match_count; ++i) {
         YRX_MATCH *match = &bare.matches[i];
         size_t width = 1;
-        if (!ascii || (wide && match->length >= 2 &&
-                       !(match->length & 1) &&
-                       yx_short_first_unit_at(data, size, match->offset,
-                                              2, first, nocase)))
-            width = 2;
-        if (match->offset > size || match->length > size - match->offset)
-            continue;
+        if (!ascii || (wide && match->length >= 2 && !(match->length & 1) && yx_short_first_unit_at(data, size, match->offset, 2, first, nocase))) width = 2;
+        if (match->offset > size || match->length > size - match->offset) continue;
         size_t end = match->offset + match->length;
-        if (end > size || width > size - end ||
-            (width == 2 && data[end + 1] != 0)) continue;
+        if (end > size || width > size - end || (width == 2 && data[end + 1] != 0)) continue;
         uint8_t next = data[end];
         if (nocase) next = yx_fold(next);
-        if (next == (nocase ? yx_fold(class_a) : class_a) ||
-            next == (nocase ? yx_fold(class_b) : class_b))
-            match->length += width;
+        if (next == (nocase ? yx_fold(class_a) : class_a) || next == (nocase ? yx_fold(class_b) : class_b)) match->length += width;
     }
     free(pattern->matches);
     pattern->matches = bare.matches;
@@ -9528,51 +8057,36 @@ static void yx_adjust_grouped_optional_suffix_ties(
 
 /* A lazy repeated capturing group still verifies its first long branch.
    PCRE2 can prefer the single-byte branch after flattening the repeat. */
-static void yx_adjust_lazy_identical_capture(YRX_PATTERN *pattern,
-                                              const uint8_t *data,
-                                              size_t size)
+static void yx_adjust_lazy_identical_capture(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        strlen(regexp) != 8 || regexp[0] != '(' ||
-        regexp[1] != regexp[2] || regexp[3] != '|' ||
-        regexp[4] != regexp[1] || regexp[5] != ')' ||
-        regexp[6] != '+' || regexp[7] != '?' ||
-        !yx_plain_regex_byte((uint8_t)regexp[1])) return;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR) || strlen(regexp) != 8 || regexp[0] != '(' || regexp[1] != regexp[2] || regexp[3] != '|' ||
+        regexp[4] != regexp[1] || regexp[5] != ')' || regexp[6] != '+' || regexp[7] != '?' || !yx_plain_regex_byte((uint8_t)regexp[1]))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        if (match->length == 1 && match->offset + 1 < size &&
-            yx_short_first_unit_at(data, size, match->offset + 1, 1,
-                                   (uint8_t)regexp[1], nocase))
-            match->length = 2;
+        if (match->length == 1 && match->offset + 1 < size && yx_short_first_unit_at(data, size, match->offset + 1, 1, (uint8_t)regexp[1], nocase)) match->length = 2;
     }
 }
 
 /* The whole-expression verifier for two fixed two-byte alternatives can
    consume up to 2*n-1 complete branches under a {1,n} upper bound. */
-static void yx_adjust_bounded_two_byte_alternatives(YRX_PATTERN *pattern,
-                                                     const uint8_t *data,
-                                                     size_t size)
+static void yx_adjust_bounded_two_byte_alternatives(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-                (YX_MOD_ASCII | YX_MOD_WIDE);
+    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE);
     size_t width = (pattern->modifiers & YX_MOD_WIDE) && !both ? 2 : 1;
     uint8_t left[2], right[2];
-    if ((both && memchr(data, 0, size) != NULL) ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        regexp[0] != '(') return;
+    if ((both && memchr(data, 0, size) != NULL) || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) != at + 11) return;
-    if (regexp[at + 2] != '|' || regexp[at + 5] != ')' ||
-        !yx_plain_regex_byte((uint8_t)regexp[at]) ||
-        !yx_plain_regex_byte((uint8_t)regexp[at + 1]) ||
-        !yx_plain_regex_byte((uint8_t)regexp[at + 3]) ||
-        !yx_plain_regex_byte((uint8_t)regexp[at + 4])) return;
+    if (regexp[at + 2] != '|' || regexp[at + 5] != ')' || !yx_plain_regex_byte((uint8_t)regexp[at]) || !yx_plain_regex_byte((uint8_t)regexp[at + 1]) ||
+        !yx_plain_regex_byte((uint8_t)regexp[at + 3]) || !yx_plain_regex_byte((uint8_t)regexp[at + 4]))
+        return;
     if (strcmp(regexp + at + 6, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 6, "{1,3}") == 0) bound = 3;
     else if (strcmp(regexp + at + 6, "{1,4}") == 0) bound = 4;
@@ -9585,22 +8099,17 @@ static void yx_adjust_bounded_two_byte_alternatives(YRX_PATTERN *pattern,
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if (offset > size || size - offset < 2 * width * (bound + 1))
-            continue;
+        if (offset > size || size - offset < 2 * width * (bound + 1)) continue;
         unsigned complete = 0;
         for (unsigned unit = 0; unit < 2 * bound - 1; ++unit) {
             size_t pos = offset + 2 * width * unit;
             if (size - offset < 2 * width * (unit + 1)) break;
-            if (!yx_short_first_token_at(data, size, pos, width, left, 2,
-                                         nocase) &&
-                !yx_short_first_token_at(data, size, pos, width, right, 2,
-                                         nocase)) {
+            if (!yx_short_first_token_at(data, size, pos, width, left, 2, nocase) && !yx_short_first_token_at(data, size, pos, width, right, 2, nocase)) {
                 break;
             }
             ++complete;
         }
-        if (complete > bound && 2 * width * complete > match->length)
-            match->length = 2 * width * complete;
+        if (complete > bound && 2 * width * complete > match->length) match->length = 2 * width * complete;
     }
 }
 
@@ -9609,93 +8118,67 @@ static void yx_adjust_bounded_two_byte_alternatives(YRX_PATTERN *pattern,
    branch, so every repetition has an unambiguous start byte. Adjust spans of
    hits already found by the ordinary matcher; other group shapes are left
    with their original verifier. */
-static void yx_adjust_bounded_terminal_byte_alternatives(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_adjust_bounded_terminal_byte_alternatives(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, left_length, right_length;
     uint8_t first, last;
-    if (!regexp || (pattern->modifiers & ~YX_MOD_ASCII) ||
-        regexp[0] != '(') return;
+    if (!regexp || (pattern->modifiers & ~YX_MOD_ASCII) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     const char *bar = strchr(regexp + at, '|');
     const char *close = strchr(regexp + at, ')');
-    if (!bar || !close || bar > close ||
-        strcmp(close + 1, "{1,2}") != 0) return;
+    if (!bar || !close || bar > close || strcmp(close + 1, "{1,2}") != 0) return;
     left_length = (size_t)(bar - regexp - at);
     right_length = (size_t)(close - bar - 1);
-    if (left_length == 2 && right_length == 1 &&
-        regexp[at + 1] == bar[1]) {
+    if (left_length == 2 && right_length == 1 && regexp[at + 1] == bar[1]) {
         first = (uint8_t)regexp[at];
         last = (uint8_t)bar[1];
-    } else if (left_length == 1 && right_length == 2 &&
-               regexp[at] == bar[2]) {
+    } else if (left_length == 1 && right_length == 2 && regexp[at] == bar[2]) {
         first = (uint8_t)bar[1];
         last = (uint8_t)regexp[at];
     } else return;
-    if (!yx_plain_regex_byte(first) || !yx_plain_regex_byte(last) ||
-        first == last) return;
+    if (!yx_plain_regex_byte(first) || !yx_plain_regex_byte(last) || first == last) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t pos = match->offset;
         unsigned repetitions = 0;
         while (repetitions < 3 && pos < size) {
-            if (size - pos >= 2 && data[pos] == first &&
-                data[pos + 1] == last)
-                pos += 2;
-            else if (data[pos] == last)
-                ++pos;
+            if (size - pos >= 2 && data[pos] == first && data[pos + 1] == last) pos += 2;
+            else if (data[pos] == last) ++pos;
             else break;
             ++repetitions;
         }
-        if (repetitions && pos - match->offset > match->length)
-            match->length = pos - match->offset;
+        if (repetitions && pos - match->offset > match->length) match->length = pos - match->offset;
     }
 }
 
 /* The overlapping two-byte branches x[yz] and [xy]z have three possible
  * complete units: xy, xz, and yz. Their verifier visits one more whole unit
  * than the written {1,2} bound, for both ASCII and wide encodings. */
-static void yx_adjust_bounded_two_byte_class_pair(YRX_PATTERN *pattern,
-                                                   const uint8_t *data,
-                                                   size_t size)
+static void yx_adjust_bounded_two_byte_class_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
-    if ((pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE)) ||
-        strlen(regexp) != 18 || regexp[0] != '(' ||
-        regexp[2] != '[' || regexp[5] != ']' || regexp[6] != '|' ||
-        regexp[7] != '[' || regexp[10] != ']' || regexp[12] != ')' ||
-        memcmp(regexp + 13, "{1,2}", 5) != 0) return;
+    if ((pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE)) || strlen(regexp) != 18 || regexp[0] != '(' || regexp[2] != '[' || regexp[5] != ']' || regexp[6] != '|' ||
+        regexp[7] != '[' || regexp[10] != ']' || regexp[12] != ')' || memcmp(regexp + 13, "{1,2}", 5) != 0)
+        return;
     uint8_t x = (uint8_t)regexp[1];
     uint8_t y = (uint8_t)regexp[3];
     uint8_t z = (uint8_t)regexp[4];
-    if (x < 'a' || z > 'z' || x >= y || y >= z ||
-        regexp[8] != (char)x || regexp[9] != (char)y ||
-        regexp[11] != (char)z) return;
-    bool ascii = (pattern->modifiers & YX_MOD_ASCII) ||
-                 !(pattern->modifiers & YX_MOD_WIDE);
+    if (x < 'a' || z > 'z' || x >= y || y >= z || regexp[8] != (char)x || regexp[9] != (char)y || regexp[11] != (char)z) return;
+    bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         for (size_t width = 1; width <= 2; ++width) {
-            if ((width == 1 && !ascii) || (width == 2 && !wide) ||
-                match->length != 4 * width || match->offset > size ||
-                size - match->offset < 6 * width) continue;
+            if ((width == 1 && !ascii) || (width == 2 && !wide) || match->length != 4 * width || match->offset > size || size - match->offset < 6 * width) continue;
             bool complete = true;
             for (unsigned unit = 0; unit < 3; ++unit) {
                 size_t at = match->offset + 2 * unit * width;
-                bool first_x = yx_short_first_unit_at(data, size, at,
-                                                      width, x, false);
-                bool first_y = yx_short_first_unit_at(data, size, at,
-                                                      width, y, false);
-                bool second_y = yx_short_first_unit_at(data, size,
-                                                       at + width, width,
-                                                       y, false);
-                bool second_z = yx_short_first_unit_at(data, size,
-                                                       at + width, width,
-                                                       z, false);
-                if (!((first_x && (second_y || second_z)) ||
-                      (first_y && second_z))) {
+                bool first_x = yx_short_first_unit_at(data, size, at, width, x, false);
+                bool first_y = yx_short_first_unit_at(data, size, at, width, y, false);
+                bool second_y = yx_short_first_unit_at(data, size, at + width, width, y, false);
+                bool second_z = yx_short_first_unit_at(data, size, at + width, width, z, false);
+                if (!((first_x && (second_y || second_z)) || (first_y && second_z))) {
                     complete = false;
                     break;
                 }
@@ -9711,69 +8194,38 @@ static void yx_adjust_bounded_two_byte_class_pair(YRX_PATTERN *pattern,
 /* In the long-input atom path, a lone long-first xyz|xy|x branch is
    reported through its one-byte x atom. A following x starts another
    repetition and lets the verifier retain the longer span. */
-static void yx_adjust_long_first_triple_singleton(YRX_PATTERN *pattern,
-                                                   const uint8_t *data,
-                                                   size_t size)
+static void yx_adjust_long_first_triple_singleton(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t x, y, z;
-    if (size < 16 ||
-        pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_FULLWORD |
-                              YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (size < 16 || pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (strlen(regexp) != at + 10 &&
-        strlen(regexp) != at + 14) return;
-    if (regexp[at + 3] != '|' || regexp[at + 6] != '|' ||
-        regexp[at + 8] != ')' ||
-        regexp[at] != regexp[at + 4] ||
-        regexp[at] != regexp[at + 7] ||
-        regexp[at + 1] != regexp[at + 5] ||
-        (strcmp(regexp + at + 9, "+") != 0 &&
-         strcmp(regexp + at + 9, "{1,2}") != 0 &&
-         strcmp(regexp + at + 9, "{1,3}") != 0)) return;
+    if (strlen(regexp) != at + 10 && strlen(regexp) != at + 14) return;
+    if (regexp[at + 3] != '|' || regexp[at + 6] != '|' || regexp[at + 8] != ')' || regexp[at] != regexp[at + 4] || regexp[at] != regexp[at + 7] ||
+        regexp[at + 1] != regexp[at + 5] || (strcmp(regexp + at + 9, "+") != 0 && strcmp(regexp + at + 9, "{1,2}") != 0 && strcmp(regexp + at + 9, "{1,3}") != 0))
+        return;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
     z = (uint8_t)regexp[at + 2];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || x == y || x == z || y == z)
-        return;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || x == y || x == z || y == z) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && offset < size &&
-                       size - offset >= 2 && data[offset + 1] == 0 ?
-                       2 : 1;
-        if (match->length <= width || offset >= size || data[offset] != x)
-            continue;
-        bool another = yx_short_first_unit_at(data, size, offset + width,
-                                               width, x, false) ||
-                       (yx_short_first_unit_at(data, size, offset + width,
-                                               width, y, false) &&
-                        yx_short_first_unit_at(data, size,
-                                               offset + 2 * width,
-                                               width, x, false)) ||
-                       (yx_short_first_unit_at(data, size, offset + width,
-                                               width, y, false) &&
-                        yx_short_first_unit_at(data, size,
-                                               offset + 2 * width,
-                                               width, z, false) &&
-                        yx_short_first_unit_at(data, size,
-                                               offset + 3 * width,
-                                               width, x, false));
-        if (!another) match->length =
-            pattern->modifiers & YX_MOD_ASCII ? 1 : width;
+        size_t width = (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && offset < size && size - offset >= 2 && data[offset + 1] == 0 ? 2 : 1;
+        if (match->length <= width || offset >= size || data[offset] != x) continue;
+        bool another = yx_short_first_unit_at(data, size, offset + width, width, x, false) ||
+                       (yx_short_first_unit_at(data, size, offset + width, width, y, false) && yx_short_first_unit_at(data, size, offset + 2 * width, width, x, false)) ||
+                       (yx_short_first_unit_at(data, size, offset + width, width, y, false) && yx_short_first_unit_at(data, size, offset + 2 * width, width, z, false) &&
+                        yx_short_first_unit_at(data, size, offset + 3 * width, width, x, false));
+        if (!another) match->length = pattern->modifiers & YX_MOD_ASCII ? 1 : width;
     }
 }
 
 /* For the guarded (x|xy)+, (x|xy){2,}, and (xy|xyz)+ shapes, YARA-X
    consumes the longest sequence of short units and suffix+short units.
    PCRE2's short-first branch stops before the first suffix. */
-static void yx_adjust_short_first_repeated_pair(YRX_PATTERN *pattern,
-                                                const uint8_t *data,
-                                                size_t size)
+static void yx_adjust_short_first_repeated_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), group = 0, at, short_length, close;
@@ -9784,50 +8236,34 @@ static void yx_adjust_short_first_repeated_pair(YRX_PATTERN *pattern,
     if (regexp[0] == '^') group = 1;
     if (regexp[group] != '(') return;
     at = group + 1;
-    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':')
-        at += 2;
+    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (length == at + 6) short_length = 1;
     else if (length == at + 8) short_length = 2;
     else if (length == at + 9) {
         short_length = 1;
         min_two = true;
-    }
-    else return;
+    } else return;
     close = at + 2 * short_length + 2;
     if (regexp[at + short_length] != '|' || regexp[close] != ')') return;
-    if (min_two ? strcmp(regexp + close + 1, "{2,}") != 0 :
-                  regexp[close + 1] != '+') return;
+    if (min_two ? strcmp(regexp + close + 1, "{2,}") != 0 : regexp[close + 1] != '+') return;
     for (size_t i = 0; i < short_length; ++i) {
         short_token[i] = (uint8_t)regexp[at + i];
-        if (!yx_plain_regex_byte(short_token[i]) ||
-            regexp[at + short_length + 1 + i] != (char)short_token[i])
-            return;
+        if (!yx_plain_regex_byte(short_token[i]) || regexp[at + short_length + 1 + i] != (char)short_token[i]) return;
     }
     suffix = (uint8_t)regexp[at + 2 * short_length + 1];
-    if (!yx_plain_regex_byte(suffix) ||
-        (nocase ? yx_fold(short_token[0]) == yx_fold(suffix) :
-                  short_token[0] == suffix)) return;
+    if (!yx_plain_regex_byte(suffix) || (nocase ? yx_fold(short_token[0]) == yx_fold(suffix) : short_token[0] == suffix)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
-        if (!yx_short_first_token_at(data, size, pos, width, short_token,
-                                     short_length, nocase))
-            continue;
+        if (!yx_short_first_token_at(data, size, pos, width, short_token, short_length, nocase)) continue;
         pos += short_length * width;
         while (pos < size) {
-            if (yx_short_first_token_at(data, size, pos, width, short_token,
-                                        short_length, nocase)) {
+            if (yx_short_first_token_at(data, size, pos, width, short_token, short_length, nocase)) {
                 pos += short_length * width;
-            } else if (size - pos >= (short_length + 1) * width &&
-                       yx_short_first_unit_at(data, size, pos, width,
-                                              suffix, nocase) &&
-                       yx_short_first_token_at(data, size, pos + width,
-                                               width, short_token,
-                                               short_length, nocase)) {
+            } else if (size - pos >= (short_length + 1) * width && yx_short_first_unit_at(data, size, pos, width, suffix, nocase) &&
+                       yx_short_first_token_at(data, size, pos + width, width, short_token, short_length, nocase)) {
                 pos += (short_length + 1) * width;
             } else {
                 break;
@@ -9843,9 +8279,7 @@ static void yx_adjust_short_first_repeated_pair(YRX_PATTERN *pattern,
    the suffix of a longer branch participates only when another x follows.
    PCRE2 stops at the first branch x. Limit this adjustment to literal
    branches with distinct bytes so each next unit is unambiguous. */
-static void yx_adjust_short_first_repeated_triple(YRX_PATTERN *pattern,
-                                                  const uint8_t *data,
-                                                  size_t size)
+static void yx_adjust_short_first_repeated_triple(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t group = regexp[0] == '^' ? 1 : 0;
@@ -9853,75 +8287,46 @@ static void yx_adjust_short_first_repeated_triple(YRX_PATTERN *pattern,
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool min_two, digit_triple;
-    if (pattern->modifiers & YX_MOD_FULLWORD || regexp[group] != '(')
+    if (pattern->modifiers & YX_MOD_FULLWORD || regexp[group] != '(') return;
+    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
+    if ((length != at + 10 && length != at + 13) || regexp[at + 1] != '|' || regexp[at + 4] != '|' || regexp[at + 8] != ')' ||
+        (strcmp(regexp + at + 9, "+") != 0 && strcmp(regexp + at + 9, "{2,}") != 0) || regexp[at] != regexp[at + 2] || regexp[at] != regexp[at + 5] ||
+        regexp[at + 3] != regexp[at + 6])
         return;
-    if (length >= at + 2 && regexp[at] == '?' &&
-        regexp[at + 1] == ':') at += 2;
-    if ((length != at + 10 && length != at + 13) ||
-        regexp[at + 1] != '|' ||
-        regexp[at + 4] != '|' || regexp[at + 8] != ')' ||
-        (strcmp(regexp + at + 9, "+") != 0 &&
-         strcmp(regexp + at + 9, "{2,}") != 0) ||
-        regexp[at] != regexp[at + 2] ||
-        regexp[at] != regexp[at + 5] ||
-        regexp[at + 3] != regexp[at + 6]) return;
     min_two = regexp[at + 9] == '{';
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 7];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        (nocase ? (yx_fold(x) == yx_fold(y) ||
-                   yx_fold(x) == yx_fold(z) ||
-                   yx_fold(y) == yx_fold(z)) :
-                  (x == y || x == z || y == z))) return;
-    digit_triple = x >= '0' && x <= '9' &&
-                   y >= '0' && y <= '9' &&
-                   z >= '0' && z <= '9';
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) ||
+        (nocase ? (yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z)) : (x == y || x == z || y == z)))
+        return;
+    digit_triple = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
         if ((nocase && !digit_triple) || min_two) {
-            if (!yx_short_first_unit_at(data, size, pos, width, x,
-                                        nocase))
-                continue;
+            if (!yx_short_first_unit_at(data, size, pos, width, x, nocase)) continue;
             pos += width;
             while (pos < size) {
-                if (yx_short_first_unit_at(data, size, pos, width, x,
-                                           nocase)) {
+                if (yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
                     pos += width;
-                } else if (yx_short_first_unit_at(data, size, pos, width,
-                                                  y, nocase) &&
-                           yx_short_first_unit_at(data, size,
-                                                  pos + width, width,
-                                                  z, nocase) &&
-                           yx_short_first_unit_at(data, size,
-                                                  pos + 2 * width, width,
-                                                  x, nocase)) {
+                } else if (yx_short_first_unit_at(data, size, pos, width, y, nocase) && yx_short_first_unit_at(data, size, pos + width, width, z, nocase) &&
+                           yx_short_first_unit_at(data, size, pos + 2 * width, width, x, nocase)) {
                     pos += 3 * width;
-                } else if (yx_short_first_unit_at(data, size, pos, width,
-                                                  y, nocase) &&
-                           yx_short_first_unit_at(data, size,
-                                                  pos + width, width,
-                                                  x, nocase)) {
+                } else if (yx_short_first_unit_at(data, size, pos, width, y, nocase) && yx_short_first_unit_at(data, size, pos + width, width, x, nocase)) {
                     pos += 2 * width;
                 } else {
                     break;
                 }
             }
         } else {
-            while (yx_short_first_unit_at(data, size, pos, width, x,
-                                          false)) {
+            while (yx_short_first_unit_at(data, size, pos, width, x, false)) {
                 pos += width;
-                if (yx_short_first_unit_at(data, size, pos, width, y,
-                                           false)) {
+                if (yx_short_first_unit_at(data, size, pos, width, y, false)) {
                     pos += width;
-                    if (yx_short_first_unit_at(data, size, pos, width, z,
-                                               false)) pos += width;
+                    if (yx_short_first_unit_at(data, size, pos, width, z, false)) pos += width;
                 }
             }
         }
@@ -9932,69 +8337,44 @@ static void yx_adjust_short_first_repeated_triple(YRX_PATTERN *pattern,
 /* A repeated x|xyz pair uses the same literal-atom branch priority as the
    x|xy|xyz form. Alphabetic nocase keeps the short endpoint until the
    following x confirms a complete long branch. */
-static void yx_adjust_short_first_three_byte_pair(YRX_PATTERN *pattern,
-                                                   const uint8_t *data,
-                                                   size_t size)
+static void yx_adjust_short_first_three_byte_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-            (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE) || regexp[0] != '(')
+        return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (strlen(regexp) != at + 7 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 5] != ')' ||
-        regexp[at + 6] != '+') return;
+    if (strlen(regexp) != at + 7 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 5] != ')' || regexp[at + 6] != '+') return;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 4];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) ||
+        (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z))
+        return;
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
-        if (!yx_short_first_unit_at(data, size, pos, width, x,
-                                    nocase)) continue;
+        if (!yx_short_first_unit_at(data, size, pos, width, x, nocase)) continue;
         if (nocase && !digits) {
             pos += width;
             while (pos < size) {
-                if (yx_short_first_unit_at(data, size, pos, width, x,
-                                           true)) {
+                if (yx_short_first_unit_at(data, size, pos, width, x, true)) {
                     pos += width;
-                } else if (yx_short_first_unit_at(data, size, pos,
-                                                  width, y, true) &&
-                           yx_short_first_unit_at(data, size,
-                                                  pos + width, width,
-                                                  z, true) &&
-                           yx_short_first_unit_at(data, size,
-                                                  pos + 2 * width,
-                                                  width, x, true)) {
+                } else if (yx_short_first_unit_at(data, size, pos, width, y, true) && yx_short_first_unit_at(data, size, pos + width, width, z, true) &&
+                           yx_short_first_unit_at(data, size, pos + 2 * width, width, x, true)) {
                     pos += 3 * width;
                 } else break;
             }
         } else {
-            while (yx_short_first_unit_at(data, size, pos, width, x,
-                                          nocase)) {
+            while (yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
                 pos += width;
-                if (yx_short_first_unit_at(data, size, pos, width, y,
-                                           nocase) &&
-                    yx_short_first_unit_at(data, size, pos + width,
-                                           width, z, nocase))
-                    pos += 2 * width;
+                if (yx_short_first_unit_at(data, size, pos, width, y, nocase) && yx_short_first_unit_at(data, size, pos + width, width, z, nocase)) pos += 2 * width;
             }
         }
         if (pos > match->offset) match->length = pos - match->offset;
@@ -10005,54 +8385,36 @@ static void yx_adjust_short_first_three_byte_pair(YRX_PATTERN *pattern,
    when another x follows. The scan verifier can then continue through either
    suffix and any intervening short branches, even though PCRE2's first
    branch stops at the initial x. */
-static void yx_adjust_short_first_fork(YRX_PATTERN *pattern,
-                                        const uint8_t *data, size_t size)
+static void yx_adjust_short_first_fork(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (strlen(regexp) != at + 9 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' ||
-        regexp[at + 5] != regexp[at] || regexp[at + 7] != ')' ||
-        regexp[at + 8] != '+') return;
+    if (strlen(regexp) != at + 9 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' || regexp[at + 5] != regexp[at] ||
+        regexp[at + 7] != ')' || regexp[at + 8] != '+')
+        return;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 6];
     bool letters =
-        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-        ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) &&
-        ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
-    bool digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-                  z >= '0' && z <= '9';
-    if (!(letters || digits) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) && ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
+    bool digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!(letters || digits) || (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
-        if (!yx_short_first_unit_at(data, size, pos, width, x,
-                                    nocase)) continue;
+        if (!yx_short_first_unit_at(data, size, pos, width, x, nocase)) continue;
         pos += width;
         while (pos < size) {
-            if (yx_short_first_unit_at(data, size, pos, width, x,
-                                       nocase)) {
+            if (yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
                 pos += width;
-            } else if ((yx_short_first_unit_at(data, size, pos, width,
-                                               y, nocase) ||
-                        yx_short_first_unit_at(data, size, pos, width,
-                                               z, nocase)) &&
-                       yx_short_first_unit_at(data, size, pos + width,
-                                              width, x, nocase)) {
+            } else if ((yx_short_first_unit_at(data, size, pos, width, y, nocase) || yx_short_first_unit_at(data, size, pos, width, z, nocase)) &&
+                       yx_short_first_unit_at(data, size, pos + width, width, x, nocase)) {
                 pos += 2 * width;
             } else break;
         }
@@ -10063,9 +8425,7 @@ static void yx_adjust_short_first_fork(YRX_PATTERN *pattern,
 /* The bounded (x|xyz) verifier can include up to bound-1 extra short
    branches after its bound complete branches. Its alphabetic nocase path
    retains yz only when another x follows before that bound is reached. */
-static void yx_adjust_bounded_three_byte_pair(YRX_PATTERN *pattern,
-                                               const uint8_t *data,
-                                               size_t size)
+static void yx_adjust_bounded_three_byte_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
@@ -10073,11 +8433,9 @@ static void yx_adjust_bounded_three_byte_pair(YRX_PATTERN *pattern,
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (strlen(regexp) != at + 11 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 5] != ')') return;
+    if (strlen(regexp) != at + 11 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 5] != ')') return;
     if (strcmp(regexp + at + 6, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 6, "{1,3}") == 0) bound = 3;
     else if (strcmp(regexp + at + 6, "{1,4}") == 0) bound = 4;
@@ -10085,41 +8443,24 @@ static void yx_adjust_bounded_three_byte_pair(YRX_PATTERN *pattern,
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 4];
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) ||
+        (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
         unsigned core = 0;
-        for (; core < bound &&
-               yx_short_first_unit_at(data, size, pos, width, x, nocase);
-             ++core) {
+        for (; core < bound && yx_short_first_unit_at(data, size, pos, width, x, nocase); ++core) {
             pos += width;
-            if (yx_short_first_unit_at(data, size, pos, width, y,
-                                       nocase) &&
-                yx_short_first_unit_at(data, size, pos + width,
-                                       width, z, nocase) &&
-                (!nocase || digits ||
-                 (core + 1 < bound &&
-                  yx_short_first_unit_at(data, size, pos + 2 * width,
-                                         width, x, nocase))))
+            if (yx_short_first_unit_at(data, size, pos, width, y, nocase) && yx_short_first_unit_at(data, size, pos + width, width, z, nocase) &&
+                (!nocase || digits || (core + 1 < bound && yx_short_first_unit_at(data, size, pos + 2 * width, width, x, nocase))))
                 pos += 2 * width;
         }
         if (!core) continue;
-        for (unsigned extra = 0; extra + 1 < bound &&
-             yx_short_first_unit_at(data, size, pos, width, x, nocase);
-             ++extra)
-            pos += width;
+        for (unsigned extra = 0; extra + 1 < bound && yx_short_first_unit_at(data, size, pos, width, x, nocase); ++extra) pos += width;
         match->length = pos - match->offset;
     }
 }
@@ -10127,8 +8468,7 @@ static void yx_adjust_bounded_three_byte_pair(YRX_PATTERN *pattern,
 /* For bounded (x|xy|xz), a suffix y or z is kept only when followed by the
    next x before the bound. The verifier can then visit bound-1 additional
    short x branches. Restrict this to literal, distinct branches. */
-static void yx_adjust_bounded_fork(YRX_PATTERN *pattern,
-                                   const uint8_t *data, size_t size)
+static void yx_adjust_bounded_fork(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
@@ -10136,12 +8476,10 @@ static void yx_adjust_bounded_fork(YRX_PATTERN *pattern,
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool letters, digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (strlen(regexp) != at + 13 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' ||
-        regexp[at + 5] != regexp[at] || regexp[at + 7] != ')')
+    if (strlen(regexp) != at + 13 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' || regexp[at + 5] != regexp[at] ||
+        regexp[at + 7] != ')')
         return;
     if (strcmp(regexp + at + 8, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 8, "{1,3}") == 0) bound = 3;
@@ -10149,42 +8487,24 @@ static void yx_adjust_bounded_fork(YRX_PATTERN *pattern,
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 6];
-    letters = ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-              ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) &&
-              ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
-    if (!(letters || digits) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+    letters =
+        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) && ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!(letters || digits) || (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset;
         unsigned core = 0;
-        for (; core < bound &&
-               yx_short_first_unit_at(data, size, pos, width, x, nocase);
-             ++core) {
+        for (; core < bound && yx_short_first_unit_at(data, size, pos, width, x, nocase); ++core) {
             pos += width;
-            if (core + 1 < bound &&
-                (yx_short_first_unit_at(data, size, pos, width, y,
-                                        nocase) ||
-                 yx_short_first_unit_at(data, size, pos, width, z,
-                                        nocase)) &&
-                yx_short_first_unit_at(data, size, pos + width,
-                                       width, x, nocase))
+            if (core + 1 < bound && (yx_short_first_unit_at(data, size, pos, width, y, nocase) || yx_short_first_unit_at(data, size, pos, width, z, nocase)) &&
+                yx_short_first_unit_at(data, size, pos + width, width, x, nocase))
                 pos += width;
         }
         if (!core) continue;
-        for (unsigned extra = 0; extra + 1 < bound &&
-             yx_short_first_unit_at(data, size, pos, width, x, nocase);
-             ++extra)
-            pos += width;
+        for (unsigned extra = 0; extra + 1 < bound && yx_short_first_unit_at(data, size, pos, width, x, nocase); ++extra) pos += width;
         match->length = pos - match->offset;
     }
 }
@@ -10192,8 +8512,7 @@ static void yx_adjust_bounded_fork(YRX_PATTERN *pattern,
 /* The xy|x|xz verifier favors its first xy branch. Its trailing xz branch
    keeps z only when the next repetition begins at x. Bounded repeats can
    visit bound-1 additional x atoms, but those atoms cannot retain z. */
-static void yx_adjust_long_first_fork(YRX_PATTERN *pattern,
-                                      const uint8_t *data, size_t size)
+static void yx_adjust_long_first_fork(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
@@ -10201,13 +8520,10 @@ static void yx_adjust_long_first_fork(YRX_PATTERN *pattern,
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool letters, digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) < at + 9) return;
-    if (regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] ||
-        regexp[at + 4] != '|' || regexp[at + 5] != regexp[at] ||
-        regexp[at + 7] != ')') return;
+    if (regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] || regexp[at + 4] != '|' || regexp[at + 5] != regexp[at] || regexp[at + 7] != ')') return;
     if (strcmp(regexp + at + 8, "+") == 0) bound = 0;
     else if (strcmp(regexp + at + 8, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 8, "{1,3}") == 0) bound = 3;
@@ -10215,36 +8531,21 @@ static void yx_adjust_long_first_fork(YRX_PATTERN *pattern,
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
     z = (uint8_t)regexp[at + 6];
-    letters = ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-              ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) &&
-              ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
-    if (!(letters || digits) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+    letters =
+        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) && ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!(letters || digits) || (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset, units = 0;
-        while ((!bound || units < 2 * bound - 1) &&
-               yx_short_first_unit_at(data, size, pos, width, x,
-                                      nocase)) {
+        while ((!bound || units < 2 * bound - 1) && yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
             pos += width;
             ++units;
-            if (yx_short_first_unit_at(data, size, pos, width, y,
-                                       nocase))
-                pos += width;
-            else if ((!bound || units < bound) &&
-                     yx_short_first_unit_at(data, size, pos, width, z,
-                                            nocase) &&
-                     yx_short_first_unit_at(data, size, pos + width,
-                                            width, x, nocase))
+            if (yx_short_first_unit_at(data, size, pos, width, y, nocase)) pos += width;
+            else if ((!bound || units < bound) && yx_short_first_unit_at(data, size, pos, width, z, nocase) &&
+                     yx_short_first_unit_at(data, size, pos + width, width, x, nocase))
                 pos += width;
         }
         if (units) match->length = pos - match->offset;
@@ -10253,8 +8554,7 @@ static void yx_adjust_long_first_fork(YRX_PATTERN *pattern,
 
 /* With both long branches before x, either suffix is consumed immediately.
    A bounded repeat can still visit bound-1 additional x atoms. */
-static void yx_adjust_long_long_short_fork(YRX_PATTERN *pattern,
-                                            const uint8_t *data, size_t size)
+static void yx_adjust_long_long_short_fork(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
@@ -10262,13 +8562,10 @@ static void yx_adjust_long_long_short_fork(YRX_PATTERN *pattern,
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool letters, digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) < at + 9) return;
-    if (regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] ||
-        regexp[at + 5] != '|' || regexp[at + 6] != regexp[at] ||
-        regexp[at + 7] != ')') return;
+    if (regexp[at + 2] != '|' || regexp[at + 3] != regexp[at] || regexp[at + 5] != '|' || regexp[at + 6] != regexp[at] || regexp[at + 7] != ')') return;
     if (strcmp(regexp + at + 8, "+") == 0) bound = 0;
     else if (strcmp(regexp + at + 8, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 8, "{1,3}") == 0) bound = 3;
@@ -10276,33 +8573,19 @@ static void yx_adjust_long_long_short_fork(YRX_PATTERN *pattern,
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
     z = (uint8_t)regexp[at + 4];
-    letters = ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-              ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) &&
-              ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
-    if (!(letters || digits) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+    letters =
+        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) && ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!(letters || digits) || (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset, units = 0;
-        while ((!bound || units < 2 * bound - 1) &&
-               yx_short_first_unit_at(data, size, pos, width, x,
-                                      nocase)) {
+        while ((!bound || units < 2 * bound - 1) && yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
             pos += width;
             ++units;
-            if (yx_short_first_unit_at(data, size, pos, width, y,
-                                       nocase) ||
-                yx_short_first_unit_at(data, size, pos, width, z,
-                                       nocase))
-                pos += width;
+            if (yx_short_first_unit_at(data, size, pos, width, y, nocase) || yx_short_first_unit_at(data, size, pos, width, z, nocase)) pos += width;
         }
         if (units) match->length = pos - match->offset;
     }
@@ -10311,9 +8594,7 @@ static void yx_adjust_long_long_short_fork(YRX_PATTERN *pattern,
 /* The bounded xyz|x verifier can visit bound-1 further x atoms after its
    written bound. On long inputs its atom search reports an isolated xyz
    through x, unless alphabetic nocase keeps the complete long branch. */
-static void yx_adjust_long_first_three_byte_pair(YRX_PATTERN *pattern,
-                                                  const uint8_t *data,
-                                                  size_t size)
+static void yx_adjust_long_first_three_byte_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
@@ -10321,108 +8602,61 @@ static void yx_adjust_long_first_three_byte_pair(YRX_PATTERN *pattern,
     unsigned bound;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool letters, digits;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        regexp[0] != '(') return;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || regexp[0] != '(') return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) < at + 7) return;
-    if (regexp[at + 3] != '|' || regexp[at + 4] != regexp[at] ||
-        regexp[at + 5] != ')') return;
+    if (regexp[at + 3] != '|' || regexp[at + 4] != regexp[at] || regexp[at + 5] != ')') return;
     if (strcmp(regexp + at + 6, "+") == 0) bound = 0;
     else if (strcmp(regexp + at + 6, "{1,2}") == 0) bound = 2;
     else if (strcmp(regexp + at + 6, "{1,3}") == 0) bound = 3;
     else return;
-    if (bound && !((pattern->modifiers &
-                   (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-                   (YX_MOD_ASCII | YX_MOD_WIDE) &&
-                   memchr(data, 0, size) != NULL))
+    if (bound && !((pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE) && memchr(data, 0, size) != NULL))
         return; /* The bounded scanner applied the same verifier earlier. */
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 1];
     z = (uint8_t)regexp[at + 2];
-    letters = ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) &&
-              ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) &&
-              ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
-    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-             z >= '0' && z <= '9';
-    if (!(letters || digits) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z)) return;
+    letters =
+        ((x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')) && ((y >= 'a' && y <= 'z') || (y >= 'A' && y <= 'Z')) && ((z >= 'a' && z <= 'z') || (z >= 'A' && z <= 'Z'));
+    digits = x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9';
+    if (!(letters || digits) || (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t pos = match->offset, units = 0;
-        while ((!bound || units < 2 * bound - 1) &&
-               yx_short_first_unit_at(data, size, pos, width, x,
-                                      nocase)) {
+        while ((!bound || units < 2 * bound - 1) && yx_short_first_unit_at(data, size, pos, width, x, nocase)) {
             pos += width;
             ++units;
-            if (yx_short_first_unit_at(data, size, pos, width, y,
-                                       nocase) &&
-                yx_short_first_unit_at(data, size, pos + width,
-                                       width, z, nocase))
-                pos += 2 * width;
+            if (yx_short_first_unit_at(data, size, pos, width, y, nocase) && yx_short_first_unit_at(data, size, pos + width, width, z, nocase)) pos += 2 * width;
         }
         if (!units) continue;
-        if (size >= 16 && units == 1 && (!nocase || digits) &&
-            pos - match->offset > width)
-            pos = match->offset + width;
+        if (size >= 16 && units == 1 && (!nocase || digits) && pos - match->offset > width) pos = match->offset + width;
         match->length = pos - match->offset;
     }
 }
 
-static void yx_bounded_short_first_pair_walk(const uint8_t *data, size_t size,
-                                             size_t start, size_t pos,
-                                             size_t width, uint8_t x,
-                                             uint8_t y, bool nocase,
-                                             bool long_first,
-                                             unsigned prior,
-                                             unsigned max_repeats,
-                                             size_t *best)
+static void yx_bounded_short_first_pair_walk(const uint8_t *data, size_t size, size_t start, size_t pos, size_t width, uint8_t x, uint8_t y, bool nocase, bool long_first,
+                                             unsigned prior, unsigned max_repeats, size_t *best)
 {
-    if (!yx_short_first_unit_at(data, size, pos, width, x, nocase))
-        return;
+    if (!yx_short_first_unit_at(data, size, pos, width, x, nocase)) return;
     size_t end = pos;
-    for (unsigned following = 0; following < max_repeats &&
-         yx_short_first_unit_at(data, size, end, width, x, nocase);
-         ++following) {
+    for (unsigned following = 0; following < max_repeats && yx_short_first_unit_at(data, size, end, width, x, nocase); ++following) {
         end += width;
-        if (long_first &&
-            yx_short_first_unit_at(data, size, end, width, y, nocase))
-            end += width;
+        if (long_first && yx_short_first_unit_at(data, size, end, width, y, nocase)) end += width;
     }
     if (end - start > *best) *best = end - start;
     if (prior + 1 == max_repeats) return;
-    if (size - pos >= 2 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width,
-                               x, nocase))
-        yx_bounded_short_first_pair_walk(data, size, start, pos + width,
-                                         width, x, y, nocase, long_first,
-                                         prior + 1,
-                                         max_repeats,
-                                         best);
-    if (size - pos >= 3 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width,
-                               y, nocase) &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width,
-                               x, nocase))
-        yx_bounded_short_first_pair_walk(data, size, start, pos + 2 * width,
-                                         width, x, y, nocase, long_first,
-                                         prior + 1,
-                                         max_repeats,
-                                         best);
+    if (size - pos >= 2 * width && yx_short_first_unit_at(data, size, pos + width, width, x, nocase))
+        yx_bounded_short_first_pair_walk(data, size, start, pos + width, width, x, y, nocase, long_first, prior + 1, max_repeats, best);
+    if (size - pos >= 3 * width && yx_short_first_unit_at(data, size, pos + width, width, y, nocase) &&
+        yx_short_first_unit_at(data, size, pos + 2 * width, width, x, nocase))
+        yx_bounded_short_first_pair_walk(data, size, start, pos + 2 * width, width, x, y, nocase, long_first, prior + 1, max_repeats, best);
 }
 
 /* The reference's verifier for (x|xy) and (xy|x) bounded repetitions can
    anchor on any x. It includes up to max-1 complete branches before that
    anchor, then follows the written branch priority for up to max branches. */
-static void yx_adjust_bounded_short_first_pair(YRX_PATTERN *pattern,
-                                                const uint8_t *data,
-                                                size_t size)
+static void yx_adjust_bounded_short_first_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp);
@@ -10432,43 +8666,30 @@ static void yx_adjust_bounded_short_first_pair(YRX_PATTERN *pattern,
     bool long_first;
     unsigned max_repeats;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if ((pattern->modifiers & YX_MOD_FULLWORD) || regexp[group] != '(')
-        return;
-    if (length >= at + 2 && regexp[at] == '?' &&
-        regexp[at + 1] == ':') at += 2;
+    if ((pattern->modifiers & YX_MOD_FULLWORD) || regexp[group] != '(') return;
+    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (length != at + 10 || regexp[at + 4] != ')') return;
-    if (strcmp(regexp + at + 5, "{1,2}") == 0)
-        max_repeats = 2;
-    else if (strcmp(regexp + at + 5, "{1,3}") == 0)
-        max_repeats = 3;
-    else if (strcmp(regexp + at + 5, "{1,4}") == 0)
-        max_repeats = 4;
-    else
-        return;
+    if (strcmp(regexp + at + 5, "{1,2}") == 0) max_repeats = 2;
+    else if (strcmp(regexp + at + 5, "{1,3}") == 0) max_repeats = 3;
+    else if (strcmp(regexp + at + 5, "{1,4}") == 0) max_repeats = 4;
+    else return;
     x = (uint8_t)regexp[at];
     if (regexp[at + 1] == '|' && regexp[at + 2] == regexp[at]) {
         y = (uint8_t)regexp[at + 3];
         long_first = false;
-    } else if (regexp[at + 2] == '|' &&
-               regexp[at + 3] == regexp[at]) {
+    } else if (regexp[at + 2] == '|' && regexp[at + 3] == regexp[at]) {
         y = (uint8_t)regexp[at + 1];
         long_first = true;
     } else {
         return;
     }
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        (nocase ? yx_fold(x) == yx_fold(y) : x == y)) return;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || (nocase ? yx_fold(x) == yx_fold(y) : x == y)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t best = 0;
-        yx_bounded_short_first_pair_walk(data, size, match->offset,
-                                         match->offset, width, x, y,
-                                         nocase, long_first, 0,
-                                         max_repeats, &best);
+        yx_bounded_short_first_pair_walk(data, size, match->offset, match->offset, width, x, y, nocase, long_first, 0, max_repeats, &best);
         if (best) match->length = best;
     }
 }
@@ -10478,98 +8699,58 @@ static void yx_adjust_bounded_short_first_pair(YRX_PATTERN *pattern,
    then the written alternative priority applies for at most max branches.
    This mirrors the one-byte prefix walk above without affecting other
    grouped alternatives. */
-static void yx_bounded_two_byte_pair_walk(const uint8_t *data, size_t size,
-                                          size_t start, size_t pos,
-                                          size_t width,
-                                          const uint8_t token[2],
-                                          uint8_t suffix, bool nocase,
-                                          bool long_first, unsigned prior,
-                                          unsigned max_repeats,
-                                          size_t *best)
+static void yx_bounded_two_byte_pair_walk(const uint8_t *data, size_t size, size_t start, size_t pos, size_t width, const uint8_t token[2], uint8_t suffix, bool nocase,
+                                          bool long_first, unsigned prior, unsigned max_repeats, size_t *best)
 {
-    if (!yx_short_first_token_at(data, size, pos, width, token, 2, nocase))
-        return;
+    if (!yx_short_first_token_at(data, size, pos, width, token, 2, nocase)) return;
     size_t end = pos;
-    for (unsigned following = 0; following < max_repeats &&
-         yx_short_first_token_at(data, size, end, width, token, 2,
-                                 nocase); ++following) {
+    for (unsigned following = 0; following < max_repeats && yx_short_first_token_at(data, size, end, width, token, 2, nocase); ++following) {
         end += 2 * width;
-        if (long_first &&
-            yx_short_first_unit_at(data, size, end, width, suffix, nocase))
-            end += width;
+        if (long_first && yx_short_first_unit_at(data, size, end, width, suffix, nocase)) end += width;
     }
     if (end - start > *best) *best = end - start;
     if (prior + 1 == max_repeats) return;
-    if (size - pos >= 4 * width &&
-        yx_short_first_token_at(data, size, pos + 2 * width, width,
-                                token, 2, nocase))
-        yx_bounded_two_byte_pair_walk(data, size, start, pos + 2 * width,
-                                      width, token, suffix, nocase,
-                                      long_first, prior + 1, max_repeats,
-                                      best);
-    if (size - pos >= 5 * width &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width,
-                               suffix, nocase) &&
-        yx_short_first_token_at(data, size, pos + 3 * width, width,
-                                token, 2, nocase))
-        yx_bounded_two_byte_pair_walk(data, size, start, pos + 3 * width,
-                                      width, token, suffix, nocase,
-                                      long_first, prior + 1, max_repeats,
-                                      best);
+    if (size - pos >= 4 * width && yx_short_first_token_at(data, size, pos + 2 * width, width, token, 2, nocase))
+        yx_bounded_two_byte_pair_walk(data, size, start, pos + 2 * width, width, token, suffix, nocase, long_first, prior + 1, max_repeats, best);
+    if (size - pos >= 5 * width && yx_short_first_unit_at(data, size, pos + 2 * width, width, suffix, nocase) &&
+        yx_short_first_token_at(data, size, pos + 3 * width, width, token, 2, nocase))
+        yx_bounded_two_byte_pair_walk(data, size, start, pos + 3 * width, width, token, suffix, nocase, long_first, prior + 1, max_repeats, best);
 }
 
-static void yx_adjust_bounded_two_byte_pair(YRX_PATTERN *pattern,
-                                             const uint8_t *data, size_t size)
+static void yx_adjust_bounded_two_byte_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t token[2], suffix;
     bool long_first, nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     unsigned max_repeats;
-    if (regexp[0] != '(' ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
+    if (regexp[0] != '(' || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) != at + 12 || regexp[at + 6] != ')') return;
-    if (strcmp(regexp + at + 7, "{1,2}") == 0)
-        max_repeats = 2;
-    else if (strcmp(regexp + at + 7, "{1,3}") == 0)
-        max_repeats = 3;
-    else if (strcmp(regexp + at + 7, "{1,4}") == 0)
-        max_repeats = 4;
-    else
-        return;
+    if (strcmp(regexp + at + 7, "{1,2}") == 0) max_repeats = 2;
+    else if (strcmp(regexp + at + 7, "{1,3}") == 0) max_repeats = 3;
+    else if (strcmp(regexp + at + 7, "{1,4}") == 0) max_repeats = 4;
+    else return;
     token[0] = (uint8_t)regexp[at];
     token[1] = (uint8_t)regexp[at + 1];
-    if (regexp[at + 2] == '|' &&
-        regexp[at + 3] == (char)token[0] &&
-        regexp[at + 4] == (char)token[1]) {
+    if (regexp[at + 2] == '|' && regexp[at + 3] == (char)token[0] && regexp[at + 4] == (char)token[1]) {
         suffix = (uint8_t)regexp[at + 5];
         long_first = false;
-    } else if (regexp[at + 3] == '|' &&
-               regexp[at + 4] == (char)token[0] &&
-               regexp[at + 5] == (char)token[1]) {
+    } else if (regexp[at + 3] == '|' && regexp[at + 4] == (char)token[0] && regexp[at + 5] == (char)token[1]) {
         suffix = (uint8_t)regexp[at + 2];
         long_first = true;
     } else {
         return;
     }
-    if (!yx_plain_regex_byte(token[0]) ||
-        !yx_plain_regex_byte(token[1]) ||
-        !yx_plain_regex_byte(suffix) ||
-        yx_fold(token[0]) == yx_fold(token[1]) ||
-        yx_fold(token[0]) == yx_fold(suffix) ||
-        yx_fold(token[1]) == yx_fold(suffix)) return;
+    if (!yx_plain_regex_byte(token[0]) || !yx_plain_regex_byte(token[1]) || !yx_plain_regex_byte(suffix) || yx_fold(token[0]) == yx_fold(token[1]) ||
+        yx_fold(token[0]) == yx_fold(suffix) || yx_fold(token[1]) == yx_fold(suffix))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 4 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 4 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t best = 0;
-        yx_bounded_two_byte_pair_walk(data, size, match->offset,
-                                      match->offset, width, token, suffix,
-                                      nocase, long_first, 0, max_repeats,
-                                      &best);
+        yx_bounded_two_byte_pair_walk(data, size, match->offset, match->offset, width, token, suffix, nocase, long_first, 0, max_repeats, &best);
         if (best) match->length = best;
     }
 }
@@ -10577,61 +8758,42 @@ static void yx_adjust_bounded_two_byte_pair(YRX_PATTERN *pattern,
 /* A nested x(y|yz) repeat has the same short xy and long xyz atoms as a
    flat xy|xyz repeat, but the regex engine stops at the first short atom.
    Apply the verifier walk only to this literal nested group shape. */
-static void yx_adjust_nested_short_first_pair(YRX_PATTERN *pattern,
-                                               const uint8_t *data,
-                                               size_t size)
+static void yx_adjust_nested_short_first_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp), at = 1;
     uint8_t token[2], suffix;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool bounded;
-    if (length < 10 || regexp[0] != '(' ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
+    if (length < 10 || regexp[0] != '(' || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (at + 7 >= length || regexp[at + 1] != '(') return;
     token[0] = (uint8_t)regexp[at];
     at += 2;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (at + 5 >= length || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' ||
-        regexp[at + 5] != ')') return;
+    if (at + 5 >= length || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' || regexp[at + 5] != ')') return;
     token[1] = (uint8_t)regexp[at];
     suffix = (uint8_t)regexp[at + 3];
     at += 6;
     if (strcmp(regexp + at, "+") == 0) bounded = false;
     else if (strcmp(regexp + at, "{1,2}") == 0) bounded = true;
     else return;
-    if (!yx_plain_regex_byte(token[0]) ||
-        !yx_plain_regex_byte(token[1]) ||
-        !yx_plain_regex_byte(suffix) ||
-        yx_fold(token[0]) == yx_fold(token[1]) ||
-        yx_fold(token[0]) == yx_fold(suffix) ||
-        yx_fold(token[1]) == yx_fold(suffix)) return;
+    if (!yx_plain_regex_byte(token[0]) || !yx_plain_regex_byte(token[1]) || !yx_plain_regex_byte(suffix) || yx_fold(token[0]) == yx_fold(token[1]) ||
+        yx_fold(token[0]) == yx_fold(suffix) || yx_fold(token[1]) == yx_fold(suffix))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 4 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 4 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t best = 0;
         if (bounded) {
-            yx_bounded_two_byte_pair_walk(data, size, match->offset,
-                                          match->offset, width, token,
-                                          suffix, nocase, false, 0, 2,
-                                          &best);
-        } else if (yx_short_first_token_at(data, size, match->offset,
-                                            width, token, 2, nocase)) {
+            yx_bounded_two_byte_pair_walk(data, size, match->offset, match->offset, width, token, suffix, nocase, false, 0, 2, &best);
+        } else if (yx_short_first_token_at(data, size, match->offset, width, token, 2, nocase)) {
             size_t pos = match->offset + 2 * width;
             while (pos < size) {
-                if (yx_short_first_token_at(data, size, pos, width,
-                                            token, 2, nocase)) {
+                if (yx_short_first_token_at(data, size, pos, width, token, 2, nocase)) {
                     pos += 2 * width;
-                } else if (yx_short_first_unit_at(data, size, pos, width,
-                                                   suffix, nocase) &&
-                           yx_short_first_token_at(data, size,
-                                                    pos + width, width,
-                                                    token, 2, nocase)) {
+                } else if (yx_short_first_unit_at(data, size, pos, width, suffix, nocase) && yx_short_first_token_at(data, size, pos + width, width, token, 2, nocase)) {
                     pos += 3 * width;
                 } else break;
             }
@@ -10644,100 +8806,60 @@ static void yx_adjust_nested_short_first_pair(YRX_PATTERN *pattern,
 /* A bounded repeated byte has no distinct suffix to anchor on. The
    reference's forward verifier reaches 3n-2 units for (x|xx){1,n}, or
    4n-2 for (xx|x){1,n}, before stopping at its repetition limit. */
-static void yx_adjust_bounded_repeated_byte(YRX_PATTERN *pattern,
-                                             const uint8_t *data, size_t size)
+static void yx_adjust_bounded_repeated_byte(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t value;
     bool long_first, nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     unsigned max_repeats, max_units;
-    if (regexp[0] != '(' ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
+    if (regexp[0] != '(' || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) != at + 10 || regexp[at + 4] != ')') return;
-    if (strcmp(regexp + at + 5, "{1,2}") == 0)
-        max_repeats = 2;
-    else if (strcmp(regexp + at + 5, "{1,3}") == 0)
-        max_repeats = 3;
-    else
-        return;
+    if (strcmp(regexp + at + 5, "{1,2}") == 0) max_repeats = 2;
+    else if (strcmp(regexp + at + 5, "{1,3}") == 0) max_repeats = 3;
+    else return;
     value = (uint8_t)regexp[at];
-    if (regexp[at + 1] == '|' &&
-        regexp[at + 2] == (char)value &&
-        regexp[at + 3] == (char)value) {
+    if (regexp[at + 1] == '|' && regexp[at + 2] == (char)value && regexp[at + 3] == (char)value) {
         long_first = false;
-    } else if (regexp[at + 1] == (char)value &&
-               regexp[at + 2] == '|' &&
-               regexp[at + 3] == (char)value) {
+    } else if (regexp[at + 1] == (char)value && regexp[at + 2] == '|' && regexp[at + 3] == (char)value) {
         long_first = true;
     } else {
         return;
     }
     if (!yx_plain_regex_byte(value)) return;
-    max_units = long_first ? 4 * max_repeats - 2 :
-                             3 * max_repeats - 2;
+    max_units = long_first ? 4 * max_repeats - 2 : 3 * max_repeats - 2;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t units = 0;
-        while (units < max_units &&
-               yx_short_first_unit_at(data, size,
-                                      match->offset + units * width,
-                                      width, value, nocase)) ++units;
+        while (units < max_units && yx_short_first_unit_at(data, size, match->offset + units * width, width, value, nocase)) ++units;
         if (units) match->length = units * width;
     }
 }
 
-static void yx_bounded_nocase_triple_walk(const uint8_t *data, size_t size,
-                                          size_t start, size_t pos,
-                                          size_t width, uint8_t x,
-                                          uint8_t y, uint8_t z,
-                                          unsigned prior,
-                                          unsigned max_repeats,
-                                          size_t *best)
+static void yx_bounded_nocase_triple_walk(const uint8_t *data, size_t size, size_t start, size_t pos, size_t width, uint8_t x, uint8_t y, uint8_t z, unsigned prior,
+                                          unsigned max_repeats, size_t *best)
 {
-    if (!yx_short_first_unit_at(data, size, pos, width, x, true))
-        return;
+    if (!yx_short_first_unit_at(data, size, pos, width, x, true)) return;
     size_t end = pos;
-    for (unsigned following = 0; following < max_repeats &&
-         yx_short_first_unit_at(data, size, end, width, x, true);
-         ++following)
-        end += width;
+    for (unsigned following = 0; following < max_repeats && yx_short_first_unit_at(data, size, end, width, x, true); ++following) end += width;
     if (end - start > *best) *best = end - start;
     if (prior + 1 == max_repeats) return;
-    if (size - pos >= 2 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, x, true))
-        yx_bounded_nocase_triple_walk(data, size, start, pos + width,
-                                      width, x, y, z, prior + 1,
-                                      max_repeats, best);
-    if (size - pos >= 3 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, y, true) &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width, x,
-                               true))
-        yx_bounded_nocase_triple_walk(data, size, start, pos + 2 * width,
-                                      width, x, y, z, prior + 1,
-                                      max_repeats, best);
-    if (size - pos >= 4 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, y, true) &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width, z,
-                               true) &&
-        yx_short_first_unit_at(data, size, pos + 3 * width, width, x,
-                               true))
-        yx_bounded_nocase_triple_walk(data, size, start, pos + 3 * width,
-                                      width, x, y, z, prior + 1,
-                                      max_repeats, best);
+    if (size - pos >= 2 * width && yx_short_first_unit_at(data, size, pos + width, width, x, true))
+        yx_bounded_nocase_triple_walk(data, size, start, pos + width, width, x, y, z, prior + 1, max_repeats, best);
+    if (size - pos >= 3 * width && yx_short_first_unit_at(data, size, pos + width, width, y, true) && yx_short_first_unit_at(data, size, pos + 2 * width, width, x, true))
+        yx_bounded_nocase_triple_walk(data, size, start, pos + 2 * width, width, x, y, z, prior + 1, max_repeats, best);
+    if (size - pos >= 4 * width && yx_short_first_unit_at(data, size, pos + width, width, y, true) &&
+        yx_short_first_unit_at(data, size, pos + 2 * width, width, z, true) && yx_short_first_unit_at(data, size, pos + 3 * width, width, x, true))
+        yx_bounded_nocase_triple_walk(data, size, start, pos + 3 * width, width, x, y, z, prior + 1, max_repeats, best);
 }
 
 /* The nocase verifier for (x|xy|xyz){1,2} and {1,3} uses x as the
    forward endpoint. The previous bounded branches can include xy and xyz,
    but a suffix is retained only when another x follows it. */
-static void yx_adjust_bounded_nocase_triple(YRX_PATTERN *pattern,
-                                             const uint8_t *data,
-                                             size_t size)
+static void yx_adjust_bounded_nocase_triple(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp);
@@ -10745,42 +8867,26 @@ static void yx_adjust_bounded_nocase_triple(YRX_PATTERN *pattern,
     size_t at = group + 1;
     uint8_t x, y, z;
     unsigned max_repeats;
-    if (!(pattern->modifiers & YX_MOD_NOCASE) ||
-        (pattern->modifiers & YX_MOD_FULLWORD) || regexp[group] != '(')
+    if (!(pattern->modifiers & YX_MOD_NOCASE) || (pattern->modifiers & YX_MOD_FULLWORD) || regexp[group] != '(') return;
+    if (length >= at + 2 && regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
+    if (length != at + 14 || regexp[at + 1] != '|' || regexp[at + 4] != '|' || regexp[at + 8] != ')' || regexp[at] != regexp[at + 2] || regexp[at] != regexp[at + 5] ||
+        regexp[at + 3] != regexp[at + 6])
         return;
-    if (length >= at + 2 && regexp[at] == '?' &&
-        regexp[at + 1] == ':') at += 2;
-    if (length != at + 14 || regexp[at + 1] != '|' ||
-        regexp[at + 4] != '|' || regexp[at + 8] != ')' ||
-        regexp[at] != regexp[at + 2] ||
-        regexp[at] != regexp[at + 5] ||
-        regexp[at + 3] != regexp[at + 6]) return;
-    if (strcmp(regexp + at + 9, "{1,2}") == 0)
-        max_repeats = 2;
-    else if (strcmp(regexp + at + 9, "{1,3}") == 0)
-        max_repeats = 3;
-    else
-        return;
+    if (strcmp(regexp + at + 9, "{1,2}") == 0) max_repeats = 2;
+    else if (strcmp(regexp + at + 9, "{1,3}") == 0) max_repeats = 3;
+    else return;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 7];
-    if (x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-        z >= '0' && z <= '9') return;
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        yx_fold(x) == yx_fold(y) ||
-        yx_fold(x) == yx_fold(z) ||
-        yx_fold(y) == yx_fold(z)) return;
+    if (x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9') return;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t best = 0;
-        yx_bounded_nocase_triple_walk(data, size, match->offset,
-                                      match->offset, width, x, y, z, 0,
-                                      max_repeats, &best);
+        yx_bounded_nocase_triple_walk(data, size, match->offset, match->offset, width, x, y, z, 0, max_repeats, &best);
         if (best) match->length = best;
     }
 }
@@ -10788,90 +8894,51 @@ static void yx_adjust_bounded_nocase_triple(YRX_PATTERN *pattern,
 /* For a case-sensitive (x|xy|xyz){1,2}, one complete branch can precede
    the forward atom. The forward scan consumes one complete branch and
    then only x. Other triple shapes take different verifier paths. */
-static void yx_bounded_triple_prefix_walk(const uint8_t *data, size_t size,
-                                          size_t start, size_t pos,
-                                          size_t width,
-                                          uint8_t x, uint8_t y, uint8_t z,
-                                          bool nocase, bool long_first,
-                                          unsigned prior,
-                                          unsigned max_repeats,
-                                          size_t *best)
+static void yx_bounded_triple_prefix_walk(const uint8_t *data, size_t size, size_t start, size_t pos, size_t width, uint8_t x, uint8_t y, uint8_t z, bool nocase,
+                                          bool long_first, unsigned prior, unsigned max_repeats, size_t *best)
 {
     if (!yx_short_first_unit_at(data, size, pos, width, x, nocase)) return;
     size_t end = pos;
-    for (unsigned following = 0; following < max_repeats &&
-         yx_short_first_unit_at(data, size, end, width, x, nocase);
-         ++following) {
+    for (unsigned following = 0; following < max_repeats && yx_short_first_unit_at(data, size, end, width, x, nocase); ++following) {
         end += width;
         if (long_first || following + 1 < max_repeats) {
-            if (yx_short_first_unit_at(data, size, end, width, y,
-                                       nocase)) {
+            if (yx_short_first_unit_at(data, size, end, width, y, nocase)) {
                 end += width;
-                if (yx_short_first_unit_at(data, size, end, width, z,
-                                           nocase)) end += width;
+                if (yx_short_first_unit_at(data, size, end, width, z, nocase)) end += width;
             }
         }
     }
     if (end - start > *best) *best = end - start;
     if (prior + 1 == max_repeats) return;
-    if (size - pos >= 2 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, x,
-                               nocase))
-        yx_bounded_triple_prefix_walk(data, size, start, pos + width,
-                                      width, x, y, z, nocase, long_first,
-                                      prior + 1, max_repeats, best);
-    if (size - pos >= 3 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, y,
-                               nocase) &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width, x,
-                               nocase))
-        yx_bounded_triple_prefix_walk(data, size, start, pos + 2 * width,
-                                      width, x, y, z, nocase, long_first,
-                                      prior + 1, max_repeats, best);
-    if (size - pos >= 4 * width &&
-        yx_short_first_unit_at(data, size, pos + width, width, y,
-                               nocase) &&
-        yx_short_first_unit_at(data, size, pos + 2 * width, width, z,
-                               nocase) &&
-        yx_short_first_unit_at(data, size, pos + 3 * width, width, x,
-                               nocase))
-        yx_bounded_triple_prefix_walk(data, size, start, pos + 3 * width,
-                                      width, x, y, z, nocase, long_first,
-                                      prior + 1, max_repeats, best);
+    if (size - pos >= 2 * width && yx_short_first_unit_at(data, size, pos + width, width, x, nocase))
+        yx_bounded_triple_prefix_walk(data, size, start, pos + width, width, x, y, z, nocase, long_first, prior + 1, max_repeats, best);
+    if (size - pos >= 3 * width && yx_short_first_unit_at(data, size, pos + width, width, y, nocase) &&
+        yx_short_first_unit_at(data, size, pos + 2 * width, width, x, nocase))
+        yx_bounded_triple_prefix_walk(data, size, start, pos + 2 * width, width, x, y, z, nocase, long_first, prior + 1, max_repeats, best);
+    if (size - pos >= 4 * width && yx_short_first_unit_at(data, size, pos + width, width, y, nocase) &&
+        yx_short_first_unit_at(data, size, pos + 2 * width, width, z, nocase) && yx_short_first_unit_at(data, size, pos + 3 * width, width, x, nocase))
+        yx_bounded_triple_prefix_walk(data, size, start, pos + 3 * width, width, x, y, z, nocase, long_first, prior + 1, max_repeats, best);
 }
 
-static void yx_adjust_bounded_triple_prefix(YRX_PATTERN *pattern,
-                                             const uint8_t *data, size_t size)
+static void yx_adjust_bounded_triple_prefix(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1;
     uint8_t x, y, z;
     bool long_first, nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     unsigned max_repeats;
-    if (regexp[0] != '(' ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
+    if (regexp[0] != '(' || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR))) return;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) != at + 14 || regexp[at + 8] != ')') return;
-    if (strcmp(regexp + at + 9, "{1,2}") == 0)
-        max_repeats = 2;
-    else if (strcmp(regexp + at + 9, "{1,3}") == 0)
-        max_repeats = 3;
-    else
-        return;
-    if (regexp[at + 1] == '|' &&
-        regexp[at + 2] == regexp[at] &&
-        regexp[at + 4] == '|' &&
-        regexp[at + 5] == regexp[at] &&
-        regexp[at + 6] == regexp[at + 3]) {
+    if (strcmp(regexp + at + 9, "{1,2}") == 0) max_repeats = 2;
+    else if (strcmp(regexp + at + 9, "{1,3}") == 0) max_repeats = 3;
+    else return;
+    if (regexp[at + 1] == '|' && regexp[at + 2] == regexp[at] && regexp[at + 4] == '|' && regexp[at + 5] == regexp[at] && regexp[at + 6] == regexp[at + 3]) {
         x = (uint8_t)regexp[at];
         y = (uint8_t)regexp[at + 3];
         z = (uint8_t)regexp[at + 7];
         long_first = false;
-    } else if (regexp[at + 3] == '|' &&
-               regexp[at + 4] == regexp[at] &&
-               regexp[at + 5] == regexp[at + 1] &&
-               regexp[at + 6] == '|' &&
-               regexp[at + 7] == regexp[at]) {
+    } else if (regexp[at + 3] == '|' && regexp[at + 4] == regexp[at] && regexp[at + 5] == regexp[at + 1] && regexp[at + 6] == '|' && regexp[at + 7] == regexp[at]) {
         x = (uint8_t)regexp[at];
         y = (uint8_t)regexp[at + 1];
         z = (uint8_t)regexp[at + 2];
@@ -10879,35 +8946,20 @@ static void yx_adjust_bounded_triple_prefix(YRX_PATTERN *pattern,
     } else {
         return;
     }
-    if ((!long_first && nocase &&
-         !(x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-           z >= '0' && z <= '9')) ||
-        !yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        yx_fold(x) == yx_fold(y) ||
-        yx_fold(x) == yx_fold(z) ||
-        yx_fold(y) == yx_fold(z)) return;
+    if ((!long_first && nocase && !(x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9')) || !yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
+        !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-                       match->length >= 2 && match->offset < size &&
-                       size - match->offset >= 2 &&
-                       data[match->offset + 1] == 0 ? 2 : 1;
+        size_t width =
+            (pattern->modifiers & YX_MOD_WIDE) && match->length >= 2 && match->offset < size && size - match->offset >= 2 && data[match->offset + 1] == 0 ? 2 : 1;
         size_t best = 0;
-        yx_bounded_triple_prefix_walk(data, size, match->offset,
-                                      match->offset, width, x, y, z, nocase,
-                                      long_first, 0, max_repeats, &best);
-        if (!long_first && max_repeats == 3 && best > 4 * width &&
-            yx_short_first_unit_at(data, size, match->offset,
-                                   width, x, nocase) &&
-            yx_short_first_unit_at(data, size, match->offset + width,
-                                   width, x, nocase) &&
-            yx_short_first_unit_at(data, size, match->offset + 2 * width,
-                                   width, x, nocase) &&
-            yx_short_first_unit_at(data, size, match->offset + 3 * width,
-                                   width, x, nocase) &&
-            yx_short_first_unit_at(data, size, match->offset + 4 * width,
-                                   width, y, nocase))
+        yx_bounded_triple_prefix_walk(data, size, match->offset, match->offset, width, x, y, z, nocase, long_first, 0, max_repeats, &best);
+        if (!long_first && max_repeats == 3 && best > 4 * width && yx_short_first_unit_at(data, size, match->offset, width, x, nocase) &&
+            yx_short_first_unit_at(data, size, match->offset + width, width, x, nocase) &&
+            yx_short_first_unit_at(data, size, match->offset + 2 * width, width, x, nocase) &&
+            yx_short_first_unit_at(data, size, match->offset + 3 * width, width, x, nocase) &&
+            yx_short_first_unit_at(data, size, match->offset + 4 * width, width, y, nocase))
             best = 4 * width;
         if (best) match->length = best;
     }
@@ -10917,70 +8969,48 @@ static void yx_adjust_bounded_triple_prefix(YRX_PATTERN *pattern,
    branches after its three full branches. With shortest-first alternatives,
    the extra branches consume only x unless the end anchor requires the
    complete input; longest-first alternatives keep their normal priority. */
-static int yx_adjust_anchored_bounded_triple(YRX_PATTERN *pattern,
-                                              const uint8_t *data,
-                                              size_t size, size_t limit)
+static int yx_adjust_anchored_bounded_triple(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit)
 {
     const char *regexp = pattern->regexp;
     size_t at = 2, pos = 0;
     uint8_t x, y, z;
     bool short_first, end_anchor;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (regexp[0] != '^' || regexp[1] != '(' ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD |
-                               YX_MOD_XOR))) return 1;
+    if (regexp[0] != '^' || regexp[1] != '(' || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR))) return 1;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
     if (strlen(regexp) < at + 14 || regexp[at + 8] != ')') return 1;
-    if (strcmp(regexp + at + 9, "{1,3}") == 0)
-        end_anchor = false;
-    else if (strcmp(regexp + at + 9, "{1,3}$") == 0)
-        end_anchor = true;
+    if (strcmp(regexp + at + 9, "{1,3}") == 0) end_anchor = false;
+    else if (strcmp(regexp + at + 9, "{1,3}$") == 0) end_anchor = true;
     else return 1;
-    short_first = regexp[at + 1] == '|' &&
-                  regexp[at + 2] == regexp[at] &&
-                  regexp[at + 4] == '|' &&
-                  regexp[at + 5] == regexp[at] &&
-                  regexp[at + 6] == regexp[at + 3];
+    short_first = regexp[at + 1] == '|' && regexp[at + 2] == regexp[at] && regexp[at + 4] == '|' && regexp[at + 5] == regexp[at] && regexp[at + 6] == regexp[at + 3];
     if (short_first) {
         x = (uint8_t)regexp[at];
         y = (uint8_t)regexp[at + 3];
         z = (uint8_t)regexp[at + 7];
     } else {
-        if (regexp[at + 3] != '|' ||
-            regexp[at + 4] != regexp[at] ||
-            regexp[at + 5] != regexp[at + 1] ||
-            regexp[at + 6] != '|' ||
-            regexp[at + 7] != regexp[at]) return 1;
+        if (regexp[at + 3] != '|' || regexp[at + 4] != regexp[at] || regexp[at + 5] != regexp[at + 1] || regexp[at + 6] != '|' || regexp[at + 7] != regexp[at]) return 1;
         x = (uint8_t)regexp[at];
         y = (uint8_t)regexp[at + 1];
         z = (uint8_t)regexp[at + 2];
     }
     if (nocase && short_first) return 1;
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        (nocase ? yx_fold(x) == yx_fold(y) ||
-                  yx_fold(x) == yx_fold(z) ||
-                  yx_fold(y) == yx_fold(z) :
-                  x == y || x == z || y == z))
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) ||
+        (nocase ? yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z) : x == y || x == z || y == z))
         return 1;
-    for (unsigned repeat = 0; repeat < 5 &&
-         yx_short_first_unit_at(data, size, pos, 1, x, nocase); ++repeat) {
+    for (unsigned repeat = 0; repeat < 5 && yx_short_first_unit_at(data, size, pos, 1, x, nocase); ++repeat) {
         ++pos;
         if (end_anchor || !short_first || repeat < 3) {
             if (yx_short_first_unit_at(data, size, pos, 1, y, nocase)) {
                 ++pos;
-                if (yx_short_first_unit_at(data, size, pos, 1, z, nocase))
-                    ++pos;
+                if (yx_short_first_unit_at(data, size, pos, 1, z, nocase)) ++pos;
             }
         }
     }
     if (end_anchor) {
-        if (pos == size && !pattern->match_count)
-            return yx_add_match(pattern, 0, pos, limit);
+        if (pos == size && !pattern->match_count) return yx_add_match(pattern, 0, pos, limit);
     } else if (pos) {
         for (size_t i = 0; i < pattern->match_count; ++i)
-            if (pattern->matches[i].offset == 0)
-                pattern->matches[i].length = pos;
+            if (pattern->matches[i].offset == 0) pattern->matches[i].length = pos;
     }
     return 1;
 }
@@ -10989,17 +9019,14 @@ static int yx_adjust_anchored_bounded_triple(YRX_PATTERN *pattern,
    {1,3} bound when all literal branches share x as their first byte.
    Complete suffix matches can be checked directly without changing the
    branch priority of matches already returned by the regex engine. */
-static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern,
-                                               const uint8_t *data,
-                                               size_t size)
+static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     const char *branch[3];
     size_t width[3], count = 0, at = 0, start, close, max_span;
     uint8_t x, y, z = 0;
     bool anchored, nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR))
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     anchored = regexp[at] == '^';
     if (anchored) ++at;
     if (regexp[at++] != '(') return 1;
@@ -11017,34 +9044,20 @@ static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern,
         ++at;
     }
     close = at;
-    if (regexp[close] != ')' || close == start ||
-        count < 1 || count == 3 ||
-        strcmp(regexp + close + 1, "{1,3}$") != 0) return 1;
+    if (regexp[close] != ')' || close == start || count < 1 || count == 3 || strcmp(regexp + close + 1, "{1,3}$") != 0) return 1;
     branch[count] = regexp + start;
     width[count++] = close - start;
-    if (!((count == 2 &&
-           ((width[0] == 1 && width[1] == 2) ||
-            (width[0] == 2 && width[1] == 1))) ||
-          (count == 3 &&
-           ((width[0] == 1 && width[1] == 2 && width[2] == 3) ||
-            (width[0] == 3 && width[1] == 2 && width[2] == 1)))))
+    if (!((count == 2 && ((width[0] == 1 && width[1] == 2) || (width[0] == 2 && width[1] == 1))) ||
+          (count == 3 && ((width[0] == 1 && width[1] == 2 && width[2] == 3) || (width[0] == 3 && width[1] == 2 && width[2] == 1)))))
         return 1;
     const char *shortest = width[0] == 1 ? branch[0] : branch[count - 1];
-    const char *middle = width[0] == 2 ? branch[0] :
-                         width[1] == 2 ? branch[1] : branch[count - 1];
-    const char *longest = count == 3 ?
-                          (width[0] == 3 ? branch[0] : branch[2]) : NULL;
+    const char *middle = width[0] == 2 ? branch[0] : width[1] == 2 ? branch[1] : branch[count - 1];
+    const char *longest = count == 3 ? (width[0] == 3 ? branch[0] : branch[2]) : NULL;
     x = (uint8_t)shortest[0];
     y = (uint8_t)middle[1];
-    if (middle[0] != (char)x ||
-        (count == 3 &&
-         (longest[0] != (char)x || longest[1] != (char)y))) return 1;
+    if (middle[0] != (char)x || (count == 3 && (longest[0] != (char)x || longest[1] != (char)y))) return 1;
     if (count == 3) z = (uint8_t)longest[2];
-    if (nocase ? yx_fold(x) == yx_fold(y) ||
-                 (count == 3 &&
-                  (yx_fold(x) == yx_fold(z) ||
-                   yx_fold(y) == yx_fold(z))) :
-                 x == y || (count == 3 && (x == z || y == z)))
+    if (nocase ? yx_fold(x) == yx_fold(y) || (count == 3 && (yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))) : x == y || (count == 3 && (x == z || y == z)))
         return 1;
     max_span = 5 * (count == 3 ? 3 : 2);
     if (anchored && size > max_span) return 1;
@@ -11055,13 +9068,9 @@ static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern,
             uint8_t value = nocase ? yx_fold(data[pos]) : data[pos];
             if (value != (nocase ? yx_fold(x) : x)) break;
             ++pos;
-            if (pos < size &&
-                (nocase ? yx_fold(data[pos]) == yx_fold(y) :
-                          data[pos] == y)) {
+            if (pos < size && (nocase ? yx_fold(data[pos]) == yx_fold(y) : data[pos] == y)) {
                 ++pos;
-                if (count == 3 && pos < size &&
-                    (nocase ? yx_fold(data[pos]) == yx_fold(z) :
-                              data[pos] == z)) ++pos;
+                if (count == 3 && pos < size && (nocase ? yx_fold(data[pos]) == yx_fold(z) : data[pos] == z)) ++pos;
             }
         }
         if (pos == size && pos > offset) {
@@ -11071,8 +9080,7 @@ static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern,
                     present = true;
                     break;
                 }
-            if (!present && !yx_add_match(pattern, offset,
-                                          pos - offset, 0)) return 0;
+            if (!present && !yx_add_match(pattern, offset, pos - offset, 0)) return 0;
         }
         if (anchored) break;
     }
@@ -11084,86 +9092,57 @@ static int yx_add_missing_bounded_end_matches(YRX_PATTERN *pattern,
    must follow a short x branch; digits keep the case-sensitive priority.
    With {1,3}, at most five branches are visited, and only the first two or
    three may use the longer forms. */
-static size_t yx_repeated_triple_suffix_length(const uint8_t *data,
-                                                size_t size, size_t offset,
-                                                uint8_t x, uint8_t y,
-                                                uint8_t z, bool nocase,
-                                                bool alphabetic,
-                                                bool bounded)
+static size_t yx_repeated_triple_suffix_length(const uint8_t *data, size_t size, size_t offset, uint8_t x, uint8_t y, uint8_t z, bool nocase, bool alphabetic,
+                                               bool bounded)
 {
     size_t pos = offset, best = 0, repeat = 0;
-    while ((!bounded || repeat < 5) &&
-           yx_short_first_unit_at(data, size, pos, 1, x, nocase)) {
+    while ((!bounded || repeat < 5) && yx_short_first_unit_at(data, size, pos, 1, x, nocase)) {
         ++pos;
-        if (yx_short_first_unit_at(data, size, pos, 1, y, nocase))
-            best = pos + 1 - offset;
+        if (yx_short_first_unit_at(data, size, pos, 1, y, nocase)) best = pos + 1 - offset;
         if (!bounded || repeat < (nocase && alphabetic ? 2u : 3u)) {
             if (yx_short_first_unit_at(data, size, pos, 1, y, nocase)) {
                 ++pos;
-                if (yx_short_first_unit_at(data, size, pos, 1, z,
-                                           nocase)) ++pos;
+                if (yx_short_first_unit_at(data, size, pos, 1, z, nocase)) ++pos;
             }
         }
-        if ((!nocase || !alphabetic) &&
-            yx_short_first_unit_at(data, size, pos, 1, y, false))
-            best = pos + 1 - offset;
+        if ((!nocase || !alphabetic) && yx_short_first_unit_at(data, size, pos, 1, y, false)) best = pos + 1 - offset;
         ++repeat;
     }
     return best;
 }
 
-static int yx_adjust_repeated_triple_suffix(YRX_PATTERN *pattern,
-                                             const uint8_t *data,
-                                             size_t size)
+static int yx_adjust_repeated_triple_suffix(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, length = strlen(regexp);
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool alphabetic, bounded;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR))
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     if (regexp[0] != '(') return 1;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if ((length != at + 11 && length != at + 15) ||
-        regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' ||
-        regexp[at + 5] != regexp[at] ||
-        regexp[at + 6] != regexp[at + 3] ||
-        regexp[at + 8] != ')') return 1;
-    if (length == at + 11 && regexp[at + 9] == '+' &&
-        regexp[at + 10] == regexp[at + 3])
-        bounded = false;
-    else if (length == at + 15 &&
-             memcmp(regexp + at + 9, "{1,3}", 5) == 0 &&
-             regexp[at + 14] == regexp[at + 3])
-        bounded = true;
+    if ((length != at + 11 && length != at + 15) || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != '|' || regexp[at + 5] != regexp[at] ||
+        regexp[at + 6] != regexp[at + 3] || regexp[at + 8] != ')')
+        return 1;
+    if (length == at + 11 && regexp[at + 9] == '+' && regexp[at + 10] == regexp[at + 3]) bounded = false;
+    else if (length == at + 15 && memcmp(regexp + at + 9, "{1,3}", 5) == 0 && regexp[at + 14] == regexp[at + 3]) bounded = true;
     else return 1;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
     z = (uint8_t)regexp[at + 7];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) ||
-        (nocase ? (yx_fold(x) == yx_fold(y) ||
-                   yx_fold(x) == yx_fold(z) ||
-                   yx_fold(y) == yx_fold(z)) :
-                  (x == y || x == z || y == z))) return 1;
-    alphabetic = !((x >= '0' && x <= '9') &&
-                   (y >= '0' && y <= '9') &&
-                   (z >= '0' && z <= '9'));
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) ||
+        (nocase ? (yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z)) : (x == y || x == z || y == z)))
+        return 1;
+    alphabetic = !((x >= '0' && x <= '9') && (y >= '0' && y <= '9') && (z >= '0' && z <= '9'));
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t best = yx_repeated_triple_suffix_length(
-            data, size, match->offset, x, y, z, nocase, alphabetic,
-            bounded);
+        size_t best = yx_repeated_triple_suffix_length(data, size, match->offset, x, y, z, nocase, alphabetic, bounded);
         if (best) match->length = best;
     }
     if (bounded) {
         for (size_t offset = 0; offset < size; ++offset) {
-            if (!yx_short_first_unit_at(data, size, offset, 1, x,
-                                        nocase)) continue;
-            size_t best = yx_repeated_triple_suffix_length(
-                data, size, offset, x, y, z, nocase, alphabetic, true);
+            if (!yx_short_first_unit_at(data, size, offset, 1, x, nocase)) continue;
+            size_t best = yx_repeated_triple_suffix_length(data, size, offset, x, y, z, nocase, alphabetic, true);
             if (best && !yx_add_match(pattern, offset, best, 0)) return 0;
         }
     }
@@ -11173,64 +9152,46 @@ static int yx_adjust_repeated_triple_suffix(YRX_PATTERN *pattern,
 /* The two-branch bounded verifier allows five short units, but only its
    first two repetitions may use xy. Alphabetic nocase keeps the written
    three-repetition bound and can place the suffix after xy. */
-static size_t yx_bounded_pair_suffix_length(const uint8_t *data,
-                                             size_t size, size_t offset,
-                                             uint8_t x, uint8_t y,
-                                             bool nocase,
-                                             bool alphabetic)
+static size_t yx_bounded_pair_suffix_length(const uint8_t *data, size_t size, size_t offset, uint8_t x, uint8_t y, bool nocase, bool alphabetic)
 {
     bool case_variant = nocase && alphabetic;
     unsigned limit = case_variant ? 3u : 5u;
     unsigned long_limit = case_variant ? 3u : 2u;
     size_t pos = offset, best = 0;
-    for (unsigned repeat = 0; repeat < limit &&
-         yx_short_first_unit_at(data, size, pos, 1, x, nocase); ++repeat) {
+    for (unsigned repeat = 0; repeat < limit && yx_short_first_unit_at(data, size, pos, 1, x, nocase); ++repeat) {
         ++pos;
-        if (yx_short_first_unit_at(data, size, pos, 1, y, nocase))
-            best = pos + 1 - offset;
-        if (repeat < long_limit &&
-            yx_short_first_unit_at(data, size, pos, 1, y, nocase)) ++pos;
-        if (case_variant &&
-            yx_short_first_unit_at(data, size, pos, 1, y, true))
-            best = pos + 1 - offset;
+        if (yx_short_first_unit_at(data, size, pos, 1, y, nocase)) best = pos + 1 - offset;
+        if (repeat < long_limit && yx_short_first_unit_at(data, size, pos, 1, y, nocase)) ++pos;
+        if (case_variant && yx_short_first_unit_at(data, size, pos, 1, y, true)) best = pos + 1 - offset;
     }
     return best;
 }
 
-static int yx_adjust_bounded_pair_suffix(YRX_PATTERN *pattern,
-                                           const uint8_t *data,
-                                           size_t size)
+static int yx_adjust_bounded_pair_suffix(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t at = 1, length = strlen(regexp);
     uint8_t x, y;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool alphabetic;
-    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR))
-        return 1;
+    if (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_XOR)) return 1;
     if (regexp[0] != '(') return 1;
     if (regexp[at] == '?' && regexp[at + 1] == ':') at += 2;
-    if (length != at + 11 || regexp[at + 1] != '|' ||
-        regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' ||
-        memcmp(regexp + at + 5, "{1,3}", 5) != 0 ||
-        regexp[at + 10] != regexp[at + 3]) return 1;
+    if (length != at + 11 || regexp[at + 1] != '|' || regexp[at + 2] != regexp[at] || regexp[at + 4] != ')' || memcmp(regexp + at + 5, "{1,3}", 5) != 0 ||
+        regexp[at + 10] != regexp[at + 3])
+        return 1;
     x = (uint8_t)regexp[at];
     y = (uint8_t)regexp[at + 3];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        (nocase ? yx_fold(x) == yx_fold(y) : x == y)) return 1;
-    alphabetic = !((x >= '0' && x <= '9') &&
-                   (y >= '0' && y <= '9'));
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || (nocase ? yx_fold(x) == yx_fold(y) : x == y)) return 1;
+    alphabetic = !((x >= '0' && x <= '9') && (y >= '0' && y <= '9'));
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t best = yx_bounded_pair_suffix_length(
-            data, size, match->offset, x, y, nocase, alphabetic);
+        size_t best = yx_bounded_pair_suffix_length(data, size, match->offset, x, y, nocase, alphabetic);
         if (best) match->length = best;
     }
     for (size_t offset = 0; offset < size; ++offset) {
-        if (!yx_short_first_unit_at(data, size, offset, 1, x, nocase))
-            continue;
-        size_t best = yx_bounded_pair_suffix_length(
-            data, size, offset, x, y, nocase, alphabetic);
+        if (!yx_short_first_unit_at(data, size, offset, 1, x, nocase)) continue;
+        size_t best = yx_bounded_pair_suffix_length(data, size, offset, x, y, nocase, alphabetic);
         if (best && !yx_add_match(pattern, offset, best, 0)) return 0;
     }
     return 1;
@@ -11240,18 +9201,14 @@ static int yx_adjust_bounded_pair_suffix(YRX_PATTERN *pattern,
    literal suffix. PCRE2 obeys the written upper bound and therefore misses
    those offsets. Add only the missing third-group hits; its existing spans
    retain their branch priority. */
-static int yx_add_missing_bounded_pair_tail(YRX_PATTERN *pattern,
-                                             const uint8_t *data,
-                                             size_t size)
+static int yx_add_missing_bounded_pair_tail(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length = strlen(regexp);
     uint8_t x, y, z;
     unsigned tail_max;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) ||
-        length < 12 || regexp[0] != '(' || regexp[5] != ')' ||
-        memcmp(regexp + 6, "{1,2}", 5) != 0) return 1;
+    if (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR) || length < 12 || regexp[0] != '(' || regexp[5] != ')' || memcmp(regexp + 6, "{1,2}", 5) != 0) return 1;
     x = (uint8_t)regexp[1];
     if (regexp[2] == '|' && regexp[3] == regexp[1]) {
         y = (uint8_t)regexp[4];
@@ -11263,73 +9220,54 @@ static int yx_add_missing_bounded_pair_tail(YRX_PATTERN *pattern,
     if (tail_length == 1) {
         z = (uint8_t)tail[0];
         tail_max = 1;
-    } else if (tail_length == 6 &&
-               memcmp(tail + 1, "{1,2}", 5) == 0) {
+    } else if (tail_length == 6 && memcmp(tail + 1, "{1,2}", 5) == 0) {
         z = (uint8_t)tail[0];
         tail_max = 2;
-    } else if ((tail_length == 6 || tail_length == 11) &&
-               tail[0] == '(' && tail[2] == '|' && tail[3] == tail[1] &&
-               tail[4] == tail[1] && tail[5] == ')' &&
-               (tail_length == 6 ||
-                memcmp(tail + 6, "{1,2}", 5) == 0)) {
+    } else if ((tail_length == 6 || tail_length == 11) && tail[0] == '(' && tail[2] == '|' && tail[3] == tail[1] && tail[4] == tail[1] && tail[5] == ')' &&
+               (tail_length == 6 || memcmp(tail + 6, "{1,2}", 5) == 0)) {
         z = (uint8_t)tail[1];
         tail_max = tail_length == 6 ? 1 : 2;
     } else return 1;
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) ||
-        yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z)) return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return 1;
     /* The nocase alphabetic single-suffix verifier keeps the written bound.
        Its grouped z|zz suffix and all-digit patterns use the third branch. */
-    if (nocase && tail[0] != '(' &&
-        !(x >= '0' && x <= '9' && y >= '0' && y <= '9' &&
-          z >= '0' && z <= '9')) return 1;
+    if (nocase && tail[0] != '(' && !(x >= '0' && x <= '9' && y >= '0' && y <= '9' && z >= '0' && z <= '9')) return 1;
     size_t original_count = pattern->match_count;
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     for (size_t offset = 0; offset < size; ++offset) {
-        if (!yx_short_first_unit_at(data, size, offset, 1, x, nocase))
-            continue;
+        if (!yx_short_first_unit_at(data, size, offset, 1, x, nocase)) continue;
         size_t left = 0, right = original_count;
         while (left < right) {
             size_t middle = left + (right - left) / 2;
-            if (pattern->matches[middle].offset < offset)
-                left = middle + 1;
+            if (pattern->matches[middle].offset < offset) left = middle + 1;
             else right = middle;
         }
-        if (left < original_count &&
-            pattern->matches[left].offset == offset) continue;
+        if (left < original_count && pattern->matches[left].offset == offset) continue;
         size_t best = 0;
         for (size_t width = 1; width <= 2; ++width) {
-            if (width == 1 && (pattern->modifiers & YX_MOD_WIDE) &&
-                !(pattern->modifiers & YX_MOD_ASCII)) continue;
+            if (width == 1 && (pattern->modifiers & YX_MOD_WIDE) && !(pattern->modifiers & YX_MOD_ASCII)) continue;
             if (width == 2 && !(pattern->modifiers & YX_MOD_WIDE)) continue;
             for (unsigned branches = 0; branches < 8; ++branches) {
                 size_t at = offset;
                 bool matched = true;
                 for (unsigned unit = 0; unit < 3; ++unit) {
-                    if (!yx_short_first_unit_at(data, size, at, width,
-                                                x, nocase)) {
+                    if (!yx_short_first_unit_at(data, size, at, width, x, nocase)) {
                         matched = false;
                         break;
                     }
                     at += width;
                     if (branches & (1u << unit)) {
-                        if (!yx_short_first_unit_at(data, size, at, width,
-                                                    y, nocase)) {
+                        if (!yx_short_first_unit_at(data, size, at, width, y, nocase)) {
                             matched = false;
                             break;
                         }
                         at += width;
                     }
                 }
-                if (!matched || !yx_short_first_unit_at(data, size, at,
-                                                         width, z, nocase))
-                    continue;
+                if (!matched || !yx_short_first_unit_at(data, size, at, width, z, nocase)) continue;
                 at += width;
-                if (tail_max == 2 &&
-                    yx_short_first_unit_at(data, size, at, width, z, nocase))
-                    at += width;
+                if (tail_max == 2 && yx_short_first_unit_at(data, size, at, width, z, nocase)) at += width;
                 if (at - offset > best) best = at - offset;
             }
         }
@@ -11341,78 +9279,55 @@ static int yx_add_missing_bounded_pair_tail(YRX_PATTERN *pattern,
 /* With a distinct optional suffix, the x|xy bounded verifier still visits
    the same short and long branches as the suffix-free group. Its longest
    endpoint determines whether the optional byte is included. */
-static void yx_adjust_bounded_pair_optional_tail(YRX_PATTERN *pattern,
-                                                  const uint8_t *data,
-                                                  size_t size)
+static void yx_adjust_bounded_pair_optional_tail(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if ((pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        strlen(regexp) != 13 || regexp[0] != '(' ||
-        regexp[2] != '|' || regexp[3] != regexp[1] ||
-        regexp[5] != ')' ||
-        memcmp(regexp + 6, "{1,2}", 5) != 0 ||
-        regexp[12] != '?') return;
+    if ((pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) || strlen(regexp) != 13 || regexp[0] != '(' || regexp[2] != '|' || regexp[3] != regexp[1] ||
+        regexp[5] != ')' || memcmp(regexp + 6, "{1,2}", 5) != 0 || regexp[12] != '?')
+        return;
     x = (uint8_t)regexp[1];
     y = (uint8_t)regexp[4];
     z = (uint8_t)regexp[11];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) ||
-        yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z)) return;
-    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) ==
-                (YX_MOD_ASCII | YX_MOD_WIDE);
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return;
+    bool both = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE);
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        size_t width = (pattern->modifiers & YX_MOD_WIDE) &&
-            (!both || yx_short_first_unit_at(data, size, match->offset,
-                                              2, x, nocase)) ? 2 : 1;
+        size_t width = (pattern->modifiers & YX_MOD_WIDE) && (!both || yx_short_first_unit_at(data, size, match->offset, 2, x, nocase)) ? 2 : 1;
         size_t best = 0;
-        yx_bounded_short_first_pair_walk(data, size, match->offset,
-                                          match->offset, width, x, y,
-                                          nocase, false, 0, 2, &best);
+        yx_bounded_short_first_pair_walk(data, size, match->offset, match->offset, width, x, y, nocase, false, 0, 2, &best);
         if (!best) continue;
-        if (both && width == 2 && size >= 16 &&
-            !yx_short_first_unit_at(data, size, match->offset + 2,
-                                     2, x, nocase) &&
-            !(yx_short_first_unit_at(data, size, match->offset + 2,
-                                      2, y, nocase) &&
-              yx_short_first_unit_at(data, size, match->offset + 4,
-                                      2, x, nocase))) {
+        if (both && width == 2 && size >= 16 && !yx_short_first_unit_at(data, size, match->offset + 2, 2, x, nocase) &&
+            !(yx_short_first_unit_at(data, size, match->offset + 2, 2, y, nocase) && yx_short_first_unit_at(data, size, match->offset + 4, 2, x, nocase))) {
             match->length = 1;
             continue;
         }
-        if (yx_short_first_unit_at(data, size, match->offset + best,
-                                   width, z, nocase)) best += width;
+        if (yx_short_first_unit_at(data, size, match->offset + best, width, z, nocase)) best += width;
         match->length = best;
     }
 }
 
 /* The bounded x|xy verifier retains one extra complete short branch for
    select four-byte prefixes, and the final short x in terminal xyx. */
-static void yx_adjust_bounded_pair_optional_class_spans(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_adjust_bounded_pair_optional_class_spans(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint32_t modifiers = pattern->modifiers;
-    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) ||
-        ((modifiers & YX_MOD_WIDE) && !(modifiers & YX_MOD_ASCII)) ||
-        strlen(regexp) != 16 || regexp[0] != '(' ||
-        regexp[2] != '|' || regexp[3] != regexp[1] ||
-        regexp[5] != ')' || memcmp(regexp + 6, "{1,3}", 5) != 0 ||
-        regexp[11] != '[' || regexp[12] != regexp[4] ||
-        regexp[14] != ']' || regexp[15] != '?') return;
+    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) || ((modifiers & YX_MOD_WIDE) && !(modifiers & YX_MOD_ASCII)) || strlen(regexp) != 16 ||
+        regexp[0] != '(' || regexp[2] != '|' || regexp[3] != regexp[1] || regexp[5] != ')' || memcmp(regexp + 6, "{1,3}", 5) != 0 || regexp[11] != '[' ||
+        regexp[12] != regexp[4] || regexp[14] != ']' || regexp[15] != '?')
+        return;
     uint8_t x = (uint8_t)regexp[1];
     uint8_t y = (uint8_t)regexp[4];
     uint8_t z = (uint8_t)regexp[13];
-    if (!((x >= 'a' && x <= 'x') || (x >= '0' && x <= '7')) ||
-        y != x + 1 || z != y + 1) return;
+    if (!((x >= 'a' && x <= 'x') || (x >= '0' && x <= '7')) || y != x + 1 || z != y + 1) return;
     bool nocase = (modifiers & YX_MOD_NOCASE) != 0;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t offset = match->offset;
-        if ((match->length != 2 && match->length != 3) ||
-            offset > size || size - offset < 3) continue;
+        if ((match->length != 2 && match->length != 3) || offset > size || size - offset < 3) continue;
         size_t available = size - offset;
         uint8_t first = data[offset];
         uint8_t second = data[offset + 1];
@@ -11428,99 +9343,71 @@ static void yx_adjust_bounded_pair_optional_class_spans(
         }
         if (first != x) continue;
         bool terminal = after != x && after != y && after != z;
-        bool fourth_short = available >= 4 && fourth == x && terminal &&
-            ((second == x && (third == x || third == y)) ||
-             (second == y && third == x));
-        bool fourth_class = available >= 4 && second == y && third == x &&
-            (fourth == z || (fourth == y && after != x));
+        bool fourth_short = available >= 4 && fourth == x && terminal && ((second == x && (third == x || third == y)) || (second == y && third == x));
+        bool fourth_class = available >= 4 && second == y && third == x && (fourth == z || (fourth == y && after != x));
         if (fourth_short || fourth_class) {
             match->length = 4;
-        } else if (match->length == 2 && second == y && third == x &&
-                   fourth != x && fourth != y && fourth != z) {
+        } else if (match->length == 2 && second == y && third == x && fourth != x && fourth != y && fourth != z) {
             match->length = 3;
         }
     }
 }
 
-static size_t yx_bounded_pair_class_tail_end(
-    const uint8_t *data, size_t size, size_t offset, size_t width,
-    uint8_t x, uint8_t y, uint8_t z, bool nocase, bool long_first)
+static size_t yx_bounded_pair_class_tail_end(const uint8_t *data, size_t size, size_t offset, size_t width, uint8_t x, uint8_t y, uint8_t z, bool nocase, bool long_first)
 {
-    if (offset > size || size - offset < 4 * width ||
-        !yx_short_first_unit_at(data, size, offset, width, x, nocase) ||
-        !yx_short_first_unit_at(data, size, offset + width, width,
-                                long_first ? y : x, nocase) ||
-        !yx_short_first_unit_at(data, size, offset + 2 * width, width,
-                                x, nocase)) return 0;
-    size_t end = offset + 3 * width;
-    if (!yx_short_first_unit_at(data, size, end, width, y, nocase) &&
-        !yx_short_first_unit_at(data, size, end, width, z, nocase))
+    if (offset > size || size - offset < 4 * width || !yx_short_first_unit_at(data, size, offset, width, x, nocase) ||
+        !yx_short_first_unit_at(data, size, offset + width, width, long_first ? y : x, nocase) ||
+        !yx_short_first_unit_at(data, size, offset + 2 * width, width, x, nocase))
         return 0;
+    size_t end = offset + 3 * width;
+    if (!yx_short_first_unit_at(data, size, end, width, y, nocase) && !yx_short_first_unit_at(data, size, end, width, z, nocase)) return 0;
     do {
         end += width;
-    } while (yx_short_first_unit_at(data, size, end, width, y, nocase) ||
-             yx_short_first_unit_at(data, size, end, width, z, nocase));
+    } while (yx_short_first_unit_at(data, size, end, width, y, nocase) || yx_short_first_unit_at(data, size, end, width, z, nocase));
     return end;
 }
 
 /* The verifier for (x|xy){1,2}[yz]+ retains the full class tail after
    xyx, and discovers a third short x before the class even though the
    written bound is two. The two prefixes have distinct atom outcomes. */
-static int yx_adjust_bounded_pair_class_tail(YRX_PATTERN *pattern,
-                                              const uint8_t *data,
-                                              size_t size)
+static int yx_adjust_bounded_pair_class_tail(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint32_t modifiers = pattern->modifiers;
-    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) ||
-        strlen(regexp) != 16 || regexp[0] != '(' ||
-        regexp[2] != '|' || regexp[3] != regexp[1] ||
-        regexp[5] != ')' || memcmp(regexp + 6, "{1,2}", 5) != 0 ||
-        regexp[11] != '[' || regexp[12] != regexp[4] ||
-        regexp[14] != ']' || regexp[15] != '+') return 1;
+    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) || strlen(regexp) != 16 || regexp[0] != '(' || regexp[2] != '|' || regexp[3] != regexp[1] ||
+        regexp[5] != ')' || memcmp(regexp + 6, "{1,2}", 5) != 0 || regexp[11] != '[' || regexp[12] != regexp[4] || regexp[14] != ']' || regexp[15] != '+')
+        return 1;
     uint8_t x = (uint8_t)regexp[1];
     uint8_t y = (uint8_t)regexp[4];
     uint8_t z = (uint8_t)regexp[13];
-    if (!((x >= 'a' && x <= 'x') || (x >= '0' && x <= '7')) ||
-        y != x + 1 || z != y + 1) return 1;
+    if (!((x >= 'a' && x <= 'x') || (x >= '0' && x <= '7')) || y != x + 1 || z != y + 1) return 1;
     bool nocase = (modifiers & YX_MOD_NOCASE) != 0;
     size_t original_count = pattern->match_count;
     for (size_t i = 0; i < original_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         for (size_t width = 1; width <= 2; ++width) {
-            if ((width == 1 && (modifiers & YX_MOD_WIDE) &&
-                 !(modifiers & YX_MOD_ASCII)) ||
-                (width == 2 && !(modifiers & YX_MOD_WIDE)) ||
-                match->length != 2 * width) continue;
-            size_t end = yx_bounded_pair_class_tail_end(
-                data, size, match->offset, width, x, y, z, nocase, true);
+            if ((width == 1 && (modifiers & YX_MOD_WIDE) && !(modifiers & YX_MOD_ASCII)) || (width == 2 && !(modifiers & YX_MOD_WIDE)) || match->length != 2 * width)
+                continue;
+            size_t end = yx_bounded_pair_class_tail_end(data, size, match->offset, width, x, y, z, nocase, true);
             if (end) {
                 match->length = end - match->offset;
                 break;
             }
         }
     }
-    if (original_count > 1)
-        qsort(pattern->matches, original_count, sizeof(YRX_MATCH),
-              yx_match_compare);
+    if (original_count > 1) qsort(pattern->matches, original_count, sizeof(YRX_MATCH), yx_match_compare);
     for (size_t width = 1; width <= 2; ++width) {
-        if ((width == 1 && (modifiers & YX_MOD_WIDE) &&
-             !(modifiers & YX_MOD_ASCII)) ||
-            (width == 2 && !(modifiers & YX_MOD_WIDE)) ||
-            size < 4 * width) continue;
+        if ((width == 1 && (modifiers & YX_MOD_WIDE) && !(modifiers & YX_MOD_ASCII)) || (width == 2 && !(modifiers & YX_MOD_WIDE)) || size < 4 * width) continue;
         for (size_t offset = 0; offset <= size - 4 * width; ++offset) {
-            size_t end = yx_bounded_pair_class_tail_end(
-                data, size, offset, width, x, y, z, nocase, false);
+            size_t end = yx_bounded_pair_class_tail_end(data, size, offset, width, x, y, z, nocase, false);
             if (!end) continue;
             size_t left = 0, right = original_count;
             while (left < right) {
                 size_t middle = left + (right - left) / 2;
-                if (pattern->matches[middle].offset < offset)
-                    left = middle + 1;
+                if (pattern->matches[middle].offset < offset) left = middle + 1;
                 else right = middle;
             }
-            if (left < original_count &&
-                pattern->matches[left].offset == offset) continue;
+            if (left < original_count && pattern->matches[left].offset == offset) continue;
             if (!yx_add_match(pattern, offset, end - offset, 0)) return 0;
         }
     }
@@ -11529,53 +9416,38 @@ static int yx_adjust_bounded_pair_class_tail(YRX_PATTERN *pattern,
 
 /* A single x|xy group with an optional distinct byte retains its ASCII
    one-byte atom at a wide offset once the search buffer reaches 16 bytes. */
-static void yx_adjust_single_pair_optional_wide_tie(YRX_PATTERN *pattern,
-                                                      const uint8_t *data,
-                                                      size_t size)
+static void yx_adjust_single_pair_optional_wide_tie(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y, z;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
-    if (size < 16 ||
-        (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) !=
-            (YX_MOD_ASCII | YX_MOD_WIDE) ||
-        (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        strlen(regexp) != 8 || regexp[0] != '(' ||
-        regexp[2] != '|' || regexp[3] != regexp[1] ||
-        regexp[5] != ')' || regexp[7] != '?') return;
+    if (size < 16 || (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) != (YX_MOD_ASCII | YX_MOD_WIDE) || (pattern->modifiers & (YX_MOD_FULLWORD | YX_MOD_XOR)) ||
+        strlen(regexp) != 8 || regexp[0] != '(' || regexp[2] != '|' || regexp[3] != regexp[1] || regexp[5] != ')' || regexp[7] != '?')
+        return;
     x = (uint8_t)regexp[1];
     y = (uint8_t)regexp[4];
     z = (uint8_t)regexp[6];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) ||
-        yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z)) return;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || yx_fold(x) == yx_fold(y) || yx_fold(x) == yx_fold(z) || yx_fold(y) == yx_fold(z))
+        return;
     for (size_t i = 0; i < pattern->match_count; ++i)
-        if (yx_short_first_unit_at(data, size,
-                                    pattern->matches[i].offset, 2,
-                                    x, nocase)) pattern->matches[i].length = 1;
+        if (yx_short_first_unit_at(data, size, pattern->matches[i].offset, 2, x, nocase)) pattern->matches[i].length = 1;
 }
 
 /* The end-anchored verifier also reaches one extra x|xy branch before an
    optional distinct suffix. Restrict the addition to exact whole-buffer
    three-branch strings; the ordinary scan retains all other priorities. */
-static int yx_add_missing_anchored_pair_optional_tail(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static int yx_add_missing_anchored_pair_optional_tail(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint8_t x, y, z;
-    if (pattern->match_count || size < 3 || size > 7 ||
-        (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE |
-                               YX_MOD_FULLWORD | YX_MOD_XOR)) ||
-        strlen(regexp) != 15 || regexp[0] != '^' || regexp[1] != '(' ||
-        regexp[3] != '|' || regexp[4] != regexp[2] || regexp[6] != ')' ||
-        memcmp(regexp + 7, "{1,2}", 5) != 0 ||
-        regexp[13] != '?' || regexp[14] != '$') return 1;
+    if (pattern->match_count || size < 3 || size > 7 || (pattern->modifiers & (YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_XOR)) || strlen(regexp) != 15 ||
+        regexp[0] != '^' || regexp[1] != '(' || regexp[3] != '|' || regexp[4] != regexp[2] || regexp[6] != ')' || memcmp(regexp + 7, "{1,2}", 5) != 0 ||
+        regexp[13] != '?' || regexp[14] != '$')
+        return 1;
     x = (uint8_t)regexp[2];
     y = (uint8_t)regexp[5];
     z = (uint8_t)regexp[12];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) ||
-        !yx_plain_regex_byte(z) || x == y || x == z || y == z)
-        return 1;
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || !yx_plain_regex_byte(z) || x == y || x == z || y == z) return 1;
     for (unsigned branches = 0; branches < 8; ++branches) {
         size_t at = 0;
         bool complete = true;
@@ -11586,18 +9458,14 @@ static int yx_add_missing_anchored_pair_optional_tail(
             }
             ++at;
             if (branches & (1u << unit)) {
-                if (!yx_short_first_unit_at(data, size, at, 1, y,
-                                            false)) {
+                if (!yx_short_first_unit_at(data, size, at, 1, y, false)) {
                     complete = false;
                     break;
                 }
                 ++at;
             }
         }
-        if (complete &&
-            (at == size ||
-             (at + 1 == size && data[at] == z)))
-            return yx_add_match(pattern, 0, size, 0);
+        if (complete && (at == size || (at + 1 == size && data[at] == z))) return yx_add_match(pattern, 0, size, 0);
     }
     return 1;
 }
@@ -11606,44 +9474,33 @@ static int yx_add_missing_anchored_pair_optional_tail(
  * one-byte inner branch before the duplicate two-byte outer branch. At 16
  * bytes the search backend changes and the two-byte branch wins. Anchors,
  * quantifiers, case folding, and wide matching use different priorities. */
-static void yx_adjust_short_nested_duplicate_pair(
-    YRX_PATTERN *pattern, const uint8_t *data, size_t size)
+static void yx_adjust_short_nested_duplicate_pair(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     size_t length;
     uint8_t x, y;
     if (size >= 16 || (pattern->modifiers & ~YX_MOD_ASCII)) return;
     length = strlen(regexp);
-    if ((length != 15 && length != 19) ||
-        memcmp(regexp, "(?:(?:", 6) != 0 ||
-        regexp[8] != '|' || regexp[9] != regexp[6] ||
-        regexp[10] != ')' || regexp[11] != '|') return;
-    x = (uint8_t) regexp[6];
-    y = (uint8_t) regexp[7];
-    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y)
+    if ((length != 15 && length != 19) || memcmp(regexp, "(?:(?:", 6) != 0 || regexp[8] != '|' || regexp[9] != regexp[6] || regexp[10] != ')' || regexp[11] != '|')
         return;
+    x = (uint8_t)regexp[6];
+    y = (uint8_t)regexp[7];
+    if (!yx_plain_regex_byte(x) || !yx_plain_regex_byte(y) || x == y) return;
     if (length == 19) {
-        if (memcmp(regexp + 12, "(?:", 3) != 0 ||
-            regexp[15] != (char) x || regexp[16] != (char) y ||
-            regexp[17] != ')' || regexp[18] != ')') return;
-    } else if (regexp[12] != (char) x ||
-               regexp[13] != (char) y || regexp[14] != ')') {
+        if (memcmp(regexp + 12, "(?:", 3) != 0 || regexp[15] != (char)x || regexp[16] != (char)y || regexp[17] != ')' || regexp[18] != ')') return;
+    } else if (regexp[12] != (char)x || regexp[13] != (char)y || regexp[14] != ')') {
         return;
     }
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
-        if (match->length == 2 && match->offset + 1 < size &&
-            data[match->offset] == x && data[match->offset + 1] == y)
-            match->length = 1;
+        if (match->length == 2 && match->offset + 1 < size && data[match->offset] == x && data[match->offset + 1] == y) match->length = 1;
     }
 }
 
 /* In the reference verifier a repeated three-way, single-byte alternation
  * with a lower bound of one can consume 2 * upper_bound - 1 units. Keep this
  * correction limited to three distinct literal choices and one encoding. */
-static void yx_adjust_bounded_three_singletons(YRX_PATTERN *pattern,
-                                                const uint8_t *data,
-                                                size_t size)
+static void yx_adjust_bounded_three_singletons(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint32_t modifiers = pattern->modifiers;
@@ -11651,41 +9508,31 @@ static void yx_adjust_bounded_three_singletons(YRX_PATTERN *pattern,
     uint8_t choices[3];
     bool nocase, wide;
     size_t width, maximum;
-    if (!regexp ||
-        (modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) ||
-        ((modifiers & YX_MOD_ASCII) && (modifiers & YX_MOD_WIDE)) ||
-        regexp[0] != '(') return;
+    if (!regexp || (modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) || ((modifiers & YX_MOD_ASCII) && (modifiers & YX_MOD_WIDE)) || regexp[0] != '(') return;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
     length = strlen(regexp);
-    if (length != at + 11 || regexp[at + 1] != '|' ||
-        regexp[at + 3] != '|' || regexp[at + 5] != ')' ||
-        regexp[at + 6] != '{' || regexp[at + 7] != '1' ||
-        regexp[at + 8] != ',' || regexp[at + 10] != '}' ||
-        regexp[at + 9] < '2' || regexp[at + 9] > '4') return;
-    choices[0] = (uint8_t) regexp[at];
-    choices[1] = (uint8_t) regexp[at + 2];
-    choices[2] = (uint8_t) regexp[at + 4];
+    if (length != at + 11 || regexp[at + 1] != '|' || regexp[at + 3] != '|' || regexp[at + 5] != ')' || regexp[at + 6] != '{' || regexp[at + 7] != '1' ||
+        regexp[at + 8] != ',' || regexp[at + 10] != '}' || regexp[at + 9] < '2' || regexp[at + 9] > '4')
+        return;
+    choices[0] = (uint8_t)regexp[at];
+    choices[1] = (uint8_t)regexp[at + 2];
+    choices[2] = (uint8_t)regexp[at + 4];
     for (size_t j = 0; j < 3; ++j)
-        if (!((choices[j] >= 'a' && choices[j] <= 'z') ||
-              (choices[j] >= '0' && choices[j] <= '9')))
-            return;
-    if (choices[0] == choices[1] || choices[0] == choices[2] ||
-        choices[1] == choices[2]) return;
+        if (!((choices[j] >= 'a' && choices[j] <= 'z') || (choices[j] >= '0' && choices[j] <= '9'))) return;
+    if (choices[0] == choices[1] || choices[0] == choices[2] || choices[1] == choices[2]) return;
     nocase = (modifiers & YX_MOD_NOCASE) != 0;
     wide = (modifiers & YX_MOD_WIDE) != 0;
     width = wide ? 2 : 1;
-    maximum = 2 * (size_t) (regexp[at + 9] - '0') - 1;
+    maximum = 2 * (size_t)(regexp[at + 9] - '0') - 1;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t units = 0;
-        while (units < maximum && match->offset <= size &&
-               size - match->offset >= (units + 1) * width) {
+        while (units < maximum && match->offset <= size && size - match->offset >= (units + 1) * width) {
             size_t offset = match->offset + units * width;
             bool chosen = false;
             if (wide && data[offset + 1] != 0) break;
             for (size_t j = 0; j < 3; ++j)
-                if (nocase ? yx_fold(data[offset]) == yx_fold(choices[j]) :
-                             data[offset] == choices[j]) {
+                if (nocase ? yx_fold(data[offset]) == yx_fold(choices[j]) : data[offset] == choices[j]) {
                     chosen = true;
                     break;
                 }
@@ -11699,8 +9546,7 @@ static void yx_adjust_bounded_three_singletons(YRX_PATTERN *pattern,
 /* Fixed two-byte alternatives have one unambiguous width even if their
  * prefixes overlap. The reference applies the same bounded verifier span as
  * the single-byte three-way form above. */
-static void yx_adjust_bounded_three_pairs(YRX_PATTERN *pattern,
-                                           const uint8_t *data, size_t size)
+static void yx_adjust_bounded_three_pairs(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     const char *regexp = pattern->regexp;
     uint32_t modifiers = pattern->modifiers;
@@ -11708,45 +9554,34 @@ static void yx_adjust_bounded_three_pairs(YRX_PATTERN *pattern,
     uint8_t choices[3][2];
     bool nocase, wide;
     size_t width, maximum;
-    if (!regexp ||
-        (modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) ||
-        ((modifiers & YX_MOD_ASCII) && (modifiers & YX_MOD_WIDE)) ||
-        regexp[0] != '(') return;
+    if (!regexp || (modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE)) || ((modifiers & YX_MOD_ASCII) && (modifiers & YX_MOD_WIDE)) || regexp[0] != '(') return;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
     length = strlen(regexp);
-    if (length != at + 14 || regexp[at + 2] != '|' ||
-        regexp[at + 5] != '|' || regexp[at + 8] != ')' ||
-        regexp[at + 9] != '{' || regexp[at + 10] != '1' ||
-        regexp[at + 11] != ',' || regexp[at + 13] != '}' ||
-        regexp[at + 12] < '2' || regexp[at + 12] > '4') return;
+    if (length != at + 14 || regexp[at + 2] != '|' || regexp[at + 5] != '|' || regexp[at + 8] != ')' || regexp[at + 9] != '{' || regexp[at + 10] != '1' ||
+        regexp[at + 11] != ',' || regexp[at + 13] != '}' || regexp[at + 12] < '2' || regexp[at + 12] > '4')
+        return;
     for (size_t j = 0; j < 3; ++j)
         for (size_t k = 0; k < 2; ++k) {
-            uint8_t value = (uint8_t) regexp[at + j * 3 + k];
-            if (!((value >= 'a' && value <= 'z') ||
-                  (value >= '0' && value <= '9')))
-                return;
+            uint8_t value = (uint8_t)regexp[at + j * 3 + k];
+            if (!((value >= 'a' && value <= 'z') || (value >= '0' && value <= '9'))) return;
             choices[j][k] = value;
         }
     for (size_t j = 0; j < 3; ++j)
         for (size_t k = j + 1; k < 3; ++k)
-            if (choices[j][0] == choices[k][0] &&
-                choices[j][1] == choices[k][1]) return;
+            if (choices[j][0] == choices[k][0] && choices[j][1] == choices[k][1]) return;
     nocase = (modifiers & YX_MOD_NOCASE) != 0;
     wide = (modifiers & YX_MOD_WIDE) != 0;
     width = wide ? 2 : 1;
-    maximum = 2 * (size_t) (regexp[at + 12] - '0') - 1;
+    maximum = 2 * (size_t)(regexp[at + 12] - '0') - 1;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         size_t pairs = 0;
-        while (pairs < maximum && match->offset <= size &&
-               size - match->offset >= (pairs + 1) * 2 * width) {
+        while (pairs < maximum && match->offset <= size && size - match->offset >= (pairs + 1) * 2 * width) {
             size_t offset = match->offset + pairs * 2 * width;
             bool chosen = false;
             for (size_t j = 0; j < 3; ++j)
-                if (yx_short_first_unit_at(data, size, offset, width,
-                                           choices[j][0], nocase) &&
-                    yx_short_first_unit_at(data, size, offset + width,
-                                           width, choices[j][1], nocase)) {
+                if (yx_short_first_unit_at(data, size, offset, width, choices[j][0], nocase) &&
+                    yx_short_first_unit_at(data, size, offset + width, width, choices[j][1], nocase)) {
                     chosen = true;
                     break;
                 }
@@ -11763,35 +9598,27 @@ typedef struct {
     unsigned maximum;
 } YX_THREE_LITERAL_BOUNDS;
 
-static bool yx_parse_three_literal_bounds(const char *regexp,
-                                          YX_THREE_LITERAL_BOUNDS *parsed,
-                                          bool include_prefixes)
+static bool yx_parse_three_literal_bounds(const char *regexp, YX_THREE_LITERAL_BOUNDS *parsed, bool include_prefixes)
 {
     size_t at = 1;
     if (!regexp || regexp[0] != '(') return false;
     if (regexp[1] == '?' && regexp[2] == ':') at = 3;
     for (size_t arm = 0; arm < 3; ++arm) {
         while (regexp[at] && regexp[at] != '|' && regexp[at] != ')') {
-            uint8_t value = (uint8_t) regexp[at++];
-            if (!((value >= 'a' && value <= 'z') ||
-                  (value >= '0' && value <= '9')) ||
-                parsed->lengths[arm] == 3) return false;
+            uint8_t value = (uint8_t)regexp[at++];
+            if (!((value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')) || parsed->lengths[arm] == 3) return false;
             parsed->bytes[arm][parsed->lengths[arm]++] = value;
         }
-        if (!parsed->lengths[arm] ||
-            regexp[at] != (arm == 2 ? ')' : '|')) return false;
+        if (!parsed->lengths[arm] || regexp[at] != (arm == 2 ? ')' : '|')) return false;
         ++at;
     }
-    if (regexp[at] != '{' || regexp[at + 1] != '1' ||
-        regexp[at + 2] != ',' || regexp[at + 3] < '2' ||
-        regexp[at + 3] > '4' || regexp[at + 4] != '}' ||
-        regexp[at + 5] != '\0') return false;
-    parsed->maximum = 2 * (unsigned) (regexp[at + 3] - '0') - 1;
+    if (regexp[at] != '{' || regexp[at + 1] != '1' || regexp[at + 2] != ',' || regexp[at + 3] < '2' || regexp[at + 3] > '4' || regexp[at + 4] != '}' ||
+        regexp[at + 5] != '\0')
+        return false;
+    parsed->maximum = 2 * (unsigned)(regexp[at + 3] - '0') - 1;
     for (size_t i = 0; i < 3; ++i)
         for (size_t j = i + 1; j < 3; ++j)
-            if (parsed->lengths[i] == parsed->lengths[j] &&
-                memcmp(parsed->bytes[i], parsed->bytes[j],
-                       parsed->lengths[i]) == 0) return false;
+            if (parsed->lengths[i] == parsed->lengths[j] && memcmp(parsed->bytes[i], parsed->bytes[j], parsed->lengths[i]) == 0) return false;
     if (include_prefixes) return true;
     /* A three-step prefix chain follows branch order in the reference
      * verifier. Existing prefix-specific handlers preserve that order. */
@@ -11800,31 +9627,20 @@ static bool yx_parse_three_literal_bounds(const char *regexp,
         if (parsed->lengths[i] < parsed->lengths[shortest]) shortest = i;
         if (parsed->lengths[i] > parsed->lengths[longest]) longest = i;
     }
-    if (parsed->lengths[shortest] == 1 &&
-        parsed->lengths[longest] == 3) {
+    if (parsed->lengths[shortest] == 1 && parsed->lengths[longest] == 3) {
         size_t middle = 3 - shortest - longest;
-        if (parsed->lengths[middle] == 2 &&
-            memcmp(parsed->bytes[shortest], parsed->bytes[middle], 1) == 0 &&
+        if (parsed->lengths[middle] == 2 && memcmp(parsed->bytes[shortest], parsed->bytes[middle], 1) == 0 &&
             memcmp(parsed->bytes[middle], parsed->bytes[longest], 2) == 0)
             return false;
     }
-    if (parsed->lengths[shortest] == 1 &&
-        parsed->lengths[0] + parsed->lengths[1] +
-            parsed->lengths[2] == 5 &&
-        parsed->bytes[0][0] == parsed->bytes[1][0] &&
+    if (parsed->lengths[shortest] == 1 && parsed->lengths[0] + parsed->lengths[1] + parsed->lengths[2] == 5 && parsed->bytes[0][0] == parsed->bytes[1][0] &&
         parsed->bytes[1][0] == parsed->bytes[2][0])
         return false;
-    if (parsed->lengths[0] == 2 && parsed->lengths[1] == 2 &&
-        parsed->lengths[2] == 3 &&
-        memcmp(parsed->bytes[0], parsed->bytes[2], 2) == 0)
-        return false;
+    if (parsed->lengths[0] == 2 && parsed->lengths[1] == 2 && parsed->lengths[2] == 3 && memcmp(parsed->bytes[0], parsed->bytes[2], 2) == 0) return false;
     return true;
 }
 
-static int yx_three_literal_reach(const uint8_t *data, size_t size,
-                                  size_t start, size_t width,
-                                  const YX_THREE_LITERAL_BOUNDS *parsed,
-                                  unsigned repeats, unsigned units,
+static int yx_three_literal_reach(const uint8_t *data, size_t size, size_t start, size_t width, const YX_THREE_LITERAL_BOUNDS *parsed, unsigned repeats, unsigned units,
                                   int memo[8][22])
 {
     if (repeats == parsed->maximum) return 0;
@@ -11836,16 +9652,12 @@ static int yx_three_literal_reach(const uint8_t *data, size_t size,
         if (at > size || size - at < length * width) continue;
         bool equal = true;
         for (unsigned i = 0; i < length; ++i)
-            if (!yx_short_first_unit_at(data, size, at + i * width,
-                                         width, parsed->bytes[arm][i],
-                                         false)) {
+            if (!yx_short_first_unit_at(data, size, at + i * width, width, parsed->bytes[arm][i], false)) {
                 equal = false;
                 break;
             }
         if (!equal) continue;
-        int span = (int) length + yx_three_literal_reach(
-            data, size, start, width, parsed, repeats + 1,
-            units + length, memo);
+        int span = (int)length + yx_three_literal_reach(data, size, start, width, parsed, repeats + 1, units + length, memo);
         if (span > best) best = span;
     }
     memo[repeats][units] = best;
@@ -11856,20 +9668,17 @@ static int yx_three_literal_reach(const uint8_t *data, size_t size,
  * reference's verifier can retain up to 2 * upper_bound - 1 complete arms.
  * Calculate the longest reachable span at an existing hit. This also covers
  * mixed one-, two-, and three-byte arms without changing hit discovery. */
-static void yx_adjust_bounded_three_literals(YRX_PATTERN *pattern,
-                                              const uint8_t *data, size_t size)
+static void yx_adjust_bounded_three_literals(YRX_PATTERN *pattern, const uint8_t *data, size_t size)
 {
     YX_THREE_LITERAL_BOUNDS parsed = {0};
     uint32_t modifiers = pattern->modifiers;
-    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE)) ||
-        !yx_parse_three_literal_bounds(pattern->regexp, &parsed, false)) return;
+    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE)) || !yx_parse_three_literal_bounds(pattern->regexp, &parsed, false)) return;
     for (size_t i = 0; i < pattern->match_count; ++i) {
         YRX_MATCH *match = &pattern->matches[i];
         if (match->offset >= size) continue;
         size_t widths[2] = {1, 0};
         size_t count = 1;
-        if ((modifiers & YX_MOD_WIDE) &&
-            match->offset + 1 < size && data[match->offset + 1] == 0) {
+        if ((modifiers & YX_MOD_WIDE) && match->offset + 1 < size && data[match->offset + 1] == 0) {
             if (modifiers & YX_MOD_ASCII) widths[count++] = 2;
             else widths[0] = 2;
         }
@@ -11877,18 +9686,12 @@ static void yx_adjust_bounded_three_literals(YRX_PATTERN *pattern,
         for (size_t j = 0; j < count; ++j) {
             int memo[8][22];
             for (size_t row = 0; row < 8; ++row)
-                for (size_t column = 0; column < 22; ++column)
-                    memo[row][column] = -1;
-            int units = yx_three_literal_reach(data, size,
-                                                match->offset, widths[j],
-                                                &parsed, 0, 0, memo);
-            size_t span = (size_t) units * widths[j];
+                for (size_t column = 0; column < 22; ++column) memo[row][column] = -1;
+            int units = yx_three_literal_reach(data, size, match->offset, widths[j], &parsed, 0, 0, memo);
+            size_t span = (size_t)units * widths[j];
             if (span > best) best = span;
         }
-        if (best && (!(modifiers & YX_MOD_ASCII) ||
-                     !(modifiers & YX_MOD_WIDE) || best > 2 ||
-                     match->length >= 2))
-            match->length = best;
+        if (best && (!(modifiers & YX_MOD_ASCII) || !(modifiers & YX_MOD_WIDE) || best > 2 || match->length >= 2)) match->length = best;
     }
 }
 
@@ -11918,8 +9721,7 @@ static int yx_literal_atom_quality(const yx_literal_verifier_atom *atom)
     int quality = 0;
     for (size_t i = 0; i < atom->length; ++i) {
         uint8_t byte = atom->bytes[i];
-        quality += (byte >= 'a' && byte <= 'z') ||
-                   (byte >= 'A' && byte <= 'Z') ? 18 : 20;
+        quality += (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ? 18 : 20;
         bool unique = true;
         for (size_t j = 0; j < i; ++j)
             if (atom->bytes[j] == byte) unique = false;
@@ -11928,10 +9730,7 @@ static int yx_literal_atom_quality(const yx_literal_verifier_atom *atom)
     return quality;
 }
 
-static bool yx_literal_atom_set_better(const yx_literal_verifier_atom *left,
-                                       size_t left_count,
-                                       const yx_literal_verifier_atom *right,
-                                       size_t right_count)
+static bool yx_literal_atom_set_better(const yx_literal_verifier_atom *left, size_t left_count, const yx_literal_verifier_atom *right, size_t right_count)
 {
     int minimum[2] = {1000, 1000}, sum[2] = {0, 0};
     size_t lengths[2] = {SIZE_MAX, SIZE_MAX};
@@ -11954,20 +9753,16 @@ static bool yx_literal_atom_set_better(const yx_literal_verifier_atom *left,
     return left_count < right_count;
 }
 
-static bool yx_literal_arm_at(const YX_THREE_LITERAL_BOUNDS *parsed,
-                               size_t arm, const uint8_t *data, size_t size,
-                               size_t offset, size_t width, bool nocase)
+static bool yx_literal_arm_at(const YX_THREE_LITERAL_BOUNDS *parsed, size_t arm, const uint8_t *data, size_t size, size_t offset, size_t width, bool nocase)
 {
     size_t length = parsed->lengths[arm];
     if (offset > size || length > (size - offset) / width) return false;
     for (size_t i = 0; i < length; ++i)
-        if (!yx_short_first_unit_at(data, size, offset + i * width, width,
-                                     parsed->bytes[arm][i], nocase)) return false;
+        if (!yx_short_first_unit_at(data, size, offset + i * width, width, parsed->bytes[arm][i], nocase)) return false;
     return true;
 }
 
-static int yx_literal_verifier_add(YRX_PATTERN *pattern, size_t start,
-                                    size_t end, size_t limit)
+static int yx_literal_verifier_add(YRX_PATTERN *pattern, size_t start, size_t end, size_t limit)
 {
     size_t count = pattern->match_count;
     if (count && start == pattern->matches[count - 1].offset) {
@@ -11981,8 +9776,7 @@ static int yx_literal_verifier_add(YRX_PATTERN *pattern, size_t start,
         else high = middle;
     }
     if (low < count && pattern->matches[low].offset == start) {
-        if (end - start > pattern->matches[low].length)
-            pattern->matches[low].length = end - start;
+        if (end - start > pattern->matches[low].length) pattern->matches[low].length = end - start;
         return 1;
     }
     if (limit && count == limit) {
@@ -11991,17 +9785,13 @@ static int yx_literal_verifier_add(YRX_PATTERN *pattern, size_t start,
         pattern->match_count = count;
     }
     if (!yx_add_match(pattern, start, end - start, 0)) return 0;
-    memmove(&pattern->matches[low + 1], &pattern->matches[low],
-            (count - low) * sizeof(*pattern->matches));
+    memmove(&pattern->matches[low + 1], &pattern->matches[low], (count - low) * sizeof(*pattern->matches));
     pattern->matches[low] = (YRX_MATCH){start, end - start, -1};
     return 1;
 }
 
-static int yx_literal_verify_atom(YRX_PATTERN *pattern,
-                                   const YX_THREE_LITERAL_BOUNDS *parsed,
-                                   const yx_literal_verifier_atom *atom,
-                                   const uint8_t *data, size_t size,
-                                   size_t offset, size_t limit)
+static int yx_literal_verify_atom(YRX_PATTERN *pattern, const YX_THREE_LITERAL_BOUNDS *parsed, const yx_literal_verifier_atom *atom, const uint8_t *data, size_t size,
+                                  size_t offset, size_t limit)
 {
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     unsigned maximum = (parsed->maximum + 1) / 2;
@@ -12028,10 +9818,7 @@ static int yx_literal_verify_atom(YRX_PATTERN *pattern,
             if (!previous[units]) continue;
             for (size_t arm = 0; arm < 3; ++arm) {
                 size_t total = units + parsed->lengths[arm];
-                if (total <= offset / width &&
-                    yx_literal_arm_at(parsed, arm, data, size,
-                        offset - total * width, width, nocase))
-                    next[total] = reachable[total] = true;
+                if (total <= offset / width && yx_literal_arm_at(parsed, arm, data, size, offset - total * width, width, nocase)) next[total] = reachable[total] = true;
             }
         }
         memcpy(previous, next, sizeof(previous));
@@ -12039,24 +9826,19 @@ static int yx_literal_verify_atom(YRX_PATTERN *pattern,
     for (size_t units = 0; units <= 3 * (maximum - 1); ++units) {
         if (!reachable[units]) continue;
         size_t start = offset - units * width;
-        if ((pattern->modifiers & YX_MOD_FULLWORD) &&
-            !yx_fullword(data, size, start, end - start, width == 2, 0))
-            continue;
+        if ((pattern->modifiers & YX_MOD_FULLWORD) && !yx_fullword(data, size, start, end - start, width == 2, 0)) continue;
         if (!yx_literal_verifier_add(pattern, start, end, limit)) return 0;
     }
     return 1;
 }
 
-static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
-                                               const uint8_t *data, size_t size,
-                                               size_t limit, bool *handled)
+static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool *handled)
 {
     YX_THREE_LITERAL_BOUNDS parsed = {0};
     uint32_t modifiers = pattern->modifiers;
     *handled = false;
-    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE |
-                       YX_MOD_FULLWORD | YX_MOD_PRIVATE)) ||
-        !yx_parse_three_literal_bounds(pattern->regexp, &parsed, true)) return 1;
+    if ((modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_PRIVATE)) || !yx_parse_three_literal_bounds(pattern->regexp, &parsed, true))
+        return 1;
     *handled = true;
     yx_literal_verifier_atom branches[24] = {0}, combined[24] = {0};
     size_t branch_count = 0;
@@ -12067,16 +9849,14 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
         memcpy(branches[begin].bytes, parsed.bytes[arm], parsed.lengths[arm]);
         for (size_t byte = 0; byte < parsed.lengths[arm]; ++byte) {
             uint8_t value = parsed.bytes[arm][byte];
-            if (!(modifiers & YX_MOD_NOCASE) || value < 'a' || value > 'z')
-                continue;
+            if (!(modifiers & YX_MOD_NOCASE) || value < 'a' || value > 'z') continue;
             size_t end = branch_count;
             for (size_t i = begin; i < end; ++i) {
                 branches[branch_count] = branches[i];
                 branches[branch_count++].bytes[byte] = (uint8_t)(value - 32);
             }
         }
-        qsort(branches + begin, branch_count - begin, sizeof(*branches),
-              yx_literal_atom_compare);
+        qsort(branches + begin, branch_count - begin, sizeof(*branches), yx_literal_atom_compare);
     }
     memcpy(combined, branches, branch_count * sizeof(*combined));
     qsort(combined, branch_count, sizeof(*combined), yx_literal_atom_compare);
@@ -12084,19 +9864,16 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
     yx_literal_verifier_atom previous = {0};
     for (size_t i = 0; i < branch_count; ++i) {
         yx_literal_verifier_atom current = combined[i];
-        bool prefix = i && previous.length <= current.length &&
-            memcmp(previous.bytes, current.bytes, previous.length) == 0;
+        bool prefix = i && previous.length <= current.length && memcmp(previous.bytes, current.bytes, previous.length) == 0;
         previous = current;
         if (prefix) continue;
         combined[combined_count] = current;
         combined[combined_count++].arm = -1;
     }
-    bool singleton_class = parsed.lengths[0] == 1 &&
-                           parsed.lengths[1] == 1 && parsed.lengths[2] == 1;
+    bool singleton_class = parsed.lengths[0] == 1 && parsed.lengths[1] == 1 && parsed.lengths[2] == 1;
     const yx_literal_verifier_atom *selected = branches;
     size_t selected_count = branch_count;
-    if (singleton_class || yx_literal_atom_set_better(combined, combined_count,
-                                                       branches, branch_count)) {
+    if (singleton_class || yx_literal_atom_set_better(combined, combined_count, branches, branch_count)) {
         selected = combined;
         selected_count = combined_count;
     }
@@ -12108,8 +9885,7 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
             atom->arm = selected[i].arm;
             atom->width = 2;
             atom->length = selected[i].length * 2;
-            for (size_t j = 0; j < selected[i].length; ++j)
-                atom->bytes[j * 2] = selected[i].bytes[j];
+            for (size_t j = 0; j < selected[i].length; ++j) atom->bytes[j * 2] = selected[i].bytes[j];
         }
     if (!(modifiers & YX_MOD_WIDE) || (modifiers & YX_MOD_ASCII))
         for (size_t i = 0; i < selected_count; ++i) {
@@ -12120,22 +9896,21 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
     for (size_t i = 0; i < atom_count; ++i)
         if (atoms[i].length < minimum) minimum = atoms[i].length;
     size_t mask = minimum < 4 ? minimum : 4;
-    bool teddy = atom_count <= (minimum == 1 ? 16u : 64u) &&
-                 pattern->global_atom_count_hint <= (minimum == 1 ? 16u : 64u) &&
-                 size >= 16 + mask - 1;
+    bool teddy = atom_count <= (minimum == 1 ? 16u : 64u) && pattern->global_atom_count_hint <= (minimum == 1 ? 16u : 64u) && size >= 16 + mask - 1;
     size_t order[48];
     for (size_t i = 0; i < atom_count; ++i) {
         atoms[i].bucket = (uint8_t)(7 - i % 8);
         for (size_t j = 0; j < i; ++j) {
             bool same = true;
             for (size_t k = 0; k < mask; ++k)
-                if ((atoms[i].bytes[k] & 15) != (atoms[j].bytes[k] & 15))
-                    same = false;
-            if (same) { atoms[i].bucket = atoms[j].bucket; break; }
+                if ((atoms[i].bytes[k] & 15) != (atoms[j].bytes[k] & 15)) same = false;
+            if (same) {
+                atoms[i].bucket = atoms[j].bucket;
+                break;
+            }
         }
         size_t at = i;
-        while (at && (teddy ? atoms[order[at - 1]].bucket > atoms[i].bucket :
-                      atoms[order[at - 1]].length < atoms[i].length)) {
+        while (at && (teddy ? atoms[order[at - 1]].bucket > atoms[i].bucket : atoms[order[at - 1]].length < atoms[i].length)) {
             order[at] = order[at - 1];
             --at;
         }
@@ -12145,16 +9920,11 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
         if (yx_scan_deadline_poll(pattern->deadline)) return 0;
         for (size_t i = 0; i < atom_count; ++i) {
             const yx_literal_verifier_atom *atom = &atoms[order[i]];
-            if ((!teddy && cursor < atom->length) ||
-                (teddy && atom->length > size - cursor)) continue;
+            if ((!teddy && cursor < atom->length) || (teddy && atom->length > size - cursor)) continue;
             size_t offset = teddy ? cursor : cursor - atom->length;
-            if (memcmp(data + offset, atom->bytes, atom->length) == 0 &&
-                !yx_literal_verify_atom(pattern, &parsed, atom, data, size,
-                                          offset, limit)) return 0;
+            if (memcmp(data + offset, atom->bytes, atom->length) == 0 && !yx_literal_verify_atom(pattern, &parsed, atom, data, size, offset, limit)) return 0;
         }
-        if (limit && pattern->match_count == limit &&
-            cursor > pattern->matches[limit - 1].offset &&
-            cursor - pattern->matches[limit - 1].offset > 24) break;
+        if (limit && pattern->match_count == limit && cursor > pattern->matches[limit - 1].offset && cursor - pattern->matches[limit - 1].offset > 24) break;
         if (cursor == size) break;
     }
     return 1;
@@ -12193,26 +9963,27 @@ static int yx_scan_bounded_literal_alternation(YRX_PATTERN *pattern,
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-static int yx_scan_archived_literal(YRX_PATTERN *pattern,const uint8_t *data,size_t size,size_t limit)
+static int yx_scan_archived_literal(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit)
 {
-    const yx_archived_literal_prefilter *filter=&pattern->archived_literal_prefilter;
-    bool nocase=(pattern->modifiers&YX_MOD_NOCASE)!=0;
-    bool fullword=(pattern->modifiers&YX_MOD_FULLWORD)!=0;
-    for(size_t i=0;i<filter->count;++i) {
-        const yx_archived_literal_atom *atom=&filter->atoms[i];
-        if(!atom->length||atom->length>size)continue;
-        size_t cursor=0;
-        while(cursor<=size-atom->length) {
-            if(yx_scan_deadline_poll(pattern->deadline))return 0;
-            int64_t hit=xx_data_find_bytes_buffer_optimize(data,size,cursor,atom->bytes,atom->length,NULL);
-            if(hit<0)break;
-            cursor=(size_t)hit+1;
-            if((size_t)hit<atom->backtrack)continue;
-            size_t start=(size_t)hit-atom->backtrack;
-            size_t width=atom->exact?atom->length:pattern->length;
-            if(width>size-start||(!atom->exact&&!yx_equal_text(data+start,pattern->bytes,width,nocase))||
-               (fullword&&!yx_fullword(data,size,start,width,false,0)))continue;
-            if(!yx_literal_verifier_add(pattern,start,start+width,limit))return 0;
+    const yx_archived_literal_prefilter *filter = &pattern->archived_literal_prefilter;
+    bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
+    bool fullword = (pattern->modifiers & YX_MOD_FULLWORD) != 0;
+    for (size_t i = 0; i < filter->count; ++i) {
+        const yx_archived_literal_atom *atom = &filter->atoms[i];
+        if (!atom->length || atom->length > size) continue;
+        size_t cursor = 0;
+        while (cursor <= size - atom->length) {
+            if (yx_scan_deadline_poll(pattern->deadline)) return 0;
+            int64_t hit = xx_data_find_bytes_buffer_optimize(data, size, cursor, atom->bytes, atom->length, NULL);
+            if (hit < 0) break;
+            cursor = (size_t)hit + 1;
+            if ((size_t)hit < atom->backtrack) continue;
+            size_t start = (size_t)hit - atom->backtrack;
+            size_t width = atom->exact ? atom->length : pattern->length;
+            if (width > size - start || (!atom->exact && !yx_equal_text(data + start, pattern->bytes, width, nocase)) ||
+                (fullword && !yx_fullword(data, size, start, width, false, 0)))
+                continue;
+            if (!yx_literal_verifier_add(pattern, start, start + width, limit)) return 0;
         }
     }
     return 1;
@@ -12221,19 +9992,14 @@ static int yx_scan_archived_literal(YRX_PATTERN *pattern,const uint8_t *data,siz
 /* The literal of a regexp that is one plain literal (its candidate plan):
  * YARA-X compiles it as a literal sub-pattern (c_alternation_literal), so it
  * is scanned as a text literal, also when it is too long for PCRE2. */
-static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan,
-                                                const YRX_PATTERN *pattern, size_t *length);
+static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan, const YRX_PATTERN *pattern, size_t *length);
 
-YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                           size_t max_matches, bool fast_scan)
+YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t max_matches, bool fast_scan)
 {
     if (!pattern || (!data && size)) return YRX_INVALID_ARGUMENT;
     if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
-    if (fast_scan && pattern->fast_count_enabled &&
-        pattern->fast_count_threshold < max_matches)
-        max_matches = pattern->fast_count_threshold;
-    if (fast_scan && !pattern->fast_scan_needs_all && max_matches > 1)
-        max_matches = 1;
+    if (fast_scan && pattern->fast_count_enabled && pattern->fast_count_threshold < max_matches) max_matches = pattern->fast_count_threshold;
+    if (fast_scan && !pattern->fast_scan_needs_all && max_matches > 1) max_matches = 1;
     free(pattern->matches);
     pattern->matches = NULL;
     pattern->match_count = 0;
@@ -12248,14 +10014,12 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
         bool ok;
         list.limit = max_matches;
         ok = yx_rx_scan_literals(pattern->rx_literals, data, size, pattern->deadline, &list,
-                                 pattern->fixed_at_enabled ? YX_RX_LITERALS_ANCHORED :
-                                 pattern->atom_search_teddy && size >= pattern->atom_search_minimum ?
-                                 YX_RX_LITERALS_TEDDY : YX_RX_LITERALS_AUTOMATON,
+                                 pattern->fixed_at_enabled                                            ? YX_RX_LITERALS_ANCHORED
+                                 : pattern->atom_search_teddy && size >= pattern->atom_search_minimum ? YX_RX_LITERALS_TEDDY
+                                                                                                      : YX_RX_LITERALS_AUTOMATON,
                                  /* A gate's sorted branch starts (yx_candidate_finalize). */
-                                 pattern->candidate_gate_starts ? pattern->candidate_hits : NULL,
-                                 pattern->candidate_gate_starts ? pattern->candidate_hit_count : 0);
-        for (size_t i = 0; ok && i < list.count; ++i)
-            ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
+                                 pattern->candidate_gate_starts ? pattern->candidate_hits : NULL, pattern->candidate_gate_starts ? pattern->candidate_hit_count : 0);
+        for (size_t i = 0; ok && i < list.count; ++i) ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
         yx_rx_match_list_free(&list);
         if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
         return ok ? YRX_SUCCESS : YRX_SCAN_ERROR;
@@ -12264,16 +10028,14 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
 #ifdef _WIN32
         bool pike_only = true;
         for (size_t i = 0; i < pattern->rx_program->sub_count; ++i)
-            if (pattern->rx_program->subs[i].flags & YX_RX_FAST)
-                pike_only = false;
+            if (pattern->rx_program->subs[i].flags & YX_RX_FAST) pike_only = false;
         /* A mandatory long repetition cannot produce a PikeVM match. Keep
          * FastVM programs on their own path: their encoded counts may wrap. */
         if (pike_only && pattern->kind == YX_PATTERN_REGEX && pattern->regexp) {
             if (yx_unmatchable_large_repeat(pattern->regexp)) return YRX_SUCCESS;
             const uint8_t *literal;
             size_t literal_length;
-            if (yx_large_repeat_literal_alt(pattern->regexp, &literal,
-                                             &literal_length)) {
+            if (yx_large_repeat_literal_alt(pattern->regexp, &literal, &literal_length)) {
                 uint8_t *saved_bytes = pattern->bytes;
                 size_t saved_length = pattern->length;
                 pattern->bytes = (uint8_t *)literal;
@@ -12281,8 +10043,7 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
                 int ok = yx_scan_text(pattern, data, size, max_matches, false);
                 pattern->bytes = saved_bytes;
                 pattern->length = saved_length;
-                if (yx_scan_deadline_reached(pattern->deadline))
-                    return YRX_SCAN_TIMEOUT;
+                if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
                 return ok ? YRX_SUCCESS : YRX_SCAN_ERROR;
             }
         }
@@ -12293,10 +10054,8 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
         if (pattern->rx_teddy && pattern->rx_order_ids) {
             yx_rx_order order = {true, pattern->rx_teddy_minimum, pattern->rx_order_ids, pattern->rx_order_buckets};
             ok = yx_rx_scan_ordered(pattern->rx_program, data, size, pattern->deadline, &list, &order);
-        } else
-        ok = yx_rx_scan(pattern->rx_program, data, size, pattern->deadline, &list);
-        for (size_t i = 0; ok && i < list.count; ++i)
-            ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
+        } else ok = yx_rx_scan(pattern->rx_program, data, size, pattern->deadline, &list);
+        for (size_t i = 0; ok && i < list.count; ++i) ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
         yx_rx_match_list_free(&list);
         if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
         return ok ? YRX_SUCCESS : YRX_SCAN_ERROR;
@@ -12316,34 +10075,25 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
     int success = 0;
     bool literal_alternation_handled = false, chain_handled = false;
     switch (pattern->kind) {
-    case YX_PATTERN_TEXT:
-        if(pattern->archived_literal_prefilter.atoms)
-            success=yx_scan_archived_literal(pattern,data,size,max_matches);
-        else if (pattern->modifiers & (YX_MOD_BASE64 | YX_MOD_BASE64WIDE))
-            success = yx_scan_base64(pattern, data, size, max_matches,
-                                     fast_scan && !pattern->fast_scan_needs_all);
-        else
-            success = yx_scan_text(pattern, data, size, max_matches,
-                                   fast_scan && !pattern->fast_scan_needs_all);
-        break;
-    case YX_PATTERN_HEX:
-        success = pattern->hex_has_jump ?
-            yx_scan_hex_complex(pattern, data, size, max_matches) :
-            yx_scan_hex(pattern, data, size, max_matches);
-        break;
-    case YX_PATTERN_REGEX:
-        {
+        case YX_PATTERN_TEXT:
+            if (pattern->archived_literal_prefilter.atoms) success = yx_scan_archived_literal(pattern, data, size, max_matches);
+            else if (pattern->modifiers & (YX_MOD_BASE64 | YX_MOD_BASE64WIDE))
+                success = yx_scan_base64(pattern, data, size, max_matches, fast_scan && !pattern->fast_scan_needs_all);
+            else success = yx_scan_text(pattern, data, size, max_matches, fast_scan && !pattern->fast_scan_needs_all);
+            break;
+        case YX_PATTERN_HEX:
+            success = pattern->hex_has_jump ? yx_scan_hex_complex(pattern, data, size, max_matches) : yx_scan_hex(pattern, data, size, max_matches);
+            break;
+        case YX_PATTERN_REGEX: {
             size_t literal_length = 0;
-            const uint8_t *literal = yx_candidate_plan_literal(pattern->candidate_plan, pattern,
-                                                               &literal_length);
+            const uint8_t *literal = yx_candidate_plan_literal(pattern->candidate_plan, pattern, &literal_length);
             if (literal) {
                 YRX_PATTERN text = *pattern;
                 text.kind = YX_PATTERN_TEXT;
                 text.bytes = (uint8_t *)literal;
                 text.length = literal_length;
                 text.modifiers &= ~(unsigned)YX_MOD_DOTALL;
-                success = yx_scan_text(&text, data, size, max_matches,
-                                       fast_scan && !pattern->fast_scan_needs_all);
+                success = yx_scan_text(&text, data, size, max_matches, fast_scan && !pattern->fast_scan_needs_all);
                 pattern->matches = text.matches;
                 pattern->match_count = text.match_count;
                 pattern->match_capacity = text.match_capacity;
@@ -12353,24 +10103,20 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
                 break;
             }
         }
-        {
-            /* Chains of sub-patterns: the reference's own join. */
-            success = yx_ser_scan_regex_chain(pattern, data, size, yx_large_regex_emit, pattern);
-            if (success != -2) {
-                chain_handled = true;
-                if (success) yx_sort_unique_limit(pattern, max_matches);
-                break;
+            {
+                /* Chains of sub-patterns: the reference's own join. */
+                success = yx_ser_scan_regex_chain(pattern, data, size, yx_large_regex_emit, pattern);
+                if (success != -2) {
+                    chain_handled = true;
+                    if (success) yx_sort_unique_limit(pattern, max_matches);
+                    break;
+                }
+                bool overlap_class_handled = false;
+                success = yx_scan_bounded_literal_alternation(pattern, data, size, max_matches, &literal_alternation_handled);
+                if (success && !literal_alternation_handled) success = yx_scan_repeated_overlap_class_branch(pattern, data, size, max_matches, &overlap_class_handled);
+                if (success && !literal_alternation_handled && !overlap_class_handled) success = yx_scan_regex(pattern, data, size, max_matches);
             }
-            bool overlap_class_handled = false;
-            success = yx_scan_bounded_literal_alternation(
-                pattern, data, size, max_matches, &literal_alternation_handled);
-            if (success && !literal_alternation_handled)
-                success = yx_scan_repeated_overlap_class_branch(
-                    pattern, data, size, max_matches, &overlap_class_handled);
-            if (success && !literal_alternation_handled && !overlap_class_handled)
-                success = yx_scan_regex(pattern, data, size, max_matches);
-        }
-        break;
+            break;
     }
     if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
     if (!success) return YRX_SCAN_ERROR;
@@ -12378,17 +10124,14 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
         yx_extend_nested_short_units(pattern, data, size);
         yx_extend_anchored_branch_short_units(pattern, data, size);
         yx_extend_anchored_class_first_units(pattern, data, size);
-        if (!yx_add_missing_three_branch_first(pattern, data, size))
-            return YRX_SCAN_ERROR;
-        if (!yx_add_missing_three_class_first(pattern, data, size))
-            return YRX_SCAN_ERROR;
+        if (!yx_add_missing_three_branch_first(pattern, data, size)) return YRX_SCAN_ERROR;
+        if (!yx_add_missing_three_class_first(pattern, data, size)) return YRX_SCAN_ERROR;
         yx_extend_two_long_group_first(pattern, data, size);
         yx_adjust_long_then_short_group_first(pattern, data, size);
         yx_extend_three_group_first_units(pattern, data, size);
         yx_extend_nine_byte_group_first(pattern, data, size);
         yx_extend_long_then_short_class_first(pattern, data, size);
-        if (!yx_add_missing_nine_byte_class_first(pattern, data, size))
-            return YRX_SCAN_ERROR;
+        if (!yx_add_missing_nine_byte_class_first(pattern, data, size)) return YRX_SCAN_ERROR;
         yx_discard_nocase_prefix_at_eof(pattern, data, size);
         yx_adjust_greedy_repeated_literal_pair(pattern, data, size);
         yx_adjust_short_first_repeated_pair(pattern, data, size);
@@ -12406,40 +10149,30 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
         yx_adjust_bounded_repeated_byte(pattern, data, size);
         yx_adjust_bounded_nocase_triple(pattern, data, size);
         yx_adjust_bounded_triple_prefix(pattern, data, size);
-        if (!yx_adjust_anchored_bounded_triple(pattern, data, size,
-                                               max_matches))
-            return YRX_SCAN_ERROR;
-        if (!yx_add_missing_bounded_end_matches(pattern, data, size))
-            return YRX_SCAN_ERROR;
-        if (!yx_adjust_repeated_triple_suffix(pattern, data, size))
-            return YRX_SCAN_ERROR;
-        if (!yx_adjust_bounded_pair_suffix(pattern, data, size))
-            return YRX_SCAN_ERROR;
-        if (!yx_add_missing_bounded_pair_tail(pattern, data, size))
-            return YRX_SCAN_ERROR;
+        if (!yx_adjust_anchored_bounded_triple(pattern, data, size, max_matches)) return YRX_SCAN_ERROR;
+        if (!yx_add_missing_bounded_end_matches(pattern, data, size)) return YRX_SCAN_ERROR;
+        if (!yx_adjust_repeated_triple_suffix(pattern, data, size)) return YRX_SCAN_ERROR;
+        if (!yx_adjust_bounded_pair_suffix(pattern, data, size)) return YRX_SCAN_ERROR;
+        if (!yx_add_missing_bounded_pair_tail(pattern, data, size)) return YRX_SCAN_ERROR;
         yx_adjust_bounded_pair_optional_tail(pattern, data, size);
         yx_adjust_bounded_pair_optional_class_spans(pattern, data, size);
         yx_adjust_single_pair_optional_wide_tie(pattern, data, size);
-        if (!yx_add_missing_anchored_pair_optional_tail(pattern, data, size))
-            return YRX_SCAN_ERROR;
+        if (!yx_add_missing_anchored_pair_optional_tail(pattern, data, size)) return YRX_SCAN_ERROR;
         yx_adjust_grouped_ascii_wide_ties(pattern, data, size);
-        yx_adjust_grouped_optional_suffix_ties(pattern, data, size,
-                                               max_matches);
+        yx_adjust_grouped_optional_suffix_ties(pattern, data, size, max_matches);
         yx_adjust_lazy_identical_capture(pattern, data, size);
         yx_adjust_bounded_two_byte_alternatives(pattern, data, size);
         yx_adjust_bounded_terminal_byte_alternatives(pattern, data, size);
         yx_adjust_bounded_two_byte_class_pair(pattern, data, size);
         yx_adjust_long_first_triple_singleton(pattern, data, size);
-        if (!yx_adjust_bounded_pair_class_tail(pattern, data, size))
-            return YRX_SCAN_ERROR;
+        if (!yx_adjust_bounded_pair_class_tail(pattern, data, size)) return YRX_SCAN_ERROR;
         yx_adjust_short_nested_duplicate_pair(pattern, data, size);
         yx_adjust_bounded_three_singletons(pattern, data, size);
         yx_adjust_bounded_three_pairs(pattern, data, size);
         yx_adjust_bounded_three_literals(pattern, data, size);
     }
     yx_sort_unique_limit(pattern, max_matches);
-    return yx_scan_deadline_reached(pattern->deadline) ?
-           YRX_SCAN_TIMEOUT : YRX_SUCCESS;
+    return yx_scan_deadline_reached(pattern->deadline) ? YRX_SCAN_TIMEOUT : YRX_SUCCESS;
 }
 
 #include "scan_candidates.h"
@@ -12463,18 +10196,16 @@ struct yx_candidate_plan {
     size_t regex_maximum;
     bool program;
     bool gate;
-    uint8_t *gate_bytes; /* encoded branches; atom variant k spans */
+    uint8_t *gate_bytes;  /* encoded branches; atom variant k spans */
     size_t *gate_offsets; /* gate_bytes[gate_offsets[k]..gate_offsets[k+1]) */
     /* A regexp that is one plain literal: its bytes (yx_candidate_plan_literal). */
     uint8_t *literal;
     size_t literal_length;
 };
 
-static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan,
-                                                const YRX_PATTERN *pattern, size_t *length)
+static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *plan, const YRX_PATTERN *pattern, size_t *length)
 {
-    if (!plan || !plan->literal || plan->kind != YX_PATTERN_REGEX ||
-        plan->regex_source != pattern->regexp) return NULL;
+    if (!plan || !plan->literal || plan->kind != YX_PATTERN_REGEX || plan->regex_source != pattern->regexp) return NULL;
     *length = plan->literal_length;
     return plan->literal;
 }
@@ -12482,8 +10213,7 @@ static const uint8_t *yx_candidate_plan_literal(const struct yx_candidate_plan *
 static pcre2_code *yx_candidate_cached_regex(const YRX_PATTERN *pattern)
 {
     const yx_candidate_plan *plan = pattern->candidate_plan;
-    return plan && plan->kind == YX_PATTERN_REGEX &&
-        plan->regex_source == pattern->regexp ? plan->regex : NULL;
+    return plan && plan->kind == YX_PATTERN_REGEX && plan->regex_source == pattern->regexp ? plan->regex : NULL;
 }
 
 /* Prefer diverse, non-padding windows. A complete 8-byte window also keeps
@@ -12492,16 +10222,12 @@ static pcre2_code *yx_candidate_cached_regex(const YRX_PATTERN *pattern)
 static unsigned yx_candidate_byte_quality(uint8_t byte)
 {
     if (!byte || byte == 0xff || byte == ' ') return 1;
-    if (byte == 'e' || byte == 'E' || byte == 't' || byte == 'T' ||
-        byte == 'a' || byte == 'A' || byte == '0') return 3;
-    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
-        (byte >= '0' && byte <= '9')) return 6;
+    if (byte == 'e' || byte == 'E' || byte == 't' || byte == 'T' || byte == 'a' || byte == 'A' || byte == '0') return 3;
+    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9')) return 6;
     return 8;
 }
 
-static void yx_candidate_select_window(const uint8_t *bytes,
-    const uint8_t *mask, size_t length, bool nocase,
-    size_t *selected, size_t *selected_length)
+static void yx_candidate_select_window(const uint8_t *bytes, const uint8_t *mask, size_t length, bool nocase, size_t *selected, size_t *selected_length)
 {
     unsigned best = 0;
     *selected = *selected_length = 0;
@@ -12513,8 +10239,7 @@ static void yx_candidate_select_window(const uint8_t *bytes,
             size_t index = start + width - 1;
             uint8_t byte = bytes[index];
             if (mask && mask[index] != 0xff) break;
-            bool letter = (byte >= 'a' && byte <= 'z') ||
-                          (byte >= 'A' && byte <= 'Z');
+            bool letter = (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z');
             if (nocase && letter && ++letters > 4) break;
             /* A byte is new when the window's earlier bytes lack it. */
             bool seen = ((present[byte >> 6] >> (byte & 63u)) & 1u) != 0;
@@ -12530,17 +10255,13 @@ static void yx_candidate_select_window(const uint8_t *bytes,
     }
 }
 
-static bool yx_candidate_add_atom(yx_candidate_plan *plan,
-    const uint8_t *bytes, size_t length, size_t backtrack,
-    uint32_t variant, uint8_t key)
+static bool yx_candidate_add_atom(yx_candidate_plan *plan, const uint8_t *bytes, size_t length, size_t backtrack, uint32_t variant, uint8_t key)
 {
     if (!length || length > 8 || plan->atom_count >= UINT32_MAX) return false;
     if (plan->atom_count == plan->atom_capacity) {
         size_t capacity = plan->atom_capacity ? plan->atom_capacity * 2 : 8;
-        if (capacity < plan->atom_capacity ||
-            capacity > SIZE_MAX / sizeof(*plan->atoms)) return false;
-        yx_candidate_atom *grown = realloc(plan->atoms,
-                                            capacity * sizeof(*grown));
+        if (capacity < plan->atom_capacity || capacity > SIZE_MAX / sizeof(*plan->atoms)) return false;
+        yx_candidate_atom *grown = realloc(plan->atoms, capacity * sizeof(*grown));
         if (!grown) return false;
         plan->atoms = grown;
         plan->atom_capacity = capacity;
@@ -12556,39 +10277,32 @@ static bool yx_candidate_add_atom(yx_candidate_plan *plan,
     return true;
 }
 
-static bool yx_candidate_add_window(yx_candidate_plan *plan,
-    const uint8_t *bytes, size_t length, size_t backtrack,
-    uint32_t variant, bool nocase, unsigned first_key, unsigned last_key)
+static bool yx_candidate_add_window(yx_candidate_plan *plan, const uint8_t *bytes, size_t length, size_t backtrack, uint32_t variant, bool nocase, unsigned first_key,
+                                    unsigned last_key)
 {
     size_t letters[8], letter_count = 0;
     if (nocase)
         for (size_t i = 0; i < length; ++i)
-            if ((bytes[i] >= 'a' && bytes[i] <= 'z') ||
-                (bytes[i] >= 'A' && bytes[i] <= 'Z')) letters[letter_count++] = i;
+            if ((bytes[i] >= 'a' && bytes[i] <= 'z') || (bytes[i] >= 'A' && bytes[i] <= 'Z')) letters[letter_count++] = i;
     if (letter_count > 4) return false;
     for (unsigned key = first_key; key <= last_key; ++key) {
-        for (unsigned combination = 0; combination < (1u << letter_count);
-             ++combination) {
+        for (unsigned combination = 0; combination < (1u << letter_count); ++combination) {
             uint8_t expanded[8];
             memcpy(expanded, bytes, length);
             for (size_t i = 0; i < letter_count; ++i) {
                 size_t at = letters[i];
-                expanded[at] = (uint8_t)(yx_fold(expanded[at]) -
-                    ((combination & (1u << i)) ? 32 : 0));
+                expanded[at] = (uint8_t)(yx_fold(expanded[at]) - ((combination & (1u << i)) ? 32 : 0));
             }
             for (size_t i = 0; i < length; ++i) expanded[i] ^= (uint8_t)key;
-            if (!yx_candidate_add_atom(plan, expanded, length, backtrack,
-                                        variant, (uint8_t)key)) return false;
+            if (!yx_candidate_add_atom(plan, expanded, length, backtrack, variant, (uint8_t)key)) return false;
         }
     }
     return true;
 }
 
-static bool yx_candidate_text_plan(yx_candidate_plan *plan,
-                                    const YRX_PATTERN *pattern)
+static bool yx_candidate_text_plan(yx_candidate_plan *plan, const YRX_PATTERN *pattern)
 {
-    bool ascii = (pattern->modifiers & YX_MOD_ASCII) ||
-                 !(pattern->modifiers & YX_MOD_WIDE);
+    bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool xor_mode = (pattern->modifiers & YX_MOD_XOR) != 0;
@@ -12606,12 +10320,10 @@ static bool yx_candidate_text_plan(yx_candidate_plan *plan,
             if (encoding) variant->needle[i * 2 + 1] = 0;
         }
         size_t start, length;
-        yx_candidate_select_window(variant->needle, NULL, variant->length,
-                                   nocase, &start, &length);
-        if (!length || !yx_candidate_add_window(plan, variant->needle + start,
-            length, start, (uint32_t)plan->variant_count, nocase,
-            xor_mode ? pattern->xor_min : 0,
-            xor_mode ? pattern->xor_max : 0)) return false;
+        yx_candidate_select_window(variant->needle, NULL, variant->length, nocase, &start, &length);
+        if (!length || !yx_candidate_add_window(plan, variant->needle + start, length, start, (uint32_t)plan->variant_count, nocase, xor_mode ? pattern->xor_min : 0,
+                                                xor_mode ? pattern->xor_max : 0))
+            return false;
         ++plan->variant_count;
     }
     return plan->atom_count != 0;
@@ -12619,8 +10331,7 @@ static bool yx_candidate_text_plan(yx_candidate_plan *plan,
 
 /* A prefix is fixed in position until a variable jump or alternative.
  * Alternatives at the head contribute one atom for every possible branch. */
-static bool yx_candidate_hex_prefix(yx_candidate_plan *plan,
-    const yx_hex_atom *atoms, size_t count, size_t origin, unsigned depth)
+static bool yx_candidate_hex_prefix(yx_candidate_plan *plan, const yx_hex_atom *atoms, size_t count, size_t origin, unsigned depth)
 {
     uint8_t bytes[256] = {0}, mask[256] = {0};
     size_t used = 0, stopped = count;
@@ -12630,16 +10341,16 @@ static bool yx_candidate_hex_prefix(yx_candidate_plan *plan,
         if (atom->kind == YX_HEX_BYTE) {
             bytes[used] = atom->value;
             mask[used++] = atom->negated ? 0 : atom->mask;
-        } else if (atom->kind == YX_HEX_JUMP &&
-                   atom->minimum == atom->maximum &&
-                   atom->minimum <= sizeof(bytes) - used) {
+        } else if (atom->kind == YX_HEX_JUMP && atom->minimum == atom->maximum && atom->minimum <= sizeof(bytes) - used) {
             used += atom->minimum;
-        } else { stopped = i; break; }
+        } else {
+            stopped = i;
+            break;
+        }
     }
     size_t start, length;
     yx_candidate_select_window(bytes, mask, used, false, &start, &length);
-    if (length) return yx_candidate_add_atom(plan, bytes + start, length,
-                                             origin + start, 0, 0);
+    if (length) return yx_candidate_add_atom(plan, bytes + start, length, origin + start, 0, 0);
     /* A partially specified prefix byte is still a complete candidate
      * cover. Expand it only when no exact byte is available. */
     for (size_t i = 0; i < used; ++i) {
@@ -12647,8 +10358,7 @@ static bool yx_candidate_hex_prefix(yx_candidate_plan *plan,
         for (unsigned value = 0; value < 256; ++value) {
             if ((value & mask[i]) != (bytes[i] & mask[i])) continue;
             uint8_t byte = (uint8_t)value;
-            if (!yx_candidate_add_atom(plan, &byte, 1, origin + i, 0, 0))
-                return false;
+            if (!yx_candidate_add_atom(plan, &byte, 1, origin + i, 0, 0)) return false;
         }
         return true;
     }
@@ -12656,29 +10366,22 @@ static bool yx_candidate_hex_prefix(yx_candidate_plan *plan,
         const yx_hex_atom *alternative = &atoms[stopped];
         if (!alternative->branch_count) return false;
         for (size_t branch = 0; branch < alternative->branch_count; ++branch)
-            if (!yx_candidate_hex_prefix(plan,
-                alternative->branches[branch].atoms,
-                alternative->branches[branch].count, origin + used, depth + 1))
-                return false;
+            if (!yx_candidate_hex_prefix(plan, alternative->branches[branch].atoms, alternative->branches[branch].count, origin + used, depth + 1)) return false;
         return true;
     }
     return false;
 }
 
-static bool yx_candidate_hex_plan(yx_candidate_plan *plan,
-                                   const YRX_PATTERN *pattern)
+static bool yx_candidate_hex_plan(yx_candidate_plan *plan, const YRX_PATTERN *pattern)
 {
     if (!pattern->hex_has_jump) {
         size_t start, length;
-        yx_candidate_select_window(pattern->bytes, pattern->mask,
-                                   pattern->length, false, &start, &length);
-        if (length) return yx_candidate_add_atom(plan, pattern->bytes + start,
-                                                 length, start, 0, 0);
+        yx_candidate_select_window(pattern->bytes, pattern->mask, pattern->length, false, &start, &length);
+        if (length) return yx_candidate_add_atom(plan, pattern->bytes + start, length, start, 0, 0);
         for (size_t i = 0; i < pattern->length; ++i) {
             if (!pattern->mask[i]) continue;
             for (unsigned value = 0; value < 256; ++value) {
-                if ((value & pattern->mask[i]) !=
-                    (pattern->bytes[i] & pattern->mask[i])) continue;
+                if ((value & pattern->mask[i]) != (pattern->bytes[i] & pattern->mask[i])) continue;
                 uint8_t byte = (uint8_t)value;
                 if (!yx_candidate_add_atom(plan, &byte, 1, i, 0, 0)) return false;
             }
@@ -12690,8 +10393,7 @@ static bool yx_candidate_hex_plan(yx_candidate_plan *plan,
     int chain = yx_ser_lower_fast_regex(pattern, &lowered);
     free(lowered);
     if (chain == -1 || chain == 3 || yx_ser_hex_chain_status(pattern)) return false;
-    return yx_candidate_hex_prefix(plan, pattern->hex_atoms,
-                                    pattern->hex_atom_count, 0, 0);
+    return yx_candidate_hex_prefix(plan, pattern->hex_atoms, pattern->hex_atom_count, 0, 0);
 }
 
 /* A jump, negation or alternative without a regexp program (fixed jumps
@@ -12714,8 +10416,7 @@ static yx_candidate_plan *yx_candidate_hex_anchor_plan(const YRX_PATTERN *patter
     yx_candidate_plan *plan = calloc(1, sizeof(*plan));
     if (!plan) return NULL;
     plan->kind = YX_PATTERN_HEX;
-    if (!yx_candidate_add_atom(plan, filter.anchor, filter.anchor_length,
-                               (size_t)filter.anchor_minimum, 0, 0)) {
+    if (!yx_candidate_add_atom(plan, filter.anchor, filter.anchor_length, (size_t)filter.anchor_minimum, 0, 0)) {
         yx_candidate_plan_free(plan);
         return NULL;
     }
@@ -12725,11 +10426,9 @@ static yx_candidate_plan *yx_candidate_hex_anchor_plan(const YRX_PATTERN *patter
 
 /* Flat, bounded byte regexps have the same anchored VM result as the
  * general scan, without the branch-order compatibility transformations. */
-static bool yx_candidate_regex_plan(yx_candidate_plan *plan,
-                                     const YRX_PATTERN *pattern)
+static bool yx_candidate_regex_plan(yx_candidate_plan *plan, const YRX_PATTERN *pattern)
 {
-    if (!pattern->regexp || pattern->gap_head_regexp ||
-        (pattern->modifiers & YX_MOD_WIDE)) return false;
+    if (!pattern->regexp || pattern->gap_head_regexp || (pattern->modifiers & YX_MOD_WIDE)) return false;
     const char *body = pattern->regexp;
     bool in_class = false, class_first = false;
     for (const unsigned char *at = (const unsigned char *)body; *at; ++at) {
@@ -12759,15 +10458,12 @@ static bool yx_candidate_regex_plan(yx_candidate_plan *plan,
         }
     }
     if (in_class) return false;
-    yx_variant_parser parser = {body,
-        (pattern->modifiers & YX_MOD_NOCASE) != 0,
-        (pattern->modifiers & YX_MOD_DOTALL) != 0, false, 0, false};
+    yx_variant_parser parser = {body, (pattern->modifiers & YX_MOD_NOCASE) != 0, (pattern->modifiers & YX_MOD_DOTALL) != 0, false, 0, false};
     size_t maximum = 0;
     while (*parser.at) {
         if (strchr("()|^$", *parser.at)) return false;
         yx_variant_shape shape;
-        if (!yx_variant_atom(&parser, &shape) || shape.maximum > 1024 ||
-            maximum > 4096 - shape.maximum) return false;
+        if (!yx_variant_atom(&parser, &shape) || shape.maximum > 1024 || maximum > 4096 - shape.maximum) return false;
         maximum += shape.maximum;
     }
     /* Every token before the first variable-width repeat has a known
@@ -12775,7 +10471,11 @@ static bool yx_candidate_regex_plan(yx_candidate_plan *plan,
      * rather than restricting discovery to a leading literal prefix. */
     uint8_t *bytes = calloc(maximum ? maximum : 1, 1);
     uint8_t *mask = calloc(maximum ? maximum : 1, 1);
-    if (!bytes || !mask) { free(bytes); free(mask); return false; }
+    if (!bytes || !mask) {
+        free(bytes);
+        free(mask);
+        return false;
+    }
     size_t position = 0;
     parser.at = body;
     while (*parser.at) {
@@ -12805,10 +10505,8 @@ static bool yx_candidate_regex_plan(yx_candidate_plan *plan,
         if (shape.minimum != shape.maximum) break;
     }
     size_t start, length;
-    yx_candidate_select_window(bytes, mask, position,
-        (pattern->modifiers & YX_MOD_NOCASE) != 0, &start, &length);
-    bool ok = length >= 2 && yx_candidate_add_window(plan, bytes + start,
-        length, start, 0, (pattern->modifiers & YX_MOD_NOCASE) != 0, 0, 0);
+    yx_candidate_select_window(bytes, mask, position, (pattern->modifiers & YX_MOD_NOCASE) != 0, &start, &length);
+    bool ok = length >= 2 && yx_candidate_add_window(plan, bytes + start, length, start, 0, (pattern->modifiers & YX_MOD_NOCASE) != 0, 0, 0);
     free(bytes);
     free(mask);
     if (!ok) return false;
@@ -12878,14 +10576,16 @@ static bool yx_candidate_parse_class(const char **at, uint8_t bitmap[32])
     return true;
 }
 
-static bool yx_candidate_parse_tail_shape(const YRX_PATTERN *pattern,
-                                          yx_candidate_tail_shape *shape)
+static bool yx_candidate_parse_tail_shape(const YRX_PATTERN *pattern, yx_candidate_tail_shape *shape)
 {
     const char *s = pattern->regexp;
     bool group = false;
     if (!s || (pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_WIDE))) return false;
     memset(shape, 0, sizeof(*shape));
-    if (*s == '(') { group = true; ++s; }
+    if (*s == '(') {
+        group = true;
+        ++s;
+    }
     for (;;) {
         size_t b = shape->branch_count;
         if (b == 8) return false;
@@ -12897,8 +10597,7 @@ static bool yx_candidate_parse_tail_shape(const YRX_PATTERN *pattern,
             for (;;) {
                 unsigned char byte;
                 if (yx_candidate_hex_escape(s, &byte)) s += 4;
-                else if ((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z'))
-                    byte = (unsigned char)*s++;
+                else if ((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z')) byte = (unsigned char)*s++;
                 else break;
                 if (n == 16) return false;
                 shape->literals[b][n++] = byte;
@@ -12907,16 +10606,27 @@ static bool yx_candidate_parse_tail_shape(const YRX_PATTERN *pattern,
             shape->literal_lengths[b] = n;
         }
         ++shape->branch_count;
-        if (group && *s == '|') { ++s; continue; }
+        if (group && *s == '|') {
+            ++s;
+            continue;
+        }
         break;
     }
-    if (group) { if (*s != ')') return false; ++s; }
+    if (group) {
+        if (*s != ')') return false;
+        ++s;
+    }
     bool tail_group = *s == '(';
     if (tail_group) ++s;
     if (!yx_candidate_parse_class(&s, shape->tail)) return false;
-    if (tail_group) { if (*s != ')') return false; ++s; }
-    if (*s == '+') { shape->tail_min = 1; ++s; }
-    else if (*s == '{') {
+    if (tail_group) {
+        if (*s != ')') return false;
+        ++s;
+    }
+    if (*s == '+') {
+        shape->tail_min = 1;
+        ++s;
+    } else if (*s == '{') {
         unsigned long n = 0, m = 0;
         char *end;
         n = strtoul(s + 1, &end, 10);
@@ -12951,13 +10661,11 @@ static bool yx_candidate_atom_starts_match(const yx_rx_program *program, const y
     for (unsigned step = 0; step < 16; ++step) {
         /* PikeVM instructions are 0xAA + opcode: MATCH 0x00, JUMP 0x04 with a
          * 32-bit offset from the instruction. */
-        if (ip >= program->code_length || program->code_length - ip < 2 ||
-            program->code[ip] != 0xAA) return false;
+        if (ip >= program->code_length || program->code_length - ip < 2 || program->code[ip] != 0xAA) return false;
         const uint8_t *c = program->code + ip;
         if (c[1] == 0x00) return true;
         if (c[1] != 0x04 || program->code_length - ip < 6) return false;
-        int64_t target = (int64_t)ip + (int32_t)((uint32_t)c[2] | (uint32_t)c[3] << 8 |
-                                                 (uint32_t)c[4] << 16 | (uint32_t)c[5] << 24);
+        int64_t target = (int64_t)ip + (int32_t)((uint32_t)c[2] | (uint32_t)c[3] << 8 | (uint32_t)c[4] << 16 | (uint32_t)c[5] << 24);
         if (target < 0) return false;
         ip = (size_t)target;
     }
@@ -12967,8 +10675,7 @@ static bool yx_candidate_atom_starts_match(const yx_rx_program *program, const y
 /* Sets the tail filter of the plan's newest atom when it starts every match
  * it verifies and is a whole branch followed by fewer than tail_min bytes of
  * the tail class. */
-static void yx_candidate_tail_filter(yx_candidate_plan *plan, const yx_candidate_tail_shape *shape,
-                                     const yx_rx_program *program, const yx_rx_atom *atom)
+static void yx_candidate_tail_filter(yx_candidate_plan *plan, const yx_candidate_tail_shape *shape, const yx_rx_program *program, const yx_rx_atom *atom)
 {
     yx_candidate_atom *target = &plan->atoms[plan->atom_count - 1];
     size_t best = 0;
@@ -12983,12 +10690,9 @@ static void yx_candidate_tail_filter(yx_candidate_plan *plan, const yx_candidate
             continue;
         }
         bool whole;
-        if (shape->is_class[b])
-            whole = shape->branch_class[b][atom->bytes[0] / 8] >> (atom->bytes[0] % 8) & 1;
-        else
-            whole = !memcmp(atom->bytes, shape->literals[b], head);
-        for (size_t i = head; whole && i < atom->length; ++i)
-            whole = shape->tail[atom->bytes[i] / 8] >> (atom->bytes[i] % 8) & 1;
+        if (shape->is_class[b]) whole = shape->branch_class[b][atom->bytes[0] / 8] >> (atom->bytes[0] % 8) & 1;
+        else whole = !memcmp(atom->bytes, shape->literals[b], head);
+        for (size_t i = head; whole && i < atom->length; ++i) whole = shape->tail[atom->bytes[i] / 8] >> (atom->bytes[i] % 8) & 1;
         if (!whole) continue;
         /* The atom already holds all the tail bytes this branch needs. */
         if (atom->length - head >= shape->tail_min) return;
@@ -13008,9 +10712,8 @@ static void yx_candidate_tail_filter(yx_candidate_plan *plan, const yx_candidate
  * those fields no longer equal the exact inputs captured at its creation. */
 static bool yx_candidate_canonical_program(const YRX_PATTERN *pattern)
 {
-    return !pattern->rx_program || (pattern->rx_program_regexp &&
-        pattern->regexp && pattern->rx_program_modifiers == pattern->modifiers &&
-        strcmp(pattern->rx_program_regexp, pattern->regexp) == 0);
+    return !pattern->rx_program || (pattern->rx_program_regexp && pattern->regexp && pattern->rx_program_modifiers == pattern->modifiers &&
+                                    strcmp(pattern->rx_program_regexp, pattern->regexp) == 0);
 }
 
 /* YARA-X reports an exact atom's occurrence as a match without running a
@@ -13034,24 +10737,19 @@ static bool yx_candidate_exact_atoms(const yx_rx_program *program)
  * an occurrence is a necessary condition: the full scanner runs unchanged
  * once one is found and is skipped when there is none. Each branch and
  * encoding contributes one window atom; a hit compares the whole branch. */
-static bool yx_candidate_gate_plan(yx_candidate_plan *plan,
-                                   const YRX_PATTERN *pattern)
+static bool yx_candidate_gate_plan(yx_candidate_plan *plan, const YRX_PATTERN *pattern)
 {
     uint8_t *bytes = NULL;
     size_t *offsets = NULL;
-    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD |
-                               YX_MOD_DOTALL | YX_MOD_PRIVATE)) return false;
-    bool ascii = (pattern->modifiers & YX_MOD_ASCII) ||
-                 !(pattern->modifiers & YX_MOD_WIDE);
+    if (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_DOTALL | YX_MOD_PRIVATE)) return false;
+    bool ascii = (pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     int count = yx_ser_literal_branches(pattern, &bytes, &offsets);
     /* A chain of sub-patterns: an occurrence of its head's literal or
      * atoms is a necessary condition for each match. */
-    if (!count && (pattern->kind == YX_PATTERN_HEX || yx_ser_regex_chain(pattern)))
-        count = yx_ser_hex_chain_gate(pattern, &bytes, &offsets);
+    if (!count && (pattern->kind == YX_PATTERN_HEX || yx_ser_regex_chain(pattern))) count = yx_ser_hex_chain_gate(pattern, &bytes, &offsets);
     size_t total = count > 0 ? offsets[count] : 0;
-    bool ok = count > 0 && total <= SIZE_MAX / 4 &&
-              (size_t)count <= SIZE_MAX / sizeof(size_t) / 2 - 1;
+    bool ok = count > 0 && total <= SIZE_MAX / 4 && (size_t)count <= SIZE_MAX / sizeof(size_t) / 2 - 1;
     if (ok) {
         plan->gate_bytes = malloc(total * 3);
         plan->gate_offsets = malloc((2 * (size_t)count + 1) * sizeof(size_t));
@@ -13071,10 +10769,8 @@ static bool yx_candidate_gate_plan(yx_candidate_plan *plan,
                 if (encoding) needle[i * 2 + 1] = 0;
             }
             size_t start, window;
-            yx_candidate_select_window(needle, NULL, length * width, false,
-                                       &start, &window);
-            ok = window && yx_candidate_add_atom(plan, needle + start, window,
-                                                 start, (uint32_t)needles, 0);
+            yx_candidate_select_window(needle, NULL, length * width, false, &start, &window);
+            ok = window && yx_candidate_add_atom(plan, needle + start, window, start, (uint32_t)needles, 0);
             used += length * width;
             plan->gate_offsets[++needles] = used;
         }
@@ -13108,8 +10804,7 @@ static yx_candidate_plan *yx_candidate_hex_gate(const YRX_PATTERN *pattern)
 
 yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
 {
-    if (!pattern || pattern->archived_literal_prefilter.atoms ||
-        pattern->base64_archived_prefilter.present) return NULL;
+    if (!pattern || pattern->archived_literal_prefilter.atoms || pattern->base64_archived_prefilter.present) return NULL;
     if (pattern->rx_program) {
         /* FastVM sub-patterns keep YARA-X's own jump semantics (a trailing
          * `.{n,m}` jump never reaches the last input byte), which an anchored
@@ -13118,13 +10813,11 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
         bool fast_subs = false;
         for (size_t i = 0; i < pattern->rx_program->sub_count; ++i)
             if (pattern->rx_program->subs[i].flags & YX_RX_FAST) fast_subs = true;
-        if (pattern->kind == YX_PATTERN_REGEX && !fast_subs &&
-            !yx_candidate_exact_atoms(pattern->rx_program)) {
+        if (pattern->kind == YX_PATTERN_REGEX && !fast_subs && !yx_candidate_exact_atoms(pattern->rx_program)) {
             yx_candidate_plan *flat = calloc(1, sizeof(*flat));
             if (flat) {
                 flat->kind = YX_PATTERN_REGEX;
-                if (yx_candidate_canonical_program(pattern) &&
-                    yx_candidate_regex_plan(flat, pattern)) {
+                if (yx_candidate_canonical_program(pattern) && yx_candidate_regex_plan(flat, pattern)) {
                     flat->regex_source = pattern->regexp;
                     return flat;
                 }
@@ -13138,9 +10831,7 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
         if (pike_only && pattern->kind == YX_PATTERN_REGEX && pattern->regexp) {
             const uint8_t *literal;
             size_t literal_length;
-            if (yx_unmatchable_large_repeat(pattern->regexp) ||
-                yx_large_repeat_literal_alt(pattern->regexp, &literal, &literal_length))
-                return NULL;
+            if (yx_unmatchable_large_repeat(pattern->regexp) || yx_large_repeat_literal_alt(pattern->regexp, &literal, &literal_length)) return NULL;
         }
 #endif
         yx_candidate_plan *program_plan = calloc(1, sizeof(*program_plan));
@@ -13148,18 +10839,15 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
         program_plan->kind = pattern->kind;
         program_plan->program = true;
         yx_candidate_tail_shape shape;
-        bool shaped = pattern->kind == YX_PATTERN_REGEX &&
-            yx_candidate_parse_tail_shape(pattern, &shape);
+        bool shaped = pattern->kind == YX_PATTERN_REGEX && yx_candidate_parse_tail_shape(pattern, &shape);
         for (size_t sub = 0; sub < pattern->rx_program->sub_count; ++sub)
             for (size_t i = 0; i < pattern->rx_program->subs[sub].atom_count; ++i) {
                 const yx_rx_atom *atom = &pattern->rx_program->subs[sub].atoms[i];
-                if (!atom->length || !yx_candidate_add_atom(program_plan,
-                    atom->bytes, atom->length, 0, 0, 0)) {
+                if (!atom->length || !yx_candidate_add_atom(program_plan, atom->bytes, atom->length, 0, 0, 0)) {
                     yx_candidate_plan_free(program_plan);
                     return NULL;
                 }
-                if (shaped && !(pattern->rx_program->subs[sub].flags & YX_RX_WIDE))
-                    yx_candidate_tail_filter(program_plan, &shape, pattern->rx_program, atom);
+                if (shaped && !(pattern->rx_program->subs[sub].flags & YX_RX_WIDE)) yx_candidate_tail_filter(program_plan, &shape, pattern->rx_program, atom);
             }
         if (program_plan->atom_count) return program_plan;
         yx_candidate_plan_free(program_plan);
@@ -13167,18 +10855,14 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
     }
     /* The hex full scanners dispatch their probe search on the lazily
      * detected CPU features; detect them before scanners share the rules. */
-    if (pattern->kind == YX_PATTERN_HEX)
-        (void)xx_maskscan_backend_available(XX_MASKSCAN_BACKEND_AVX2);
-    if (pattern->kind == YX_PATTERN_HEX && pattern->hex_has_jump &&
-        pattern->hex_atoms && !pattern->bytes && pattern->length) {
+    if (pattern->kind == YX_PATTERN_HEX) (void)xx_maskscan_backend_available(XX_MASKSCAN_BACKEND_AVX2);
+    if (pattern->kind == YX_PATTERN_HEX && pattern->hex_has_jump && pattern->hex_atoms && !pattern->bytes && pattern->length) {
         yx_candidate_plan *anchored = yx_candidate_hex_anchor_plan(pattern);
         if (anchored) return anchored;
     }
-    if (pattern->kind != YX_PATTERN_REGEX && (!pattern->bytes || !pattern->length))
-        return yx_candidate_hex_gate(pattern);
+    if (pattern->kind != YX_PATTERN_REGEX && (!pattern->bytes || !pattern->length)) return yx_candidate_hex_gate(pattern);
     if (pattern->kind == YX_PATTERN_REGEX && pattern->regexp && !pattern->gap_head_regexp &&
-        !(pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD |
-                                 YX_MOD_PRIVATE | YX_MOD_DOTALL))) {
+        !(pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_PRIVATE | YX_MOD_DOTALL))) {
         /* One plain literal (Hir::as_literal_bytes): a literal sub-pattern
          * in YARA-X (compiler/mod.rs c_alternation_literal), scanned as text
          * behind its own gate. */
@@ -13188,7 +10872,10 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
         if (literal < 0) return NULL;
         if (literal == 1) {
             yx_candidate_plan *plan = calloc(1, sizeof(*plan));
-            if (!plan) { free(bytes); return NULL; }
+            if (!plan) {
+                free(bytes);
+                return NULL;
+            }
             plan->kind = YX_PATTERN_REGEX;
             plan->regex_source = pattern->regexp;
             plan->literal = bytes;
@@ -13216,18 +10903,14 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
     bool ok = false;
     if (pattern->kind == YX_PATTERN_TEXT) {
         if (pattern->modifiers & (YX_MOD_BASE64 | YX_MOD_BASE64WIDE)) {
-            plan->base64 = yx_base64_candidates_build(pattern,
-                                                       &plan->base64_count);
+            plan->base64 = yx_base64_candidates_build(pattern, &plan->base64_count);
             ok = plan->base64 != NULL;
             for (size_t i = 0; ok && i < plan->base64_count; ++i) {
                 size_t start, length;
                 /* YARA-X's own atom: where it lies decides which data
                  * verify_base64 is asked about. */
-                ok = yx_ser_best_atom(plan->base64[i].needle,
-                    plan->base64[i].length, &start, &length) > 0;
-                ok = ok && length && yx_candidate_add_atom(plan,
-                    plan->base64[i].needle + start, length, start,
-                    (uint32_t)i, 0);
+                ok = yx_ser_best_atom(plan->base64[i].needle, plan->base64[i].length, &start, &length) > 0;
+                ok = ok && length && yx_candidate_add_atom(plan, plan->base64[i].needle + start, length, start, (uint32_t)i, 0);
             }
         } else ok = yx_candidate_text_plan(plan, pattern);
     } else if (pattern->kind == YX_PATTERN_HEX) {
@@ -13275,14 +10958,11 @@ void yx_candidate_plan_free(yx_candidate_plan *plan)
  * regex_source on this pattern's own regexp. NULL for other plan shapes
  * (text variants, base64) and on allocation failure; the caller then
  * builds the plan itself. */
-yx_candidate_plan *yx_candidate_plan_clone(const yx_candidate_plan *plan,
-                                           const YRX_PATTERN *pattern)
+yx_candidate_plan *yx_candidate_plan_clone(const yx_candidate_plan *plan, const YRX_PATTERN *pattern)
 {
     yx_candidate_plan *copy;
-    if (!plan || plan->kind != YX_PATTERN_REGEX || plan->variant_count ||
-        plan->base64 || plan->base64_count || !pattern ||
-        pattern->kind != YX_PATTERN_REGEX || !pattern->regexp ||
-        (plan->gate && (!plan->gate_offsets || !plan->gate_bytes)))
+    if (!plan || plan->kind != YX_PATTERN_REGEX || plan->variant_count || plan->base64 || plan->base64_count || !pattern || pattern->kind != YX_PATTERN_REGEX ||
+        !pattern->regexp || (plan->gate && (!plan->gate_offsets || !plan->gate_bytes)))
         return NULL;
     copy = calloc(1, sizeof(*copy));
     if (!copy) return NULL;
@@ -13327,8 +11007,7 @@ size_t yx_candidate_plan_atom_count(const yx_candidate_plan *plan)
     return plan ? plan->atom_count : 0;
 }
 
-const yx_candidate_atom *yx_candidate_plan_atom(const yx_candidate_plan *plan,
-                                                size_t index)
+const yx_candidate_atom *yx_candidate_plan_atom(const yx_candidate_plan *plan, size_t index)
 {
     return plan && index < plan->atom_count ? &plan->atoms[index] : NULL;
 }
@@ -13341,19 +11020,16 @@ static bool yx_scan_deadline_expired(const yx_scan_deadline *deadline)
     return deadline && deadline->enabled && deadline->expired;
 }
 
-static size_t yx_candidate_limit(const YRX_PATTERN *pattern, size_t limit,
-                                 bool fast_scan)
+static size_t yx_candidate_limit(const YRX_PATTERN *pattern, size_t limit, bool fast_scan)
 {
-    if (fast_scan && pattern->fast_count_enabled &&
-        pattern->fast_count_threshold < limit) limit = pattern->fast_count_threshold;
+    if (fast_scan && pattern->fast_count_enabled && pattern->fast_count_threshold < limit) limit = pattern->fast_count_threshold;
     if (fast_scan && !pattern->fast_scan_needs_all && limit > 1) limit = 1;
     return limit;
 }
 
 /* Keep the earliest unique offsets even when differently positioned atoms
  * reach their candidates out of match-start order. */
-static int yx_candidate_record(YRX_PATTERN *pattern, const yx_candidate_plan *plan,
-    size_t size, size_t start, size_t length, int16_t key, size_t limit)
+static int yx_candidate_record(YRX_PATTERN *pattern, const yx_candidate_plan *plan, size_t size, size_t start, size_t length, int16_t key, size_t limit)
 {
     size_t left = 0, right = pattern->match_count;
     /* Candidates mostly arrive in increasing start order: append. */
@@ -13370,22 +11046,17 @@ static int yx_candidate_record(YRX_PATTERN *pattern, const yx_candidate_plan *pl
     }
     if (left < pattern->match_count && pattern->matches[left].offset == start) {
         size_t atom_width = pattern->length < 4 ? pattern->length : 4;
-        if (pattern->global_atom_count_hint && pattern->global_atom_count_hint <= 4)
-            atom_width = pattern->global_atom_count_hint;
-        bool longest = plan->kind == YX_PATTERN_TEXT && !plan->base64 &&
-            (pattern->modifiers & YX_MOD_WIDE) &&
-            ((pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE)) &&
-            (pattern->length >= 4 || (atom_width && size >= 15 + atom_width &&
-                                      pattern->global_atom_count_hint <= 16));
+        if (pattern->global_atom_count_hint && pattern->global_atom_count_hint <= 4) atom_width = pattern->global_atom_count_hint;
+        bool longest = plan->kind == YX_PATTERN_TEXT && !plan->base64 && (pattern->modifiers & YX_MOD_WIDE) &&
+                       ((pattern->modifiers & YX_MOD_ASCII) || !(pattern->modifiers & YX_MOD_WIDE)) &&
+                       (pattern->length >= 4 || (atom_width && size >= 15 + atom_width && pattern->global_atom_count_hint <= 16));
         YRX_MATCH *current = &pattern->matches[left];
-        if (longest ? length > current->length : length < current->length)
-            *current = (YRX_MATCH){start, length, key};
+        if (longest ? length > current->length : length < current->length) *current = (YRX_MATCH){start, length, key};
         return 1;
     }
     if (limit && left >= limit) return 1;
     if (!yx_add_match_key(pattern, start, length, 0, key)) return 0;
-    memmove(pattern->matches + left + 1, pattern->matches + left,
-            (pattern->match_count - left - 1) * sizeof(*pattern->matches));
+    memmove(pattern->matches + left + 1, pattern->matches + left, (pattern->match_count - left - 1) * sizeof(*pattern->matches));
     pattern->matches[left] = (YRX_MATCH){start, length, key};
     if (limit && pattern->match_count > limit) pattern->match_count = limit;
     return 1;
@@ -13394,35 +11065,27 @@ static int yx_candidate_record(YRX_PATTERN *pattern, const yx_candidate_plan *pl
 /* A hex anchor behind a variable-length head: every start the occurrence
  * allows, lowest first, gets the per-start checks and walk of the hex path
  * of yx_candidate_verify below. */
-static YRX_RESULT yx_candidate_verify_spread(YRX_PATTERN *pattern,
-    const yx_candidate_plan *plan, const yx_candidate_atom *atom,
-    size_t atom_position, const uint8_t *data, size_t size, size_t limit)
+static YRX_RESULT yx_candidate_verify_spread(YRX_PATTERN *pattern, const yx_candidate_plan *plan, const yx_candidate_atom *atom, size_t atom_position,
+                                             const uint8_t *data, size_t size, size_t limit)
 {
     if (atom_position < atom->backtrack) return YRX_SUCCESS;
     size_t high = atom_position - atom->backtrack;
     size_t start = high > atom->spread ? high - atom->spread : 0;
     for (;; ++start) {
-        if (start < size && (!pattern->fixed_at_enabled ||
-                             start == pattern->fixed_at_offset) &&
-            !(limit && pattern->match_count >= limit &&
-              start > pattern->matches[pattern->match_count - 1].offset) &&
-            pattern->length <= size - start) {
+        if (start < size && (!pattern->fixed_at_enabled || start == pattern->fixed_at_offset) &&
+            !(limit && pattern->match_count >= limit && start > pattern->matches[pattern->match_count - 1].offset) && pattern->length <= size - start) {
             size_t length = SIZE_MAX;
-            yx_hex_walk(data, size, start, start, pattern->hex_atoms,
-                pattern->hex_atom_count, 0, NULL, &length, pattern->deadline);
+            yx_hex_walk(data, size, start, start, pattern->hex_atoms, pattern->hex_atom_count, 0, NULL, &length, pattern->deadline);
             if (yx_scan_deadline_expired(pattern->deadline)) return YRX_SCAN_TIMEOUT;
-            if (length != SIZE_MAX && !yx_candidate_record(pattern, plan, size,
-                                                            start, length, -1, limit))
-                return YRX_SCAN_ERROR;
+            if (length != SIZE_MAX && !yx_candidate_record(pattern, plan, size, start, length, -1, limit)) return YRX_SCAN_ERROR;
         }
         if (start == high) break;
     }
     return YRX_SUCCESS;
 }
 
-YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
-    const yx_candidate_plan *plan, uint32_t tag, size_t atom_position,
-    const uint8_t *data, size_t size, size_t limit, bool fast_scan)
+YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern, const yx_candidate_plan *plan, uint32_t tag, size_t atom_position, const uint8_t *data, size_t size, size_t limit,
+                               bool fast_scan)
 {
     if (!pattern || !plan || tag >= plan->atom_count) return YRX_INVALID_ARGUMENT;
     if (yx_scan_deadline_poll(pattern->deadline)) return YRX_SCAN_TIMEOUT;
@@ -13432,23 +11095,16 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
          * Every match starts at such an occurrence, so a regexp gate keeps
          * their starts for its search (up to the retained-candidate bound). */
         bool keep = plan->kind == YX_PATTERN_REGEX && plan->regex;
-        if ((pattern->candidate_hits_overflow &&
-             (!keep || pattern->candidate_gate_dropped)) ||
-            atom_position < atom->backtrack)
-            return YRX_SUCCESS;
+        if ((pattern->candidate_hits_overflow && (!keep || pattern->candidate_gate_dropped)) || atom_position < atom->backtrack) return YRX_SUCCESS;
         size_t start = atom_position - atom->backtrack;
         size_t first = plan->gate_offsets[atom->variant];
         size_t length = plan->gate_offsets[atom->variant + 1] - first;
-        if (!(start <= size && length <= size - start &&
-              memcmp(data + start, plan->gate_bytes + first, length) == 0))
-            return YRX_SUCCESS;
+        if (!(start <= size && length <= size - start && memcmp(data + start, plan->gate_bytes + first, length) == 0)) return YRX_SUCCESS;
         pattern->candidate_hits_overflow = true;
         if (!keep || pattern->candidate_gate_dropped) return YRX_SUCCESS;
         if (pattern->candidate_hit_count == pattern->candidate_hit_capacity) {
-            size_t capacity = pattern->candidate_hit_capacity ?
-                pattern->candidate_hit_capacity * 2 : 32;
-            yx_rx_candidate *grown = capacity <= 1000000 ?
-                realloc(pattern->candidate_hits, capacity * sizeof(*grown)) : NULL;
+            size_t capacity = pattern->candidate_hit_capacity ? pattern->candidate_hit_capacity * 2 : 32;
+            yx_rx_candidate *grown = capacity <= 1000000 ? realloc(pattern->candidate_hits, capacity * sizeof(*grown)) : NULL;
             if (!grown) {
                 pattern->candidate_gate_dropped = true;
                 return YRX_SUCCESS;
@@ -13456,8 +11112,7 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
             pattern->candidate_hits = grown;
             pattern->candidate_hit_capacity = capacity;
         }
-        pattern->candidate_hits[pattern->candidate_hit_count++] =
-            (yx_rx_candidate){tag, start};
+        pattern->candidate_hits[pattern->candidate_hit_count++] = (yx_rx_candidate){tag, start};
         return YRX_SUCCESS;
     }
     if (plan->program) {
@@ -13472,8 +11127,7 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
         }
         /* The program's atom windows (yx_rx_process skips such hits). The
          * plan's tags are the program's flattened atom indices. */
-        if (!yx_rx_atom_possible(pattern->rx_program, tag, data, size, atom_position))
-            return YRX_SUCCESS;
+        if (!yx_rx_atom_possible(pattern->rx_program, tag, data, size, atom_position)) return YRX_SUCCESS;
         /* Bound retained candidate memory independently of the reporting
          * cap; a dense atom stream uses the existing full scanner instead. */
         if (pattern->candidate_hit_count == 1000000) {
@@ -13481,34 +11135,26 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
             return YRX_SUCCESS;
         }
         if (pattern->candidate_hit_count == pattern->candidate_hit_capacity) {
-            size_t capacity = pattern->candidate_hit_capacity ?
-                pattern->candidate_hit_capacity * 2 : 32;
+            size_t capacity = pattern->candidate_hit_capacity ? pattern->candidate_hit_capacity * 2 : 32;
             if (capacity > 1000000) capacity = 1000000;
-            yx_rx_candidate *grown = realloc(pattern->candidate_hits,
-                                               capacity * sizeof(*grown));
+            yx_rx_candidate *grown = realloc(pattern->candidate_hits, capacity * sizeof(*grown));
             if (!grown) return YRX_SCAN_ERROR;
             pattern->candidate_hits = grown;
             pattern->candidate_hit_capacity = capacity;
         }
-        pattern->candidate_hits[pattern->candidate_hit_count++] =
-            (yx_rx_candidate){tag, atom_position};
+        pattern->candidate_hits[pattern->candidate_hit_count++] = (yx_rx_candidate){tag, atom_position};
         return YRX_SUCCESS;
     }
-    if (atom->spread)
-        return yx_candidate_verify_spread(pattern, plan, atom, atom_position, data,
-            size, yx_candidate_limit(pattern, limit, fast_scan));
+    if (atom->spread) return yx_candidate_verify_spread(pattern, plan, atom, atom_position, data, size, yx_candidate_limit(pattern, limit, fast_scan));
     if (atom_position < atom->backtrack) return YRX_SUCCESS;
     size_t start = atom_position - atom->backtrack, length = 0;
     int16_t key = -1;
-    if (start >= size || (pattern->fixed_at_enabled &&
-                          start != pattern->fixed_at_offset)) return YRX_SUCCESS;
+    if (start >= size || (pattern->fixed_at_enabled && start != pattern->fixed_at_offset)) return YRX_SUCCESS;
     limit = yx_candidate_limit(pattern, limit, fast_scan);
-    if (limit && pattern->match_count >= limit &&
-        start > pattern->matches[pattern->match_count - 1].offset) return YRX_SUCCESS;
+    if (limit && pattern->match_count >= limit && start > pattern->matches[pattern->match_count - 1].offset) return YRX_SUCCESS;
     bool matched = false;
     if (plan->base64) {
-        int verified = yx_base64_candidate_verify(&plan->base64[atom->variant],
-                                                  data, size, start, &length);
+        int verified = yx_base64_candidate_verify(&plan->base64[atom->variant], data, size, start, &length);
         if (verified < 0) return YRX_SCAN_ERROR;
         matched = verified != 0;
     } else if (plan->kind == YX_PATTERN_TEXT) {
@@ -13519,12 +11165,12 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
         matched = true;
         for (size_t i = 0; i < length; ++i) {
             uint8_t expected = variant->needle[i] ^ atom->xor_key;
-            if (nocase ? yx_fold(data[start + i]) != yx_fold(expected) :
-                         data[start + i] != expected) { matched = false; break; }
+            if (nocase ? yx_fold(data[start + i]) != yx_fold(expected) : data[start + i] != expected) {
+                matched = false;
+                break;
+            }
         }
-        if (matched && (pattern->modifiers & YX_MOD_FULLWORD))
-            matched = yx_fullword(data, size, start, length, variant->wide,
-                                  atom->xor_key) != 0;
+        if (matched && (pattern->modifiers & YX_MOD_FULLWORD)) matched = yx_fullword(data, size, start, length, variant->wide, atom->xor_key) != 0;
         if (pattern->modifiers & YX_MOD_XOR) key = atom->xor_key;
     } else if (plan->kind == YX_PATTERN_HEX) {
         if (pattern->length > size - start) return YRX_SUCCESS;
@@ -13533,8 +11179,7 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
             matched = yx_hex_equal(pattern, data + start) != 0;
         } else {
             length = SIZE_MAX;
-            yx_hex_walk(data, size, start, start, pattern->hex_atoms,
-                pattern->hex_atom_count, 0, NULL, &length, pattern->deadline);
+            yx_hex_walk(data, size, start, start, pattern->hex_atoms, pattern->hex_atom_count, 0, NULL, &length, pattern->deadline);
             matched = length != SIZE_MAX;
         }
     } else {
@@ -13544,25 +11189,20 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern,
          * the native adapter's INT32_MAX whole-subject limit on large files. */
         size_t subject_size = size - start;
         if (subject_size > plan->regex_maximum) subject_size = plan->regex_maximum;
-        int result = yx_pcre_match_deadline(pattern, plan->regex, data + start,
-                                            subject_size, 0, PCRE2_ANCHORED, matches);
+        int result = yx_pcre_match_deadline(pattern, plan->regex, data + start, subject_size, 0, PCRE2_ANCHORED, matches);
         if (result >= 0) {
             PCRE2_SIZE *vector = pcre2_get_ovector_pointer(matches);
             length = vector[1] - vector[0];
             matched = vector[0] == 0 && length != 0;
         }
         pcre2_match_data_free(matches);
-        if (result < 0 && result != PCRE2_ERROR_NOMATCH)
-            return yx_scan_deadline_reached(pattern->deadline) ?
-                YRX_SCAN_TIMEOUT : YRX_SCAN_ERROR;
-        if (matched && (pattern->modifiers & YX_MOD_FULLWORD))
-            matched = yx_fullword(data, size, start, length, false, 0) != 0;
+        if (result < 0 && result != PCRE2_ERROR_NOMATCH) return yx_scan_deadline_reached(pattern->deadline) ? YRX_SCAN_TIMEOUT : YRX_SCAN_ERROR;
+        if (matched && (pattern->modifiers & YX_MOD_FULLWORD)) matched = yx_fullword(data, size, start, length, false, 0) != 0;
     }
     /* A walk or regexp cut short by the deadline left it expired; the
      * verifications above cannot otherwise be incomplete. */
     if (yx_scan_deadline_expired(pattern->deadline)) return YRX_SCAN_TIMEOUT;
-    if (matched && !yx_candidate_record(pattern, plan, size, start, length,
-                                         key, limit)) return YRX_SCAN_ERROR;
+    if (matched && !yx_candidate_record(pattern, plan, size, start, length, key, limit)) return YRX_SCAN_ERROR;
     return YRX_SUCCESS;
 }
 
@@ -13572,8 +11212,7 @@ static int yx_gate_start_compare(const void *left, const void *right)
     return a->position < b->position ? -1 : a->position > b->position;
 }
 
-YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *plan,
-    const uint8_t *data, size_t size, size_t limit, bool fast_scan)
+YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *plan, const uint8_t *data, size_t size, size_t limit, bool fast_scan)
 {
     if (plan->gate) {
         /* No whole branch occurred: the full scanner has no match to find.
@@ -13581,8 +11220,7 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
          * (yx_scan_pattern_fixed_at in xxyara.c); its regexp search visits
          * only the recorded branch starts (yx_scan_regex_buffer). */
         bool fired = pattern->candidate_hits_overflow;
-        bool starts = fired && !pattern->candidate_gate_dropped &&
-                      pattern->candidate_hit_count;
+        bool starts = fired && !pattern->candidate_gate_dropped && pattern->candidate_hit_count;
         pattern->candidate_hits_overflow = false;
         pattern->candidate_gate_dropped = false;
         if (starts) {
@@ -13590,19 +11228,15 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
             yx_rx_candidate *hits = pattern->candidate_hits;
             size_t count = pattern->candidate_hit_count, kept = 0;
             bool sorted = true;
-            for (size_t i = 1; i < count && sorted; ++i)
-                sorted = hits[i - 1].position < hits[i].position;
-            if (!sorted)
-                qsort(hits, count, sizeof(*hits), yx_gate_start_compare);
+            for (size_t i = 1; i < count && sorted; ++i) sorted = hits[i - 1].position < hits[i].position;
+            if (!sorted) qsort(hits, count, sizeof(*hits), yx_gate_start_compare);
             for (size_t i = 0; i < count; ++i)
-                if (!kept || hits[kept - 1].position != hits[i].position)
-                    hits[kept++] = hits[i];
+                if (!kept || hits[kept - 1].position != hits[i].position) hits[kept++] = hits[i];
             pattern->candidate_hit_count = kept;
         }
         YRX_RESULT result = YRX_SUCCESS;
         if (fired && !(pattern->fixed_at_enabled && pattern->fixed_at_offset >= size)) {
-            if (pattern->fixed_at_enabled && limit && limit <= pattern->fixed_at_offset)
-                limit = pattern->fixed_at_offset + 1;
+            if (pattern->fixed_at_enabled && limit && limit <= pattern->fixed_at_offset) limit = pattern->fixed_at_offset + 1;
             pattern->candidate_gate_starts = starts;
             result = yx_scan_pattern(pattern, data, size, limit, fast_scan);
             pattern->candidate_gate_starts = false;
@@ -13610,8 +11244,7 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
         free(pattern->candidate_hits);
         pattern->candidate_hits = NULL;
         pattern->candidate_hit_count = pattern->candidate_hit_capacity = 0;
-        if (!fired || (pattern->fixed_at_enabled && pattern->fixed_at_offset >= size))
-            return YRX_SUCCESS;
+        if (!fired || (pattern->fixed_at_enabled && pattern->fixed_at_offset >= size)) return YRX_SUCCESS;
         if (result != YRX_SUCCESS || !pattern->fixed_at_enabled) return result;
         size_t kept = 0;
         for (size_t i = 0; i < pattern->match_count; ++i)
@@ -13624,9 +11257,7 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
     }
     if (plan->program) {
         size_t scan_limit = limit;
-        if (pattern->fixed_at_enabled && scan_limit &&
-            scan_limit <= pattern->fixed_at_offset)
-            scan_limit = pattern->fixed_at_offset + 1;
+        if (pattern->fixed_at_enabled && scan_limit && scan_limit <= pattern->fixed_at_offset) scan_limit = pattern->fixed_at_offset + 1;
         if (pattern->candidate_hits_overflow) {
             YRX_RESULT result = yx_scan_pattern(pattern, data, size, scan_limit, fast_scan);
             free(pattern->candidate_hits);
@@ -13636,22 +11267,16 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
             if (result != YRX_SUCCESS) return result;
         } else {
             yx_rx_match_list list = {0};
-            yx_rx_order order = {pattern->rx_teddy, pattern->rx_teddy_minimum,
-                                 pattern->rx_order_ids, pattern->rx_order_buckets};
+            yx_rx_order order = {pattern->rx_teddy, pattern->rx_teddy_minimum, pattern->rx_order_ids, pattern->rx_order_buckets};
             list.limit = yx_candidate_limit(pattern, scan_limit, fast_scan);
-            bool ok = yx_rx_scan_from_candidates(pattern->rx_program, data, size,
-                pattern->deadline, &list,
-                pattern->rx_teddy && pattern->rx_order_ids ? &order : NULL,
-                pattern->candidate_hits, pattern->candidate_hit_count);
+            bool ok = yx_rx_scan_from_candidates(pattern->rx_program, data, size, pattern->deadline, &list, pattern->rx_teddy && pattern->rx_order_ids ? &order : NULL,
+                                                 pattern->candidate_hits, pattern->candidate_hit_count);
             free(pattern->candidate_hits);
             pattern->candidate_hits = NULL;
             pattern->candidate_hit_count = pattern->candidate_hit_capacity = 0;
-            for (size_t i = 0; ok && i < list.count; ++i)
-                ok = yx_add_match(pattern, list.items[i].start,
-                    list.items[i].end - list.items[i].start, list.limit) != 0;
+            for (size_t i = 0; ok && i < list.count; ++i) ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, list.limit) != 0;
             yx_rx_match_list_free(&list);
-            if (!ok) return yx_scan_deadline_reached(pattern->deadline) ?
-                                YRX_SCAN_TIMEOUT : YRX_SCAN_ERROR;
+            if (!ok) return yx_scan_deadline_reached(pattern->deadline) ? YRX_SCAN_TIMEOUT : YRX_SCAN_ERROR;
         }
         if (pattern->fixed_at_enabled) {
             size_t kept = 0;
@@ -13664,6 +11289,5 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
         }
     }
     yx_sort_unique_limit(pattern, yx_candidate_limit(pattern, limit, fast_scan));
-    return yx_scan_deadline_reached(pattern->deadline) ?
-               YRX_SCAN_TIMEOUT : YRX_SUCCESS;
+    return yx_scan_deadline_reached(pattern->deadline) ? YRX_SCAN_TIMEOUT : YRX_SUCCESS;
 }

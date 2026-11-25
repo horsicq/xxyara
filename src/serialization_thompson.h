@@ -60,8 +60,15 @@
 #include "native_regex.h"
 
 typedef enum {
-    YX_TR_EMPTY, YX_TR_LITERAL, YX_TR_CLASS, YX_TR_LOOK,
-    YX_TR_CONCAT, YX_TR_ALT, YX_TR_REPEAT, YX_TR_CAPTURE, YX_TR_SCALAR_CLASS
+    YX_TR_EMPTY,
+    YX_TR_LITERAL,
+    YX_TR_CLASS,
+    YX_TR_LOOK,
+    YX_TR_CONCAT,
+    YX_TR_ALT,
+    YX_TR_REPEAT,
+    YX_TR_CAPTURE,
+    YX_TR_SCALAR_CLASS
 } yx_tr_kind;
 typedef struct yx_tr_node {
     yx_tr_kind kind;
@@ -81,7 +88,9 @@ typedef struct yx_tr_node {
     size_t start, end;
 } yx_tr_node;
 static bool yx_tr_unbounded(const yx_tr_node *node)
-{ return node->maximum == UINT32_MAX && !node->finite_maximum; }
+{
+    return node->maximum == UINT32_MAX && !node->finite_maximum;
+}
 typedef struct {
     const uint8_t *text;
     size_t at, length, depth;
@@ -116,17 +125,22 @@ static bool yx_tr_zero_width(const yx_tr_node *node)
 {
     if (!node) return false;
     if (node->kind == YX_TR_EMPTY || node->kind == YX_TR_LOOK) return true;
-    if (node->kind != YX_TR_CONCAT && node->kind != YX_TR_ALT &&
-        node->kind != YX_TR_CAPTURE && node->kind != YX_TR_REPEAT) return false;
+    if (node->kind != YX_TR_CONCAT && node->kind != YX_TR_ALT && node->kind != YX_TR_CAPTURE && node->kind != YX_TR_REPEAT) return false;
     for (size_t i = 0; i < node->count; ++i)
         if (!yx_tr_zero_width(node->children[i])) return false;
     return true;
 }
 static bool yx_tr_child(yx_tr_parser *p, yx_tr_node *node, yx_tr_node *child)
 {
-    if (!node || !child || node->count >= 65535) { p->failed = true; return false; }
+    if (!node || !child || node->count >= 65535) {
+        p->failed = true;
+        return false;
+    }
     yx_tr_node **items = realloc(node->children, (node->count + 1) * sizeof(*items));
-    if (!items) { p->oom = true; return false; }
+    if (!items) {
+        p->oom = true;
+        return false;
+    }
     node->children = items;
     node->children[node->count++] = child;
     node->has_look |= child->has_look;
@@ -141,16 +155,26 @@ static bool yx_tr_join_child(yx_tr_parser *p, yx_tr_node *node, yx_tr_node *chil
             if (!yx_tr_join_child(p, node, child->children[i])) return false;
             child->children[i] = NULL;
         }
-        child->count = 0; yx_tr_destroy(child); return true;
+        child->count = 0;
+        yx_tr_destroy(child);
+        return true;
     }
-    if (node->kind == YX_TR_CONCAT && node->count && child->kind == YX_TR_LITERAL &&
-        node->children[node->count - 1]->kind == YX_TR_LITERAL) {
+    if (node->kind == YX_TR_CONCAT && node->count && child->kind == YX_TR_LITERAL && node->children[node->count - 1]->kind == YX_TR_LITERAL) {
         yx_tr_node *previous = node->children[node->count - 1];
-        if (child->length > SIZE_MAX - previous->length) { p->oom = true; return false; }
+        if (child->length > SIZE_MAX - previous->length) {
+            p->oom = true;
+            return false;
+        }
         uint8_t *bytes = realloc(previous->bytes, previous->length + child->length);
-        if (!bytes) { p->oom = true; return false; }
+        if (!bytes) {
+            p->oom = true;
+            return false;
+        }
         memcpy(bytes + previous->length, child->bytes, child->length);
-        previous->bytes = bytes; previous->length += child->length; yx_tr_destroy(child); return true;
+        previous->bytes = bytes;
+        previous->length += child->length;
+        yx_tr_destroy(child);
+        return true;
     }
     return yx_tr_child(p, node, child);
 }
@@ -158,7 +182,10 @@ static yx_tr_node *yx_tr_finish_concat(yx_tr_node *node)
 {
     if (!node->count) node->kind = YX_TR_EMPTY;
     else if (node->count == 1) {
-        yx_tr_node *child = node->children[0]; node->count = 0; yx_tr_destroy(node); return child;
+        yx_tr_node *child = node->children[0];
+        node->count = 0;
+        yx_tr_destroy(node);
+        return child;
     }
     return node;
 }
@@ -166,41 +193,47 @@ static bool yx_tr_equal(const yx_tr_node *a, const yx_tr_node *b)
 {
     /* Capture indices affect upstream HIR equality. Conservatively avoid
      * factoring captures, whose numbering is unnecessary for matching. */
-    if (a->kind == YX_TR_CAPTURE || a->kind != b->kind || a->count != b->count ||
-        a->length != b->length || a->minimum != b->minimum || a->maximum != b->maximum ||
-        a->finite_maximum != b->finite_maximum || a->greedy != b->greedy || a->look != b->look || a->unicode_class != b->unicode_class ||
-        a->gap_split != b->gap_split ||
-        memcmp(a->bitmap, b->bitmap, 32) || (a->length && memcmp(a->bytes, b->bytes, a->length *
-            (a->kind == YX_TR_SCALAR_CLASS ? sizeof(yx_re_range) : 1)))) return false;
+    if (a->kind == YX_TR_CAPTURE || a->kind != b->kind || a->count != b->count || a->length != b->length || a->minimum != b->minimum || a->maximum != b->maximum ||
+        a->finite_maximum != b->finite_maximum || a->greedy != b->greedy || a->look != b->look || a->unicode_class != b->unicode_class || a->gap_split != b->gap_split ||
+        memcmp(a->bitmap, b->bitmap, 32) || (a->length && memcmp(a->bytes, b->bytes, a->length * (a->kind == YX_TR_SCALAR_CLASS ? sizeof(yx_re_range) : 1))))
+        return false;
     for (size_t i = 0; i < a->count; ++i)
         if (!yx_tr_equal(a->children[i], b->children[i])) return false;
     return true;
 }
 static void yx_tr_set(uint8_t bitmap[32], unsigned byte)
-{ bitmap[byte >> 3] |= (uint8_t)(1u << (byte & 7)); }
+{
+    bitmap[byte >> 3] |= (uint8_t)(1u << (byte & 7));
+}
 static bool yx_tr_has(const uint8_t bitmap[32], unsigned byte)
-{ return (bitmap[byte >> 3] & (uint8_t)(1u << (byte & 7))) != 0; }
+{
+    return (bitmap[byte >> 3] & (uint8_t)(1u << (byte & 7))) != 0;
+}
 static yx_tr_node *yx_tr_byte(yx_tr_parser *p, unsigned byte)
 {
-    yx_tr_node *node = yx_tr_new(p, p->nocase && byte < 128 && isalpha((int)byte) ?
-                                  YX_TR_CLASS : YX_TR_LITERAL);
+    yx_tr_node *node = yx_tr_new(p, p->nocase && byte < 128 && isalpha((int)byte) ? YX_TR_CLASS : YX_TR_LITERAL);
     if (!node) return NULL;
     if (node->kind == YX_TR_CLASS) {
         yx_tr_set(node->bitmap, (unsigned)tolower((int)byte));
         yx_tr_set(node->bitmap, (unsigned)toupper((int)byte));
     } else {
         node->bytes = malloc(1);
-        if (!node->bytes) { p->oom = true; yx_tr_destroy(node); return NULL; }
-        node->bytes[0] = (uint8_t)byte; node->length = 1;
+        if (!node->bytes) {
+            p->oom = true;
+            yx_tr_destroy(node);
+            return NULL;
+        }
+        node->bytes[0] = (uint8_t)byte;
+        node->length = 1;
     }
     return node;
 }
-static bool yx_tr_escape(yx_tr_parser *p, uint8_t bitmap[32], unsigned *value,
-                          bool *is_class, uint8_t *look)
+static bool yx_tr_escape(yx_tr_parser *p, uint8_t bitmap[32], unsigned *value, bool *is_class, uint8_t *look)
 {
     if (p->at == p->length) return false;
     unsigned c = p->text[p->at++];
-    *is_class = false; *look = 0;
+    *is_class = false;
+    *look = 0;
     /* regex-syntax permits superfluous escapes only for ASCII characters.
      * A raw UTF-8 scalar remains valid without a preceding backslash. */
     if (p->condition_only && c >= 128) return false;
@@ -215,27 +248,30 @@ static bool yx_tr_escape(yx_tr_parser *p, uint8_t bitmap[32], unsigned *value,
             else return false;
             v = v * 16 + d;
         }
-        *value = v; return true;
+        *value = v;
+        return true;
     }
     if (c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S') {
         unsigned low = (unsigned)tolower((int)c);
         for (unsigned b = 0; b < 256; ++b) {
-            bool match = low == 'd' ? (b >= '0' && b <= '9') :
-                low == 'w' ? ((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') ||
-                              (b >= 'a' && b <= 'z') || b == '_') :
-                b == ' ' || (b >= 9 && b <= 13);
+            bool match = low == 'd'   ? (b >= '0' && b <= '9')
+                         : low == 'w' ? ((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_')
+                                      : b == ' ' || (b >= 9 && b <= 13);
             if ((c == low) == match) yx_tr_set(bitmap, b);
         }
-        *is_class = true; return true;
+        *is_class = true;
+        return true;
     }
-    if (c == 'b' && (p->warning_only || p->condition_only) &&
-        p->at < p->length && p->text[p->at] == '{') {
+    if (c == 'b' && (p->warning_only || p->condition_only) && p->at < p->length && p->text[p->at] == '{') {
         static const char *const boundaries[] = {"{start}", "{end}", "{start-half}", "{end-half}"};
         for (size_t i = 0; i < sizeof(boundaries) / sizeof(*boundaries); ++i) {
             size_t n = strlen(boundaries[i]);
             if (n <= p->length - p->at && !memcmp(p->text + p->at, boundaries[i], n)) {
                 p->at += n;
-                if (p->condition_only) { *look = (uint8_t)(24 + i); return true; }
+                if (p->condition_only) {
+                    *look = (uint8_t)(24 + i);
+                    return true;
+                }
                 break;
             }
         }
@@ -244,11 +280,15 @@ static bool yx_tr_escape(yx_tr_parser *p, uint8_t bitmap[32], unsigned *value,
         *look = c == 'b' ? 12 : c == 'B' ? 13 : c == 'A' ? 10 : 11;
         return true;
     }
-    if (c == 'n') c = '\n'; else if (c == 'r') c = '\r';
-    else if (c == 't') c = '\t'; else if (c == 'f') c = '\f';
-    else if (c == 'v') c = '\v'; else if (c == 'a') c = 7;
+    if (c == 'n') c = '\n';
+    else if (c == 'r') c = '\r';
+    else if (c == 't') c = '\t';
+    else if (c == 'f') c = '\f';
+    else if (c == 'v') c = '\v';
+    else if (c == 'a') c = 7;
     else if (isalnum((int)c)) return false;
-    *value = c; return true;
+    *value = c;
+    return true;
 }
 static yx_tr_node *yx_tr_expression(yx_tr_parser *p);
 static void yx_tr_repeat_space(yx_tr_parser *p)
@@ -259,10 +299,9 @@ static void yx_tr_repeat_space(yx_tr_parser *p)
         if (*s == 32 || (*s >= 9 && *s <= 13)) width = 1;
         else if (left >= 2 && s[0] == 0xc2 && (s[1] == 0x85 || s[1] == 0xa0)) width = 2;
         else if (left >= 3 && ((s[0] == 0xe1 && s[1] == 0x9a && s[2] == 0x80) ||
-            (s[0] == 0xe2 && s[1] == 0x80 && ((s[2] >= 0x80 && s[2] <= 0x8a) ||
-             s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf)) ||
-            (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) ||
-            (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80))) width = 3;
+                               (s[0] == 0xe2 && s[1] == 0x80 && ((s[2] >= 0x80 && s[2] <= 0x8a) || s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf)) ||
+                               (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) || (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80)))
+            width = 3;
         if (!width) break;
         p->at += width;
     }
@@ -279,26 +318,33 @@ static void yx_tr_skip_space(yx_tr_parser *p)
 /* Condition regexps use the scalar resolver already shared with the native
  * parser, then parse its exact UTF-8 byte expansion. Scanner serialization and
  * warning classification keep their existing AST and instruction choices. */
-static yx_tr_node *yx_tr_condition_ranges(yx_tr_parser *p,
-                                           const yx_re_range *ranges, size_t count)
+static yx_tr_node *yx_tr_condition_ranges(yx_tr_parser *p, const yx_re_range *ranges, size_t count)
 {
 #ifdef XXYARA_NATIVE_REGEX
     if (!count) return yx_tr_new(p, YX_TR_CLASS);
     char *text = yx_re_ranges_pattern(ranges, count);
-    if (!text) { p->oom = true; return NULL; }
+    if (!text) {
+        p->oom = true;
+        return NULL;
+    }
     /* The rule's AST depth is validated separately. These generated UTF-8
      * groups must not consume the source expression's remaining depth, and
      * their byte alternations stay branches of the search program. */
     yx_tr_parser lowered = {.text = (const uint8_t *)text, .length = strlen(text), .literal_alternations = true};
     yx_tr_node *node = yx_tr_expression(&lowered);
     if (!node || lowered.failed || lowered.at != lowered.length) {
-        yx_tr_destroy(node); node = NULL; p->failed = true;
+        yx_tr_destroy(node);
+        node = NULL;
+        p->failed = true;
     }
     if (lowered.oom) p->oom = true;
     free(text);
     return node;
 #else
-    (void)ranges; (void)count; p->failed = true; return NULL;
+    (void)ranges;
+    (void)count;
+    p->failed = true;
+    return NULL;
 #endif
 }
 /* The literal of one Unicode scalar: its UTF-8 bytes. */
@@ -308,19 +354,26 @@ static yx_tr_node *yx_tr_scalar_literal(yx_tr_parser *p, uint32_t value)
     yx_tr_node *node = yx_tr_new(p, YX_TR_LITERAL);
     if (!node) return NULL;
     node->bytes = malloc(4);
-    if (!node->bytes) { p->oom = true; yx_tr_destroy(node); return NULL; }
+    if (!node->bytes) {
+        p->oom = true;
+        yx_tr_destroy(node);
+        return NULL;
+    }
     if (value < 0x800) {
         node->bytes[0] = (uint8_t)(0xc0 | (value >> 6));
-        node->bytes[1] = (uint8_t)(0x80 | (value & 0x3f)); node->length = 2;
+        node->bytes[1] = (uint8_t)(0x80 | (value & 0x3f));
+        node->length = 2;
     } else if (value < 0x10000) {
         node->bytes[0] = (uint8_t)(0xe0 | (value >> 12));
         node->bytes[1] = (uint8_t)(0x80 | ((value >> 6) & 0x3f));
-        node->bytes[2] = (uint8_t)(0x80 | (value & 0x3f)); node->length = 3;
+        node->bytes[2] = (uint8_t)(0x80 | (value & 0x3f));
+        node->length = 3;
     } else {
         node->bytes[0] = (uint8_t)(0xf0 | (value >> 18));
         node->bytes[1] = (uint8_t)(0x80 | ((value >> 12) & 0x3f));
         node->bytes[2] = (uint8_t)(0x80 | ((value >> 6) & 0x3f));
-        node->bytes[3] = (uint8_t)(0x80 | (value & 0x3f)); node->length = 4;
+        node->bytes[3] = (uint8_t)(0x80 | (value & 0x3f));
+        node->length = 4;
     }
     return node;
 }
@@ -328,32 +381,36 @@ static yx_tr_node *yx_tr_scalar_literal(yx_tr_parser *p, uint32_t value)
 static yx_tr_node *yx_tr_condition_scalar(yx_tr_parser *p, size_t start)
 {
 #ifdef XXYARA_NATIVE_REGEX
-    yx_re_range *ranges = NULL; size_t count = 0, at = start;
+    yx_re_range *ranges = NULL;
+    size_t count = 0, at = start;
     /* In a byte scope scalar escapes still encode UTF-8, but case folding is
      * ASCII only. A scalar below 128 can use the regular byte constructor. */
-    if (!yx_re_class_ranges(p->text, p->length, &at, PCRE2_UTF,
-                            &ranges, &count)) return NULL;
-    yx_tr_node *node = count == 1 && ranges[0].first == ranges[0].last &&
-        ranges[0].first < 128 ? yx_tr_byte(p, ranges[0].first) :
-        yx_tr_condition_ranges(p, ranges, count);
-    free(ranges); p->at = at;
+    if (!yx_re_class_ranges(p->text, p->length, &at, PCRE2_UTF, &ranges, &count)) return NULL;
+    yx_tr_node *node =
+        count == 1 && ranges[0].first == ranges[0].last && ranges[0].first < 128 ? yx_tr_byte(p, ranges[0].first) : yx_tr_condition_ranges(p, ranges, count);
+    free(ranges);
+    p->at = at;
     return node;
 #else
-    (void)p; (void)start; return NULL;
+    (void)p;
+    (void)start;
+    return NULL;
 #endif
 }
 static yx_tr_node *yx_tr_scalar_atom(yx_tr_parser *p, size_t start)
 {
-    yx_re_range *ranges = NULL; size_t count = 0, at = start;
+    yx_re_range *ranges = NULL;
+    size_t count = 0, at = start;
     bool gap_split = false;
-    uint32_t options = PCRE2_UTF | PCRE2_UCP |
-                       (p->nocase ? PCRE2_CASELESS : 0) |
-                       (p->extended ? PCRE2_EXTENDED : 0);
-    if (p->condition_only ? !yx_re_class_ranges(p->text, p->length, &at, options, &ranges, &count) :
-        !yx_re_class_ranges_gap(p->text, p->length, &at, options, &ranges, &count, &gap_split)) return NULL;
+    uint32_t options = PCRE2_UTF | PCRE2_UCP | (p->nocase ? PCRE2_CASELESS : 0) | (p->extended ? PCRE2_EXTENDED : 0);
+    if (p->condition_only ? !yx_re_class_ranges(p->text, p->length, &at, options, &ranges, &count)
+                          : !yx_re_class_ranges_gap(p->text, p->length, &at, options, &ranges, &count, &gap_split))
+        return NULL;
     if (p->condition_only) {
         yx_tr_node *node = yx_tr_condition_ranges(p, ranges, count);
-        free(ranges); p->at = at; return node;
+        free(ranges);
+        p->at = at;
+        return node;
     }
     /* Hir::class makes a class of one scalar the literal of it. */
     if (count == 1 && ranges[0].first == ranges[0].last) {
@@ -368,16 +425,25 @@ static yx_tr_node *yx_tr_scalar_atom(yx_tr_parser *p, size_t start)
      * The empty class is Hir::fail, a byte class. */
     if (!p->warning_only && (!count || ranges[count - 1].last < 0x80)) {
         yx_tr_node *node = yx_tr_new(p, YX_TR_CLASS);
-        if (!node) { free(ranges); return NULL; }
+        if (!node) {
+            free(ranges);
+            return NULL;
+        }
         for (size_t i = 0; i < count; ++i)
             for (uint32_t b = ranges[i].first; b <= ranges[i].last; ++b) yx_tr_set(node->bitmap, (unsigned)b);
         node->unicode_class = count != 0;
-        free(ranges); p->at = at;
+        free(ranges);
+        p->at = at;
         return node;
     }
     yx_tr_node *node = yx_tr_new(p, YX_TR_SCALAR_CLASS);
-    if (!node) { free(ranges); return NULL; }
-    node->bytes = (uint8_t *)ranges; node->length = count; p->at = at;
+    if (!node) {
+        free(ranges);
+        return NULL;
+    }
+    node->bytes = (uint8_t *)ranges;
+    node->length = count;
+    p->at = at;
     node->gap_split = gap_split;
     return node;
 }
@@ -398,15 +464,32 @@ static yx_tr_node *yx_tr_scalar_escape(yx_tr_parser *p)
         if (d >= '0' && d <= '9') d -= '0';
         else if (d >= 'a' && d <= 'f') d = d - 'a' + 10;
         else if (d >= 'A' && d <= 'F') d = d - 'A' + 10;
-        else { p->failed = true; return NULL; }
-        if (value > 0x10ffff) { p->failed = true; return NULL; }
-        value = value * 16 + d; ++count; ++p->at;
+        else {
+            p->failed = true;
+            return NULL;
+        }
+        if (value > 0x10ffff) {
+            p->failed = true;
+            return NULL;
+        }
+        value = value * 16 + d;
+        ++count;
+        ++p->at;
     }
     if (brace) {
-        if (p->at == p->length || !count) { p->failed = true; return NULL; }
+        if (p->at == p->length || !count) {
+            p->failed = true;
+            return NULL;
+        }
         ++p->at;
-    } else if (count != digits) { p->failed = true; return NULL; }
-    if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) { p->failed = true; return NULL; }
+    } else if (count != digits) {
+        p->failed = true;
+        return NULL;
+    }
+    if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) {
+        p->failed = true;
+        return NULL;
+    }
     return yx_tr_scalar_literal(p, value);
 }
 
@@ -430,13 +513,19 @@ static bool yx_tr_byte_list_class(const yx_tr_parser *p, size_t at, uint8_t bitm
         }
         yx_tr_set(bitmap, v);
         at += 4;
-        if (at < p->length && p->text[at] == ']') { *end = at + 1; return true; }
+        if (at < p->length && p->text[at] == ']') {
+            *end = at + 1;
+            return true;
+        }
     }
     return false;
 }
 static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
 {
-    if (p->at >= p->length || p->depth > 250) { p->failed = true; return NULL; }
+    if (p->at >= p->length || p->depth > 250) {
+        p->failed = true;
+        return NULL;
+    }
     size_t atom_start = p->at;
     unsigned c = p->text[p->at++];
     yx_tr_node *node = NULL;
@@ -448,17 +537,14 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
         bool saved_ungreedy = p->ungreedy;
         if (p->at < p->length && p->text[p->at] == '?') {
             ++p->at;
-            if (p->at < p->length && (p->text[p->at] == '<' ||
-                (p->text[p->at] == 'P' && p->at + 1 < p->length && p->text[p->at + 1] == '<'))) {
+            if (p->at < p->length && (p->text[p->at] == '<' || (p->text[p->at] == 'P' && p->at + 1 < p->length && p->text[p->at + 1] == '<'))) {
                 if (p->text[p->at] == 'P') ++p->at;
                 size_t name = ++p->at;
                 while (p->at < p->length && p->text[p->at] != '>') ++p->at;
                 if (p->at == p->length) goto invalid;
 #ifdef XXYARA_NATIVE_REGEX
                 if (p->condition_only) {
-                    int status = yx_re_capture_name_append(&p->capture_names,
-                        &p->capture_names_length, &p->capture_names_capacity,
-                        p->text + name, p->at - name);
+                    int status = yx_re_capture_name_append(&p->capture_names, &p->capture_names_length, &p->capture_names_capacity, p->text + name, p->at - name);
                     if (status <= 0) {
                         if (status < 0) p->oom = true;
                         goto invalid;
@@ -472,7 +558,11 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
                 bool negate = false, any = false;
                 while (p->at < p->length) {
                     unsigned flag = p->text[p->at];
-                    if (flag == '-') { negate = true; ++p->at; continue; }
+                    if (flag == '-') {
+                        negate = true;
+                        ++p->at;
+                        continue;
+                    }
                     if (flag == 'i') p->nocase = !negate;
                     else if (flag == 's') p->dotall = !negate;
                     else if (flag == 'x') p->extended = !negate;
@@ -486,24 +576,34 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
                     /* U swaps the meaning of a quantifier and its `?` suffix. */
                     else if (flag == 'U') p->ungreedy = !negate;
                     else break;
-                    any = true; ++p->at;
+                    any = true;
+                    ++p->at;
                 }
                 if (any && p->at < p->length && p->text[p->at] == ')') {
-                    ++p->at; return yx_tr_new(p, YX_TR_EMPTY);
+                    ++p->at;
+                    return yx_tr_new(p, YX_TR_EMPTY);
                 }
                 if (p->at == p->length || p->text[p->at++] != ':') goto invalid;
                 capture = false;
             }
         }
-        ++p->depth; node = yx_tr_expression(p); --p->depth;
+        ++p->depth;
+        node = yx_tr_expression(p);
+        --p->depth;
         if (!node || p->at == p->length || p->text[p->at++] != ')') goto invalid;
-        p->nocase = saved_nocase; p->dotall = saved_dotall; p->extended = saved_extended;
+        p->nocase = saved_nocase;
+        p->dotall = saved_dotall;
+        p->extended = saved_extended;
         p->unicode = saved_unicode;
-        p->multiline = saved_multiline; p->crlf = saved_crlf;
+        p->multiline = saved_multiline;
+        p->crlf = saved_crlf;
         p->ungreedy = saved_ungreedy;
         if (capture) {
             yx_tr_node *parent = yx_tr_new(p, YX_TR_CAPTURE);
-            if (!yx_tr_child(p, parent, node)) { yx_tr_destroy(parent); goto invalid; }
+            if (!yx_tr_child(p, parent, node)) {
+                yx_tr_destroy(parent);
+                goto invalid;
+            }
             node = parent;
         }
     } else if (c == '[' && p->unicode) {
@@ -513,7 +613,8 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
          * Nested brackets and &&/--/~~ use regex-syntax's class grammar.
          * Unicode-scoped atoms use the native fallback, selected by this
          * byte compiler's unsupported u flag. */
-        size_t at = p->at - 1, count = 0; yx_re_range *ranges = NULL;
+        size_t at = p->at - 1, count = 0;
+        yx_re_range *ranges = NULL;
         uint8_t listed[32];
         if (!p->nocase && !p->extended && yx_tr_byte_list_class(p, p->at, listed, &at)) {
             /* A list of \xHH escapes, as yx_tr_hex_regex writes masked hex
@@ -523,23 +624,26 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
             p->at = at;
             memcpy(node->bitmap, listed, 32);
         } else {
-            if (!yx_re_class_ranges(p->text, p->length, &at,
-                                    (p->nocase ? PCRE2_CASELESS : 0) |
-                                    (p->extended ? PCRE2_EXTENDED : 0), &ranges, &count)) goto invalid;
+            if (!yx_re_class_ranges(p->text, p->length, &at, (p->nocase ? PCRE2_CASELESS : 0) | (p->extended ? PCRE2_EXTENDED : 0), &ranges, &count)) goto invalid;
             node = yx_tr_new(p, YX_TR_CLASS);
-            if (!node) { free(ranges); return NULL; }
+            if (!node) {
+                free(ranges);
+                return NULL;
+            }
             p->at = at;
             for (size_t i = 0; i < count; ++i)
-                for (uint32_t b = ranges[i].first; b <= ranges[i].last; ++b)
-                    yx_tr_set(node->bitmap, (unsigned)b);
+                for (uint32_t b = ranges[i].first; b <= ranges[i].last; ++b) yx_tr_set(node->bitmap, (unsigned)b);
             free(ranges);
         }
         unsigned cardinality = 0, singleton = 0;
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) {
-            ++cardinality; singleton = b;
-        }
+        for (unsigned b = 0; b < 256; ++b)
+            if (yx_tr_has(node->bitmap, b)) {
+                ++cardinality;
+                singleton = b;
+            }
         if (cardinality == 1) {
-            yx_tr_destroy(node); node = yx_tr_byte(p, singleton);
+            yx_tr_destroy(node);
+            node = yx_tr_byte(p, singleton);
         }
     } else if (c == '.' && p->condition_only && p->unicode) {
         yx_re_range ranges[4] = {{0, 0xd7ff}, {0xe000, 0x10ffff}};
@@ -547,10 +651,12 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
         if (!p->dotall) {
             ranges[0] = (yx_re_range){0, 9};
             ranges[1] = (yx_re_range){11, p->crlf ? 12 : 0xd7ff};
-            ranges[2] = (yx_re_range){p->crlf ? 14 : 0xe000,
-                                      p->crlf ? 0xd7ff : 0x10ffff};
+            ranges[2] = (yx_re_range){p->crlf ? 14 : 0xe000, p->crlf ? 0xd7ff : 0x10ffff};
             count = 3;
-            if (p->crlf) { ranges[3] = (yx_re_range){0xe000, 0x10ffff}; count = 4; }
+            if (p->crlf) {
+                ranges[3] = (yx_re_range){0xe000, 0x10ffff};
+                count = 4;
+            }
         }
         node = yx_tr_condition_ranges(p, ranges, count);
     } else if (c == '.' && p->unicode) {
@@ -564,57 +670,54 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
         node = yx_tr_new(p, YX_TR_SCALAR_CLASS);
         if (!node) return NULL;
         node->bytes = malloc(chosen_count * sizeof(*chosen));
-        if (!node->bytes) { p->oom = true; yx_tr_destroy(node); return NULL; }
-        memcpy(node->bytes, chosen, chosen_count * sizeof(*chosen)); node->length = chosen_count;
+        if (!node->bytes) {
+            p->oom = true;
+            yx_tr_destroy(node);
+            return NULL;
+        }
+        memcpy(node->bytes, chosen, chosen_count * sizeof(*chosen));
+        node->length = chosen_count;
     } else if (c == '.') {
         node = yx_tr_new(p, YX_TR_CLASS);
         if (!node) return NULL;
         memset(node->bitmap, 255, 32);
         if (!p->dotall) node->bitmap[1] &= (uint8_t)~4u;
         /* (?R). is [^\n\r]. */
-        if (p->crlf && !p->dotall)
-            node->bitmap[1] &= (uint8_t)~32u;
+        if (p->crlf && !p->dotall) node->bitmap[1] &= (uint8_t)~32u;
     } else if (c == '^' || c == '$') {
         node = yx_tr_new(p, YX_TR_LOOK);
         if (!node) return NULL;
         /* Multi-line anchors (Look::StartLF/StartCRLF, EndLF/EndCRLF) are
          * the PikeVM's LINE_START and LINE_END in patterns; conditions keep
          * the search program's own LF and CRLF looks. */
-        node->look = p->multiline ?
-            (uint8_t)(p->condition_only ? (p->crlf ? 22 : 20) + (c == '$') :
-                                          (c == '^' ? 0x12 : 0x13)) :
-            (uint8_t)(c == '^' ? 10 : 11);
+        node->look = p->multiline ? (uint8_t)(p->condition_only ? (p->crlf ? 22 : 20) + (c == '$') : (c == '^' ? 0x12 : 0x13)) : (uint8_t)(c == '^' ? 10 : 11);
         node->has_look = true;
-    } else if (c == '\\' && p->unicode &&
-               p->at < p->length && strchr("dDsSwWpPxuU", p->text[p->at])) {
+    } else if (c == '\\' && p->unicode && p->at < p->length && strchr("dDsSwWpPxuU", p->text[p->at])) {
         node = yx_tr_scalar_atom(p, p->at - 1);
-    } else if (c == '\\' && p->condition_only && !p->unicode &&
-               p->at < p->length && (p->text[p->at] == 'u' || p->text[p->at] == 'U' ||
-                (p->text[p->at] == 'x' && p->at + 1 < p->length && p->text[p->at + 1] == '{'))) {
+    } else if (c == '\\' && p->condition_only && !p->unicode && p->at < p->length &&
+               (p->text[p->at] == 'u' || p->text[p->at] == 'U' || (p->text[p->at] == 'x' && p->at + 1 < p->length && p->text[p->at + 1] == '{'))) {
         node = yx_tr_condition_scalar(p, p->at - 1);
     } else if (c == '\\' && p->warning_only && p->at < p->length &&
-               (p->text[p->at] == 'u' || p->text[p->at] == 'U' ||
-                (p->text[p->at] == 'x' && p->at + 1 < p->length &&
-                 p->text[p->at + 1] == '{'))) {
+               (p->text[p->at] == 'u' || p->text[p->at] == 'U' || (p->text[p->at] == 'x' && p->at + 1 < p->length && p->text[p->at + 1] == '{'))) {
         node = yx_tr_scalar_escape(p);
     } else if (c == '\\') {
         size_t escape_start = p->at - 1;
-        uint8_t bm[32] = {0}, look = 0; bool cls; unsigned value = 0;
+        uint8_t bm[32] = {0}, look = 0;
+        bool cls;
+        unsigned value = 0;
         /* YARA-X rejects \b and \B in Unicode mode. */
-        if (!p->warning_only && p->unicode && p->at < p->length &&
-            (p->text[p->at] == 'b' || p->text[p->at] == 'B')) goto invalid;
+        if (!p->warning_only && p->unicode && p->at < p->length && (p->text[p->at] == 'b' || p->text[p->at] == 'B')) goto invalid;
         if (!yx_tr_escape(p, bm, &value, &cls, &look)) goto invalid;
         if (look || cls) {
             node = yx_tr_new(p, look ? YX_TR_LOOK : YX_TR_CLASS);
             if (!node) return NULL;
-            node->look = look; node->has_look = look != 0;
+            node->look = look;
+            node->has_look = look != 0;
             memcpy(node->bitmap, bm, 32);
-        } else if (p->unicode)
-            node = yx_tr_scalar_atom(p, escape_start);
+        } else if (p->unicode) node = yx_tr_scalar_atom(p, escape_start);
         else node = yx_tr_byte(p, value);
     } else if (c == '*' || c == '+' || c == '?' || c == '{' || c == '}') goto invalid;
-    else if (p->unicode)
-        node = yx_tr_scalar_atom(p, p->at - 1);
+    else if (p->unicode) node = yx_tr_scalar_atom(p, p->at - 1);
     else if (c >= 0xc2 && c <= 0xf4) {
         /* regex-syntax reads a non-ASCII character as one literal, so a
          * quantifier applies to all of its UTF-8 bytes. */
@@ -625,9 +728,14 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
             node = yx_tr_new(p, YX_TR_LITERAL);
             if (!node) return NULL;
             node->bytes = malloc(n);
-            if (!node->bytes) { p->oom = true; yx_tr_destroy(node); return NULL; }
+            if (!node->bytes) {
+                p->oom = true;
+                yx_tr_destroy(node);
+                return NULL;
+            }
             memcpy(node->bytes, p->text + p->at - 1, n);
-            node->length = n; p->at += n - 1;
+            node->length = n;
+            p->at += n - 1;
         }
     } else node = yx_tr_byte(p, c);
     if (!node) return NULL;
@@ -637,29 +745,45 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
     yx_tr_skip_space(p);
     while (p->at < p->length && strchr("*+?{", p->text[p->at])) {
         if (++repetitions > 1) p->stacked = true;
-        uint32_t min, max; bool unbounded = false; c = p->text[p->at++];
-        if (c == '*') { min = 0; max = UINT32_MAX; unbounded = true; }
-        else if (c == '+') { min = 1; max = UINT32_MAX; unbounded = true; }
-        else if (c == '?') { min = 0; max = 1; }
-        else {
-            uint64_t number = 0; bool digit = false;
+        uint32_t min, max;
+        bool unbounded = false;
+        c = p->text[p->at++];
+        if (c == '*') {
+            min = 0;
+            max = UINT32_MAX;
+            unbounded = true;
+        } else if (c == '+') {
+            min = 1;
+            max = UINT32_MAX;
+            unbounded = true;
+        } else if (c == '?') {
+            min = 0;
+            max = 1;
+        } else {
+            uint64_t number = 0;
+            bool digit = false;
             yx_tr_repeat_space(p);
             while (p->at < p->length && isdigit(p->text[p->at])) {
-                digit = true; number = number * 10 + p->text[p->at++] - '0';
+                digit = true;
+                number = number * 10 + p->text[p->at++] - '0';
                 if (number > UINT32_MAX) goto invalid;
             }
             bool lower = digit;
             min = max = (uint32_t)number;
             yx_tr_repeat_space(p);
             if (p->at < p->length && p->text[p->at] == ',') {
-                ++p->at; number = 0; digit = false;
+                ++p->at;
+                number = 0;
+                digit = false;
                 yx_tr_repeat_space(p);
                 while (p->at < p->length && isdigit(p->text[p->at])) {
-                    digit = true; number = number * 10 + p->text[p->at++] - '0';
+                    digit = true;
+                    number = number * 10 + p->text[p->at++] - '0';
                     if (number > UINT32_MAX) goto invalid;
                 }
                 if (!lower && !digit) goto invalid;
-                max = digit ? (uint32_t)number : UINT32_MAX; unbounded = !digit;
+                max = digit ? (uint32_t)number : UINT32_MAX;
+                unbounded = !digit;
                 yx_tr_repeat_space(p);
             } else if (!lower) goto invalid;
             if (p->at == p->length || p->text[p->at++] != '}' || max < min) goto invalid;
@@ -670,7 +794,8 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
         if (suffix) ++p->at;
         /* YARA-X's validator and its `greedy` flag read the quantifier's own
          * suffix, not the effect of the U flag. */
-        if (suffix) p->saw_lazy = true; else p->saw_greedy = true;
+        if (suffix) p->saw_lazy = true;
+        else p->saw_greedy = true;
         yx_tr_skip_space(p);
         bool zero_width = yx_tr_zero_width(node);
         if (max == 0 || (!min && zero_width)) {
@@ -681,15 +806,23 @@ static yx_tr_node *yx_tr_atom(yx_tr_parser *p)
         }
         if ((min == 1 && max == 1) || zero_width) continue;
         yx_tr_node *parent = yx_tr_new(p, YX_TR_REPEAT);
-        if (!yx_tr_child(p, parent, node)) { yx_tr_destroy(parent); goto invalid; }
-        parent->minimum = min; parent->maximum = max; parent->greedy = greedy;
+        if (!yx_tr_child(p, parent, node)) {
+            yx_tr_destroy(parent);
+            goto invalid;
+        }
+        parent->minimum = min;
+        parent->maximum = max;
+        parent->greedy = greedy;
         parent->finite_maximum = max == UINT32_MAX && !unbounded;
         node = parent;
     }
-    node->start = atom_start; node->end = p->at;
+    node->start = atom_start;
+    node->end = p->at;
     return node;
 invalid:
-    p->failed = true; yx_tr_destroy(node); return NULL;
+    p->failed = true;
+    yx_tr_destroy(node);
+    return NULL;
 }
 /* The byte of a literal atom at `at` that yx_tr_atom would turn into a
  * one-byte LITERAL node without a quantifier (a plain byte, an escaped
@@ -724,8 +857,8 @@ static bool yx_tr_plain_literal(const yx_tr_parser *p, size_t at, uint8_t *value
         else if (e >= 128 || isalnum((int)e)) return false;
         else v = e;
     } else {
-        if (c == '(' || c == ')' || c == '|' || c == '[' || c == '.' || c == '^' || c == '$' ||
-            c == '*' || c == '+' || c == '?' || c == '{' || c == '}' || (c >= 0xc2 && c <= 0xf4))
+        if (c == '(' || c == ')' || c == '|' || c == '[' || c == '.' || c == '^' || c == '$' || c == '*' || c == '+' || c == '?' || c == '{' || c == '}' ||
+            (c >= 0xc2 && c <= 0xf4))
             return false;
         v = c;
     }
@@ -734,7 +867,8 @@ static bool yx_tr_plain_literal(const yx_tr_parser *p, size_t at, uint8_t *value
         unsigned next = p->text[at + n];
         if (!next || next == '*' || next == '+' || next == '?' || next == '{') return false;
     }
-    *value = (uint8_t)v; *width = n;
+    *value = (uint8_t)v;
+    *width = n;
     return true;
 }
 static yx_tr_node *yx_tr_concat(yx_tr_parser *p)
@@ -748,33 +882,56 @@ static yx_tr_node *yx_tr_concat(yx_tr_parser *p)
     for (;;) {
         yx_tr_skip_space(p);
         if (p->at == p->length || p->text[p->at] == ')' || p->text[p->at] == '|') break;
-        uint8_t value; size_t width;
-        if (fast && !p->unicode && !p->extended && p->depth <= 250 &&
-            yx_tr_plain_literal(p, p->at, &value, &width)) {
+        uint8_t value;
+        size_t width;
+        if (fast && !p->unicode && !p->extended && p->depth <= 250 && yx_tr_plain_literal(p, p->at, &value, &width)) {
             /* Measure the run, then decode it into the literal's buffer. */
             size_t used = 1, at = p->at + width;
-            while (at < p->length && yx_tr_plain_literal(p, at, &value, &width)) { ++used; at += width; }
+            while (at < p->length && yx_tr_plain_literal(p, at, &value, &width)) {
+                ++used;
+                at += width;
+            }
             yx_tr_node *previous = node->count ? node->children[node->count - 1] : NULL, *child = NULL;
             if (!previous || previous->kind != YX_TR_LITERAL) {
                 child = yx_tr_new(p, YX_TR_LITERAL);
-                if (!child) { yx_tr_destroy(node); return NULL; }
+                if (!child) {
+                    yx_tr_destroy(node);
+                    return NULL;
+                }
                 previous = child;
             }
             uint8_t *bytes = realloc(previous->bytes, previous->length + used);
-            if (!bytes) { p->oom = true; yx_tr_destroy(child); yx_tr_destroy(node); return NULL; }
+            if (!bytes) {
+                p->oom = true;
+                yx_tr_destroy(child);
+                yx_tr_destroy(node);
+                return NULL;
+            }
             previous->bytes = bytes;
             for (size_t i = 0; i < used; ++i) {
                 yx_tr_plain_literal(p, p->at, &bytes[previous->length++], &width);
                 p->at += width;
             }
-            if (child && !yx_tr_child(p, node, child)) { yx_tr_destroy(child); yx_tr_destroy(node); return NULL; }
+            if (child && !yx_tr_child(p, node, child)) {
+                yx_tr_destroy(child);
+                yx_tr_destroy(node);
+                return NULL;
+            }
             continue;
         }
         yx_tr_node *child = yx_tr_atom(p);
-        if (!child) { yx_tr_destroy(node); return NULL; }
-        if (child->kind == YX_TR_EMPTY) { yx_tr_destroy(child); continue; }
+        if (!child) {
+            yx_tr_destroy(node);
+            return NULL;
+        }
+        if (child->kind == YX_TR_EMPTY) {
+            yx_tr_destroy(child);
+            continue;
+        }
         if (!yx_tr_join_child(p, node, child)) {
-            yx_tr_destroy(child); yx_tr_destroy(node); return NULL;
+            yx_tr_destroy(child);
+            yx_tr_destroy(node);
+            return NULL;
         }
     }
     return yx_tr_finish_concat(node);
@@ -786,21 +943,27 @@ static bool yx_tr_unicode_literal_class(yx_tr_node *parent)
 {
     bool nonascii = false;
     for (size_t i = 0; i < parent->count; ++i) {
-        yx_tr_node *a = parent->children[i]; uint32_t ca;
+        yx_tr_node *a = parent->children[i];
+        uint32_t ca;
         if (a->kind != YX_TR_LITERAL || !yx_hh_single_char(a->bytes, a->length, &ca)) return false;
         if (ca >= 128) nonascii = true;
         for (size_t j = 0; j < i; ++j) {
-            yx_tr_node *b = parent->children[j]; uint32_t cb;
-            if (!yx_hh_single_char(b->bytes, b->length, &cb) ||
-                ca == cb || ca + 1 == cb || cb + 1 == ca) return false;
+            yx_tr_node *b = parent->children[j];
+            uint32_t cb;
+            if (!yx_hh_single_char(b->bytes, b->length, &cb) || ca == cb || ca + 1 == cb || cb + 1 == ca) return false;
         }
     }
     if (!nonascii || parent->count < 2) return false;
-    for (size_t i = 0; i < parent->count; ++i) for (size_t j = i + 1; j < parent->count; ++j) {
-        yx_tr_node *a = parent->children[i], *b = parent->children[j]; uint32_t ca, cb;
-        if (!yx_hh_single_char(a->bytes, a->length, &ca) || !yx_hh_single_char(b->bytes, b->length, &cb)) return false;
-        if (cb < ca) { parent->children[i] = b; parent->children[j] = a; }
-    }
+    for (size_t i = 0; i < parent->count; ++i)
+        for (size_t j = i + 1; j < parent->count; ++j) {
+            yx_tr_node *a = parent->children[i], *b = parent->children[j];
+            uint32_t ca, cb;
+            if (!yx_hh_single_char(a->bytes, a->length, &ca) || !yx_hh_single_char(b->bytes, b->length, &cb)) return false;
+            if (cb < ca) {
+                parent->children[i] = b;
+                parent->children[j] = a;
+            }
+        }
     return true;
 }
 static int yx_tr_range_cmp(const void *x, const void *y)
@@ -820,35 +983,45 @@ static yx_tr_node *yx_tr_unicode_alternation(yx_tr_parser *p, const yx_tr_node *
         const yx_tr_node *child = parent->children[i];
         uint32_t cp;
         if (child->kind == YX_TR_LITERAL && yx_hh_single_char(child->bytes, child->length, &cp)) {
-            classes = false; unicode |= cp >= 0x80; total += 1;
+            classes = false;
+            unicode |= cp >= 0x80;
+            total += 1;
         } else if (child->kind == YX_TR_SCALAR_CLASS) {
             const yx_re_range *own = (const yx_re_range *)child->bytes;
             /* A range across the surrogate gap stays one in the union. */
             for (size_t k = 0; !child->gap_split && k + 1 < child->length; ++k)
                 if (own[k].last == 0xd7ff && own[k + 1].first == 0xe000) joined = true;
-            scalars = false; unicode = true; total += child->length;
+            scalars = false;
+            unicode = true;
+            total += child->length;
         } else if (child->kind == YX_TR_CLASS) {
             /* ClassBytes::to_unicode_class: ASCII byte classes only. */
-            scalars = false; total += 64;
-            for (unsigned b = 128; b < 256; ++b) if (yx_tr_has(child->bitmap, b)) classes = false;
+            scalars = false;
+            total += 64;
+            for (unsigned b = 128; b < 256; ++b)
+                if (yx_tr_has(child->bitmap, b)) classes = false;
         } else scalars = classes = false;
     }
     if (!unicode || (!scalars && !classes)) return NULL;
     yx_re_range *ranges = malloc(total * sizeof(*ranges));
-    if (!ranges) { p->oom = true; return NULL; }
+    if (!ranges) {
+        p->oom = true;
+        return NULL;
+    }
     for (size_t i = 0; i < parent->count; ++i) {
         const yx_tr_node *child = parent->children[i];
         uint32_t cp;
-        if (child->kind == YX_TR_LITERAL && yx_hh_single_char(child->bytes, child->length, &cp))
-            ranges[count++] = (yx_re_range){cp, cp};
+        if (child->kind == YX_TR_LITERAL && yx_hh_single_char(child->bytes, child->length, &cp)) ranges[count++] = (yx_re_range){cp, cp};
         else if (child->kind == YX_TR_SCALAR_CLASS) {
             memcpy(ranges + count, child->bytes, child->length * sizeof(*ranges));
             count += child->length;
-        } else for (unsigned b = 0; b < 128; ++b) if (yx_tr_has(child->bitmap, b)) {
-            unsigned first = b;
-            while (b + 1 < 128 && yx_tr_has(child->bitmap, b + 1)) ++b;
-            ranges[count++] = (yx_re_range){first, b};
-        }
+        } else
+            for (unsigned b = 0; b < 128; ++b)
+                if (yx_tr_has(child->bitmap, b)) {
+                    unsigned first = b;
+                    while (b + 1 < 128 && yx_tr_has(child->bitmap, b + 1)) ++b;
+                    ranges[count++] = (yx_re_range){first, b};
+                }
     }
     qsort(ranges, count, sizeof(*ranges), yx_tr_range_cmp);
     size_t used = 0;
@@ -862,7 +1035,8 @@ static yx_tr_node *yx_tr_unicode_alternation(yx_tr_parser *p, const yx_tr_node *
         node = yx_tr_scalar_literal(p, ranges[0].first);
         free(ranges);
     } else if ((node = yx_tr_new(p, YX_TR_SCALAR_CLASS)) != NULL) {
-        node->bytes = (uint8_t *)ranges; node->length = used;
+        node->bytes = (uint8_t *)ranges;
+        node->length = used;
         for (size_t k = 0; !joined && k + 1 < used; ++k)
             if (ranges[k].last == 0xd7ff && ranges[k + 1].first == 0xe000) node->gap_split = true;
     } else free(ranges);
@@ -872,46 +1046,65 @@ static yx_tr_node *yx_tr_finish_alternation(yx_tr_parser *p, yx_tr_node *parent)
 {
     yx_tr_node *node;
     bool literals = true, classes = true, ascii = true;
-    for (size_t i = 0; i < parent->count; ++i)
-    {
+    for (size_t i = 0; i < parent->count; ++i) {
         yx_tr_node *child = parent->children[i];
         if (child->kind != YX_TR_CLASS) classes = false;
         if (child->kind != YX_TR_LITERAL || child->length != 1) literals = false;
         if (child->kind == YX_TR_LITERAL && child->length == 1 && child->bytes[0] >= 128) ascii = false;
         if (child->kind == YX_TR_CLASS)
-            for (unsigned b = 128; b < 256; ++b) if (yx_tr_has(child->bitmap, b)) ascii = false;
+            for (unsigned b = 128; b < 256; ++b)
+                if (yx_tr_has(child->bitmap, b)) ascii = false;
     }
     if (literals || classes) {
         node = yx_tr_new(p, YX_TR_CLASS);
         if (node) node->unicode_class = ascii;
-        if (node) for (size_t i = 0; i < parent->count; ++i) {
-            yx_tr_node *child = parent->children[i];
-            if (child->kind == YX_TR_LITERAL) yx_tr_set(node->bitmap, child->bytes[0]);
-            else for (size_t b = 0; b < 32; ++b) node->bitmap[b] |= child->bitmap[b];
-        }
+        if (node)
+            for (size_t i = 0; i < parent->count; ++i) {
+                yx_tr_node *child = parent->children[i];
+                if (child->kind == YX_TR_LITERAL) yx_tr_set(node->bitmap, child->bytes[0]);
+                else
+                    for (size_t b = 0; b < 32; ++b) node->bitmap[b] |= child->bitmap[b];
+            }
         yx_tr_destroy(parent);
         /* Hir::class turns a one-byte class into a literal. */
         unsigned members = 0, member = 0;
-        for (unsigned b = 0; node && b < 256; ++b) if (yx_tr_has(node->bitmap, b)) { ++members; member = b; }
+        for (unsigned b = 0; node && b < 256; ++b)
+            if (yx_tr_has(node->bitmap, b)) {
+                ++members;
+                member = b;
+            }
         if (node && members == 1) {
             uint8_t *bytes = malloc(1);
-            if (!bytes) { p->oom = true; yx_tr_destroy(node); return NULL; }
+            if (!bytes) {
+                p->oom = true;
+                yx_tr_destroy(node);
+                return NULL;
+            }
             bytes[0] = (uint8_t)member;
             memset(node->bitmap, 0, sizeof(node->bitmap));
-            node->kind = YX_TR_LITERAL; node->bytes = bytes; node->length = 1; node->unicode_class = false;
+            node->kind = YX_TR_LITERAL;
+            node->bytes = bytes;
+            node->length = 1;
+            node->unicode_class = false;
         }
         return node;
     }
     /* Condition regexps keep their search program's literal branches. */
     if (!p->condition_only && !p->literal_alternations) {
         node = yx_tr_unicode_alternation(p, parent);
-        if (node || p->oom) { yx_tr_destroy(parent); return node; }
+        if (node || p->oom) {
+            yx_tr_destroy(parent);
+            return node;
+        }
     }
     if (yx_tr_unicode_literal_class(parent)) parent->unicode_class = true;
     size_t prefix = parent->count && parent->children[0]->kind == YX_TR_CONCAT ? parent->children[0]->count : 0;
     for (size_t i = 1; prefix && i < parent->count; ++i) {
         yx_tr_node *branch = parent->children[i];
-        if (branch->kind != YX_TR_CONCAT) { prefix = 0; break; }
+        if (branch->kind != YX_TR_CONCAT) {
+            prefix = 0;
+            break;
+        }
         if (prefix > branch->count) prefix = branch->count;
         size_t j = 0;
         while (j < prefix && yx_tr_equal(parent->children[0]->children[j], branch->children[j])) ++j;
@@ -919,7 +1112,10 @@ static yx_tr_node *yx_tr_finish_alternation(yx_tr_parser *p, yx_tr_node *parent)
     }
     if (prefix) {
         yx_tr_node *joined = yx_tr_new(p, YX_TR_CONCAT);
-        if (!joined) { yx_tr_destroy(parent); return NULL; }
+        if (!joined) {
+            yx_tr_destroy(parent);
+            return NULL;
+        }
         for (size_t i = 0; i < parent->count; ++i) {
             yx_tr_node *branch = parent->children[i];
             for (size_t j = 0; j < prefix; ++j) {
@@ -927,7 +1123,10 @@ static yx_tr_node *yx_tr_finish_alternation(yx_tr_parser *p, yx_tr_node *parent)
                 branch->children[j] = NULL;
                 if (i) yx_tr_destroy(child);
                 else if (!yx_tr_join_child(p, joined, child)) {
-                    yx_tr_destroy(child); yx_tr_destroy(joined); yx_tr_destroy(parent); return NULL;
+                    yx_tr_destroy(child);
+                    yx_tr_destroy(joined);
+                    yx_tr_destroy(parent);
+                    return NULL;
                 }
             }
             branch->count -= prefix;
@@ -936,7 +1135,9 @@ static yx_tr_node *yx_tr_finish_alternation(yx_tr_parser *p, yx_tr_node *parent)
         }
         parent = yx_tr_finish_alternation(p, parent);
         if (!parent || !yx_tr_join_child(p, joined, parent)) {
-            yx_tr_destroy(parent); yx_tr_destroy(joined); return NULL;
+            yx_tr_destroy(parent);
+            yx_tr_destroy(joined);
+            return NULL;
         }
         return yx_tr_finish_concat(joined);
     }
@@ -947,10 +1148,19 @@ static yx_tr_node *yx_tr_expression(yx_tr_parser *p)
     yx_tr_node *node = yx_tr_concat(p);
     if (!node || p->at == p->length || p->text[p->at] != '|') return node;
     yx_tr_node *parent = yx_tr_new(p, YX_TR_ALT);
-    if (!parent || !yx_tr_join_child(p, parent, node)) { yx_tr_destroy(node); yx_tr_destroy(parent); return NULL; }
+    if (!parent || !yx_tr_join_child(p, parent, node)) {
+        yx_tr_destroy(node);
+        yx_tr_destroy(parent);
+        return NULL;
+    }
     while (p->at < p->length && p->text[p->at] == '|') {
-        ++p->at; node = yx_tr_concat(p);
-        if (!node || !yx_tr_join_child(p, parent, node)) { yx_tr_destroy(node); yx_tr_destroy(parent); return NULL; }
+        ++p->at;
+        node = yx_tr_concat(p);
+        if (!node || !yx_tr_join_child(p, parent, node)) {
+            yx_tr_destroy(node);
+            yx_tr_destroy(parent);
+            return NULL;
+        }
     }
     return yx_tr_finish_alternation(p, parent);
 }
@@ -960,34 +1170,38 @@ typedef struct {
     bool exact;
     size_t forward, backward;
 } yx_tr_atom_entry;
-typedef struct { yx_tr_atom_entry *items; size_t count; bool infinite; } yx_tr_atoms;
-static void yx_tr_atoms_free(yx_tr_atoms *a) { free(a->items); *a = (yx_tr_atoms){0}; }
+typedef struct {
+    yx_tr_atom_entry *items;
+    size_t count;
+    bool infinite;
+} yx_tr_atoms;
+static void yx_tr_atoms_free(yx_tr_atoms *a)
+{
+    free(a->items);
+    *a = (yx_tr_atoms){0};
+}
 static bool yx_tr_atoms_add(yx_tr_atoms *a, yx_tr_atom_entry item)
 {
-    if (a->count >= 16384) { a->infinite = true; return true; }
+    if (a->count >= 16384) {
+        a->infinite = true;
+        return true;
+    }
     yx_tr_atom_entry *items = realloc(a->items, (a->count + 1) * sizeof(*items));
     if (!items) return false;
-    a->items = items; a->items[a->count++] = item; return true;
+    a->items = items;
+    a->items[a->count++] = item;
+    return true;
 }
 /* Each byte's score: 6 for 0, 12 for 32, 0x90, 0xcc and 255, 18 for an
  * ASCII letter and 20 for any other byte. */
 static const uint8_t yx_tr_byte_score[256] = {
-    6, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    12, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20,
-    20, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    12, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
-    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12,
+    6,  20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 18, 18, 18, 18, 18, 18, 18, 18, 18,
+    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
+    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 12,
 };
 static int yx_tr_quality_bytes(const uint8_t *bytes, size_t length)
 {
@@ -1018,17 +1232,37 @@ static int yx_tr_quality(const yx_tr_atom_entry *a)
 /* concat_seq crosses up to fourteen multi-literal sequences before it
  * truncates, so literals are kept up to YX_SQ_BYTES bytes. */
 #define YX_SQ_BYTES 72
-typedef struct { uint8_t bytes[YX_SQ_BYTES]; uint8_t length; bool exact; } yx_sq_lit;
-typedef struct { yx_sq_lit *items; size_t count, capacity; bool infinite; } yx_sq;
-enum { YX_SQ_LIMIT_TOTAL = 16384, YX_SQ_LITERAL_LEN = 4, YX_SQ_REPEAT = 4, YX_SQ_CLASS = 256 };
+typedef struct {
+    uint8_t bytes[YX_SQ_BYTES];
+    uint8_t length;
+    bool exact;
+} yx_sq_lit;
+typedef struct {
+    yx_sq_lit *items;
+    size_t count, capacity;
+    bool infinite;
+} yx_sq;
+enum {
+    YX_SQ_LIMIT_TOTAL = 16384,
+    YX_SQ_LITERAL_LEN = 4,
+    YX_SQ_REPEAT = 4,
+    YX_SQ_CLASS = 256
+};
 /* The literal buffers of sequences are recycled per thread: one compilation
  * builds and drops many sequences of thousands of literals, and blocks of
  * that size come from the heap's locked large-block path, freshly committed
  * each time. yx_sq_buffer gives a buffer of at least count literals with
  * unspecified contents (*capacity is its size in literals) and
  * yx_sq_buffer_release takes one back; only the memory's origin changes. */
-enum { YX_SQ_POOL_SLOTS = 8, YX_SQ_POOL_MINIMUM = 64, YX_SQ_POOL_MAXIMUM = 32768 };
-typedef struct { void *items[YX_SQ_POOL_SLOTS]; size_t capacity[YX_SQ_POOL_SLOTS]; } yx_sq_pool;
+enum {
+    YX_SQ_POOL_SLOTS = 8,
+    YX_SQ_POOL_MINIMUM = 64,
+    YX_SQ_POOL_MAXIMUM = 32768
+};
+typedef struct {
+    void *items[YX_SQ_POOL_SLOTS];
+    size_t capacity[YX_SQ_POOL_SLOTS];
+} yx_sq_pool;
 static yx_thread_storage yx_sq_pool_storage = YX_THREAD_STORAGE_INIT;
 static void yx_sq_pool_destroy(void *opaque)
 {
@@ -1038,8 +1272,7 @@ static void yx_sq_pool_destroy(void *opaque)
 static yx_sq_pool *yx_sq_pool_get(void)
 {
     static _Thread_local yx_sq_pool *thread_pool;
-    if (!thread_pool)
-        thread_pool = yx_thread_storage_get(&yx_sq_pool_storage, sizeof(*thread_pool), yx_sq_pool_destroy);
+    if (!thread_pool) thread_pool = yx_thread_storage_get(&yx_sq_pool_storage, sizeof(*thread_pool), yx_sq_pool_destroy);
     return thread_pool;
 }
 static void *yx_sq_buffer(size_t count, size_t size, size_t *capacity)
@@ -1049,12 +1282,12 @@ static void *yx_sq_buffer(size_t count, size_t size, size_t *capacity)
         size_t best = YX_SQ_POOL_SLOTS;
         /* The smallest kept buffer that is large enough. */
         for (size_t i = 0; pool && i < YX_SQ_POOL_SLOTS; ++i)
-            if (pool->items[i] && pool->capacity[i] >= count &&
-                (best == YX_SQ_POOL_SLOTS || pool->capacity[i] < pool->capacity[best])) best = i;
+            if (pool->items[i] && pool->capacity[i] >= count && (best == YX_SQ_POOL_SLOTS || pool->capacity[i] < pool->capacity[best])) best = i;
         if (best != YX_SQ_POOL_SLOTS) {
             void *items = pool->items[best];
             *capacity = pool->capacity[best];
-            pool->items[best] = NULL; pool->capacity[best] = 0;
+            pool->items[best] = NULL;
+            pool->capacity[best] = 0;
             return items;
         }
     }
@@ -1068,31 +1301,46 @@ static void yx_sq_buffer_release(void *items, size_t capacity)
         yx_sq_pool *pool = yx_sq_pool_get();
         size_t smallest = 0;
         for (size_t i = 0; pool && i < YX_SQ_POOL_SLOTS; ++i) {
-            if (!pool->items[i]) { pool->items[i] = items; pool->capacity[i] = capacity; return; }
+            if (!pool->items[i]) {
+                pool->items[i] = items;
+                pool->capacity[i] = capacity;
+                return;
+            }
             if (pool->capacity[i] < pool->capacity[smallest]) smallest = i;
         }
         /* A full pool keeps its larger buffers. */
         if (pool && pool->capacity[smallest] < capacity) {
             void *dropped = pool->items[smallest];
-            pool->items[smallest] = items; pool->capacity[smallest] = capacity;
+            pool->items[smallest] = items;
+            pool->capacity[smallest] = capacity;
             items = dropped;
         }
     }
     free(items);
 }
-static void yx_sq_free(yx_sq *s) { yx_sq_buffer_release(s->items, s->capacity); *s = (yx_sq){0}; }
-static void yx_sq_make_infinite(yx_sq *s) { yx_sq_free(s); s->infinite = true; }
+static void yx_sq_free(yx_sq *s)
+{
+    yx_sq_buffer_release(s->items, s->capacity);
+    *s = (yx_sq){0};
+}
+static void yx_sq_make_infinite(yx_sq *s)
+{
+    yx_sq_free(s);
+    s->infinite = true;
+}
 /* Nothing reads a literal's bytes past its length, so copies and
  * comparisons take only those (literals are mostly one to four bytes). */
 static void yx_sq_lit_copy(yx_sq_lit *to, const yx_sq_lit *from)
 {
-    to->length = from->length; to->exact = from->exact;
+    to->length = from->length;
+    to->exact = from->exact;
     for (size_t i = 0; i < from->length; ++i) to->bytes[i] = from->bytes[i];
 }
 static bool yx_sq_same_bytes(const yx_sq_lit *a, const yx_sq_lit *b)
 {
     if (a->length != b->length) return false;
-    for (size_t i = 0; i < a->length; ++i) if (a->bytes[i] != b->bytes[i]) return false;
+    for (size_t i = 0; i < a->length; ++i)
+        if (a->bytes[i] != b->bytes[i]) return false;
     return true;
 }
 static bool yx_sq_raw_push(yx_sq *s, const yx_sq_lit *lit)
@@ -1110,12 +1358,16 @@ static bool yx_sq_raw_push(yx_sq *s, const yx_sq_lit *lit)
             if (s->count) memcpy(items, s->items, s->count * sizeof(*items));
             yx_sq_buffer_release(s->items, s->capacity);
         }
-        s->items = items; s->capacity = capacity;
+        s->items = items;
+        s->capacity = capacity;
     }
-    yx_sq_lit_copy(&s->items[s->count++], lit); return true;
+    yx_sq_lit_copy(&s->items[s->count++], lit);
+    return true;
 }
 static bool yx_sq_lit_equal(const yx_sq_lit *a, const yx_sq_lit *b)
-{ return a->exact == b->exact && yx_sq_same_bytes(a, b); }
+{
+    return a->exact == b->exact && yx_sq_same_bytes(a, b);
+}
 static bool yx_sq_push(yx_sq *s, const yx_sq_lit *lit)
 {
     if (s->infinite) return true;
@@ -1123,9 +1375,15 @@ static bool yx_sq_push(yx_sq *s, const yx_sq_lit *lit)
     return yx_sq_raw_push(s, lit);
 }
 static bool yx_sq_singleton_empty(yx_sq *s)
-{ yx_sq_lit empty = {.exact = true}; *s = (yx_sq){0}; return yx_sq_raw_push(s, &empty); }
+{
+    yx_sq_lit empty = {.exact = true};
+    *s = (yx_sq){0};
+    return yx_sq_raw_push(s, &empty);
+}
 static void yx_sq_make_inexact(yx_sq *s)
-{ for (size_t i = 0; i < s->count; ++i) s->items[i].exact = false; }
+{
+    for (size_t i = 0; i < s->count; ++i) s->items[i].exact = false;
+}
 static void yx_sq_dedup(yx_sq *s)
 {
     size_t used = 0;
@@ -1144,12 +1402,16 @@ static void yx_sq_dedup(yx_sq *s)
 static void yx_sq_keep_first(yx_sq *s, size_t length)
 {
     for (size_t i = 0; i < s->count; ++i)
-        if (length < s->items[i].length) { s->items[i].exact = false; s->items[i].length = (uint8_t)length; }
+        if (length < s->items[i].length) {
+            s->items[i].exact = false;
+            s->items[i].length = (uint8_t)length;
+        }
 }
 static bool yx_sq_is_inexact(const yx_sq *s)
 {
     if (s->infinite) return true;
-    for (size_t i = 0; i < s->count; ++i) if (s->items[i].exact) return false;
+    for (size_t i = 0; i < s->count; ++i)
+        if (s->items[i].exact) return false;
     return true;
 }
 /* min_literal_len / max_literal_len: false for None. */
@@ -1157,14 +1419,16 @@ static bool yx_sq_min_len(const yx_sq *s, size_t *length)
 {
     if (s->infinite || !s->count) return false;
     *length = SIZE_MAX;
-    for (size_t i = 0; i < s->count; ++i) if (s->items[i].length < *length) *length = s->items[i].length;
+    for (size_t i = 0; i < s->count; ++i)
+        if (s->items[i].length < *length) *length = s->items[i].length;
     return true;
 }
 static bool yx_sq_max_len(const yx_sq *s, size_t *length)
 {
     if (s->infinite || !s->count) return false;
     *length = 0;
-    for (size_t i = 0; i < s->count; ++i) if (s->items[i].length > *length) *length = s->items[i].length;
+    for (size_t i = 0; i < s->count; ++i)
+        if (s->items[i].length > *length) *length = s->items[i].length;
     return true;
 }
 static bool yx_sq_copy(yx_sq *to, const yx_sq *from)
@@ -1172,12 +1436,18 @@ static bool yx_sq_copy(yx_sq *to, const yx_sq *from)
     *to = (yx_sq){.infinite = from->infinite};
     if (!from->count) return true;
     to->items = yx_sq_buffer(from->count, sizeof(*to->items), &to->capacity);
-    if (!to->items) { to->capacity = 0; return false; }
+    if (!to->items) {
+        to->capacity = 0;
+        return false;
+    }
     memcpy(to->items, from->items, from->count * sizeof(*to->items));
     to->count = from->count;
     return true;
 }
-static size_t yx_sq_mul(size_t a, size_t b) { return a && b > SIZE_MAX / a ? SIZE_MAX : a * b; }
+static size_t yx_sq_mul(size_t a, size_t b)
+{
+    return a && b > SIZE_MAX / a ? SIZE_MAX : a * b;
+}
 /* Seq::cross_forward, reading other only. */
 static bool yx_sq_cross_from(yx_sq *self, const yx_sq *other)
 {
@@ -1191,8 +1461,7 @@ static bool yx_sq_cross_from(yx_sq *self, const yx_sq *other)
     yx_sq result = {0};
     /* The product is known up front; only the bytes in use are copied. */
     size_t total = 0;
-    for (size_t i = 0; i < self->count; ++i)
-        total += self->items[i].exact ? other->count : 1;
+    for (size_t i = 0; i < self->count; ++i) total += self->items[i].exact ? other->count : 1;
     if (total) {
         result.items = yx_sq_buffer(total, sizeof(*result.items), &result.capacity);
         if (!result.items) return false;
@@ -1204,8 +1473,9 @@ static bool yx_sq_cross_from(yx_sq *self, const yx_sq *other)
         const yx_sq_lit *a = &self->items[i];
         if (!a->exact) {
             yx_sq_lit *kept = result.count ? &result.items[result.count - 1] : NULL;
-            if (kept && yx_sq_same_bytes(kept, a)) { if (kept->exact != a->exact) kept->exact = false; }
-            else yx_sq_lit_copy(&result.items[result.count++], a);
+            if (kept && yx_sq_same_bytes(kept, a)) {
+                if (kept->exact != a->exact) kept->exact = false;
+            } else yx_sq_lit_copy(&result.items[result.count++], a);
             continue;
         }
         for (size_t j = 0; j < other->count; ++j) {
@@ -1218,42 +1488,57 @@ static bool yx_sq_cross_from(yx_sq *self, const yx_sq *other)
             for (size_t k = 0; k < a->length; ++k) lit->bytes[k] = a->bytes[k];
             for (size_t k = 0; k < take; ++k) lit->bytes[a->length + k] = b->bytes[k];
             yx_sq_lit *kept = result.count ? &result.items[result.count - 1] : NULL;
-            if (kept && yx_sq_same_bytes(kept, lit)) { if (kept->exact != lit->exact) kept->exact = false; }
-            else ++result.count;
+            if (kept && yx_sq_same_bytes(kept, lit)) {
+                if (kept->exact != lit->exact) kept->exact = false;
+            } else ++result.count;
         }
     }
-    yx_sq_free(self); *self = result;
+    yx_sq_free(self);
+    *self = result;
     return true;
 fail:
-    yx_sq_free(&result); return false;
+    yx_sq_free(&result);
+    return false;
 }
 /* Seq::cross_forward; other is drained (an infinite other is left as is). */
 static bool yx_sq_cross_forward(yx_sq *self, yx_sq *other)
 {
     if (other->infinite) return yx_sq_cross_from(self, other);
     if (!yx_sq_cross_from(self, other)) return false;
-    yx_sq_free(other); return true;
+    yx_sq_free(other);
+    return true;
 }
 /* Seq::union; other is drained. */
 static bool yx_sq_union(yx_sq *self, yx_sq *other)
 {
-    if (other->infinite) { yx_sq_make_infinite(self); return true; }
-    if (self->infinite) { yx_sq_free(other); return true; }
-    for (size_t i = 0; i < other->count; ++i) if (!yx_sq_raw_push(self, &other->items[i])) return false;
-    yx_sq_free(other); yx_sq_dedup(self); return true;
+    if (other->infinite) {
+        yx_sq_make_infinite(self);
+        return true;
+    }
+    if (self->infinite) {
+        yx_sq_free(other);
+        return true;
+    }
+    for (size_t i = 0; i < other->count; ++i)
+        if (!yx_sq_raw_push(self, &other->items[i])) return false;
+    yx_sq_free(other);
+    yx_sq_dedup(self);
+    return true;
 }
 static bool yx_ex_cross(yx_sq *self, yx_sq *other)
 {
-    if (!self->infinite && !other->infinite && yx_sq_mul(self->count, other->count) > YX_SQ_LIMIT_TOTAL)
-        yx_sq_make_infinite(other);
+    if (!self->infinite && !other->infinite && yx_sq_mul(self->count, other->count) > YX_SQ_LIMIT_TOTAL) yx_sq_make_infinite(other);
     if (!yx_sq_cross_forward(self, other)) return false;
-    yx_sq_keep_first(self, YX_SQ_LITERAL_LEN); return true;
+    yx_sq_keep_first(self, YX_SQ_LITERAL_LEN);
+    return true;
 }
 static bool yx_ex_union(yx_sq *self, yx_sq *other)
 {
     if (!self->infinite && !other->infinite && self->count + other->count > YX_SQ_LIMIT_TOTAL) {
-        yx_sq_keep_first(self, 4); yx_sq_keep_first(other, 4);
-        yx_sq_dedup(self); yx_sq_dedup(other);
+        yx_sq_keep_first(self, 4);
+        yx_sq_keep_first(other, 4);
+        yx_sq_dedup(self);
+        yx_sq_dedup(other);
         if (self->count + other->count > YX_SQ_LIMIT_TOTAL) yx_sq_make_infinite(other);
     }
     return yx_sq_union(self, other);
@@ -1263,97 +1548,137 @@ static bool yx_ex_extract(const yx_tr_node *node, yx_sq *out, size_t depth)
     *out = (yx_sq){0};
     if (depth > 250) return false;
     switch (node->kind) {
-    case YX_TR_EMPTY: case YX_TR_LOOK: return yx_sq_singleton_empty(out);
-    case YX_TR_LITERAL: {
-        yx_sq_lit lit = {.exact = true};
-        lit.length = (uint8_t)(node->length < YX_SQ_LITERAL_LEN ? node->length : YX_SQ_LITERAL_LEN);
-        memcpy(lit.bytes, node->bytes, lit.length);
-        if (node->length > lit.length) lit.exact = false;
-        if (!yx_sq_raw_push(out, &lit)) return false;
-        yx_sq_keep_first(out, YX_SQ_LITERAL_LEN); return true;
-    }
-    case YX_TR_SCALAR_CLASS: {
-        const yx_re_range *ranges = (const yx_re_range *)node->bytes;
-        uint64_t count = 0;
-        for (size_t i = 0; i < node->length; ++i) {
-            count += ranges[i].last - ranges[i].first + 1;
-            /* ClassUnicodeRange::len of a range across the surrogate gap. */
-            if (!node->gap_split && i + 1 < node->length && ranges[i].last == 0xd7ff &&
-                ranges[i + 1].first == 0xe000) count += 0x800;
+        case YX_TR_EMPTY:
+        case YX_TR_LOOK: return yx_sq_singleton_empty(out);
+        case YX_TR_LITERAL: {
+            yx_sq_lit lit = {.exact = true};
+            lit.length = (uint8_t)(node->length < YX_SQ_LITERAL_LEN ? node->length : YX_SQ_LITERAL_LEN);
+            memcpy(lit.bytes, node->bytes, lit.length);
+            if (node->length > lit.length) lit.exact = false;
+            if (!yx_sq_raw_push(out, &lit)) return false;
+            yx_sq_keep_first(out, YX_SQ_LITERAL_LEN);
+            return true;
         }
-        if (count > YX_SQ_CLASS) { yx_sq_make_infinite(out); return true; }
-        for (size_t i = 0; i < node->length; ++i)
-            for (uint32_t cp = ranges[i].first; cp <= ranges[i].last; ++cp) {
-                yx_sq_lit lit = {.exact = true};
-                if (cp < 0x80) { lit.bytes[0] = (uint8_t)cp; lit.length = 1; }
-                else if (cp < 0x800) {
-                    lit.bytes[0] = (uint8_t)(0xc0 | (cp >> 6));
-                    lit.bytes[1] = (uint8_t)(0x80 | (cp & 63)); lit.length = 2;
-                } else if (cp < 0x10000) {
-                    lit.bytes[0] = (uint8_t)(0xe0 | (cp >> 12));
-                    lit.bytes[1] = (uint8_t)(0x80 | ((cp >> 6) & 63));
-                    lit.bytes[2] = (uint8_t)(0x80 | (cp & 63)); lit.length = 3;
-                } else {
-                    lit.bytes[0] = (uint8_t)(0xf0 | (cp >> 18));
-                    lit.bytes[1] = (uint8_t)(0x80 | ((cp >> 12) & 63));
-                    lit.bytes[2] = (uint8_t)(0x80 | ((cp >> 6) & 63));
-                    lit.bytes[3] = (uint8_t)(0x80 | (cp & 63)); lit.length = 4;
+        case YX_TR_SCALAR_CLASS: {
+            const yx_re_range *ranges = (const yx_re_range *)node->bytes;
+            uint64_t count = 0;
+            for (size_t i = 0; i < node->length; ++i) {
+                count += ranges[i].last - ranges[i].first + 1;
+                /* ClassUnicodeRange::len of a range across the surrogate gap. */
+                if (!node->gap_split && i + 1 < node->length && ranges[i].last == 0xd7ff && ranges[i + 1].first == 0xe000) count += 0x800;
+            }
+            if (count > YX_SQ_CLASS) {
+                yx_sq_make_infinite(out);
+                return true;
+            }
+            for (size_t i = 0; i < node->length; ++i)
+                for (uint32_t cp = ranges[i].first; cp <= ranges[i].last; ++cp) {
+                    yx_sq_lit lit = {.exact = true};
+                    if (cp < 0x80) {
+                        lit.bytes[0] = (uint8_t)cp;
+                        lit.length = 1;
+                    } else if (cp < 0x800) {
+                        lit.bytes[0] = (uint8_t)(0xc0 | (cp >> 6));
+                        lit.bytes[1] = (uint8_t)(0x80 | (cp & 63));
+                        lit.length = 2;
+                    } else if (cp < 0x10000) {
+                        lit.bytes[0] = (uint8_t)(0xe0 | (cp >> 12));
+                        lit.bytes[1] = (uint8_t)(0x80 | ((cp >> 6) & 63));
+                        lit.bytes[2] = (uint8_t)(0x80 | (cp & 63));
+                        lit.length = 3;
+                    } else {
+                        lit.bytes[0] = (uint8_t)(0xf0 | (cp >> 18));
+                        lit.bytes[1] = (uint8_t)(0x80 | ((cp >> 12) & 63));
+                        lit.bytes[2] = (uint8_t)(0x80 | ((cp >> 6) & 63));
+                        lit.bytes[3] = (uint8_t)(0x80 | (cp & 63));
+                        lit.length = 4;
+                    }
+                    if (!yx_sq_push(out, &lit)) {
+                        yx_sq_free(out);
+                        return false;
+                    }
                 }
-                if (!yx_sq_push(out, &lit)) { yx_sq_free(out); return false; }
+            return true;
+        }
+        case YX_TR_CLASS:
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(node->bitmap, b)) {
+                    yx_sq_lit lit = {.bytes = {(uint8_t)b}, .length = 1, .exact = true};
+                    if (!yx_sq_push(out, &lit)) {
+                        yx_sq_free(out);
+                        return false;
+                    }
+                }
+            return true;
+        case YX_TR_CAPTURE: return yx_ex_extract(node->children[0], out, depth + 1);
+        case YX_TR_CONCAT:
+            if (!yx_sq_singleton_empty(out)) return false;
+            for (size_t i = 0; i < node->count; ++i) {
+                yx_sq child;
+                if (yx_sq_is_inexact(out)) break;
+                if (!yx_ex_extract(node->children[i], &child, depth + 1) || !yx_ex_cross(out, &child)) {
+                    yx_sq_free(&child);
+                    yx_sq_free(out);
+                    return false;
+                }
             }
-        return true;
-    }
-    case YX_TR_CLASS:
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) {
-            yx_sq_lit lit = {.bytes = {(uint8_t)b}, .length = 1, .exact = true};
-            if (!yx_sq_push(out, &lit)) { yx_sq_free(out); return false; }
-        }
-        return true;
-    case YX_TR_CAPTURE: return yx_ex_extract(node->children[0], out, depth + 1);
-    case YX_TR_CONCAT:
-        if (!yx_sq_singleton_empty(out)) return false;
-        for (size_t i = 0; i < node->count; ++i) {
-            yx_sq child;
-            if (yx_sq_is_inexact(out)) break;
-            if (!yx_ex_extract(node->children[i], &child, depth + 1) || !yx_ex_cross(out, &child)) {
-                yx_sq_free(&child); yx_sq_free(out); return false;
+            return true;
+        case YX_TR_ALT:
+            for (size_t i = 0; i < node->count; ++i) {
+                yx_sq child;
+                if (out->infinite) break;
+                if (!yx_ex_extract(node->children[i], &child, depth + 1) || !yx_ex_union(out, &child)) {
+                    yx_sq_free(&child);
+                    yx_sq_free(out);
+                    return false;
+                }
             }
-        }
-        return true;
-    case YX_TR_ALT:
-        for (size_t i = 0; i < node->count; ++i) {
-            yx_sq child;
-            if (out->infinite) break;
-            if (!yx_ex_extract(node->children[i], &child, depth + 1) || !yx_ex_union(out, &child)) {
-                yx_sq_free(&child); yx_sq_free(out); return false;
+            return true;
+        case YX_TR_REPEAT: {
+            yx_sq sub, seq;
+            if (!yx_ex_extract(node->children[0], &sub, depth + 1)) return false;
+            if (node->minimum == 0) {
+                yx_sq empty;
+                if (yx_tr_unbounded(node) || node->maximum != 1) yx_sq_make_inexact(&sub);
+                if (!yx_sq_singleton_empty(&empty)) {
+                    yx_sq_free(&sub);
+                    return false;
+                }
+                if (!node->greedy) {
+                    yx_sq swap = sub;
+                    sub = empty;
+                    empty = swap;
+                }
+                if (!yx_ex_union(&sub, &empty)) {
+                    yx_sq_free(&sub);
+                    yx_sq_free(&empty);
+                    return false;
+                }
+                *out = sub;
+                return true;
             }
-        }
-        return true;
-    case YX_TR_REPEAT: {
-        yx_sq sub, seq;
-        if (!yx_ex_extract(node->children[0], &sub, depth + 1)) return false;
-        if (node->minimum == 0) {
-            yx_sq empty;
-            if (yx_tr_unbounded(node) || node->maximum != 1) yx_sq_make_inexact(&sub);
-            if (!yx_sq_singleton_empty(&empty)) { yx_sq_free(&sub); return false; }
-            if (!node->greedy) { yx_sq swap = sub; sub = empty; empty = swap; }
-            if (!yx_ex_union(&sub, &empty)) { yx_sq_free(&sub); yx_sq_free(&empty); return false; }
-            *out = sub; return true;
-        }
-        if (!yx_sq_singleton_empty(&seq)) { yx_sq_free(&sub); return false; }
-        uint32_t times = node->minimum < YX_SQ_REPEAT ? node->minimum : YX_SQ_REPEAT;
-        for (uint32_t i = 0; i < times; ++i) {
-            yx_sq copy;
-            if (yx_sq_is_inexact(&seq)) break;
-            if (!yx_sq_copy(&copy, &sub) || !yx_ex_cross(&seq, &copy)) {
-                yx_sq_free(&copy); yx_sq_free(&seq); yx_sq_free(&sub); return false;
+            if (!yx_sq_singleton_empty(&seq)) {
+                yx_sq_free(&sub);
+                return false;
             }
+            uint32_t times = node->minimum < YX_SQ_REPEAT ? node->minimum : YX_SQ_REPEAT;
+            for (uint32_t i = 0; i < times; ++i) {
+                yx_sq copy;
+                if (yx_sq_is_inexact(&seq)) break;
+                if (!yx_sq_copy(&copy, &sub) || !yx_ex_cross(&seq, &copy)) {
+                    yx_sq_free(&copy);
+                    yx_sq_free(&seq);
+                    yx_sq_free(&sub);
+                    return false;
+                }
+            }
+            bool fixed = !yx_tr_unbounded(node) && node->minimum == node->maximum;
+            if (!fixed || node->minimum > YX_SQ_REPEAT) yx_sq_make_inexact(&seq);
+            yx_sq_free(&sub);
+            *out = seq;
+            return true;
         }
-        bool fixed = !yx_tr_unbounded(node) && node->minimum == node->maximum;
-        if (!fixed || node->minimum > YX_SQ_REPEAT) yx_sq_make_inexact(&seq);
-        yx_sq_free(&sub); *out = seq; return true;
-    }
-    default: return false;
+        default: return false;
     }
 }
 /* optimize_seq. Literals are grouped by their prefix without the last
@@ -1370,7 +1695,10 @@ static bool yx_sq_optimize(yx_sq *seq)
     if (seq->infinite || seq->count <= 1) return true;
     /* A group collapses only when all 256 final bytes occur under one
      * prefix, which takes at least 256 literals. */
-    if (seq->count < 256) { yx_sq_dedup(seq); return true; }
+    if (seq->count < 256) {
+        yx_sq_dedup(seq);
+        return true;
+    }
     {
         /* A full group needs all 256 final bytes among the literals of one
          * length; without such a length no group collapses. (Per-thread
@@ -1386,14 +1714,20 @@ static bool yx_sq_optimize(yx_sq *seq)
             possible = true;
             for (size_t b = 0; b < 32 && possible; ++b) possible = finals[length][b] == 255;
         }
-        if (!possible) { yx_sq_dedup(seq); return true; }
+        if (!possible) {
+            yx_sq_dedup(seq);
+            return true;
+        }
     }
     size_t *table = NULL, *group = malloc(seq->count * sizeof(*group));
-    uint8_t (*bitmaps)[32] = NULL;
+    uint8_t(*bitmaps)[32] = NULL;
     bool *full = NULL, *pending = NULL, ok = false, any = false;
     size_t used = 0, groups = 0, slots = 16;
     if (!group) goto done;
-    for (size_t i = 0; i < seq->count; ++i) { group[i] = SIZE_MAX; if (seq->items[i].length) ++used; }
+    for (size_t i = 0; i < seq->count; ++i) {
+        group[i] = SIZE_MAX;
+        if (seq->items[i].length) ++used;
+    }
     while (slots < used * 2) slots *= 2;
     table = malloc(slots * sizeof(*table));
     bitmaps = calloc(used ? used : 1, sizeof(*bitmaps));
@@ -1409,8 +1743,10 @@ static bool yx_sq_optimize(yx_sq *seq)
             if (other->length == lit->length && !memcmp(other->bytes, lit->bytes, lit->length - 1u)) break;
             slot = (slot + 1u) & (slots - 1u);
         }
-        if (table[slot] == SIZE_MAX) { table[slot] = i; group[i] = groups++; }
-        else group[i] = group[table[slot]];
+        if (table[slot] == SIZE_MAX) {
+            table[slot] = i;
+            group[i] = groups++;
+        } else group[i] = group[table[slot]];
         yx_tr_set(bitmaps[group[i]], lit->bytes[lit->length - 1]);
     }
     full = calloc(groups ? groups : 1, sizeof(*full));
@@ -1418,25 +1754,45 @@ static bool yx_sq_optimize(yx_sq *seq)
     if (!full || !pending) goto done;
     for (size_t g = 0; g < groups; ++g) {
         full[g] = pending[g] = true;
-        for (size_t b = 0; b < 32; ++b) if (bitmaps[g][b] != 255) full[g] = pending[g] = false;
+        for (size_t b = 0; b < 32; ++b)
+            if (bitmaps[g][b] != 255) full[g] = pending[g] = false;
         any |= full[g];
     }
-    if (!any) { yx_sq_dedup(seq); ok = true; goto done; }
+    if (!any) {
+        yx_sq_dedup(seq);
+        ok = true;
+        goto done;
+    }
     yx_sq result = {0};
     for (size_t i = 0; i < seq->count; ++i) {
         const yx_sq_lit *lit = &seq->items[i];
         if (group[i] != SIZE_MAX && full[group[i]]) {
             if (pending[group[i]]) {
                 yx_sq_lit prefix = *lit;
-                prefix.length = (uint8_t)(lit->length - 1u); prefix.exact = false;
+                prefix.length = (uint8_t)(lit->length - 1u);
+                prefix.exact = false;
                 pending[group[i]] = false;
-                if (!yx_sq_push(&result, &prefix)) { yx_sq_free(&result); goto done; }
+                if (!yx_sq_push(&result, &prefix)) {
+                    yx_sq_free(&result);
+                    goto done;
+                }
             }
-        } else if (!yx_sq_push(&result, lit)) { yx_sq_free(&result); goto done; }
+        } else if (!yx_sq_push(&result, lit)) {
+            yx_sq_free(&result);
+            goto done;
+        }
     }
-    yx_sq_free(seq); *seq = result; yx_sq_dedup(seq); ok = true;
+    yx_sq_free(seq);
+    *seq = result;
+    yx_sq_dedup(seq);
+    ok = true;
 done:
-    free(table); free(group); free(bitmaps); free(full); free(pending); return ok;
+    free(table);
+    free(group);
+    free(bitmaps);
+    free(full);
+    free(pending);
+    return ok;
 }
 static int yx_sq_lit_cmp(const void *x, const void *y)
 {
@@ -1475,28 +1831,47 @@ static void yx_sq_sort(yx_sq *seq)
                 keys[i] = yx_sq_lit_key(&seq->items[i]);
                 if (i && keys[i - 1] > keys[i]) sorted = false;
             }
-            if (sorted) { free(keys); return; }
+            if (sorted) {
+                free(keys);
+                return;
+            }
             if (n <= 24) {
                 for (size_t i = 1; i < n; ++i) {
-                    uint64_t k = keys[i]; size_t j = i;
-                    while (j && keys[j - 1] > k) { keys[j] = keys[j - 1]; --j; }
+                    uint64_t k = keys[i];
+                    size_t j = i;
+                    while (j && keys[j - 1] > k) {
+                        keys[j] = keys[j - 1];
+                        --j;
+                    }
                     keys[j] = k;
                 }
             } else {
                 /* LSD radix sort over the byte digits that differ. */
-                size_t (*counts)[256] = calloc(8, sizeof(*counts));
-                if (!counts) { free(keys); goto fallback; }
+                size_t(*counts)[256] = calloc(8, sizeof(*counts));
+                if (!counts) {
+                    free(keys);
+                    goto fallback;
+                }
                 for (size_t i = 0; i < n; ++i)
                     for (unsigned d = 0; d < 8; ++d) ++counts[d][(keys[i] >> (8 * d)) & 255];
                 for (unsigned d = 0; d < 8; ++d) {
                     size_t *c = counts[d], total = 0;
                     if (c[(keys[0] >> (8 * d)) & 255] == n) continue;
-                    for (unsigned b = 0; b < 256; ++b) { size_t v = c[b]; c[b] = total; total += v; }
+                    for (unsigned b = 0; b < 256; ++b) {
+                        size_t v = c[b];
+                        c[b] = total;
+                        total += v;
+                    }
                     for (size_t i = 0; i < n; ++i) tmp[c[(keys[i] >> (8 * d)) & 255]++] = keys[i];
-                    uint64_t *swap = keys; keys = tmp; tmp = swap;
+                    uint64_t *swap = keys;
+                    keys = tmp;
+                    tmp = swap;
                 }
                 free(counts);
-                if (keys > tmp) { memcpy(tmp, keys, n * sizeof(*keys)); keys = tmp; }
+                if (keys > tmp) {
+                    memcpy(tmp, keys, n * sizeof(*keys));
+                    keys = tmp;
+                }
             }
             for (size_t i = 0; i < n; ++i) {
                 yx_sq_lit *lit = &seq->items[i];
@@ -1517,7 +1892,10 @@ static bool yx_sq_to_atoms(yx_sq *seq, bool *none)
 {
     *none = false;
     if (!yx_sq_optimize(seq)) return false;
-    if (seq->infinite) { *none = true; return true; }
+    if (seq->infinite) {
+        *none = true;
+        return true;
+    }
     yx_sq_sort(seq);
     size_t used = 0;
     for (size_t i = 0; i < seq->count; ++i)
@@ -1528,14 +1906,19 @@ static bool yx_sq_to_atoms(yx_sq *seq, bool *none)
     seq->count = used;
     if (used > 1) {
         bool *remove = calloc(used, sizeof(*remove)), *inexact = calloc(used, sizeof(*inexact));
-        if (!remove || !inexact) { free(remove); free(inexact); return false; }
+        if (!remove || !inexact) {
+            free(remove);
+            free(inexact);
+            return false;
+        }
         for (size_t i = 0; i + 1 < used; ++i) {
             const yx_sq_lit *a = &seq->items[i], *b = &seq->items[i + 1];
             bool prefix = b->length >= a->length;
             for (size_t k = 0; prefix && k < a->length; ++k) prefix = a->bytes[k] == b->bytes[k];
             if (prefix && a->length == b->length) remove[i + 1] = true;
             else if (prefix) {
-                inexact[i] = true; remove[i + 1] = true;
+                inexact[i] = true;
+                remove[i + 1] = true;
             }
         }
         size_t kept = 0;
@@ -1547,7 +1930,8 @@ static bool yx_sq_to_atoms(yx_sq *seq, bool *none)
             }
         }
         seq->count = kept;
-        free(remove); free(inexact);
+        free(remove);
+        free(inexact);
     }
     return true;
 }
@@ -1555,7 +1939,8 @@ static bool yx_sq_to_atoms(yx_sq *seq, bool *none)
 static bool yx_sq_concat(const yx_sq *seqs, size_t count, yx_sq *out, bool *none)
 {
     size_t length;
-    *none = true; *out = (yx_sq){0};
+    *none = true;
+    *out = (yx_sq){0};
     if (!count || seqs[0].infinite) return true;
     if (seqs[0].count == 256 && yx_sq_max_len(&seqs[0], &length) && length == 1) return true;
     size_t considered = count;
@@ -1566,13 +1951,20 @@ static bool yx_sq_concat(const yx_sq *seqs, size_t count, yx_sq *out, bool *none
         size_t minimum;
         if (!yx_sq_min_len(&seqs[i], &minimum)) break;
         if (out->infinite || yx_sq_mul(out->count, seqs[i].count) > YX_SQ_LIMIT_TOTAL) break;
-        if (!yx_sq_cross_from(out, &seqs[i])) { yx_sq_free(out); return false; }
-        ++added; total += minimum;
+        if (!yx_sq_cross_from(out, &seqs[i])) {
+            yx_sq_free(out);
+            return false;
+        }
+        ++added;
+        total += minimum;
         if (total >= 4 || yx_sq_is_inexact(out)) break;
     }
     if (added < count) yx_sq_make_inexact(out);
     yx_sq_keep_first(out, 4);
-    if (!yx_sq_optimize(out)) { yx_sq_free(out); return false; }
+    if (!yx_sq_optimize(out)) {
+        yx_sq_free(out);
+        return false;
+    }
     *none = out->infinite;
     if (*none) yx_sq_free(out);
     return true;
@@ -1582,14 +1974,20 @@ typedef struct {
     int min_quality;
     int64_t sum;
 } yx_aq;
-static yx_aq yx_aq_min(void) { return (yx_aq){0, 0, 0, INT_MIN, INT64_MIN}; }
+static yx_aq yx_aq_min(void)
+{
+    return (yx_aq){0, 0, 0, INT_MIN, INT64_MIN};
+}
 static int64_t yx_aq_add(int64_t a, int64_t b)
 {
     if (b > 0 && a > INT64_MAX - b) return INT64_MAX;
     if (b < 0 && a < INT64_MIN - b) return INT64_MIN;
     return a + b;
 }
-static size_t yx_aq_count_add(size_t a, size_t b) { return a > SIZE_MAX - b ? SIZE_MAX : a + b; }
+static size_t yx_aq_count_add(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
 static int yx_tr_quality(const yx_tr_atom_entry *a);
 /* atom_quality: the best four-byte window, or the whole of a shorter
  * literal. */
@@ -1608,7 +2006,8 @@ static yx_aq yx_aq_of(const yx_sq_lit *lits, size_t count)
     yx_aq q = {0, 0, SIZE_MAX, INT_MAX, 0};
     for (size_t i = 0; i < count; ++i) {
         int quality = yx_aq_bytes_quality(lits[i].bytes, lits[i].length);
-        if (lits[i].exact) ++q.exact; else ++q.inexact;
+        if (lits[i].exact) ++q.exact;
+        else ++q.inexact;
         q.sum = yx_aq_add(q.sum, quality);
         if (quality < q.min_quality) q.min_quality = quality;
         if (lits[i].length < q.min_length) q.min_length = lits[i].length;
@@ -1623,8 +2022,14 @@ static void yx_aq_merge(yx_aq *a, const yx_aq *b)
     if (b->min_length < a->min_length) a->min_length = b->min_length;
     if (b->min_quality < a->min_quality) a->min_quality = b->min_quality;
 }
-static size_t yx_aq_atoms(const yx_aq *q) { return yx_aq_count_add(q->exact, q->inexact); }
-static double yx_aq_avg(const yx_aq *q) { return (double)q->sum / (double)(q->exact + q->inexact); }
+static size_t yx_aq_atoms(const yx_aq *q)
+{
+    return yx_aq_count_add(q->exact, q->inexact);
+}
+static double yx_aq_avg(const yx_aq *q)
+{
+    return (double)q->sum / (double)(q->exact + q->inexact);
+}
 static int64_t yx_aq_total_key(double value)
 {
     int64_t bits;
@@ -1651,49 +2056,76 @@ static int yx_aq_cmp(const yx_aq *a, const yx_aq *b)
     if (a->inexact != b->inexact) return b->inexact < a->inexact ? -1 : 1;
     return b->exact < a->exact ? -1 : b->exact > a->exact ? 1 : 0;
 }
-enum { YX_TR_EV_CANDIDATE, YX_TR_EV_ALT_BEGIN, YX_TR_EV_ALT_NEXT, YX_TR_EV_ALT_END };
+enum {
+    YX_TR_EV_CANDIDATE,
+    YX_TR_EV_ALT_BEGIN,
+    YX_TR_EV_ALT_NEXT,
+    YX_TR_EV_ALT_END
+};
 typedef struct {
     unsigned kind;
     size_t alternatives;
     yx_tr_atom_entry *atoms;
     size_t count;
 } yx_tr_event;
-typedef struct { yx_tr_event *items; size_t count, capacity; } yx_tr_events;
+typedef struct {
+    yx_tr_event *items;
+    size_t count, capacity;
+} yx_tr_events;
 static void yx_tr_events_free(yx_tr_events *e)
 {
     for (size_t i = 0; i < e->count; ++i) free(e->items[i].atoms);
-    free(e->items); *e = (yx_tr_events){0};
+    free(e->items);
+    *e = (yx_tr_events){0};
 }
 static bool yx_tr_events_push(yx_tr_events *e, yx_tr_event event)
 {
     if (e->count == e->capacity) {
         size_t next = e->capacity ? e->capacity * 2 : 8;
         yx_tr_event *items = realloc(e->items, next * sizeof(*items));
-        if (!items) { free(event.atoms); return false; }
-        e->items = items; e->capacity = next;
+        if (!items) {
+            free(event.atoms);
+            return false;
+        }
+        e->items = items;
+        e->capacity = next;
     }
-    e->items[e->count++] = event; return true;
+    e->items[e->count++] = event;
+    return true;
 }
 static bool yx_tr_events_marker(yx_tr_events *e, unsigned kind, size_t alternatives)
-{ return yx_tr_events_push(e, (yx_tr_event){.kind = kind, .alternatives = alternatives}); }
+{
+    return yx_tr_events_push(e, (yx_tr_event){.kind = kind, .alternatives = alternatives});
+}
 /* Moves the events of a child program, shifting its code locations. */
 static bool yx_tr_events_take(yx_tr_events *to, yx_tr_events *from, size_t forward, size_t backward)
 {
     for (size_t i = 0; i < from->count; ++i) {
         yx_tr_event event = from->items[i];
-        for (size_t a = 0; a < event.count; ++a) { event.atoms[a].forward += forward; event.atoms[a].backward += backward; }
+        for (size_t a = 0; a < event.count; ++a) {
+            event.atoms[a].forward += forward;
+            event.atoms[a].backward += backward;
+        }
         from->items[i].atoms = NULL;
         if (!yx_tr_events_push(to, event)) {
-            for (size_t j = i + 1; j < from->count; ++j) { free(from->items[j].atoms); from->items[j].atoms = NULL; }
+            for (size_t j = i + 1; j < from->count; ++j) {
+                free(from->items[j].atoms);
+                from->items[j].atoms = NULL;
+            }
             return false;
         }
     }
-    free(from->items); *from = (yx_tr_events){0}; return true;
+    free(from->items);
+    *from = (yx_tr_events){0};
+    return true;
 }
 static void yx_tr_events_shift(yx_tr_events *e, size_t forward, size_t backward)
 {
     for (size_t i = 0; i < e->count; ++i)
-        for (size_t a = 0; a < e->items[i].count; ++a) { e->items[i].atoms[a].forward += forward; e->items[i].atoms[a].backward += backward; }
+        for (size_t a = 0; a < e->items[i].count; ++a) {
+            e->items[i].atoms[a].forward += forward;
+            e->items[i].atoms[a].backward += backward;
+        }
 }
 static void yx_tr_events_shift_backward(yx_tr_events *e, size_t adjustment)
 {
@@ -1711,25 +2143,27 @@ static int yx_tr_entry_cmp(const void *x, const void *y)
 }
 /* The candidate of one HIR node: atoms from a sequence (or a literal's best
  * atom), made inexact below the top level or under look-around. */
-static bool yx_tr_candidate(yx_tr_events *e, const yx_sq_lit *lits, size_t count, size_t forward, size_t backward,
-                            bool can_be_exact)
+static bool yx_tr_candidate(yx_tr_events *e, const yx_sq_lit *lits, size_t count, size_t forward, size_t backward, bool can_be_exact)
 {
     if (!count) return true;
     yx_tr_atom_entry *atoms = calloc(count, sizeof(*atoms));
     if (!atoms) return false;
     for (size_t i = 0; i < count; ++i) {
-        if (lits[i].length > 4) { free(atoms); return false; }
+        if (lits[i].length > 4) {
+            free(atoms);
+            return false;
+        }
         memcpy(atoms[i].bytes, lits[i].bytes, lits[i].length);
         atoms[i].length = lits[i].length;
         atoms[i].exact = lits[i].exact && can_be_exact;
-        atoms[i].forward = forward; atoms[i].backward = backward;
+        atoms[i].forward = forward;
+        atoms[i].backward = backward;
     }
     /* Sequences come from yx_sq_to_atoms, sorted and free of duplicates:
      * skip the sort when the inexact entries are already strictly ordered
      * (sorting would leave them as they are and remove nothing). */
     bool sorted = true;
-    for (size_t i = 1; sorted && !can_be_exact && i < count; ++i)
-        sorted = yx_tr_entry_cmp(&atoms[i - 1], &atoms[i]) < 0;
+    for (size_t i = 1; sorted && !can_be_exact && i < count; ++i) sorted = yx_tr_entry_cmp(&atoms[i - 1], &atoms[i]) < 0;
     if (!can_be_exact && count > 1 && !sorted) {
         qsort(atoms, count, sizeof(*atoms), yx_tr_entry_cmp);
         size_t used = 0;
@@ -1744,7 +2178,8 @@ static yx_aq yx_tr_entries_quality(const yx_tr_atom_entry *atoms, size_t count)
     yx_aq q = {0, 0, SIZE_MAX, INT_MAX, 0};
     for (size_t i = 0; i < count; ++i) {
         int quality = yx_tr_quality(&atoms[i]);
-        if (atoms[i].exact) ++q.exact; else ++q.inexact;
+        if (atoms[i].exact) ++q.exact;
+        else ++q.inexact;
         q.sum = yx_aq_add(q.sum, quality);
         if (quality < q.min_quality) q.min_quality = quality;
         if (atoms[i].length < q.min_length) q.min_length = atoms[i].length;
@@ -1754,7 +2189,11 @@ static yx_aq yx_tr_entries_quality(const yx_tr_atom_entry *atoms, size_t count)
 /* best_atoms_stack over the recorded events. */
 static bool yx_tr_fold_events(yx_tr_events *e, yx_tr_atoms *result)
 {
-    typedef struct { yx_tr_atom_entry *atoms; size_t count; yx_aq quality; } yx_tr_best;
+    typedef struct {
+        yx_tr_atom_entry *atoms;
+        size_t count;
+        yx_aq quality;
+    } yx_tr_best;
     yx_tr_best *stack = malloc(sizeof(*stack));
     size_t depth = 1, capacity = 1;
     bool ok = false;
@@ -1768,13 +2207,15 @@ static bool yx_tr_fold_events(yx_tr_events *e, yx_tr_atoms *result)
             if (yx_aq_cmp(&q, &top->quality) > 0) {
                 free(top->atoms);
                 *top = (yx_tr_best){event->atoms, event->count, q};
-                event->atoms = NULL; event->count = 0;
+                event->atoms = NULL;
+                event->count = 0;
             }
         } else if (event->kind == YX_TR_EV_ALT_BEGIN || event->kind == YX_TR_EV_ALT_NEXT) {
             if (depth == capacity) {
                 yx_tr_best *grown = realloc(stack, capacity * 2 * sizeof(*grown));
                 if (!grown) goto done;
-                stack = grown; capacity *= 2;
+                stack = grown;
+                capacity *= 2;
             }
             stack[depth++] = (yx_tr_best){NULL, 0, yx_aq_min()};
         } else {
@@ -1803,21 +2244,32 @@ static bool yx_tr_fold_events(yx_tr_events *e, yx_tr_atoms *result)
     }
     if (depth != 1) goto done;
     *result = (yx_tr_atoms){0};
-    result->items = stack[0].atoms; result->count = stack[0].count;
+    result->items = stack[0].atoms;
+    result->count = stack[0].count;
     stack[0].atoms = NULL;
     ok = true;
 done:
     for (size_t j = 0; j < depth; ++j) free(stack[j].atoms);
-    free(stack); return ok;
+    free(stack);
+    return ok;
 }
 
-typedef struct { yx_writer forward, backward; yx_tr_atoms atoms; yx_tr_events events; } yx_tr_program;
+typedef struct {
+    yx_writer forward, backward;
+    yx_tr_atoms atoms;
+    yx_tr_events events;
+} yx_tr_program;
 static void yx_tr_program_free(yx_tr_program *p)
-{ free(p->forward.data); free(p->backward.data); yx_tr_atoms_free(&p->atoms); yx_tr_events_free(&p->events); memset(p, 0, sizeof(*p)); }
+{
+    free(p->forward.data);
+    free(p->backward.data);
+    yx_tr_atoms_free(&p->atoms);
+    yx_tr_events_free(&p->events);
+    memset(p, 0, sizeof(*p));
+}
 static bool yx_tr_u32(yx_writer *w, uint32_t value)
 {
-    uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8),
-                        (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
+    uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
     return yx_put_bytes(w, bytes, 4);
 }
 static bool yx_tr_instr(yx_writer *w, unsigned op, unsigned id, unsigned alternatives)
@@ -1850,16 +2302,21 @@ static size_t yx_tr_instruction_size(const uint8_t *code, size_t size)
     if (!size) return 0;
     if (code[0] != 0xaa) return 1;
     if (size < 2) return 0;
-    unsigned op = code[1]; size_t n;
+    unsigned op = code[1];
+    size_t n;
     if (op == 0xaa) n = 2;
     else if (op == 1 || op == 2) n = 8;
-    else if (op == 3) { if (size < 5) return 0; n = 5 + 4 * code[4]; }
-    else if (op == 4) n = 6;
+    else if (op == 3) {
+        if (size < 5) return 0;
+        n = 5 + 4 * code[4];
+    } else if (op == 4) n = 6;
     else if (op == 6) n = 4;
     else if (op == 7) n = 3;
     else if (op == 8) n = 34;
-    else if (op == 9) { if (size < 3) return 0; n = 3 + 2 * code[2]; }
-    else if (op == 16 || op == 17) n = 14;
+    else if (op == 9) {
+        if (size < 3) return 0;
+        n = 3 + 2 * code[2];
+    } else if (op == 16 || op == 17) n = 14;
     else if (op <= 19) n = 2;
     else return 0;
     return n <= size ? n : 0;
@@ -1878,35 +2335,41 @@ static bool yx_tr_clone_one(yx_writer *to, const yx_writer *from, unsigned start
         }
         at += n;
     }
-    *next = start; return true;
+    *next = start;
+    return true;
 }
 static bool yx_tr_clone(yx_tr_program *to, const yx_tr_program *from, unsigned *split)
 {
     unsigned next_f, next_b;
-    if (!yx_tr_clone_one(&to->forward, &from->forward, *split, &next_f) ||
-        !yx_tr_clone_one(&to->backward, &from->backward, *split, &next_b) || next_f != next_b) return false;
-    *split = next_f; return true;
+    if (!yx_tr_clone_one(&to->forward, &from->forward, *split, &next_f) || !yx_tr_clone_one(&to->backward, &from->backward, *split, &next_b) || next_f != next_b)
+        return false;
+    *split = next_f;
+    return true;
 }
 static bool yx_tr_class_code(yx_writer *w, const uint8_t bitmap[32], bool unicode_class)
 {
     unsigned low = 255, high = 0, count = 0, ranges = 0;
-    for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(bitmap, b)) {
-        low &= b; high |= b; ++count;
-        if (!b || !yx_tr_has(bitmap, b - 1)) ++ranges;
-    }
+    for (unsigned b = 0; b < 256; ++b)
+        if (yx_tr_has(bitmap, b)) {
+            low &= b;
+            high |= b;
+            ++count;
+            if (!b || !yx_tr_has(bitmap, b - 1)) ++ranges;
+        }
     if (count == 256) return yx_tr_instr(w, 5, 0, 0);
     uint8_t mask = (uint8_t)~(low ^ high);
     unsigned combinations = 1;
-    for (unsigned bit = 1; bit <= 128; bit <<= 1) if (!(mask & bit)) combinations *= 2;
-    if (!unicode_class && count && count == combinations)
-        return yx_tr_instr(w, 6, 0, 0) && yx_put_u8(w, (uint8_t)low) && yx_put_u8(w, mask);
+    for (unsigned bit = 1; bit <= 128; bit <<= 1)
+        if (!(mask & bit)) combinations *= 2;
+    if (!unicode_class && count && count == combinations) return yx_tr_instr(w, 6, 0, 0) && yx_put_u8(w, (uint8_t)low) && yx_put_u8(w, mask);
     if (ranges >= 4) return yx_tr_instr(w, 8, 0, 0) && yx_put_bytes(w, bitmap, 32);
     if (!yx_tr_instr(w, 9, 0, 0) || !yx_put_u8(w, (uint8_t)ranges)) return false;
-    for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(bitmap, b)) {
-        unsigned first = b;
-        while (b < 255 && yx_tr_has(bitmap, b + 1)) ++b;
-        if (!yx_put_u8(w, (uint8_t)first) || !yx_put_u8(w, (uint8_t)b)) return false;
-    }
+    for (unsigned b = 0; b < 256; ++b)
+        if (yx_tr_has(bitmap, b)) {
+            unsigned first = b;
+            while (b < 255 && yx_tr_has(bitmap, b + 1)) ++b;
+            if (!yx_put_u8(w, (uint8_t)first) || !yx_put_u8(w, (uint8_t)b)) return false;
+        }
     return true;
 }
 #include "serialization_utf8.h"
@@ -1915,10 +2378,19 @@ static bool yx_tr_class_code(yx_writer *w, const uint8_t bitmap[32], bool unicod
  * extracts each of its children again with the same arguments, a pure
  * function of the child, and takes the kept sequence instead. Each node
  * drops what its subtree kept once it has read its children's sequences. */
-typedef struct { const yx_tr_node *node; yx_sq seq; } yx_ex_kept;
-typedef struct { yx_ex_kept *items; size_t count, capacity; } yx_ex_memo;
+typedef struct {
+    const yx_tr_node *node;
+    yx_sq seq;
+} yx_ex_kept;
+typedef struct {
+    yx_ex_kept *items;
+    size_t count, capacity;
+} yx_ex_memo;
 static _Thread_local yx_ex_memo *yx_ex_memo_active;
-static size_t yx_ex_memo_mark(void) { return yx_ex_memo_active ? yx_ex_memo_active->count : 0; }
+static size_t yx_ex_memo_mark(void)
+{
+    return yx_ex_memo_active ? yx_ex_memo_active->count : 0;
+}
 static void yx_ex_memo_truncate(size_t count)
 {
     yx_ex_memo *memo = yx_ex_memo_active;
@@ -1932,7 +2404,8 @@ static void yx_ex_memo_keep(const yx_tr_node *node, const yx_sq *seq)
         size_t next = memo->capacity ? memo->capacity * 2 : 16;
         yx_ex_kept *items = realloc(memo->items, next * sizeof(*items));
         if (!items) return;
-        memo->items = items; memo->capacity = next;
+        memo->items = items;
+        memo->capacity = next;
     }
     if (!yx_sq_copy(&memo->items[memo->count].seq, seq)) return;
     memo->items[memo->count++].node = node;
@@ -1952,7 +2425,8 @@ static bool yx_ex_memo_take(const yx_tr_node *node, size_t *from, yx_sq *out)
     for (size_t i = *from; memo && i < memo->count; ++i) {
         if (memo->items[i].node == node) {
             *out = memo->items[i].seq;
-            memo->items[i].seq = (yx_sq){0}; memo->items[i].node = NULL;
+            memo->items[i].seq = (yx_sq){0};
+            memo->items[i].node = NULL;
             if (all_taken) *from = i + 1;
             return true;
         }
@@ -1960,9 +2434,7 @@ static bool yx_ex_memo_take(const yx_tr_node *node, size_t *from, yx_sq *out)
     }
     return false;
 }
-static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
-                                unsigned *split, size_t depth, bool zero,
-                                bool counted)
+static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out, unsigned *split, size_t depth, bool zero, bool counted)
 {
     if (depth > 250) return false;
     size_t memo_mark = yx_ex_memo_mark();
@@ -1974,19 +2446,18 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
     if (node->kind == YX_TR_LITERAL) {
         for (size_t i = 0; i < node->length; ++i) {
             uint8_t f = node->bytes[i], b = node->bytes[node->length - i - 1];
-            if (!yx_put_u8(&out->forward, f) || (f == 0xaa && !yx_put_u8(&out->forward, f)) ||
-                !yx_put_u8(&out->backward, b) || (b == 0xaa && !yx_put_u8(&out->backward, b))) goto done;
+            if (!yx_put_u8(&out->forward, f) || (f == 0xaa && !yx_put_u8(&out->forward, f)) || !yx_put_u8(&out->backward, b) ||
+                (b == 0xaa && !yx_put_u8(&out->backward, b)))
+                goto done;
         }
     } else if (node->kind == YX_TR_SCALAR_CLASS) {
         /* A Unicode class of every scalar is any_byte, ANY_BYTE; others are
          * their UTF-8 sequences. */
         if (yx_u8_any(node)) {
-            if (!yx_tr_instr(&out->forward, 5, 0, 0) ||
-                !yx_tr_instr(&out->backward, 5, 0, 0)) goto done;
+            if (!yx_tr_instr(&out->forward, 5, 0, 0) || !yx_tr_instr(&out->backward, 5, 0, 0)) goto done;
         } else if (!yx_u8_class_code((const yx_re_range *)node->bytes, node->length, out, split)) goto done;
     } else if (node->kind == YX_TR_CLASS) {
-        if (!yx_tr_class_code(&out->forward, node->bitmap, node->unicode_class) ||
-            !yx_tr_class_code(&out->backward, node->bitmap, node->unicode_class)) goto done;
+        if (!yx_tr_class_code(&out->forward, node->bitmap, node->unicode_class) || !yx_tr_class_code(&out->backward, node->bitmap, node->unicode_class)) goto done;
     } else if (node->kind == YX_TR_LOOK) {
         if (!yx_tr_pair(out, node->look, split, 0)) goto done;
     } else if (node->count) {
@@ -1994,18 +2465,17 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         fstarts = calloc(node->count, sizeof(*fstarts));
         bends = calloc(node->count, sizeof(*bends));
         if (!children || !fstarts || !bends) goto done;
-        bool repeat_counted = node->kind == YX_TR_REPEAT && !counted &&
-            !yx_tr_unbounded(node) && node->maximum > 10;
+        bool repeat_counted = node->kind == YX_TR_REPEAT && !counted && !yx_tr_unbounded(node) && node->maximum > 10;
         bool prefix_split = node->kind == YX_TR_REPEAT && node->minimum == 0;
         if (node->kind == YX_TR_ALT) {
             if (!yx_tr_pair(out, 3, split, (unsigned)node->count)) goto done;
         } else if (prefix_split) {
             if (!yx_tr_pair(out, node->greedy ? 1 : 2, split, 0)) goto done;
         }
-        start_f = out->forward.used; start_b = out->backward.used;
+        start_f = out->forward.used;
+        start_b = out->backward.used;
         for (size_t i = 0; i < node->count; ++i) {
-            if (!yx_tr_compile_node(node->children[i], &children[i], split, depth + 1,
-                                    zero || prefix_split, repeat_counted || counted)) goto done;
+            if (!yx_tr_compile_node(node->children[i], &children[i], split, depth + 1, zero || prefix_split, repeat_counted || counted)) goto done;
             fstarts[i] = out->forward.used;
             if (!yx_put_bytes(&out->forward, children[i].forward.data, children[i].forward.used)) goto done;
             if (node->kind != YX_TR_CONCAT) {
@@ -2027,11 +2497,10 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         } else if (node->kind == YX_TR_ALT) {
             for (size_t i = 0; i < node->count; ++i) {
                 size_t bstart = bends[i] - children[i].backward.used;
-                if (!yx_tr_patch(&out->forward, 0, 5 + 4 * i, fstarts[i]) ||
-                    !yx_tr_patch(&out->backward, 0, 5 + 4 * i, bstart)) goto done;
-                if (i + 1 < node->count &&
-                    (!yx_tr_patch(&out->forward, fstarts[i] + children[i].forward.used, 2, out->forward.used) ||
-                     !yx_tr_patch(&out->backward, bends[i], 2, out->backward.used))) goto done;
+                if (!yx_tr_patch(&out->forward, 0, 5 + 4 * i, fstarts[i]) || !yx_tr_patch(&out->backward, 0, 5 + 4 * i, bstart)) goto done;
+                if (i + 1 < node->count && (!yx_tr_patch(&out->forward, fstarts[i] + children[i].forward.used, 2, out->forward.used) ||
+                                            !yx_tr_patch(&out->backward, bends[i], 2, out->backward.used)))
+                    goto done;
             }
         } else if (node->kind == YX_TR_REPEAT) {
             const uint32_t min = node->minimum, max = node->maximum;
@@ -2039,21 +2508,18 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
             size_t adjustment = 0;
             if (yx_tr_unbounded(node) && min == 0) {
                 size_t jf = out->forward.used, jb = out->backward.used;
-                if (!yx_tr_pair(out, 4, split, 0) ||
-                    !yx_tr_patch(&out->forward, 0, 4, out->forward.used) ||
-                    !yx_tr_patch(&out->backward, 0, 4, out->backward.used) ||
-                    !yx_tr_patch(&out->forward, jf, 2, 0) ||
-                    !yx_tr_patch(&out->backward, jb, 2, 0)) goto done;
+                if (!yx_tr_pair(out, 4, split, 0) || !yx_tr_patch(&out->forward, 0, 4, out->forward.used) || !yx_tr_patch(&out->backward, 0, 4, out->backward.used) ||
+                    !yx_tr_patch(&out->forward, jf, 2, 0) || !yx_tr_patch(&out->backward, jb, 2, 0))
+                    goto done;
             } else if (yx_tr_unbounded(node)) {
                 size_t lf = 0, lb = 0;
                 for (uint32_t i = 1; i + 1 < min; ++i) {
-                    lf = out->forward.used; lb = out->backward.used;
+                    lf = out->forward.used;
+                    lb = out->backward.used;
                     if (!yx_tr_clone(out, child, split)) goto done;
                 }
                 size_t sf = out->forward.used, sb = out->backward.used;
-                if (!yx_tr_pair(out, node->greedy ? 2 : 1, split, 0) ||
-                    !yx_tr_patch(&out->forward, sf, 4, lf) ||
-                    !yx_tr_patch(&out->backward, sb, 4, lb)) goto done;
+                if (!yx_tr_pair(out, node->greedy ? 2 : 1, split, 0) || !yx_tr_patch(&out->forward, sf, 4, lf) || !yx_tr_patch(&out->backward, sb, 4, lb)) goto done;
                 if (min > 1) {
                     if (!yx_tr_clone(out, child, split)) goto done;
                     adjustment = (min - 1) * child->backward.used + 8;
@@ -2061,35 +2527,37 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
             } else if (repeat_counted) {
                 if (!min) {
                     size_t rf = out->forward.used, rb = out->backward.used;
-                    if (!yx_tr_pair(out, node->greedy ? 16 : 17, split, 0) ||
-                        !yx_tr_u32(&out->forward, 0) || !yx_tr_u32(&out->forward, 0) || !yx_tr_u32(&out->forward, max) ||
-                        !yx_tr_u32(&out->backward, 0) || !yx_tr_u32(&out->backward, 0) || !yx_tr_u32(&out->backward, max) ||
-                        !yx_tr_patch(&out->forward, rf, 2, start_f) ||
-                        !yx_tr_patch(&out->backward, rb, 2, start_b) ||
-                        !yx_tr_patch(&out->forward, 0, 4, out->forward.used) ||
-                        !yx_tr_patch(&out->backward, 0, 4, out->backward.used)) goto done;
+                    if (!yx_tr_pair(out, node->greedy ? 16 : 17, split, 0) || !yx_tr_u32(&out->forward, 0) || !yx_tr_u32(&out->forward, 0) ||
+                        !yx_tr_u32(&out->forward, max) || !yx_tr_u32(&out->backward, 0) || !yx_tr_u32(&out->backward, 0) || !yx_tr_u32(&out->backward, max) ||
+                        !yx_tr_patch(&out->forward, rf, 2, start_f) || !yx_tr_patch(&out->backward, rb, 2, start_b) ||
+                        !yx_tr_patch(&out->forward, 0, 4, out->forward.used) || !yx_tr_patch(&out->backward, 0, 4, out->backward.used))
+                        goto done;
                 } else {
                     yx_tr_program tail = {0};
-                    if ((min == 1 && !yx_tr_pair(&tail, node->greedy ? 1 : 2, split, 0)) ||
-                        !yx_tr_clone(&tail, child, split)) { yx_tr_program_free(&tail); goto done; }
+                    if ((min == 1 && !yx_tr_pair(&tail, node->greedy ? 1 : 2, split, 0)) || !yx_tr_clone(&tail, child, split)) {
+                        yx_tr_program_free(&tail);
+                        goto done;
+                    }
                     size_t rf = tail.forward.used, rb = tail.backward.used;
-                    if (!yx_tr_pair(&tail, node->greedy ? 16 : 17, split, 0) ||
-                        !yx_tr_u32(&tail.forward, 0) || !yx_tr_u32(&tail.forward, min - 1) || !yx_tr_u32(&tail.forward, max - 1) ||
-                        !yx_tr_u32(&tail.backward, 0) || !yx_tr_u32(&tail.backward, min - 1) || !yx_tr_u32(&tail.backward, max - 1) ||
-                        !yx_tr_patch(&tail.forward, rf, 2, min == 1 ? 8 : 0) ||
+                    if (!yx_tr_pair(&tail, node->greedy ? 16 : 17, split, 0) || !yx_tr_u32(&tail.forward, 0) || !yx_tr_u32(&tail.forward, min - 1) ||
+                        !yx_tr_u32(&tail.forward, max - 1) || !yx_tr_u32(&tail.backward, 0) || !yx_tr_u32(&tail.backward, min - 1) ||
+                        !yx_tr_u32(&tail.backward, max - 1) || !yx_tr_patch(&tail.forward, rf, 2, min == 1 ? 8 : 0) ||
                         !yx_tr_patch(&tail.backward, rb, 2, min == 1 ? 8 : 0) ||
-                        (min == 1 && (!yx_tr_patch(&tail.forward, 0, 4, tail.forward.used) ||
-                                      !yx_tr_patch(&tail.backward, 0, 4, tail.backward.used))) ||
+                        (min == 1 && (!yx_tr_patch(&tail.forward, 0, 4, tail.forward.used) || !yx_tr_patch(&tail.backward, 0, 4, tail.backward.used))) ||
                         !yx_put_bytes(&out->forward, tail.forward.data, tail.forward.used)) {
-                        yx_tr_program_free(&tail); goto done;
+                        yx_tr_program_free(&tail);
+                        goto done;
                     }
                     yx_writer reversed = {0};
-                    if (!yx_put_bytes(&reversed, tail.backward.data, tail.backward.used) ||
-                        !yx_put_bytes(&reversed, out->backward.data, out->backward.used)) {
-                        free(reversed.data); yx_tr_program_free(&tail); goto done;
+                    if (!yx_put_bytes(&reversed, tail.backward.data, tail.backward.used) || !yx_put_bytes(&reversed, out->backward.data, out->backward.used)) {
+                        free(reversed.data);
+                        yx_tr_program_free(&tail);
+                        goto done;
                     }
                     adjustment = tail.backward.used;
-                    free(out->backward.data); out->backward = reversed; yx_tr_program_free(&tail);
+                    free(out->backward.data);
+                    out->backward = reversed;
+                    yx_tr_program_free(&tail);
                 }
             } else {
                 size_t splits = 0, capacity = max - min;
@@ -2098,17 +2566,19 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
                     split_b = calloc(capacity, sizeof(*split_b));
                     if (!split_f || !split_b) goto done;
                 }
-                if (!min) { split_f[splits] = 0; split_b[splits++] = 0; }
+                if (!min) {
+                    split_f[splits] = 0;
+                    split_b[splits++] = 0;
+                }
                 for (uint32_t i = 1; i < min; ++i)
                     if (!yx_tr_clone(out, child, split)) goto done;
                 for (uint32_t i = min ? min : 1; i < max; ++i) {
-                    split_f[splits] = out->forward.used; split_b[splits++] = out->backward.used;
-                    if (!yx_tr_pair(out, node->greedy ? 1 : 2, split, 0) ||
-                        !yx_tr_clone(out, child, split)) goto done;
+                    split_f[splits] = out->forward.used;
+                    split_b[splits++] = out->backward.used;
+                    if (!yx_tr_pair(out, node->greedy ? 1 : 2, split, 0) || !yx_tr_clone(out, child, split)) goto done;
                 }
                 for (size_t i = 0; i < splits; ++i)
-                    if (!yx_tr_patch(&out->forward, split_f[i], 4, out->forward.used) ||
-                        !yx_tr_patch(&out->backward, split_b[i], 4, out->backward.used)) goto done;
+                    if (!yx_tr_patch(&out->forward, split_f[i], 4, out->forward.used) || !yx_tr_patch(&out->backward, split_b[i], 4, out->backward.used)) goto done;
                 if (min > 1) adjustment = (min - 1) * child->backward.used;
             }
             yx_tr_events_shift_backward(&child->events, adjustment);
@@ -2122,7 +2592,10 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         }
         if (node->kind == YX_TR_ALT && !node->unicode_class && !yx_tr_events_marker(&out->events, YX_TR_EV_ALT_END, node->count)) goto done;
     }
-    if (zero || (node->kind == YX_TR_REPEAT && node->minimum == 0)) { ok = true; goto done; }
+    if (zero || (node->kind == YX_TR_REPEAT && node->minimum == 0)) {
+        ok = true;
+        goto done;
+    }
     bool can_be_exact = !depth && !node->has_look;
     if (node->kind == YX_TR_CONCAT) {
         /* The best concat_seq over each suffix of the children. */
@@ -2131,25 +2604,30 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         size_t best_at = 0, memo_from = memo_mark;
         bool seq_ok = seqs != NULL, have = false, none;
         for (size_t i = 0; seq_ok && i < node->count; ++i)
-            seq_ok = yx_ex_memo_take(node->children[i], &memo_from, &seqs[i]) ||
-                     yx_ex_extract(node->children[i], &seqs[i], 0);
+            seq_ok = yx_ex_memo_take(node->children[i], &memo_from, &seqs[i]) || yx_ex_extract(node->children[i], &seqs[i], 0);
         yx_ex_memo_truncate(memo_mark);
         for (size_t start = 0; seq_ok && start < node->count; ++start) {
             yx_sq seq;
-            if (!yx_sq_concat(seqs + start, node->count - start, &seq, &none)) { seq_ok = false; break; }
+            if (!yx_sq_concat(seqs + start, node->count - start, &seq, &none)) {
+                seq_ok = false;
+                break;
+            }
             if (none) continue;
             if (start) yx_sq_make_inexact(&seq);
             yx_aq quality = yx_aq_of(seq.items, seq.count);
             if (yx_aq_cmp(&quality, &best_quality) > 0) {
-                best_quality = quality; yx_sq_free(&best); best = seq; have = true; best_at = start;
+                best_quality = quality;
+                yx_sq_free(&best);
+                best = seq;
+                have = true;
+                best_at = start;
             } else yx_sq_free(&seq);
         }
-        if (seqs) for (size_t i = 0; i < node->count; ++i) yx_sq_free(&seqs[i]);
+        if (seqs)
+            for (size_t i = 0; i < node->count; ++i) yx_sq_free(&seqs[i]);
         free(seqs);
         if (seq_ok && have)
-            seq_ok = yx_sq_to_atoms(&best, &none) &&
-                     (none || yx_tr_candidate(&out->events, best.items, best.count, fstarts[best_at], bends[best_at],
-                                              can_be_exact));
+            seq_ok = yx_sq_to_atoms(&best, &none) && (none || yx_tr_candidate(&out->events, best.items, best.count, fstarts[best_at], bends[best_at], can_be_exact));
         yx_sq_free(&best);
         if (!seq_ok) goto done;
     } else if (node->kind == YX_TR_LITERAL) {
@@ -2165,27 +2643,29 @@ static bool yx_tr_compile_node(const yx_tr_node *node, yx_tr_program *out,
         bool none, seq_ok = yx_ex_extract(node, &seq, 0);
         if (seq_ok) yx_ex_memo_keep(node, &seq);
         seq_ok = seq_ok && yx_sq_to_atoms(&seq, &none) &&
-                 (none || yx_tr_candidate(&out->events, seq.items, seq.count,
-                                          node->kind == YX_TR_REPEAT ? start_f : 0, out->backward.used, can_be_exact));
+                 (none || yx_tr_candidate(&out->events, seq.items, seq.count, node->kind == YX_TR_REPEAT ? start_f : 0, out->backward.used, can_be_exact));
         yx_sq_free(&seq);
         if (!seq_ok) goto done;
     }
     ok = true;
 done:
-    if (children) for (size_t i = 0; i < node->count; ++i) yx_tr_program_free(&children[i]);
-    free(children); free(fstarts); free(bends); free(split_f); free(split_b); return ok;
+    if (children)
+        for (size_t i = 0; i < node->count; ++i) yx_tr_program_free(&children[i]);
+    free(children);
+    free(fstarts);
+    free(bends);
+    free(split_f);
+    free(split_b);
+    return ok;
 }
-static bool yx_tr_compile_uncached(const char *regexp, bool dotall, bool nocase,
-                                   yx_tr_program *program, bool *greedy)
+static bool yx_tr_compile_uncached(const char *regexp, bool dotall, bool nocase, yx_tr_program *program, bool *greedy)
 {
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
-                           .dotall = dotall, .nocase = nocase};
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = dotall, .nocase = nocase};
     yx_tr_node *root = yx_tr_expression(&parser);
     unsigned split = 0;
     yx_ex_memo memo = {0}, *outer_memo = yx_ex_memo_active;
     yx_ex_memo_active = &memo;
-    bool ok = root && !parser.failed && !parser.oom && parser.at == parser.length &&
-        yx_tr_compile_node(root, program, &split, 0, false, false);
+    bool ok = root && !parser.failed && !parser.oom && parser.at == parser.length && yx_tr_compile_node(root, program, &split, 0, false, false);
     yx_ex_memo_truncate(0);
     free(memo.items);
     yx_ex_memo_active = outer_memo;
@@ -2193,8 +2673,7 @@ static bool yx_tr_compile_uncached(const char *regexp, bool dotall, bool nocase,
     /* Only the folded atoms are used once the events are folded; dropping
      * them keeps cached programs small and their copies cheap. */
     yx_tr_events_free(&program->events);
-    if (ok && !program->atoms.count)
-        ok = yx_tr_atoms_add(&program->atoms, (yx_tr_atom_entry){.backward = program->backward.used});
+    if (ok && !program->atoms.count) ok = yx_tr_atoms_add(&program->atoms, (yx_tr_atom_entry){.backward = program->backward.used});
     if (ok) ok = yx_tr_pair(program, 0, &split, 0);
     *greedy = parser.saw_greedy && !parser.saw_lazy;
     yx_tr_destroy(root);
@@ -2206,13 +2685,20 @@ static bool yx_tr_compile_uncached(const char *regexp, bool dotall, bool nocase,
  * and the atom extraction dominates each of those. The result is a pure
  * function of (source, dotall, nocase), so each thread keeps its recent
  * successful compilations of small programs and hands out deep copies. */
-enum { YX_TR_CACHE_SLOTS = 2048, YX_TR_CACHE_PROGRAM_LIMIT = 1u << 20, YX_TR_CACHE_BUDGET = 32u << 20 };
+enum {
+    YX_TR_CACHE_SLOTS = 2048,
+    YX_TR_CACHE_PROGRAM_LIMIT = 1u << 20,
+    YX_TR_CACHE_BUDGET = 32u << 20
+};
 typedef struct {
     char *regexp;
     bool dotall, nocase, greedy;
     yx_tr_program program;
 } yx_tr_cache_entry;
-typedef struct { yx_tr_cache_entry slots[YX_TR_CACHE_SLOTS]; size_t bytes; } yx_tr_cache;
+typedef struct {
+    yx_tr_cache_entry slots[YX_TR_CACHE_SLOTS];
+    size_t bytes;
+} yx_tr_cache;
 static yx_thread_storage yx_tr_cache_storage = YX_THREAD_STORAGE_INIT;
 static void yx_tr_cache_destroy(void *opaque)
 {
@@ -2225,8 +2711,7 @@ static void yx_tr_cache_destroy(void *opaque)
 static size_t yx_tr_cache_hash(const char *regexp, bool dotall, bool nocase)
 {
     uint64_t hash = 1469598103934665603ull ^ (dotall ? 1u : 0u) ^ (nocase ? 2u : 0u);
-    for (const unsigned char *at = (const unsigned char *)regexp; *at; ++at)
-        hash = (hash ^ *at) * 1099511628211ull;
+    for (const unsigned char *at = (const unsigned char *)regexp; *at; ++at) hash = (hash ^ *at) * 1099511628211ull;
     return (size_t)(hash ^ (hash >> 32));
 }
 static bool yx_tr_writer_copy(yx_writer *to, const yx_writer *from)
@@ -2242,15 +2727,13 @@ static bool yx_tr_writer_copy(yx_writer *to, const yx_writer *from)
 static bool yx_tr_program_copy(yx_tr_program *to, const yx_tr_program *from)
 {
     *to = (yx_tr_program){0};
-    if (!yx_tr_writer_copy(&to->forward, &from->forward) ||
-        !yx_tr_writer_copy(&to->backward, &from->backward)) goto failed;
+    if (!yx_tr_writer_copy(&to->forward, &from->forward) || !yx_tr_writer_copy(&to->backward, &from->backward)) goto failed;
     to->atoms.count = from->atoms.count;
     to->atoms.infinite = from->atoms.infinite;
     if (from->atoms.count) {
         to->atoms.items = malloc(from->atoms.count * sizeof(*to->atoms.items));
         if (!to->atoms.items) goto failed;
-        memcpy(to->atoms.items, from->atoms.items,
-               from->atoms.count * sizeof(*to->atoms.items));
+        memcpy(to->atoms.items, from->atoms.items, from->atoms.count * sizeof(*to->atoms.items));
     }
     if (from->events.count) {
         to->events.items = calloc(from->events.count, sizeof(*to->events.items));
@@ -2263,9 +2746,11 @@ static bool yx_tr_program_copy(yx_tr_program *to, const yx_tr_program *from)
             target->atoms = NULL;
             if (source->atoms && source->count) {
                 target->atoms = malloc(source->count * sizeof(*target->atoms));
-                if (!target->atoms) { to->events.count = i + 1; goto failed; }
-                memcpy(target->atoms, source->atoms,
-                       source->count * sizeof(*target->atoms));
+                if (!target->atoms) {
+                    to->events.count = i + 1;
+                    goto failed;
+                }
+                memcpy(target->atoms, source->atoms, source->count * sizeof(*target->atoms));
             }
             to->events.count = i + 1;
         }
@@ -2279,25 +2764,20 @@ failed:
 static size_t yx_tr_program_weight(const yx_tr_program *p)
 {
     size_t weight = p->forward.used + p->backward.used + p->atoms.count * sizeof(yx_tr_atom_entry);
-    for (size_t i = 0; i < p->events.count; ++i)
-        weight += sizeof(yx_tr_event) + p->events.items[i].count * sizeof(yx_tr_atom_entry);
+    for (size_t i = 0; i < p->events.count; ++i) weight += sizeof(yx_tr_event) + p->events.items[i].count * sizeof(yx_tr_atom_entry);
     return weight;
 }
-static bool yx_tr_compile(const char *regexp, bool dotall, bool nocase,
-                          yx_tr_program *program, bool *greedy)
+static bool yx_tr_compile(const char *regexp, bool dotall, bool nocase, yx_tr_program *program, bool *greedy)
 {
     static _Thread_local yx_tr_cache *thread_cache;
-    if (!thread_cache)
-        thread_cache = yx_thread_storage_get(&yx_tr_cache_storage,
-                                             sizeof(*thread_cache), yx_tr_cache_destroy);
+    if (!thread_cache) thread_cache = yx_thread_storage_get(&yx_tr_cache_storage, sizeof(*thread_cache), yx_tr_cache_destroy);
     yx_tr_cache *cache = thread_cache;
     size_t hash = yx_tr_cache_hash(regexp, dotall, nocase), slot = hash & (YX_TR_CACHE_SLOTS - 1);
     if (cache)
         for (size_t probe = 0; probe < 8; ++probe, slot = (slot + 1) & (YX_TR_CACHE_SLOTS - 1)) {
             const yx_tr_cache_entry *entry = &cache->slots[slot];
             if (!entry->regexp) break;
-            if (entry->dotall == dotall && entry->nocase == nocase &&
-                !strcmp(entry->regexp, regexp)) {
+            if (entry->dotall == dotall && entry->nocase == nocase && !strcmp(entry->regexp, regexp)) {
                 if (!yx_tr_program_copy(program, &entry->program)) break;
                 *greedy = entry->greedy;
                 return true;
@@ -2330,8 +2810,7 @@ static bool yx_tr_compile(const char *regexp, bool dotall, bool nocase,
 static bool yx_se_masked_literal(const yx_tr_node *);
 /* Complete atom warning classifier for scopes/properties outside the byte
  * serializer grammar. Its scalar AST is never used to build scanner code. */
-int yx_re_slow_pattern(const unsigned char *body, size_t length, bool nocase,
-                       bool dotall, bool *slow, bool *extreme)
+int yx_re_slow_pattern(const unsigned char *body, size_t length, bool nocase, bool dotall, bool *slow, bool *extreme)
 {
     if (!body || !slow || !extreme) return 0;
     /* Keep the established literal/class/FastVM warning decisions. This
@@ -2342,9 +2821,9 @@ int yx_re_slow_pattern(const unsigned char *body, size_t length, bool nocase,
     for (size_t i = 0; i < length; ++i) {
         unsigned char ch = body[i];
         if (ch == '\\' && i + 1 < length) {
-            if (!class_depth && body[i + 1] == 'b' && i + 2 < length && body[i + 2] == '{')
-                needed = true;
-            ++i; continue;
+            if (!class_depth && body[i + 1] == 'b' && i + 2 < length && body[i + 2] == '{') needed = true;
+            ++i;
+            continue;
         }
         if (ch == '[') {
             size_t first = i + 1;
@@ -2352,49 +2831,52 @@ int yx_re_slow_pattern(const unsigned char *body, size_t length, bool nocase,
             if (class_depth || (first < length && body[first] == ']')) {
                 needed = forced_class_path = true;
             }
-            ++class_depth; continue;
+            ++class_depth;
+            continue;
         }
-        if (ch == ']' && class_depth) { --class_depth; continue; }
+        if (ch == ']' && class_depth) {
+            --class_depth;
+            continue;
+        }
         if (class_depth && i + 1 < length && strchr("&-~", ch) && body[i + 1] == ch) {
-            needed = true; continue;
+            needed = true;
+            continue;
         }
         if (!class_depth && ch == '(' && i + 1 < length && body[i + 1] == '?') {
             for (size_t j = i + 2; j < length && strchr("imsxuUR-", body[j]); ++j) {
                 if (body[j] == 'u' || body[j] == 'x') {
-                    needed = flag_wrapper = true; break;
+                    needed = flag_wrapper = true;
+                    break;
                 }
             }
         }
     }
     if (!needed) return 0;
-    yx_tr_parser parser = {.text = body, .length = length, .nocase = nocase,
-                           .dotall = dotall, .warning_only = true};
+    yx_tr_parser parser = {.text = body, .length = length, .nocase = nocase, .dotall = dotall, .warning_only = true};
     yx_tr_node *root = yx_tr_expression(&parser);
     const yx_tr_node *bare = root;
     size_t captures = 0;
     while (bare && bare->kind == YX_TR_CAPTURE && bare->count) {
-        ++captures; bare = bare->children[0];
+        ++captures;
+        bare = bare->children[0];
     }
     bool singleton_scalar = false;
     if (bare && bare->kind == YX_TR_SCALAR_CLASS && bare->length == 1) {
         const yx_re_range *range = (const yx_re_range *)bare->bytes;
         singleton_scalar = range->first == range->last;
     }
-    bool pooled_literal = bare &&
-        ((bare->kind == YX_TR_LITERAL &&
-          (captures || (!forced_class_path && !flag_wrapper))) ||
-         (captures && singleton_scalar));
-    bool pooled_mask = bare && bare->kind != YX_TR_LITERAL &&
-                       !nocase && yx_se_masked_literal(root);
-    if (bare && !parser.stacked && (pooled_literal || pooled_mask) &&
-        !parser.failed && !parser.oom && parser.at == parser.length) {
+    bool pooled_literal = bare && ((bare->kind == YX_TR_LITERAL && (captures || (!forced_class_path && !flag_wrapper))) || (captures && singleton_scalar));
+    bool pooled_mask = bare && bare->kind != YX_TR_LITERAL && !nocase && yx_se_masked_literal(root);
+    if (bare && !parser.stacked && (pooled_literal || pooled_mask) && !parser.failed && !parser.oom && parser.at == parser.length) {
         /* A capture wrapper does not force the literal sub-pattern into
          * the regexp compiler. Even one-byte pooled literals are warning-free. */
-        *slow = *extreme = false; yx_tr_destroy(root); return 1;
+        *slow = *extreme = false;
+        yx_tr_destroy(root);
+        return 1;
     }
-    yx_tr_program program = {0}; unsigned split = 0;
-    bool ok = root && !parser.failed && !parser.oom && parser.at == parser.length &&
-              yx_tr_compile_node(root, &program, &split, 0, false, false) &&
+    yx_tr_program program = {0};
+    unsigned split = 0;
+    bool ok = root && !parser.failed && !parser.oom && parser.at == parser.length && yx_tr_compile_node(root, &program, &split, 0, false, false) &&
               yx_tr_fold_events(&program.events, &program.atoms);
     if (ok) {
         size_t minimum = SIZE_MAX, maximum = 0;
@@ -2404,10 +2886,11 @@ int yx_re_slow_pattern(const unsigned char *body, size_t length, bool nocase,
             if (n > maximum) maximum = n;
         }
         *extreme = !program.atoms.count || minimum == 0;
-        *slow = *extreme || minimum < 2 ||
-                (minimum == 2 && maximum == 2 && program.atoms.count > 2700);
+        *slow = *extreme || minimum < 2 || (minimum == 2 && maximum == 2 && program.atoms.count > 2700);
     }
-    yx_tr_destroy(root); yx_tr_program_free(&program); return ok ? 1 : 0;
+    yx_tr_destroy(root);
+    yx_tr_program_free(&program);
+    return ok ? 1 : 0;
 }
 static bool yx_tr_any_class(const yx_tr_node *node)
 {
@@ -2416,15 +2899,14 @@ static bool yx_tr_any_class(const yx_tr_node *node)
         if (b != 10 && !yx_tr_has(node->bitmap, b)) return false;
     return true;
 }
-static bool yx_tr_needs_thompson(const yx_tr_node *node, bool in_alternation,
-                                bool in_repetition)
+static bool yx_tr_needs_thompson(const yx_tr_node *node, bool in_alternation, bool in_repetition)
 {
     if (node->kind == YX_TR_LOOK || node->unicode_class) return true;
     /* FastVM ignores a Unicode class only as the gap of a repetition. */
     if (node->kind == YX_TR_SCALAR_CLASS) return !in_repetition || !yx_tr_gap_class(node, NULL);
-    if (node->kind == YX_TR_REPEAT &&
-        (in_alternation || in_repetition || !yx_tr_gap_class(node->children[0], NULL) ||
-         node->minimum > UINT16_MAX || (!yx_tr_unbounded(node) && node->maximum > UINT16_MAX))) return true;
+    if (node->kind == YX_TR_REPEAT && (in_alternation || in_repetition || !yx_tr_gap_class(node->children[0], NULL) || node->minimum > UINT16_MAX ||
+                                       (!yx_tr_unbounded(node) && node->maximum > UINT16_MAX)))
+        return true;
     if (node->kind == YX_TR_ALT) {
         if (in_alternation || in_repetition) return true;
         for (size_t i = 0; i < node->count; ++i)
@@ -2433,10 +2915,12 @@ static bool yx_tr_needs_thompson(const yx_tr_node *node, bool in_alternation,
     if (node->kind == YX_TR_CLASS) {
         if (in_repetition && yx_tr_any_class(node)) return false;
         unsigned first = 256, last = 0, count = 0;
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) {
-            if (first == 256) first = b;
-            last = b; ++count;
-        }
+        for (unsigned b = 0; b < 256; ++b)
+            if (yx_tr_has(node->bitmap, b)) {
+                if (first == 256) first = b;
+                last = b;
+                ++count;
+            }
         unsigned combinations = 1;
         for (unsigned bit = 1; bit <= 128; bit <<= 1)
             if ((first ^ last) & bit) combinations *= 2;
@@ -2445,8 +2929,7 @@ static bool yx_tr_needs_thompson(const yx_tr_node *node, bool in_alternation,
             if (yx_tr_has(node->bitmap, b) && (b & first) != first) return true;
     }
     for (size_t i = 0; i < node->count; ++i)
-        if (yx_tr_needs_thompson(node->children[i], in_alternation || node->kind == YX_TR_ALT,
-                                 in_repetition || node->kind == YX_TR_REPEAT)) return true;
+        if (yx_tr_needs_thompson(node->children[i], in_alternation || node->kind == YX_TR_ALT, in_repetition || node->kind == YX_TR_REPEAT)) return true;
     return false;
 }
 static bool yx_tr_failed_fast_sequence(const yx_tr_node *node, yx_writer *code)
@@ -2460,8 +2943,7 @@ static bool yx_tr_failed_fast_sequence(const yx_tr_node *node, yx_writer *code)
     if (node->kind != YX_TR_REPEAT || !yx_tr_gap_class(node->children[0], &newline)) return false;
     bool fixed = !yx_tr_unbounded(node) && node->minimum == node->maximum;
     uint8_t op = (newline ? 3 : 5) + (fixed ? 0 : 1);
-    return yx_put_u8(code, op) && yx_fast_u32(code, node->minimum) &&
-        (fixed || yx_fast_u32(code, yx_tr_unbounded(node) ? 0 : node->maximum));
+    return yx_put_u8(code, op) && yx_fast_u32(code, node->minimum) && (fixed || yx_fast_u32(code, yx_tr_unbounded(node) ? 0 : node->maximum));
 }
 static bool yx_tr_only_any_classes(const yx_tr_node *node)
 {
@@ -2473,8 +2955,7 @@ static bool yx_tr_only_any_classes(const yx_tr_node *node)
 }
 static bool yx_tr_text(yx_writer *w, const char *text);
 static bool yx_tr_hex_text(yx_writer *w, uint8_t byte);
-static bool yx_tr_hex_regex(yx_writer *text, const yx_hex_atom *atoms,
-                           size_t count, size_t depth)
+static bool yx_tr_hex_regex(yx_writer *text, const yx_hex_atom *atoms, size_t count, size_t depth)
 {
     if (depth > 250) return false;
     for (size_t i = 0; i < count; ++i) {
@@ -2492,8 +2973,10 @@ static bool yx_tr_hex_regex(yx_writer *text, const yx_hex_atom *atoms,
                 for (unsigned b = 0; b < 256; ++b) {
                     bool match = (b & a->mask) == (a->value & a->mask);
                     if (match == a->negated) continue;
-                    list[used++] = '\\'; list[used++] = 'x';
-                    list[used++] = digits[b >> 4]; list[used++] = digits[b & 15];
+                    list[used++] = '\\';
+                    list[used++] = 'x';
+                    list[used++] = digits[b >> 4];
+                    list[used++] = digits[b & 15];
                 }
                 list[used++] = ']';
                 if (!yx_put_bytes(text, list, used)) return false;
@@ -2501,16 +2984,14 @@ static bool yx_tr_hex_regex(yx_writer *text, const yx_hex_atom *atoms,
         } else if (a->kind == YX_HEX_ALTERNATIVE) {
             if (!yx_tr_text(text, "(?:")) return false;
             for (size_t j = 0; j < a->branch_count; ++j)
-                if ((j && !yx_tr_text(text, "|")) ||
-                    !yx_tr_hex_regex(text, a->branches[j].atoms, a->branches[j].count, depth + 1)) return false;
+                if ((j && !yx_tr_text(text, "|")) || !yx_tr_hex_regex(text, a->branches[j].atoms, a->branches[j].count, depth + 1)) return false;
             if (!yx_tr_text(text, ")")) return false;
         } else if (a->kind == YX_HEX_JUMP) {
             uint64_t min = a->minimum, max = a->maximum == UINT32_MAX && !a->finite_maximum ? UINT64_MAX : a->maximum;
             while (i + 1 < count && atoms[i + 1].kind == YX_HEX_JUMP) {
                 const yx_hex_atom *next = &atoms[++i];
                 min += next->minimum;
-                max = max == UINT64_MAX || (next->maximum == UINT32_MAX && !next->finite_maximum) ?
-                    UINT64_MAX : max + next->maximum;
+                max = max == UINT64_MAX || (next->maximum == UINT32_MAX && !next->finite_maximum) ? UINT64_MAX : max + next->maximum;
             }
             char quantifier[64];
             if (min > UINT32_MAX || (max != UINT64_MAX && max > UINT32_MAX)) return false;
@@ -2525,14 +3006,13 @@ static bool yx_ft_regex(yx_fast_program *p, const yx_tr_node *root, bool greedy)
 /* FastVM emits its verifier before rejecting atoms shorter than two
  * bytes. Those unreferenced bytes remain in the canonical archive when the
  * compiler retries with Thompson. */
-static bool yx_tr_failed_fast_regexp(const yx_tr_node *root, const char *regexp, bool dotall, bool nocase,
-                                    const YRX_PATTERN *hex, yx_writer *code)
+static bool yx_tr_failed_fast_regexp(const yx_tr_node *root, const char *regexp, bool dotall, bool nocase, const YRX_PATTERN *hex, yx_writer *code)
 {
     yx_fast_program *fast = calloc(1, sizeof(*fast));
     if (!fast) return false;
-    fast->nocase = nocase; fast->force_regexp = true;
-    bool parsed = hex ? yx_fast_hex_sequence(fast, hex->hex_atoms, hex->hex_atom_count) :
-                        yx_fast_regex(fast, regexp, dotall);
+    fast->nocase = nocase;
+    fast->force_regexp = true;
+    bool parsed = hex ? yx_fast_hex_sequence(fast, hex->hex_atoms, hex->hex_atom_count) : yx_fast_regex(fast, regexp, dotall);
     /* The text lowering reads (?s) groups only. Other flag spellings ((?m),
      * (?sm), (?s-u), (?u) ...) take FastVM's splitter over the parsed HIR,
      * as the scanner's program builder does; its code does not depend on
@@ -2546,18 +3026,24 @@ static bool yx_tr_failed_fast_regexp(const yx_tr_node *root, const char *regexp,
         fast->force_regexp = true;
     }
     bool failed = parsed && !yx_fast_compile(fast) && fast->code.used != 0;
-    if (failed) { *code = fast->code; fast->code = (yx_writer){0}; }
-    yx_fast_program_destroy(fast); return failed;
+    if (failed) {
+        *code = fast->code;
+        fast->code = (yx_writer){0};
+    }
+    yx_fast_program_destroy(fast);
+    return failed;
 }
 /* Bytes that a failed FastVM attempt leaves in front of the Thompson
  * program. Empty when FastVM rejects the pattern before emitting code. */
-static bool yx_tr_fast_leftover(const yx_tr_node *root, const char *regexp, bool dotall, bool nocase,
-                                const YRX_PATTERN *hex, yx_writer *code)
+static bool yx_tr_fast_leftover(const yx_tr_node *root, const char *regexp, bool dotall, bool nocase, const YRX_PATTERN *hex, yx_writer *code)
 {
     *code = (yx_writer){0};
     bool failed_fast = root && yx_tr_failed_fast_regexp(root, regexp, dotall, nocase, hex, code);
     if (!failed_fast) failed_fast = root && yx_tr_failed_fast_sequence(root, code) && code->used && yx_put_u8(code, 0);
-    if (!failed_fast) { free(code->data); *code = (yx_writer){0}; }
+    if (!failed_fast) {
+        free(code->data);
+        *code = (yx_writer){0};
+    }
     return failed_fast;
 }
 /* Whether YARA-X compiles the pattern with Thompson rather than FastVM. A
@@ -2573,48 +3059,56 @@ static bool yx_tr_uses_thompson(const yx_tr_node *root, bool failed_fast, const 
     yx_fast_program_destroy(fast);
     return !parsed;
 }
-static yx_ser_result yx_encode_thompson_regex(const YRX_RULES *rules,
-    bool vba_order, uint8_t **data, size_t *length)
+static yx_ser_result yx_encode_thompson_regex(const YRX_RULES *rules, bool vba_order, uint8_t **data, size_t *length)
 {
-    if (!rules || rules->rule_count != 1 || rules->import_count || rules->global_count)
-        return YX_SER_UNSUPPORTED;
+    if (!rules || rules->rule_count != 1 || rules->import_count || rules->global_count) return YX_SER_UNSUPPORTED;
     const YRX_RULE *rule = &rules->rules[0];
-    if (rule->pattern_count != 1 || rule->is_private || rule->is_global ||
-        rule->tag_count || rule->metadata_count ||
-        (rule->namespace_name && strcmp(rule->namespace_name, "default"))) return YX_SER_UNSUPPORTED;
+    if (rule->pattern_count != 1 || rule->is_private || rule->is_global || rule->tag_count || rule->metadata_count ||
+        (rule->namespace_name && strcmp(rule->namespace_name, "default")))
+        return YX_SER_UNSUPPORTED;
     const YRX_PATTERN *pattern = &rule->patterns[0];
     bool hex = pattern->kind == YX_PATTERN_HEX;
     if ((!hex && (pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)) ||
         (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) ||
-        !yx_regex_direct_condition(rule->condition_text, pattern->identifier)) return YX_SER_UNSUPPORTED;
+        !yx_regex_direct_condition(rule->condition_text, pattern->identifier))
+        return YX_SER_UNSUPPORTED;
     yx_writer hex_text = {0};
     const char *regexp = pattern->regexp;
     if (hex) {
-        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) { free(hex_text.data); return YX_SER_UNSUPPORTED; }
+        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) {
+            free(hex_text.data);
+            return YX_SER_UNSUPPORTED;
+        }
         regexp = (char *)hex_text.data;
     }
     yx_tr_parser eligibility = {.text = (const uint8_t *)regexp,
-        .length = strlen(regexp), .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0,
-        .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
+                                .length = strlen(regexp),
+                                .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0,
+                                .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
     yx_tr_node *root = yx_tr_expression(&eligibility);
     yx_writer code = {0};
-    bool failed_fast = root && yx_tr_fast_leftover(root, regexp, eligibility.dotall, eligibility.nocase,
-                                                   hex ? pattern : NULL, &code);
-    bool supported = root && !eligibility.failed && !eligibility.oom &&
-        eligibility.at == eligibility.length && yx_tr_uses_thompson(root, failed_fast, hex ? pattern : NULL);
+    bool failed_fast = root && yx_tr_fast_leftover(root, regexp, eligibility.dotall, eligibility.nocase, hex ? pattern : NULL, &code);
+    bool supported =
+        root && !eligibility.failed && !eligibility.oom && eligibility.at == eligibility.length && yx_tr_uses_thompson(root, failed_fast, hex ? pattern : NULL);
     yx_tr_destroy(root);
-    if (!supported) { free(code.data); free(hex_text.data); return YX_SER_UNSUPPORTED; }
-    yx_tr_program program = {0}; bool greedy = false;
+    if (!supported) {
+        free(code.data);
+        free(hex_text.data);
+        return YX_SER_UNSUPPORTED;
+    }
+    yx_tr_program program = {0};
+    bool greedy = false;
     yx_ser_result status = YX_SER_UNSUPPORTED;
     yx_archive_regexp_atom *atoms = NULL;
     uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
-    if (!yx_tr_compile(regexp, (pattern->modifiers & YX_MOD_DOTALL) != 0,
-                        (pattern->modifiers & YX_MOD_NOCASE) != 0, &program, &greedy)) goto done;
+    if (!yx_tr_compile(regexp, (pattern->modifiers & YX_MOD_DOTALL) != 0, (pattern->modifiers & YX_MOD_NOCASE) != 0, &program, &greedy)) goto done;
     bool ascii_wide = (pattern->modifiers & (YX_MOD_ASCII | YX_MOD_WIDE)) == (YX_MOD_ASCII | YX_MOD_WIDE);
     size_t atom_count = program.atoms.count * (ascii_wide ? 2 : 1);
     atoms = calloc(atom_count, sizeof(*atoms));
-    if (!atoms) { status = YX_SER_NO_MEMORY; goto done; }
+    if (!atoms) {
+        status = YX_SER_NO_MEMORY;
+        goto done;
+    }
     for (size_t i = 0; i < program.atoms.count; ++i) {
         const yx_tr_atom_entry *from = &program.atoms.items[i];
         if (pattern->modifiers & YX_MOD_WIDE) {
@@ -2630,34 +3124,42 @@ static yx_ser_result yx_encode_thompson_regex(const YRX_RULES *rules,
         atoms[i].backward = code.used + program.forward.used + from->backward;
         if (ascii_wide) {
             yx_archive_regexp_atom *ascii = &atoms[program.atoms.count + i];
-            *ascii = atoms[i]; ascii->subpattern = 1;
-            memcpy(ascii->bytes, from->bytes, from->length); ascii->length = from->length;
+            *ascii = atoms[i];
+            ascii->subpattern = 1;
+            memcpy(ascii->bytes, from->bytes, from->length);
+            ascii->length = from->length;
         }
     }
     if (!yx_put_bytes(&program.forward, program.backward.data, program.backward.used)) {
-        status = YX_SER_NO_MEMORY; goto done;
+        status = YX_SER_NO_MEMORY;
+        goto done;
     }
     if (!yx_put_bytes(&code, program.forward.data, program.forward.used)) {
-        status = YX_SER_NO_MEMORY; goto done;
+        status = YX_SER_NO_MEMORY;
+        goto done;
     }
     memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
     if (vba_order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) goto done;
     status = yx_regexp_variants_encode(rule->identifier, pattern->identifier, hex ? 1 : 2,
-        (!hex && greedy ? 32 : 0) | ((pattern->modifiers & YX_MOD_NOCASE) ? 2 : 0) |
-        ((pattern->modifiers & YX_MOD_FULLWORD) ? 24 : 0) | ((pattern->modifiers & YX_MOD_WIDE) ? 1 : 0),
-        ascii_wide, wasm, sizeof(wasm), atoms, atom_count,
-        code.data, code.used, data, length);
+                                       (!hex && greedy ? 32 : 0) | ((pattern->modifiers & YX_MOD_NOCASE) ? 2 : 0) | ((pattern->modifiers & YX_MOD_FULLWORD) ? 24 : 0) |
+                                           ((pattern->modifiers & YX_MOD_WIDE) ? 1 : 0),
+                                       ascii_wide, wasm, sizeof(wasm), atoms, atom_count, code.data, code.used, data, length);
 done:
-    free(code.data); free(hex_text.data); free(atoms); yx_tr_program_free(&program); return status;
+    free(code.data);
+    free(hex_text.data);
+    free(atoms);
+    yx_tr_program_free(&program);
+    return status;
 }
 static int32_t yx_tr_read_i32(const uint8_t *p)
 {
-    uint32_t value = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    uint32_t value = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     return value <= INT32_MAX ? (int32_t)value : (int32_t)((int64_t)value - INT64_C(4294967296));
 }
 static bool yx_tr_text(yx_writer *w, const char *text)
-{ return yx_put_bytes(w, text, strlen(text)); }
+{
+    return yx_put_bytes(w, text, strlen(text));
+}
 static bool yx_tr_hex_text(yx_writer *w, uint8_t byte)
 {
     static const char hex[] = "0123456789abcdef";
@@ -2688,8 +3190,7 @@ static bool yx_tr_cloned_region(const uint8_t *a, const uint8_t *b, size_t lengt
  * `l1: e; split l1` and one more copy of e) is decoded as e{n,} instead of
  * as copies around (e)+: both compile to the same code but not to the same
  * atoms (visit_post_repetition). */
-static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t end,
-                                     yx_writer *text, size_t depth, bool roll)
+static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t end, yx_writer *text, size_t depth, bool roll)
 {
     if (depth > 250 || end < begin || end - begin > 1048576) return false;
     size_t *positions = malloc((end - begin + 1) * sizeof(*positions));
@@ -2702,7 +3203,8 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
         if (!width) goto done;
         if (code[at] != 0xaa || code[at + 1] == 0xaa) {
             if (!yx_tr_hex_text(text, code[at])) goto done;
-            at += width; continue;
+            at += width;
+            continue;
         }
         unsigned op = code[at + 1];
         if (op == 3) {
@@ -2710,22 +3212,20 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
             if (count < 2) goto done;
             int64_t first = (int64_t)at + yx_tr_read_i32(code + at + 5);
             int64_t second = (int64_t)at + yx_tr_read_i32(code + at + 9);
-            if (first != (int64_t)(at + width) || second < first + 6 || second > (int64_t)end ||
-                code[second - 6] != 0xaa || code[second - 5] != 4) goto done;
+            if (first != (int64_t)(at + width) || second < first + 6 || second > (int64_t)end || code[second - 6] != 0xaa || code[second - 5] != 4) goto done;
             int64_t finish = second - 6 + yx_tr_read_i32(code + second - 4);
             if (finish < second || finish > (int64_t)end || !yx_tr_text(text, "(")) goto done;
             for (unsigned i = 0; i < count; ++i) {
                 int64_t start = (int64_t)at + yx_tr_read_i32(code + at + 5 + 4 * i);
-                int64_t stop = i + 1 == count ? finish :
-                    (int64_t)at + yx_tr_read_i32(code + at + 5 + 4 * (i + 1)) - 6;
-                if (start < first || stop < start || stop > finish ||
-                    (i && !yx_tr_text(text, "|")) ||
-                    !yx_tr_decode_region_mode(code, (size_t)start, (size_t)stop, text, depth + 1, roll)) goto done;
-                if (i + 1 < count && (code[stop] != 0xaa || code[stop + 1] != 4 ||
-                    stop + yx_tr_read_i32(code + stop + 2) != finish)) goto done;
+                int64_t stop = i + 1 == count ? finish : (int64_t)at + yx_tr_read_i32(code + at + 5 + 4 * (i + 1)) - 6;
+                if (start < first || stop < start || stop > finish || (i && !yx_tr_text(text, "|")) ||
+                    !yx_tr_decode_region_mode(code, (size_t)start, (size_t)stop, text, depth + 1, roll))
+                    goto done;
+                if (i + 1 < count && (code[stop] != 0xaa || code[stop + 1] != 4 || stop + yx_tr_read_i32(code + stop + 2) != finish)) goto done;
             }
             if (!yx_tr_text(text, ")")) goto done;
-            at = (size_t)finish; continue;
+            at = (size_t)finish;
+            continue;
         }
         if (op == 1 || op == 2) {
             int64_t target = (int64_t)at + yx_tr_read_i32(code + at + 4);
@@ -2733,20 +3233,18 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
             if (target < (int64_t)at) {
                 size_t start = positions[(size_t)target - begin];
                 size_t unit = at - (size_t)target, after = at + width;
-                if (roll && start != SIZE_MAX && start <= text->used && unit <= end - after &&
-                    yx_tr_cloned_region(code + (size_t)target, code + after, unit)) {
+                if (roll && start != SIZE_MAX && start <= text->used && unit <= end - after && yx_tr_cloned_region(code + (size_t)target, code + after, unit)) {
                     size_t copies = 0, previous = (size_t)target;
                     while (previous >= begin + unit && positions[previous - unit - begin] != SIZE_MAX &&
                            yx_tr_cloned_region(code + previous - unit, code + (size_t)target, unit)) {
-                        ++copies; previous -= unit;
+                        ++copies;
+                        previous -= unit;
                     }
                     size_t body = text->used - start, first = positions[previous - begin];
                     bool atomic = unit == yx_tr_instruction_size(code + (size_t)target, unit) &&
-                        (code[target] != 0xaa || code[target + 1] == 0xaa ||
-                         (code[target + 1] >= 5 && code[target + 1] <= 9));
+                                  (code[target] != 0xaa || code[target + 1] == 0xaa || (code[target + 1] >= 5 && code[target + 1] <= 9));
                     char quantifier[48];
-                    snprintf(quantifier, sizeof(quantifier), "%s{%zu,}%s", atomic ? "" : ")",
-                             copies + 2, op == 2 ? "" : "?");
+                    snprintf(quantifier, sizeof(quantifier), "%s{%zu,}%s", atomic ? "" : ")", copies + 2, op == 2 ? "" : "?");
                     /* Reserve room for "(?:", then keep one copy of the body. */
                     if (first > start || !yx_tr_text(text, "(?:")) goto done;
                     text->used -= 3;
@@ -2757,17 +3255,18 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
                     /* Only the start of the rolled repetition stays addressable. */
                     for (size_t i = previous - begin + 1; i < after + unit - begin; ++i) positions[i] = SIZE_MAX;
                     positions[previous - begin] = first;
-                    at = after + unit; continue;
+                    at = after + unit;
+                    continue;
                 }
                 if (start == SIZE_MAX || !yx_tr_wrap(text, start, op == 2 ? "+" : "+?")) goto done;
                 for (size_t i = (size_t)target - begin; i <= at - begin; ++i)
                     if (positions[i] != SIZE_MAX && positions[i] > start) ++positions[i];
-                at += width; continue;
+                at += width;
+                continue;
             }
             if (target < (int64_t)(at + width)) goto done;
             size_t stop = (size_t)target;
-            bool star = stop >= at + width + 6 && code[stop - 6] == 0xaa && code[stop - 5] == 4 &&
-                (int64_t)stop - 6 + yx_tr_read_i32(code + stop - 4) == (int64_t)at;
+            bool star = stop >= at + width + 6 && code[stop - 6] == 0xaa && code[stop - 5] == 4 && (int64_t)stop - 6 + yx_tr_read_i32(code + stop - 4) == (int64_t)at;
             if (star) stop -= 6;
             /* Small bounded repeats are unrolled as nested optional copies.
              * Restore their count instead of introducing capture groups:
@@ -2775,64 +3274,66 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
             if (!star && at + width < stop) {
                 size_t unit = at + width;
                 size_t unit_width = yx_tr_instruction_size(code + unit, stop - unit);
-                bool atomic = unit_width && (code[unit] != 0xaa || code[unit + 1] == 0xaa ||
-                    (code[unit + 1] >= 5 && code[unit + 1] <= 9));
+                bool atomic = unit_width && (code[unit] != 0xaa || code[unit + 1] == 0xaa || (code[unit + 1] >= 5 && code[unit + 1] <= 9));
                 size_t copies = 1, next = unit + unit_width;
                 while (atomic && next < stop) {
-                    if (stop - next < 8 + unit_width || code[next] != 0xaa || code[next + 1] != op ||
-                        (int64_t)next + yx_tr_read_i32(code + next + 4) != (int64_t)stop ||
-                        memcmp(code + next + 8, code + unit, unit_width)) { atomic = false; break; }
-                    ++copies; next += 8 + unit_width;
+                    if (stop - next < 8 + unit_width || code[next] != 0xaa || code[next + 1] != op || (int64_t)next + yx_tr_read_i32(code + next + 4) != (int64_t)stop ||
+                        memcmp(code + next + 8, code + unit, unit_width)) {
+                        atomic = false;
+                        break;
+                    }
+                    ++copies;
+                    next += 8 + unit_width;
                 }
                 if (atomic && next == stop) {
                     size_t mandatory = 0, previous = at;
-                    while (previous >= begin + unit_width &&
-                        positions[previous - unit_width - begin] != SIZE_MAX &&
-                        !memcmp(code + previous - unit_width, code + unit, unit_width)) {
-                        ++mandatory; previous -= unit_width;
+                    while (previous >= begin + unit_width && positions[previous - unit_width - begin] != SIZE_MAX &&
+                           !memcmp(code + previous - unit_width, code + unit, unit_width)) {
+                        ++mandatory;
+                        previous -= unit_width;
                     }
                     if (copies > 1 || mandatory) {
                         char quantifier[64];
-                        snprintf(quantifier, sizeof(quantifier), "{%zu,%zu}%s", mandatory,
-                                 mandatory + copies, op == 2 ? "?" : "");
+                        snprintf(quantifier, sizeof(quantifier), "{%zu,%zu}%s", mandatory, mandatory + copies, op == 2 ? "?" : "");
                         if (mandatory) text->used = positions[previous - begin];
-                        if (!yx_tr_decode_region_mode(code, unit, unit + unit_width, text, depth + 1, roll) ||
-                            !yx_tr_text(text, quantifier)) goto done;
-                        at = (size_t)target; continue;
+                        if (!yx_tr_decode_region_mode(code, unit, unit + unit_width, text, depth + 1, roll) || !yx_tr_text(text, quantifier)) goto done;
+                        at = (size_t)target;
+                        continue;
                     }
                 }
             }
             if (!yx_tr_text(text, "(") || !yx_tr_decode_region_mode(code, at + width, stop, text, depth + 1, roll) ||
-                !yx_tr_text(text, star ? (op == 1 ? ")*" : ")*?") : (op == 1 ? ")?" : ")??"))) goto done;
-            at = (size_t)target; continue;
+                !yx_tr_text(text, star ? (op == 1 ? ")*" : ")*?") : (op == 1 ? ")?" : ")??")))
+                goto done;
+            at = (size_t)target;
+            continue;
         }
         if (op == 16 || op == 17) {
             int64_t target = (int64_t)at + yx_tr_read_i32(code + at + 2);
             uint32_t minimum = (uint32_t)yx_tr_read_i32(code + at + 6);
             uint32_t maximum = (uint32_t)yx_tr_read_i32(code + at + 10);
-            if (target < (int64_t)begin || target >= (int64_t)at || !maximum ||
-                minimum > maximum) goto done;
+            if (target < (int64_t)begin || target >= (int64_t)at || !maximum || minimum > maximum) goto done;
             size_t start = positions[(size_t)target - begin];
             /* A counted repetition with a positive minimum emits one copy
              * before its counted tail. Restore that original repetition:
              * leaving the first copy separate can put a ten-copy tail below
              * the compiler's counted-repeat threshold and change VM priority. */
             size_t unit_width = at - (size_t)target;
-            if (minimum && maximum < UINT32_MAX && (size_t)target - begin >= unit_width &&
-                positions[(size_t)target - unit_width - begin] != SIZE_MAX &&
+            if (minimum && maximum < UINT32_MAX && (size_t)target - begin >= unit_width && positions[(size_t)target - unit_width - begin] != SIZE_MAX &&
                 yx_tr_cloned_region(code + (size_t)target - unit_width, code + (size_t)target, unit_width)) {
                 size_t previous = positions[(size_t)target - unit_width - begin];
                 if (start == SIZE_MAX || previous > start || start > text->used) goto done;
                 size_t body_length = text->used - start;
                 memmove(text->data + previous, text->data + start, body_length);
-                text->used = previous + body_length; start = previous;
-                ++minimum; ++maximum;
+                text->used = previous + body_length;
+                start = previous;
+                ++minimum;
+                ++maximum;
                 for (size_t i = (size_t)target - unit_width - begin; i <= at - begin; ++i)
                     if (positions[i] != SIZE_MAX && positions[i] >= previous) positions[i] = previous;
             }
             char suffix[64];
-            snprintf(suffix, sizeof(suffix), "{%u,%u}%s", minimum ? minimum : 1,
-                     maximum, op == 17 ? "?" : "");
+            snprintf(suffix, sizeof(suffix), "{%u,%u}%s", minimum ? minimum : 1, maximum, op == 17 ? "?" : "");
             if (start == SIZE_MAX || !yx_tr_wrap(text, start, suffix)) goto done;
             for (size_t i = (size_t)target - begin; i <= at - begin; ++i)
                 if (positions[i] != SIZE_MAX && positions[i] > start) ++positions[i];
@@ -2844,7 +3345,8 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
                 for (unsigned b = 0; b < 256; ++b)
                     if ((b & code[at + 3]) == code[at + 2]) yx_tr_set(bitmap, b);
             } else if (op == 7) {
-                unsigned b = code[at + 2]; yx_tr_set(bitmap, b);
+                unsigned b = code[at + 2];
+                yx_tr_set(bitmap, b);
                 if (b < 128 && isalpha((int)b)) yx_tr_set(bitmap, b ^ 32);
             } else if (op == 8) memcpy(bitmap, code + at + 2, 32);
             else {
@@ -2858,25 +3360,35 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
              * literal alternation. Preserve that distinction when its byte
              * class would otherwise be emitted as a mask opcode. */
             unsigned low = 255, high = 0, count = 0;
-            for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(bitmap, b)) { low &= b; high |= b; ++count; }
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(bitmap, b)) {
+                    low &= b;
+                    high |= b;
+                    ++count;
+                }
             unsigned combinations = 1;
-            for (unsigned bit = 1; bit <= 128; bit <<= 1) if ((low ^ high) & bit) combinations *= 2;
+            for (unsigned bit = 1; bit <= 128; bit <<= 1)
+                if ((low ^ high) & bit) combinations *= 2;
             bool alternatives = op == 9 && count == combinations;
             /* Hir::fail, the empty class ((?u)[\x{E001}&&\x{80}]): CLASS_RANGES
              * without ranges. */
             if (!count) {
                 if (op != 9 || !yx_tr_text(text, "[^\\x00-\\xff]")) goto done;
-                at += width; continue;
+                at += width;
+                continue;
             }
             if (!yx_tr_text(text, alternatives ? "(" : "[")) goto done;
             bool first = true;
-            for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(bitmap, b)) {
-                unsigned start = b;
-                if (!alternatives) while (b < 255 && yx_tr_has(bitmap, b + 1)) ++b;
-                if ((alternatives && !first && !yx_tr_text(text, "|")) || !yx_tr_hex_text(text, (uint8_t)start) ||
-                    (b > start && (!yx_tr_text(text, "-") || !yx_tr_hex_text(text, (uint8_t)b)))) goto done;
-                first = false;
-            }
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(bitmap, b)) {
+                    unsigned start = b;
+                    if (!alternatives)
+                        while (b < 255 && yx_tr_has(bitmap, b + 1)) ++b;
+                    if ((alternatives && !first && !yx_tr_text(text, "|")) || !yx_tr_hex_text(text, (uint8_t)start) ||
+                        (b > start && (!yx_tr_text(text, "-") || !yx_tr_hex_text(text, (uint8_t)b))))
+                        goto done;
+                    first = false;
+                }
             if (first || !yx_tr_text(text, alternatives ? ")" : "]")) goto done;
         } else if (op >= 10 && op <= 15) {
             static const char *const assertions[] = {"^", "$", "\\b", "\\B", "\\b", "\\b"};
@@ -2889,10 +3401,10 @@ static bool yx_tr_decode_region_mode(const uint8_t *code, size_t begin, size_t e
     }
     ok = text->used <= 1048576;
 done:
-    free(positions); return ok;
+    free(positions);
+    return ok;
 }
-static bool yx_tr_decode_region(const uint8_t *code, size_t begin, size_t end,
-                                yx_writer *text, size_t depth)
+static bool yx_tr_decode_region(const uint8_t *code, size_t begin, size_t end, yx_writer *text, size_t depth)
 {
     return yx_tr_decode_region_mode(code, begin, end, text, depth, false);
 }
@@ -2900,10 +3412,15 @@ static bool yx_tr_any_span(const yx_tr_node *node, uint64_t *min, uint64_t *max)
 {
     *min = *max = 0;
     if (node->kind == YX_TR_CLASS) {
-        for (size_t i = 0; i < 32; ++i) if (node->bitmap[i] != 255) return false;
-        *min = *max = 1; return true;
+        for (size_t i = 0; i < 32; ++i)
+            if (node->bitmap[i] != 255) return false;
+        *min = *max = 1;
+        return true;
     }
-    if (yx_u8_any(node)) { *min = *max = 1; return true; }
+    if (yx_u8_any(node)) {
+        *min = *max = 1;
+        return true;
+    }
     if (node->kind == YX_TR_CAPTURE) return yx_tr_any_span(node->children[0], min, max);
     if (node->kind == YX_TR_REPEAT) {
         uint64_t low, high;
@@ -2938,7 +3455,8 @@ static bool yx_tr_hex_source(const yx_tr_node *node, yx_writer *text)
     }
     if (node->kind == YX_TR_LITERAL) {
         for (size_t i = 0; i < node->length; ++i) {
-            char token[4]; snprintf(token, sizeof(token), "%02x ", node->bytes[i]);
+            char token[4];
+            snprintf(token, sizeof(token), "%02x ", node->bytes[i]);
             if (!yx_tr_text(text, token)) return false;
         }
         return true;
@@ -2946,11 +3464,13 @@ static bool yx_tr_hex_source(const yx_tr_node *node, yx_writer *text)
     if (node->kind == YX_TR_CLASS) {
         bool first = true;
         if (!yx_tr_text(text, "(")) return false;
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) {
-            char token[4]; snprintf(token, sizeof(token), "%02x ", b);
-            if ((!first && !yx_tr_text(text, "| ")) || !yx_tr_text(text, token)) return false;
-            first = false;
-        }
+        for (unsigned b = 0; b < 256; ++b)
+            if (yx_tr_has(node->bitmap, b)) {
+                char token[4];
+                snprintf(token, sizeof(token), "%02x ", b);
+                if ((!first && !yx_tr_text(text, "| ")) || !yx_tr_text(text, token)) return false;
+                first = false;
+            }
         return !first && yx_tr_text(text, ") ");
     }
     if (node->kind == YX_TR_CONCAT || node->kind == YX_TR_CAPTURE || node->kind == YX_TR_ALT) {
@@ -2964,8 +3484,7 @@ static bool yx_tr_hex_source(const yx_tr_node *node, yx_writer *text)
 }
 /* Decode the forward Thompson program that starts at begin. The text is
  * NUL-terminated regexp source, or hex source for hex patterns. */
-static bool yx_tr_decode_forward(const yx_archive_regexp_envelope *e, size_t begin, bool jump_gap,
-                                 yx_writer *out, yx_writer *raw, yx_writer *raw_backward)
+static bool yx_tr_decode_forward(const yx_archive_regexp_envelope *e, size_t begin, bool jump_gap, yx_writer *out, yx_writer *raw, yx_writer *raw_backward)
 {
     yx_writer text = {0}, backward = {0};
     size_t forward_end = begin;
@@ -2979,11 +3498,9 @@ static bool yx_tr_decode_forward(const yx_archive_regexp_envelope *e, size_t beg
     /* Reconstruct the executable expression, while validating every other
      * archive byte against the schema. Equivalent expressions need not
      * reproduce the producer's repetition unrolling or atom choices. */
-    if (forward_end + 2 >= e->code_length ||
-        !yx_tr_decode_region(e->code, begin, forward_end, &text, 0) || !yx_put_u8(&text, 0) ||
-        e->code_length < forward_end + 4 || e->code[e->code_length - 2] != 0xaa ||
-        e->code[e->code_length - 1] != 0 ||
-        !yx_tr_decode_region(e->code, forward_end + 2, e->code_length - 2, &backward, 0)) goto done;
+    if (forward_end + 2 >= e->code_length || !yx_tr_decode_region(e->code, begin, forward_end, &text, 0) || !yx_put_u8(&text, 0) || e->code_length < forward_end + 4 ||
+        e->code[e->code_length - 2] != 0xaa || e->code[e->code_length - 1] != 0 || !yx_tr_decode_region(e->code, forward_end + 2, e->code_length - 2, &backward, 0))
+        goto done;
     if (jump_gap) {
         if (!yx_put_u8(&backward, 0)) goto done;
         yx_tr_parser parser = {.text = backward.data, .length = backward.used - 1};
@@ -2993,23 +3510,28 @@ static bool yx_tr_decode_forward(const yx_archive_regexp_envelope *e, size_t beg
         if (!valid) goto done;
         --backward.used;
     }
-    if ((raw && !yx_put_bytes(raw, text.data, text.used)) ||
-        (raw_backward && (!yx_put_bytes(raw_backward, backward.data, backward.used) ||
-                          !yx_put_u8(raw_backward, 0)))) goto done;
+    if ((raw && !yx_put_bytes(raw, text.data, text.used)) || (raw_backward && (!yx_put_bytes(raw_backward, backward.data, backward.used) || !yx_put_u8(raw_backward, 0))))
+        goto done;
     if (e->pattern_kind == 1) {
         /* Hex source keeps its alternatives as written. */
         yx_tr_parser parser = {.text = text.data, .length = text.used - 1, .literal_alternations = true};
         yx_tr_node *node = yx_tr_expression(&parser);
         yx_writer hex = {0};
-        bool valid = node && !parser.failed && !parser.oom && parser.at == parser.length &&
-            yx_tr_hex_source(node, &hex) && yx_put_u8(&hex, 0);
+        bool valid = node && !parser.failed && !parser.oom && parser.at == parser.length && yx_tr_hex_source(node, &hex) && yx_put_u8(&hex, 0);
         yx_tr_destroy(node);
-        if (!valid) { free(hex.data); goto done; }
-        free(text.data); text = hex;
+        if (!valid) {
+            free(hex.data);
+            goto done;
+        }
+        free(text.data);
+        text = hex;
     }
-    *out = text; text = (yx_writer){0}; ok = true;
+    *out = text;
+    text = (yx_writer){0};
+    ok = true;
 done:
-    free(text.data); free(backward.data);
+    free(text.data);
+    free(backward.data);
     return ok;
 }
 /* Recompile the decoded pattern as the reconstructed rule declares it and
@@ -3036,8 +3558,7 @@ static void yx_tr_mandatory_bytes(const yx_tr_node *node, uint64_t factor, uint6
     if (node->kind == YX_TR_LITERAL) {
         for (size_t i = 0; i < node->length; ++i) counts[node->bytes[i]] += factor;
     } else if (node->kind == YX_TR_REPEAT) {
-        if (node->minimum && node->count)
-            yx_tr_mandatory_bytes(node->children[0], factor > UINT32_MAX ? factor : factor * node->minimum, counts);
+        if (node->minimum && node->count) yx_tr_mandatory_bytes(node->children[0], factor > UINT32_MAX ? factor : factor * node->minimum, counts);
     } else if (node->kind == YX_TR_CONCAT || node->kind == YX_TR_CAPTURE || node->kind == YX_TR_ALT) {
         for (size_t i = 0; i < node->count; ++i) yx_tr_mandatory_bytes(node->children[i], factor, counts);
     }
@@ -3077,54 +3598,58 @@ static bool yx_tr_same_literals(const char *a, const char *b)
     }
     return !memcmp(counts[0], counts[1], sizeof(counts[0]));
 }
-static bool yx_tr_leftover_matches(const yx_archive_regexp_envelope *e, const char *text, size_t prefix,
-                                   bool check_residue, const yx_writer *raw)
+static bool yx_tr_leftover_matches(const yx_archive_regexp_envelope *e, const char *text, size_t prefix, bool check_residue, const yx_writer *raw)
 {
     yx_writer source = {0}, hex_text = {0}, code = {0};
     YRX_RULES *rules = NULL;
     bool ok = false;
     if (!text) return false;
-    if (!yx_tr_text(&source, e->pattern_kind == 1 ? "rule r { strings: $a = { " : "rule r { strings: $a = /") ||
-        !yx_tr_text(&source, text) ||
-        !yx_tr_text(&source, e->pattern_kind == 1 ? " }" : ((e->flags & 2u) ? "/ nocase" : "/")) ||
-        !yx_tr_text(&source, " condition: $a }") || !yx_put_u8(&source, 0)) goto done;
-    if (yx_compile_quiet((const char *)source.data, &rules) != YRX_SUCCESS || !rules ||
-        rules->rule_count != 1 || rules->rules[0].pattern_count != 1) goto done;
+    if (!yx_tr_text(&source, e->pattern_kind == 1 ? "rule r { strings: $a = { " : "rule r { strings: $a = /") || !yx_tr_text(&source, text) ||
+        !yx_tr_text(&source, e->pattern_kind == 1 ? " }" : ((e->flags & 2u) ? "/ nocase" : "/")) || !yx_tr_text(&source, " condition: $a }") || !yx_put_u8(&source, 0))
+        goto done;
+    if (yx_compile_quiet((const char *)source.data, &rules) != YRX_SUCCESS || !rules || rules->rule_count != 1 || rules->rules[0].pattern_count != 1) goto done;
     const YRX_PATTERN *pattern = &rules->rules[0].patterns[0];
     bool hex = pattern->kind == YX_PATTERN_HEX;
     const char *regexp = pattern->regexp;
     if (hex) {
-        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) goto done;
+        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) goto done;
         regexp = (const char *)hex_text.data;
     } else if (pattern->kind != YX_PATTERN_REGEX || !regexp) goto done;
     /* Without a residue to check or a raw program to compare, the result is
      * decided here: the rest only computes values that nothing reads. */
-    if (!check_residue && !raw) { ok = true; goto done; }
-    yx_tr_parser eligibility = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
-        .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0, .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
+    if (!check_residue && !raw) {
+        ok = true;
+        goto done;
+    }
+    yx_tr_parser eligibility = {.text = (const uint8_t *)regexp,
+                                .length = strlen(regexp),
+                                .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0,
+                                .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
     yx_tr_node *root = yx_tr_expression(&eligibility);
-    bool failed_fast = yx_tr_fast_leftover(root, regexp, eligibility.dotall, eligibility.nocase,
-                                           hex ? pattern : NULL, &code);
+    bool failed_fast = yx_tr_fast_leftover(root, regexp, eligibility.dotall, eligibility.nocase, hex ? pattern : NULL, &code);
     /* The archive holds a Thompson program, so the pattern must be one that
      * the FastVM compiler rejects, exactly as the encoder decides. */
-    bool thompson = root && !eligibility.failed && !eligibility.oom && eligibility.at == eligibility.length &&
-        yx_tr_uses_thompson(root, failed_fast, hex ? pattern : NULL);
+    bool thompson =
+        root && !eligibility.failed && !eligibility.oom && eligibility.at == eligibility.length && yx_tr_uses_thompson(root, failed_fast, hex ? pattern : NULL);
     yx_tr_destroy(root);
-    ok = !check_residue ||
-         (thompson && code.used == prefix && (!prefix || !memcmp(code.data, e->code, prefix)));
+    ok = !check_residue || (thompson && code.used == prefix && (!prefix || !memcmp(code.data, e->code, prefix)));
     if (ok && raw) {
         /* A pattern rebuilt from the residue must describe the archived
          * forward program: compile it and compare literal byte counts. */
-        yx_tr_program program = {0}; bool greedy = false; yx_writer forward = {0};
+        yx_tr_program program = {0};
+        bool greedy = false;
+        yx_writer forward = {0};
         size_t end = 0;
-        ok = yx_tr_compile(regexp, eligibility.dotall, eligibility.nocase, &program, &greedy) &&
-             yx_tr_region_text(&program.forward, &forward, &end) &&
+        ok = yx_tr_compile(regexp, eligibility.dotall, eligibility.nocase, &program, &greedy) && yx_tr_region_text(&program.forward, &forward, &end) &&
              yx_tr_same_literals((const char *)forward.data, (const char *)raw->data);
-        free(forward.data); yx_tr_program_free(&program);
+        free(forward.data);
+        yx_tr_program_free(&program);
     }
 done:
-    yrx_rules_destroy(rules); free(source.data); free(hex_text.data); free(code.data);
+    yrx_rules_destroy(rules);
+    free(source.data);
+    free(hex_text.data);
+    free(code.data);
     return ok;
 }
 /* Rebuild a pattern from the pieces of a FastVM residue. The first
@@ -3133,20 +3658,22 @@ done:
 static bool yx_tr_residue_source(const yx_archive_regexp_envelope *e, size_t first_end, size_t end, yx_writer *out)
 {
     yx_fast_program *p = calloc(1, sizeof(*p));
-    size_t at = 0; bool ok = false, dotall = false;
+    size_t at = 0;
+    bool ok = false, dotall = false;
     if (!p) return false;
     p->flags = e->flags & 32u;
     if (!yx_fast_read_sequence(p, e->code, e->code_length, &at) || at != first_end) goto done;
     if (end != first_end) {
         for (size_t i = 0; i < p->count / 2; ++i) {
-            yx_fast_piece swap = p->pieces[i]; p->pieces[i] = p->pieces[p->count - i - 1]; p->pieces[p->count - i - 1] = swap;
+            yx_fast_piece swap = p->pieces[i];
+            p->pieces[i] = p->pieces[p->count - i - 1];
+            p->pieces[p->count - i - 1] = swap;
         }
         if (!yx_fast_read_sequence(p, e->code, e->code_length, &at) || at != end) goto done;
     }
     /* Regexp jumps that exclude newlines need the reconstructed rule's
      * default dot; a dotall reconstruction is not representable here. */
-    ok = yx_fast_source(p, e->pattern_kind == 1, out, &dotall) && (e->pattern_kind == 1 || !dotall) &&
-         yx_put_u8(out, 0);
+    ok = yx_fast_source(p, e->pattern_kind == 1, out, &dotall) && (e->pattern_kind == 1 || !dotall) && yx_put_u8(out, 0);
 done:
     yx_fast_program_destroy(p);
     return ok;
@@ -3159,24 +3686,22 @@ static bool yx_tr_reproduces(const yx_archive_regexp_envelope *e, const uint8_t 
     YRX_RULES *rules = NULL;
     bool same = false;
     if (!text || !e->names[1] || !e->names[2]) return false;
-    if (!yx_tr_text(&source, "rule ") || !yx_tr_text(&source, e->names[2]) ||
-        !yx_tr_text(&source, " { strings: ") || !yx_tr_text(&source, e->names[1]) ||
-        !yx_tr_text(&source, " = /") || !yx_tr_text(&source, text) || !yx_tr_text(&source, "/") ||
-        ((e->flags & 24u) && !yx_tr_text(&source, " fullword")) ||
-        ((e->flags & 1u) && !yx_tr_text(&source, " wide")) ||
-        (e->ascii_wide && !yx_tr_text(&source, " ascii")) ||
-        ((e->flags & 2u) && !yx_tr_text(&source, " nocase")) ||
-        !yx_tr_text(&source, " condition: ") || !yx_tr_text(&source, e->names[1]) ||
-        !yx_tr_text(&source, " }") || !yx_put_u8(&source, 0)) goto done;
+    if (!yx_tr_text(&source, "rule ") || !yx_tr_text(&source, e->names[2]) || !yx_tr_text(&source, " { strings: ") || !yx_tr_text(&source, e->names[1]) ||
+        !yx_tr_text(&source, " = /") || !yx_tr_text(&source, text) || !yx_tr_text(&source, "/") || ((e->flags & 24u) && !yx_tr_text(&source, " fullword")) ||
+        ((e->flags & 1u) && !yx_tr_text(&source, " wide")) || (e->ascii_wide && !yx_tr_text(&source, " ascii")) || ((e->flags & 2u) && !yx_tr_text(&source, " nocase")) ||
+        !yx_tr_text(&source, " condition: ") || !yx_tr_text(&source, e->names[1]) || !yx_tr_text(&source, " }") || !yx_put_u8(&source, 0))
+        goto done;
     if (yx_compile_quiet((const char *)source.data, &rules) != YRX_SUCCESS || !rules) goto done;
     for (unsigned profile = 0; profile < 2 && !same; ++profile) {
-        uint8_t *encoded = NULL; size_t encoded_length = 0;
+        uint8_t *encoded = NULL;
+        size_t encoded_length = 0;
         if (yx_encode_thompson_regex(rules, profile != 0, &encoded, &encoded_length) == YX_SER_SUCCESS)
             same = encoded_length == e->archive_length && !memcmp(encoded, data, encoded_length);
         free(encoded);
     }
 done:
-    yrx_rules_destroy(rules); free(source.data);
+    yrx_rules_destroy(rules);
+    free(source.data);
     return same;
 }
 /* One \xHH escape at t: its value, or -1. */
@@ -3218,10 +3743,12 @@ static bool yx_tr_plain_regexp(const char *t)
                 ++items;
             }
             if (!items) return false;
-            ++t; ++classes;
+            ++t;
+            ++classes;
         } else {
             if (yx_tr_hex_escape(t) < 0) return false;
-            t += 4; ++bytes;
+            t += 4;
+            ++bytes;
         }
     }
     return bytes && classes && (size_t)(t - start) <= 1024;
@@ -3236,21 +3763,20 @@ static bool yx_tr_roll_forward(const yx_archive_regexp_envelope *e, size_t begin
         if (e->code[forward_end] == 0xaa && e->code[forward_end + 1] == 0) break;
         forward_end += n;
     }
-    return forward_end < e->code_length &&
-           yx_tr_decode_region_mode(e->code, begin, forward_end, out, 0, true) && yx_put_u8(out, 0);
+    return forward_end < e->code_length && yx_tr_decode_region_mode(e->code, begin, forward_end, out, 0, true) && yx_put_u8(out, 0);
 }
-static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length,
-    yx_ser_rule **rules, size_t *rule_count)
+static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length, yx_ser_rule **rules, size_t *rule_count)
 {
     yx_archive_regexp_envelope envelope = {0};
     yx_writer text = {0};
-    uint8_t *expected = NULL; size_t expected_length = 0;
+    uint8_t *expected = NULL;
+    size_t expected_length = 0;
     yx_ser_rule *decoded = NULL;
     yx_ser_result status = YX_SER_UNSUPPORTED;
     if (!yx_regexp_envelope_read(data, length, &envelope)) return status;
-    if ((envelope.pattern_kind != 1 && envelope.pattern_kind != 2) ||
-        (envelope.flags & ~59u) || (envelope.pattern_kind == 1 && envelope.flags) ||
-        ((envelope.flags & 24u) && (envelope.flags & 24u) != 24u)) goto done;
+    if ((envelope.pattern_kind != 1 && envelope.pattern_kind != 2) || (envelope.flags & ~59u) || (envelope.pattern_kind == 1 && envelope.flags) ||
+        ((envelope.flags & 24u) && (envelope.flags & 24u) != 24u))
+        goto done;
     /* A failed FastVM attempt may leave one or two unreferenced verifier
      * sequences (backward, then forward) or a jump-only program in front of
      * the Thompson program. Every candidate boundary is checked by
@@ -3259,32 +3785,37 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
     size_t candidates[4] = {0}, candidate_count = 1, gap_end = 0;
     while (gap_end < envelope.code_length && envelope.code[gap_end] >= 3 && envelope.code[gap_end] <= 6) {
         size_t width = (envelope.code[gap_end] == 3 || envelope.code[gap_end] == 5) ? 5 : 9;
-        if (width >= envelope.code_length - gap_end) { gap_end = 0; break; }
+        if (width >= envelope.code_length - gap_end) {
+            gap_end = 0;
+            break;
+        }
         gap_end += width;
     }
     if (gap_end && gap_end < envelope.code_length && !envelope.code[gap_end]) {
         bool unused = true;
         for (size_t i = 0; i < envelope.atom_count; ++i)
-            if (envelope.atoms[i].length > ((envelope.flags & 1u) ? 2u : 1u) ||
-                !envelope.atoms[i].has_forward || !envelope.atoms[i].has_backward ||
-                envelope.atoms[i].forward <= gap_end || envelope.atoms[i].backward <= gap_end) unused = false;
+            if (envelope.atoms[i].length > ((envelope.flags & 1u) ? 2u : 1u) || !envelope.atoms[i].has_forward || !envelope.atoms[i].has_backward ||
+                envelope.atoms[i].forward <= gap_end || envelope.atoms[i].backward <= gap_end)
+                unused = false;
         if (unused) candidates[candidate_count++] = gap_end + 1;
     }
     if (candidate_count == 1 && envelope.code_length && envelope.code[0] >= 1 && envelope.code[0] <= 7) {
         size_t sequence_end = 0;
         for (unsigned sequence = 0; sequence < 2; ++sequence) {
             yx_fast_program *prefix = calloc(1, sizeof(*prefix));
-            if (!prefix) { status = YX_SER_NO_MEMORY; goto done; }
-            bool parsed = sequence_end < envelope.code_length && envelope.code[sequence_end] >= 1 &&
-                envelope.code[sequence_end] <= 7 &&
-                yx_fast_read_sequence(prefix, envelope.code, envelope.code_length, &sequence_end) &&
-                sequence_end < envelope.code_length;
+            if (!prefix) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
+            bool parsed = sequence_end < envelope.code_length && envelope.code[sequence_end] >= 1 && envelope.code[sequence_end] <= 7 &&
+                          yx_fast_read_sequence(prefix, envelope.code, envelope.code_length, &sequence_end) && sequence_end < envelope.code_length;
             yx_fast_program_destroy(prefix);
             if (!parsed) break;
             bool unused = true;
             for (size_t i = 0; i < envelope.atom_count && unused; ++i)
-                if (!envelope.atoms[i].has_forward || !envelope.atoms[i].has_backward ||
-                    envelope.atoms[i].forward < sequence_end || envelope.atoms[i].backward < sequence_end) unused = false;
+                if (!envelope.atoms[i].has_forward || !envelope.atoms[i].has_backward || envelope.atoms[i].forward < sequence_end ||
+                    envelope.atoms[i].backward < sequence_end)
+                    unused = false;
             if (!unused) break;
             candidates[candidate_count++] = sequence_end;
         }
@@ -3295,8 +3826,10 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
     for (size_t c = candidate_count; c-- > 0 && !decoded_forward;) {
         yx_writer raw = {0}, raw_backward = {0};
         bool gap = gap_end && candidates[c] == gap_end + 1, residue = candidates[c] && !gap;
-        decoded_begin = candidates[c]; decoded_gap = gap;
-        free(text.data); text = (yx_writer){0};
+        decoded_begin = candidates[c];
+        decoded_gap = gap;
+        free(text.data);
+        text = (yx_writer){0};
         decoded_forward = yx_tr_decode_forward(&envelope, candidates[c], gap, &text, &raw, &raw_backward);
         decoded_forward = decoded_forward && yx_tr_same_literals((const char *)raw.data, (const char *)raw_backward.data);
         if (decoded_forward && residue && envelope.pattern_kind == 1) {
@@ -3304,9 +3837,11 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
              * e.g. `?? [3-6]` versus `[4-7]`. Prefer it for hex patterns. */
             yx_writer rebuilt = {0};
             bool exact = yx_tr_residue_source(&envelope, candidates[1], candidates[c], &rebuilt) &&
-                yx_tr_leftover_matches(&envelope, (const char *)rebuilt.data, candidates[c], true, &raw);
-            if (exact) { free(text.data); text = rebuilt; }
-            else {
+                         yx_tr_leftover_matches(&envelope, (const char *)rebuilt.data, candidates[c], true, &raw);
+            if (exact) {
+                free(text.data);
+                text = rebuilt;
+            } else {
                 free(rebuilt.data);
                 decoded_forward = yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c], true, NULL);
             }
@@ -3326,11 +3861,10 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
                 abort();
             }
 #endif
-            if (!plain)
-                decoded_forward = yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c],
-                                                         envelope.pattern_kind == 1 && !gap, NULL);
+            if (!plain) decoded_forward = yx_tr_leftover_matches(&envelope, (const char *)text.data, candidates[c], envelope.pattern_kind == 1 && !gap, NULL);
         }
-        free(raw.data); free(raw_backward.data);
+        free(raw.data);
+        free(raw_backward.data);
     }
     if (!decoded_forward) goto done;
     /* An equivalent spelling can still differ in its atoms, and the atoms
@@ -3343,45 +3877,55 @@ static yx_ser_result yx_decode_thompson_regex(const uint8_t *data, size_t length
      * stays whatever the two recompiles say, so they are skipped. */
     if (envelope.pattern_kind == 2 && !decoded_gap) {
         yx_writer rolled = {0};
-        if (yx_tr_roll_forward(&envelope, decoded_begin, &rolled) &&
-            strcmp((const char *)rolled.data, (const char *)text.data) &&
-            !yx_tr_reproduces(&envelope, data, (const char *)text.data) &&
-            yx_tr_reproduces(&envelope, data, (const char *)rolled.data)) {
-            free(text.data); text = rolled;
+        if (yx_tr_roll_forward(&envelope, decoded_begin, &rolled) && strcmp((const char *)rolled.data, (const char *)text.data) &&
+            !yx_tr_reproduces(&envelope, data, (const char *)text.data) && yx_tr_reproduces(&envelope, data, (const char *)rolled.data)) {
+            free(text.data);
+            text = rolled;
         } else free(rolled.data);
     }
     for (size_t profile = 0; profile < 2; ++profile) {
         uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
         memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
         if (profile && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) goto done;
-        free(expected); expected = NULL;
-        status = yx_regexp_variants_encode(envelope.names[2], envelope.names[1],
-            envelope.pattern_kind, envelope.flags, envelope.ascii_wide, wasm, sizeof(wasm),
-            envelope.atoms, envelope.atom_count, envelope.code, envelope.code_length,
-            &expected, &expected_length);
+        free(expected);
+        expected = NULL;
+        status = yx_regexp_variants_encode(envelope.names[2], envelope.names[1], envelope.pattern_kind, envelope.flags, envelope.ascii_wide, wasm, sizeof(wasm),
+                                           envelope.atoms, envelope.atom_count, envelope.code, envelope.code_length, &expected, &expected_length);
         if (status == YX_SER_NO_MEMORY) goto done;
-        if (status == YX_SER_SUCCESS && expected_length == envelope.archive_length &&
-            memcmp(data, expected, expected_length) == 0) break;
+        if (status == YX_SER_SUCCESS && expected_length == envelope.archive_length && memcmp(data, expected, expected_length) == 0) break;
         status = YX_SER_UNSUPPORTED;
     }
     if (status != YX_SER_SUCCESS) goto done;
     decoded = calloc(1, sizeof(*decoded));
-    if (!decoded) { status = YX_SER_NO_MEMORY; goto done; }
-    decoded->namespace_name = envelope.names[0]; envelope.names[0] = NULL;
-    decoded->pattern_identifier = envelope.names[1]; envelope.names[1] = NULL;
-    decoded->identifier = envelope.names[2]; envelope.names[2] = NULL;
-    decoded->pattern_bytes = text.data; decoded->pattern_length = text.used - 1;
-    text.data = NULL; decoded->single_text_pattern = true;
+    if (!decoded) {
+        status = YX_SER_NO_MEMORY;
+        goto done;
+    }
+    decoded->namespace_name = envelope.names[0];
+    envelope.names[0] = NULL;
+    decoded->pattern_identifier = envelope.names[1];
+    envelope.names[1] = NULL;
+    decoded->identifier = envelope.names[2];
+    envelope.names[2] = NULL;
+    decoded->pattern_bytes = text.data;
+    decoded->pattern_length = text.used - 1;
+    text.data = NULL;
+    decoded->single_text_pattern = true;
     decoded->preserve_serialized_prefix = true;
     decoded->single_regex_thompson = envelope.pattern_kind == 2;
     decoded->fullword_single_pattern = (envelope.flags & 24u) != 0;
     decoded->wide_single_pattern = (envelope.flags & 1u) != 0;
     decoded->ascii_wide_single_pattern = envelope.ascii_wide;
     decoded->nocase_single_pattern = (envelope.flags & 2u) != 0;
-    decoded->single_hex_thompson = envelope.pattern_kind == 1; decoded->truth = true;
-    *rules = decoded; *rule_count = 1; decoded = NULL;
+    decoded->single_hex_thompson = envelope.pattern_kind == 1;
+    decoded->truth = true;
+    *rules = decoded;
+    *rule_count = 1;
+    decoded = NULL;
 done:
-    free(expected); free(text.data); yx_regexp_envelope_destroy(&envelope);
+    free(expected);
+    free(text.data);
+    yx_regexp_envelope_destroy(&envelope);
     if (decoded) yx_ser_rules_destroy(decoded, 1);
     return status;
 }

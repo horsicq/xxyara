@@ -19,7 +19,6 @@
  * SOFTWARE.
  */
 
-
 /* Generated from private_docs/MODULE_OUTPUT_SCHEMA.json; integer field types
  * aligned with YARA-X v1.23.0 module protobufs. */
 static const yx_mo_wire_field yx_mo_fields_crx_Crx[] = {
@@ -51,29 +50,15 @@ static const yx_mo_wire_field yx_mo_fields_dex_ClassItem[] = {
     {"source_file", 4, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_dex_Dex[] = {
-    {"is_dex", 1, YX_MOW_BOOL, 0, 8},
-    {"header", 2, YX_MOW_MESSAGE, 4, 8},
-    {"strings", 3, YX_MOW_STRING, 0, 1},
-    {"types", 4, YX_MOW_STRING, 0, 1},
-    {"protos", 5, YX_MOW_MESSAGE, 9, 1},
-    {"fields", 6, YX_MOW_MESSAGE, 5, 1},
-    {"methods", 7, YX_MOW_MESSAGE, 8, 1},
-    {"class_defs", 8, YX_MOW_MESSAGE, 2, 1},
-    {"map_list", 9, YX_MOW_MESSAGE, 7, 8},
+    {"is_dex", 1, YX_MOW_BOOL, 0, 8},     {"header", 2, YX_MOW_MESSAGE, 4, 8},     {"strings", 3, YX_MOW_STRING, 0, 1},
+    {"types", 4, YX_MOW_STRING, 0, 1},    {"protos", 5, YX_MOW_MESSAGE, 9, 1},     {"fields", 6, YX_MOW_MESSAGE, 5, 1},
+    {"methods", 7, YX_MOW_MESSAGE, 8, 1}, {"class_defs", 8, YX_MOW_MESSAGE, 2, 1}, {"map_list", 9, YX_MOW_MESSAGE, 7, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_dex_DexHeader[] = {
-    {"magic", 1, YX_MOW_UINT32, 0, 8},
-    {"version", 2, YX_MOW_UINT32, 0, 8},
-    {"checksum", 3, YX_MOW_UINT32, 0, 8},
-    {"signature", 4, YX_MOW_STRING, 0, 8},
-    {"file_size", 5, YX_MOW_UINT32, 0, 8},
-    {"header_size", 6, YX_MOW_UINT32, 0, 8},
-    {"endian_tag", 7, YX_MOW_UINT32, 0, 8},
-    {"link_size", 8, YX_MOW_UINT32, 0, 8},
-    {"link_off", 9, YX_MOW_UINT32, 0, 8},
-    {"data_size", 23, YX_MOW_UINT32, 0, 8},
-    {"data_off", 24, YX_MOW_UINT32, 0, 8},
-    {"container_size", 25, YX_MOW_UINT32, 0, 8},
+    {"magic", 1, YX_MOW_UINT32, 0, 8},          {"version", 2, YX_MOW_UINT32, 0, 8},   {"checksum", 3, YX_MOW_UINT32, 0, 8},
+    {"signature", 4, YX_MOW_STRING, 0, 8},      {"file_size", 5, YX_MOW_UINT32, 0, 8}, {"header_size", 6, YX_MOW_UINT32, 0, 8},
+    {"endian_tag", 7, YX_MOW_UINT32, 0, 8},     {"link_size", 8, YX_MOW_UINT32, 0, 8}, {"link_off", 9, YX_MOW_UINT32, 0, 8},
+    {"data_size", 23, YX_MOW_UINT32, 0, 8},     {"data_off", 24, YX_MOW_UINT32, 0, 8}, {"container_size", 25, YX_MOW_UINT32, 0, 8},
     {"header_offset", 26, YX_MOW_UINT32, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_dex_FieldItem[] = {
@@ -211,12 +196,8 @@ static const yx_mo_wire_field yx_mo_fields_elf_ELF[] = {
     {"dynamic", 17, YX_MOW_MESSAGE, 19, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_elf_Section[] = {
-    {"type", 1, YX_MOW_INT32, 0, 24},
-    {"flags", 2, YX_MOW_INT64, 0, 24},
-    {"address", 3, YX_MOW_INT64, 0, 24},
-    {"size", 4, YX_MOW_INT64, 0, 24},
-    {"offset", 5, YX_MOW_INT64, 0, 24},
-    {"name", 6, YX_MOW_STRING, 0, 8},
+    {"type", 1, YX_MOW_INT32, 0, 24}, {"flags", 2, YX_MOW_INT64, 0, 24},  {"address", 3, YX_MOW_INT64, 0, 24},
+    {"size", 4, YX_MOW_INT64, 0, 24}, {"offset", 5, YX_MOW_INT64, 0, 24}, {"name", 6, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_elf_Segment[] = {
     {"type", 1, YX_MOW_INT32, 0, 24},
@@ -229,13 +210,8 @@ static const yx_mo_wire_field yx_mo_fields_elf_Segment[] = {
     {"alignment", 8, YX_MOW_INT64, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_elf_Sym[] = {
-    {"name", 1, YX_MOW_STRING, 0, 8},
-    {"value", 2, YX_MOW_INT64, 0, 24},
-    {"size", 3, YX_MOW_INT64, 0, 24},
-    {"type", 4, YX_MOW_INT32, 0, 24},
-    {"bind", 5, YX_MOW_INT32, 0, 24},
-    {"shndx", 6, YX_MOW_UINT32, 0, 24},
-    {"visibility", 7, YX_MOW_INT32, 0, 24},
+    {"name", 1, YX_MOW_STRING, 0, 8}, {"value", 2, YX_MOW_INT64, 0, 24},  {"size", 3, YX_MOW_INT64, 0, 24},       {"type", 4, YX_MOW_INT32, 0, 24},
+    {"bind", 5, YX_MOW_INT32, 0, 24}, {"shndx", 6, YX_MOW_UINT32, 0, 24}, {"visibility", 7, YX_MOW_INT32, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_lnk_Lnk[] = {
     {"is_lnk", 1, YX_MOW_BOOL, 0, 24},
@@ -262,14 +238,10 @@ static const yx_mo_wire_field yx_mo_fields_lnk_Lnk[] = {
     {"target_id_list", 22, YX_MOW_MESSAGE, 25, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_lnk_ShellItem[] = {
-    {"item_type", 1, YX_MOW_INT32, 0, 8},
-    {"data", 3, YX_MOW_STRING, 0, 12},
-    {"cpl_file_path", 4, YX_MOW_STRING, 0, 8},
-    {"root_folder_id", 5, YX_MOW_STRING, 0, 8},
-    {"volume_name", 6, YX_MOW_STRING, 0, 8},
-    {"volume_id", 7, YX_MOW_STRING, 0, 8},
-    {"file_entry_name", 8, YX_MOW_STRING, 0, 8},
-    {"network_location", 9, YX_MOW_STRING, 0, 8},
+    {"item_type", 1, YX_MOW_INT32, 0, 8},        {"data", 3, YX_MOW_STRING, 0, 12},
+    {"cpl_file_path", 4, YX_MOW_STRING, 0, 8},   {"root_folder_id", 5, YX_MOW_STRING, 0, 8},
+    {"volume_name", 6, YX_MOW_STRING, 0, 8},     {"volume_id", 7, YX_MOW_STRING, 0, 8},
+    {"file_entry_name", 8, YX_MOW_STRING, 0, 8}, {"network_location", 9, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_lnk_TrackerData[] = {
     {"version", 1, YX_MOW_UINT32, 0, 8},
@@ -284,11 +256,8 @@ static const yx_mo_wire_field yx_mo_fields_macho_BuildTool[] = {
     {"version", 2, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_BuildVersion[] = {
-    {"platform", 1, YX_MOW_UINT32, 0, 8},
-    {"minos", 2, YX_MOW_STRING, 0, 8},
-    {"sdk", 3, YX_MOW_STRING, 0, 8},
-    {"ntools", 4, YX_MOW_UINT32, 0, 8},
-    {"tools", 5, YX_MOW_MESSAGE, 27, 1},
+    {"platform", 1, YX_MOW_UINT32, 0, 8}, {"minos", 2, YX_MOW_STRING, 0, 8},   {"sdk", 3, YX_MOW_STRING, 0, 8},
+    {"ntools", 4, YX_MOW_UINT32, 0, 8},   {"tools", 5, YX_MOW_MESSAGE, 27, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Certificate[] = {
     {"issuer", 1, YX_MOW_STRING, 0, 24},
@@ -296,15 +265,9 @@ static const yx_mo_wire_field yx_mo_fields_macho_Certificate[] = {
     {"is_self_signed", 3, YX_MOW_BOOL, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_DyldInfo[] = {
-    {"rebase_off", 1, YX_MOW_UINT32, 0, 8},
-    {"rebase_size", 2, YX_MOW_UINT32, 0, 8},
-    {"bind_off", 3, YX_MOW_UINT32, 0, 8},
-    {"bind_size", 4, YX_MOW_UINT32, 0, 8},
-    {"weak_bind_off", 5, YX_MOW_UINT32, 0, 8},
-    {"weak_bind_size", 6, YX_MOW_UINT32, 0, 8},
-    {"lazy_bind_off", 7, YX_MOW_UINT32, 0, 8},
-    {"lazy_bind_size", 8, YX_MOW_UINT32, 0, 8},
-    {"export_off", 9, YX_MOW_UINT32, 0, 8},
+    {"rebase_off", 1, YX_MOW_UINT32, 0, 8},    {"rebase_size", 2, YX_MOW_UINT32, 0, 8},    {"bind_off", 3, YX_MOW_UINT32, 0, 8},
+    {"bind_size", 4, YX_MOW_UINT32, 0, 8},     {"weak_bind_off", 5, YX_MOW_UINT32, 0, 8},  {"weak_bind_size", 6, YX_MOW_UINT32, 0, 8},
+    {"lazy_bind_off", 7, YX_MOW_UINT32, 0, 8}, {"lazy_bind_size", 8, YX_MOW_UINT32, 0, 8}, {"export_off", 9, YX_MOW_UINT32, 0, 8},
     {"export_size", 10, YX_MOW_UINT32, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Dylib[] = {
@@ -314,32 +277,16 @@ static const yx_mo_wire_field yx_mo_fields_macho_Dylib[] = {
     {"current_version", 4, YX_MOW_STRING, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Dysymtab[] = {
-    {"ilocalsym", 3, YX_MOW_UINT32, 0, 8},
-    {"nlocalsym", 4, YX_MOW_UINT32, 0, 8},
-    {"iextdefsym", 5, YX_MOW_UINT32, 0, 8},
-    {"nextdefsym", 6, YX_MOW_UINT32, 0, 8},
-    {"iundefsym", 7, YX_MOW_UINT32, 0, 8},
-    {"nundefsym", 8, YX_MOW_UINT32, 0, 8},
-    {"tocoff", 9, YX_MOW_UINT32, 0, 8},
-    {"ntoc", 10, YX_MOW_UINT32, 0, 8},
-    {"modtaboff", 11, YX_MOW_UINT32, 0, 8},
-    {"nmodtab", 12, YX_MOW_UINT32, 0, 8},
-    {"extrefsymoff", 13, YX_MOW_UINT32, 0, 8},
-    {"nextrefsyms", 14, YX_MOW_UINT32, 0, 8},
-    {"indirectsymoff", 15, YX_MOW_UINT32, 0, 8},
-    {"nindirectsyms", 16, YX_MOW_UINT32, 0, 8},
-    {"extreloff", 17, YX_MOW_UINT32, 0, 8},
-    {"nextrel", 18, YX_MOW_UINT32, 0, 8},
-    {"locreloff", 19, YX_MOW_UINT32, 0, 8},
-    {"nlocrel", 20, YX_MOW_UINT32, 0, 8},
+    {"ilocalsym", 3, YX_MOW_UINT32, 0, 8},       {"nlocalsym", 4, YX_MOW_UINT32, 0, 8},      {"iextdefsym", 5, YX_MOW_UINT32, 0, 8},
+    {"nextdefsym", 6, YX_MOW_UINT32, 0, 8},      {"iundefsym", 7, YX_MOW_UINT32, 0, 8},      {"nundefsym", 8, YX_MOW_UINT32, 0, 8},
+    {"tocoff", 9, YX_MOW_UINT32, 0, 8},          {"ntoc", 10, YX_MOW_UINT32, 0, 8},          {"modtaboff", 11, YX_MOW_UINT32, 0, 8},
+    {"nmodtab", 12, YX_MOW_UINT32, 0, 8},        {"extrefsymoff", 13, YX_MOW_UINT32, 0, 8},  {"nextrefsyms", 14, YX_MOW_UINT32, 0, 8},
+    {"indirectsymoff", 15, YX_MOW_UINT32, 0, 8}, {"nindirectsyms", 16, YX_MOW_UINT32, 0, 8}, {"extreloff", 17, YX_MOW_UINT32, 0, 8},
+    {"nextrel", 18, YX_MOW_UINT32, 0, 8},        {"locreloff", 19, YX_MOW_UINT32, 0, 8},     {"nlocrel", 20, YX_MOW_UINT32, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_FatArch[] = {
-    {"cputype", 1, YX_MOW_UINT32, 0, 8},
-    {"cpusubtype", 2, YX_MOW_UINT32, 0, 8},
-    {"offset", 3, YX_MOW_INT64, 0, 8},
-    {"size", 4, YX_MOW_INT64, 0, 8},
-    {"align", 5, YX_MOW_UINT32, 0, 8},
-    {"reserved", 6, YX_MOW_UINT32, 0, 8},
+    {"cputype", 1, YX_MOW_UINT32, 0, 8}, {"cpusubtype", 2, YX_MOW_UINT32, 0, 8}, {"offset", 3, YX_MOW_INT64, 0, 8},
+    {"size", 4, YX_MOW_INT64, 0, 8},     {"align", 5, YX_MOW_UINT32, 0, 8},      {"reserved", 6, YX_MOW_UINT32, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_File[] = {
     {"magic", 1, YX_MOW_UINT32, 0, 8},
@@ -415,45 +362,22 @@ static const yx_mo_wire_field yx_mo_fields_macho_MinVersion[] = {
     {"sdk", 3, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Nlist[] = {
-    {"n_strx", 1, YX_MOW_UINT32, 0, 8},
-    {"n_type", 2, YX_MOW_UINT32, 0, 8},
-    {"n_sect", 3, YX_MOW_UINT32, 0, 8},
-    {"n_desc", 4, YX_MOW_UINT32, 0, 8},
-    {"n_value", 5, YX_MOW_INT64, 0, 8},
+    {"n_strx", 1, YX_MOW_UINT32, 0, 8}, {"n_type", 2, YX_MOW_UINT32, 0, 8}, {"n_sect", 3, YX_MOW_UINT32, 0, 8},
+    {"n_desc", 4, YX_MOW_UINT32, 0, 8}, {"n_value", 5, YX_MOW_INT64, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Section[] = {
-    {"segname", 1, YX_MOW_STRING, 0, 12},
-    {"sectname", 2, YX_MOW_STRING, 0, 12},
-    {"addr", 3, YX_MOW_INT64, 0, 8},
-    {"size", 4, YX_MOW_INT64, 0, 8},
-    {"offset", 5, YX_MOW_UINT32, 0, 8},
-    {"align", 6, YX_MOW_UINT32, 0, 8},
-    {"reloff", 7, YX_MOW_UINT32, 0, 8},
-    {"nreloc", 8, YX_MOW_UINT32, 0, 8},
-    {"flags", 9, YX_MOW_UINT32, 0, 8},
-    {"reserved1", 10, YX_MOW_UINT32, 0, 8},
-    {"reserved2", 11, YX_MOW_UINT32, 0, 8},
-    {"reserved3", 12, YX_MOW_UINT32, 0, 8},
+    {"segname", 1, YX_MOW_STRING, 0, 12}, {"sectname", 2, YX_MOW_STRING, 0, 12},  {"addr", 3, YX_MOW_INT64, 0, 8},        {"size", 4, YX_MOW_INT64, 0, 8},
+    {"offset", 5, YX_MOW_UINT32, 0, 8},   {"align", 6, YX_MOW_UINT32, 0, 8},      {"reloff", 7, YX_MOW_UINT32, 0, 8},     {"nreloc", 8, YX_MOW_UINT32, 0, 8},
+    {"flags", 9, YX_MOW_UINT32, 0, 8},    {"reserved1", 10, YX_MOW_UINT32, 0, 8}, {"reserved2", 11, YX_MOW_UINT32, 0, 8}, {"reserved3", 12, YX_MOW_UINT32, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Segment[] = {
-    {"segname", 3, YX_MOW_STRING, 0, 12},
-    {"vmaddr", 4, YX_MOW_INT64, 0, 8},
-    {"vmsize", 5, YX_MOW_INT64, 0, 8},
-    {"fileoff", 6, YX_MOW_INT64, 0, 8},
-    {"filesize", 7, YX_MOW_INT64, 0, 8},
-    {"maxprot", 8, YX_MOW_UINT32, 0, 8},
-    {"initprot", 9, YX_MOW_UINT32, 0, 8},
-    {"nsects", 10, YX_MOW_UINT32, 0, 8},
-    {"flags", 11, YX_MOW_UINT32, 0, 8},
-    {"sections", 12, YX_MOW_MESSAGE, 39, 1},
+    {"segname", 3, YX_MOW_STRING, 0, 12}, {"vmaddr", 4, YX_MOW_INT64, 0, 8},       {"vmsize", 5, YX_MOW_INT64, 0, 8},    {"fileoff", 6, YX_MOW_INT64, 0, 8},
+    {"filesize", 7, YX_MOW_INT64, 0, 8},  {"maxprot", 8, YX_MOW_UINT32, 0, 8},     {"initprot", 9, YX_MOW_UINT32, 0, 8}, {"nsects", 10, YX_MOW_UINT32, 0, 8},
+    {"flags", 11, YX_MOW_UINT32, 0, 8},   {"sections", 12, YX_MOW_MESSAGE, 39, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_macho_Symtab[] = {
-    {"symoff", 1, YX_MOW_UINT32, 0, 8},
-    {"nsyms", 2, YX_MOW_UINT32, 0, 8},
-    {"stroff", 3, YX_MOW_UINT32, 0, 8},
-    {"strsize", 4, YX_MOW_UINT32, 0, 8},
-    {"entries", 5, YX_MOW_STRING, 0, 5},
-    {"nlists", 6, YX_MOW_MESSAGE, 38, 1},
+    {"symoff", 1, YX_MOW_UINT32, 0, 8},  {"nsyms", 2, YX_MOW_UINT32, 0, 8},   {"stroff", 3, YX_MOW_UINT32, 0, 8},
+    {"strsize", 4, YX_MOW_UINT32, 0, 8}, {"entries", 5, YX_MOW_STRING, 0, 5}, {"nlists", 6, YX_MOW_MESSAGE, 38, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_olecf_Olecf[] = {
     {"is_olecf", 1, YX_MOW_BOOL, 0, 24},
@@ -465,33 +389,21 @@ static const yx_mo_wire_field yx_mo_fields_olecf_Stream[] = {
     {"size", 3, YX_MOW_INT64, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_Certificate[] = {
-    {"issuer", 1, YX_MOW_STRING, 0, 8},
-    {"subject", 2, YX_MOW_STRING, 0, 8},
-    {"thumbprint", 3, YX_MOW_STRING, 0, 8},
-    {"version", 4, YX_MOW_INT64, 0, 8},
-    {"algorithm", 5, YX_MOW_STRING, 0, 8},
-    {"algorithm_oid", 6, YX_MOW_STRING, 0, 8},
-    {"serial", 7, YX_MOW_STRING, 0, 8},
-    {"not_before", 8, YX_MOW_INT64, 0, 8},
-    {"not_after", 9, YX_MOW_INT64, 0, 8},
+    {"issuer", 1, YX_MOW_STRING, 0, 8}, {"subject", 2, YX_MOW_STRING, 0, 8},   {"thumbprint", 3, YX_MOW_STRING, 0, 8},
+    {"version", 4, YX_MOW_INT64, 0, 8}, {"algorithm", 5, YX_MOW_STRING, 0, 8}, {"algorithm_oid", 6, YX_MOW_STRING, 0, 8},
+    {"serial", 7, YX_MOW_STRING, 0, 8}, {"not_before", 8, YX_MOW_INT64, 0, 8}, {"not_after", 9, YX_MOW_INT64, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_CounterSignature[] = {
-    {"verified", 1, YX_MOW_BOOL, 0, 8},
-    {"sign_time", 2, YX_MOW_INT64, 0, 8},
-    {"digest", 12, YX_MOW_STRING, 0, 8},
-    {"digest_alg", 3, YX_MOW_STRING, 0, 8},
-    {"chain", 4, YX_MOW_MESSAGE, 44, 1},
+    {"verified", 1, YX_MOW_BOOL, 0, 8},     {"sign_time", 2, YX_MOW_INT64, 0, 8}, {"digest", 12, YX_MOW_STRING, 0, 8},
+    {"digest_alg", 3, YX_MOW_STRING, 0, 8}, {"chain", 4, YX_MOW_MESSAGE, 44, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_DirEntry[] = {
     {"virtual_address", 1, YX_MOW_UINT32, 0, 24},
     {"size", 2, YX_MOW_UINT32, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_Export[] = {
-    {"name", 1, YX_MOW_STRING, 0, 8},
-    {"ordinal", 2, YX_MOW_UINT32, 0, 24},
-    {"rva", 3, YX_MOW_UINT32, 0, 24},
-    {"offset", 4, YX_MOW_UINT32, 0, 8},
-    {"forward_name", 5, YX_MOW_STRING, 0, 8},
+    {"name", 1, YX_MOW_STRING, 0, 8},   {"ordinal", 2, YX_MOW_UINT32, 0, 24},     {"rva", 3, YX_MOW_UINT32, 0, 24},
+    {"offset", 4, YX_MOW_UINT32, 0, 8}, {"forward_name", 5, YX_MOW_STRING, 0, 8},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_Function[] = {
     {"name", 1, YX_MOW_STRING, 0, 8},
@@ -578,23 +490,13 @@ static const yx_mo_wire_field yx_mo_fields_pe_PE_VersionInfoEntry[] = {
     {"value", 2, YX_MOW_STRING, 0, 0},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_Resource[] = {
-    {"length", 1, YX_MOW_UINT32, 0, 24},
-    {"rva", 2, YX_MOW_UINT32, 0, 24},
-    {"offset", 3, YX_MOW_UINT32, 0, 8},
-    {"type", 4, YX_MOW_INT32, 0, 8},
-    {"id", 5, YX_MOW_UINT32, 0, 8},
-    {"language", 6, YX_MOW_UINT32, 0, 8},
-    {"type_string", 7, YX_MOW_STRING, 0, 12},
-    {"name_string", 8, YX_MOW_STRING, 0, 12},
-    {"language_string", 9, YX_MOW_STRING, 0, 12},
+    {"length", 1, YX_MOW_UINT32, 0, 24},      {"rva", 2, YX_MOW_UINT32, 0, 24},         {"offset", 3, YX_MOW_UINT32, 0, 8},
+    {"type", 4, YX_MOW_INT32, 0, 8},          {"id", 5, YX_MOW_UINT32, 0, 8},           {"language", 6, YX_MOW_UINT32, 0, 8},
+    {"type_string", 7, YX_MOW_STRING, 0, 12}, {"name_string", 8, YX_MOW_STRING, 0, 12}, {"language_string", 9, YX_MOW_STRING, 0, 12},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_RichSignature[] = {
-    {"offset", 1, YX_MOW_UINT32, 0, 24},
-    {"length", 2, YX_MOW_UINT32, 0, 24},
-    {"key", 3, YX_MOW_UINT32, 0, 24},
-    {"raw_data", 4, YX_MOW_STRING, 0, 28},
-    {"clear_data", 5, YX_MOW_STRING, 0, 28},
-    {"tools", 6, YX_MOW_MESSAGE, 56, 1},
+    {"offset", 1, YX_MOW_UINT32, 0, 24},   {"length", 2, YX_MOW_UINT32, 0, 24},     {"key", 3, YX_MOW_UINT32, 0, 24},
+    {"raw_data", 4, YX_MOW_STRING, 0, 28}, {"clear_data", 5, YX_MOW_STRING, 0, 28}, {"tools", 6, YX_MOW_MESSAGE, 56, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_RichTool[] = {
     {"toolid", 1, YX_MOW_UINT32, 0, 24},
@@ -635,23 +537,16 @@ static const yx_mo_wire_field yx_mo_fields_pe_Signature[] = {
     {"countersignatures", 18, YX_MOW_MESSAGE, 45, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_SignerInfo[] = {
-    {"program_name", 1, YX_MOW_STRING, 0, 8},
-    {"more_info", 2, YX_MOW_STRING, 0, 8},
-    {"digest", 3, YX_MOW_STRING, 0, 8},
-    {"digest_alg", 4, YX_MOW_STRING, 0, 8},
-    {"chain", 5, YX_MOW_MESSAGE, 44, 1},
+    {"program_name", 1, YX_MOW_STRING, 0, 8}, {"more_info", 2, YX_MOW_STRING, 0, 8}, {"digest", 3, YX_MOW_STRING, 0, 8},
+    {"digest_alg", 4, YX_MOW_STRING, 0, 8},   {"chain", 5, YX_MOW_MESSAGE, 44, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_pe_Version[] = {
     {"major", 1, YX_MOW_UINT32, 0, 24},
     {"minor", 2, YX_MOW_UINT32, 0, 24},
 };
 static const yx_mo_wire_field yx_mo_fields_test_proto2_NestedProto2[] = {
-    {"nested_int32_zero", 1, YX_MOW_INT32, 0, 8},
-    {"nested_int64_zero", 2, YX_MOW_INT64, 0, 8},
-    {"nested_int32_one", 3, YX_MOW_INT32, 0, 8},
-    {"nested_int64_one", 4, YX_MOW_INT64, 0, 8},
-    {"nested_bool", 5, YX_MOW_BOOL, 0, 8},
-    {"nested_string", 6, YX_MOW_STRING, 0, 8},
+    {"nested_int32_zero", 1, YX_MOW_INT32, 0, 8},  {"nested_int64_zero", 2, YX_MOW_INT64, 0, 8}, {"nested_int32_one", 3, YX_MOW_INT32, 0, 8},
+    {"nested_int64_one", 4, YX_MOW_INT64, 0, 8},   {"nested_bool", 5, YX_MOW_BOOL, 0, 8},        {"nested_string", 6, YX_MOW_STRING, 0, 8},
     {"nested_array_int64", 7, YX_MOW_INT64, 0, 1},
 };
 static const yx_mo_wire_field yx_mo_fields_test_proto2_TestProto2[] = {
@@ -764,45 +659,19 @@ static const yx_mo_wire_field yx_mo_fields_test_proto2_TestProto2_MapStringStruc
     {"value", 2, YX_MOW_MESSAGE, 61, 0},
 };
 static const yx_mo_wire_field yx_mo_fields_test_proto3_TestProto3[] = {
-    {"int32_zero", 1, YX_MOW_INT32, 0, 0},
-    {"int64_zero", 2, YX_MOW_INT64, 0, 0},
-    {"sint32_zero", 3, YX_MOW_SINT32, 0, 0},
-    {"sint64_zero", 4, YX_MOW_SINT64, 0, 0},
-    {"uint32_zero", 5, YX_MOW_UINT32, 0, 0},
-    {"uint64_zero", 6, YX_MOW_UINT64, 0, 0},
-    {"fixed32_zero", 7, YX_MOW_FIXED32, 0, 0},
-    {"fixed64_zero", 8, YX_MOW_FIXED64, 0, 0},
-    {"sfixed32_zero", 9, YX_MOW_SFIXED32, 0, 0},
-    {"sfixed64_zero", 10, YX_MOW_SFIXED64, 0, 0},
-    {"float_zero", 11, YX_MOW_FLOAT, 0, 0},
-    {"int32_one", 21, YX_MOW_INT32, 0, 0},
-    {"int64_one", 22, YX_MOW_INT64, 0, 0},
-    {"sint32_one", 23, YX_MOW_SINT32, 0, 0},
-    {"sint64_one", 24, YX_MOW_SINT64, 0, 0},
-    {"uint32_one", 25, YX_MOW_UINT32, 0, 0},
-    {"uint64_one", 26, YX_MOW_UINT64, 0, 0},
-    {"fixed32_one", 27, YX_MOW_FIXED32, 0, 0},
-    {"fixed64_one", 28, YX_MOW_FIXED64, 0, 0},
-    {"sfixed32_one", 29, YX_MOW_SFIXED32, 0, 0},
-    {"sfixed64_one", 30, YX_MOW_SFIXED64, 0, 0},
-    {"float_one", 31, YX_MOW_FLOAT, 0, 0},
-    {"int32_undef", 41, YX_MOW_INT32, 0, 0},
-    {"int64_undef", 42, YX_MOW_INT64, 0, 0},
-    {"sint32_undef", 43, YX_MOW_SINT32, 0, 0},
-    {"sint64_undef", 44, YX_MOW_SINT64, 0, 0},
-    {"uint32_undef", 45, YX_MOW_UINT32, 0, 0},
-    {"uint64_undef", 46, YX_MOW_UINT64, 0, 0},
-    {"fixed32_undef", 47, YX_MOW_FIXED32, 0, 0},
-    {"fixed64_undef", 48, YX_MOW_FIXED64, 0, 0},
-    {"sfixed32_undef", 49, YX_MOW_SFIXED32, 0, 0},
-    {"sfixed64_undef", 50, YX_MOW_SFIXED64, 0, 0},
-    {"float_undef", 51, YX_MOW_FLOAT, 0, 0},
-    {"bool_undef", 52, YX_MOW_BOOL, 0, 0},
-    {"string_foo", 61, YX_MOW_STRING, 0, 0},
-    {"string_bar", 62, YX_MOW_STRING, 0, 0},
-    {"string_undef", 63, YX_MOW_STRING, 0, 0},
-    {"bytes_foo", 64, YX_MOW_STRING, 0, 4},
-    {"bytes_bar", 65, YX_MOW_STRING, 0, 4},
+    {"int32_zero", 1, YX_MOW_INT32, 0, 0},         {"int64_zero", 2, YX_MOW_INT64, 0, 0},         {"sint32_zero", 3, YX_MOW_SINT32, 0, 0},
+    {"sint64_zero", 4, YX_MOW_SINT64, 0, 0},       {"uint32_zero", 5, YX_MOW_UINT32, 0, 0},       {"uint64_zero", 6, YX_MOW_UINT64, 0, 0},
+    {"fixed32_zero", 7, YX_MOW_FIXED32, 0, 0},     {"fixed64_zero", 8, YX_MOW_FIXED64, 0, 0},     {"sfixed32_zero", 9, YX_MOW_SFIXED32, 0, 0},
+    {"sfixed64_zero", 10, YX_MOW_SFIXED64, 0, 0},  {"float_zero", 11, YX_MOW_FLOAT, 0, 0},        {"int32_one", 21, YX_MOW_INT32, 0, 0},
+    {"int64_one", 22, YX_MOW_INT64, 0, 0},         {"sint32_one", 23, YX_MOW_SINT32, 0, 0},       {"sint64_one", 24, YX_MOW_SINT64, 0, 0},
+    {"uint32_one", 25, YX_MOW_UINT32, 0, 0},       {"uint64_one", 26, YX_MOW_UINT64, 0, 0},       {"fixed32_one", 27, YX_MOW_FIXED32, 0, 0},
+    {"fixed64_one", 28, YX_MOW_FIXED64, 0, 0},     {"sfixed32_one", 29, YX_MOW_SFIXED32, 0, 0},   {"sfixed64_one", 30, YX_MOW_SFIXED64, 0, 0},
+    {"float_one", 31, YX_MOW_FLOAT, 0, 0},         {"int32_undef", 41, YX_MOW_INT32, 0, 0},       {"int64_undef", 42, YX_MOW_INT64, 0, 0},
+    {"sint32_undef", 43, YX_MOW_SINT32, 0, 0},     {"sint64_undef", 44, YX_MOW_SINT64, 0, 0},     {"uint32_undef", 45, YX_MOW_UINT32, 0, 0},
+    {"uint64_undef", 46, YX_MOW_UINT64, 0, 0},     {"fixed32_undef", 47, YX_MOW_FIXED32, 0, 0},   {"fixed64_undef", 48, YX_MOW_FIXED64, 0, 0},
+    {"sfixed32_undef", 49, YX_MOW_SFIXED32, 0, 0}, {"sfixed64_undef", 50, YX_MOW_SFIXED64, 0, 0}, {"float_undef", 51, YX_MOW_FLOAT, 0, 0},
+    {"bool_undef", 52, YX_MOW_BOOL, 0, 0},         {"string_foo", 61, YX_MOW_STRING, 0, 0},       {"string_bar", 62, YX_MOW_STRING, 0, 0},
+    {"string_undef", 63, YX_MOW_STRING, 0, 0},     {"bytes_foo", 64, YX_MOW_STRING, 0, 4},        {"bytes_bar", 65, YX_MOW_STRING, 0, 4},
     {"bytes_undef", 66, YX_MOW_STRING, 0, 4},
 };
 static const yx_mo_wire_field yx_mo_fields_vba_Vba[] = {

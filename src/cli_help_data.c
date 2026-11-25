@@ -23,8 +23,7 @@
 #include "cli_help_data.h"
 #include "cli_branding.h"
 
-const char yx_cli_help_top_short[] =
-    YX_CLI_BANNER
+const char yx_cli_help_top_short[] = YX_CLI_BANNER
     "\n"
     "Usage:\n"
     "  yr [OPTIONS] <COMMAND>\n"
@@ -44,8 +43,7 @@ const char yx_cli_help_top_short[] =
     "  -h, --help                  Print help (see more with '--help')\n"
     "  -V, --version               Print version\n";
 
-const char yx_cli_help_top_long[] =
-    YX_CLI_BANNER
+const char yx_cli_help_top_long[] = YX_CLI_BANNER
     "\n"
     "Usage:\n"
     "  yr [OPTIONS] <COMMAND>\n"
@@ -423,7 +421,6 @@ const char yx_cli_help_dump_long[] =
     "\n"
     "  -h, --help\n"
     "          Print help (see a summary with '-h')\n";
-
 
 const char yx_cli_help_compile_short[] =
     "Compile rules to binary form\n"

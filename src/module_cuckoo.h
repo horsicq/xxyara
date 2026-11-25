@@ -40,22 +40,16 @@
  * yields zero for every function. Invalid JSON or wrong field types fail. */
 typedef struct yx_cuckoo_report yx_cuckoo_report;
 
-typedef bool (*yx_cuckoo_match_fn)(const uint8_t *bytes, size_t length,
-                                    void *opaque);
+typedef bool (*yx_cuckoo_match_fn)(const uint8_t *bytes, size_t length, void *opaque);
 
-bool yx_cuckoo_report_parse(const uint8_t *json, size_t size,
-                             yx_cuckoo_report **out);
-bool yx_cuckoo_report_parse_ex(const uint8_t *json, size_t size,
-    yx_cuckoo_report **out, char *error, size_t error_capacity);
+bool yx_cuckoo_report_parse(const uint8_t *json, size_t size, yx_cuckoo_report **out);
+bool yx_cuckoo_report_parse_ex(const uint8_t *json, size_t size, yx_cuckoo_report **out, char *error, size_t error_capacity);
 void yx_cuckoo_report_free(yx_cuckoo_report *report);
 
 /* `function` is one of the exported names after `cuckoo.`. TCP and UDP
  * require a port argument; other functions require has_port=false. The
  * regex callback receives decoded UTF-8 bytes. Counts follow YARA-X's
  * integer-valued exports, including zero when a field is absent. */
-bool yx_cuckoo_query(const yx_cuckoo_report *report,
-                      const char *function, yx_cuckoo_match_fn matches,
-                      void *opaque, bool has_port, int64_t port,
-                      uint64_t *count);
+bool yx_cuckoo_query(const yx_cuckoo_report *report, const char *function, yx_cuckoo_match_fn matches, void *opaque, bool has_port, int64_t port, uint64_t *count);
 
 #endif

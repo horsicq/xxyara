@@ -94,7 +94,9 @@ static bool yx_chain_frames_reserve(yx_chain_archive *a, size_t count)
     yx_chain_frame *frames = realloc(a->frames, count * sizeof(*frames));
     if (!frames) return false;
     memset(frames + a->frame_capacity, 0, (count - a->frame_capacity) * sizeof(*frames));
-    a->frames = frames; a->frame_capacity = count; return true;
+    a->frames = frames;
+    a->frame_capacity = count;
+    return true;
 }
 static bool yx_chain_pool_reserve(yx_chain_archive *a, size_t count)
 {
@@ -105,18 +107,25 @@ static bool yx_chain_pool_reserve(yx_chain_archive *a, size_t count)
     a->pool = pool;
     size_t *lengths = realloc(a->pool_lengths, count * sizeof(*lengths));
     if (!lengths) return false;
-    a->pool_lengths = lengths; a->pool_capacity = count; return true;
+    a->pool_lengths = lengths;
+    a->pool_capacity = count;
+    return true;
 }
 static void yx_chain_storage_destroy(yx_chain_archive *a)
 {
-    free(a->frames); free(a->pool); free(a->pool_lengths); free(a->atoms);
-    a->frames = NULL; a->pool = NULL; a->pool_lengths = NULL; a->atoms = NULL;
+    free(a->frames);
+    free(a->pool);
+    free(a->pool_lengths);
+    free(a->atoms);
+    a->frames = NULL;
+    a->pool = NULL;
+    a->pool_lengths = NULL;
+    a->atoms = NULL;
     a->frame_capacity = a->pool_capacity = 0;
 }
 static void yx_chain_destroy(yx_chain_archive *a)
 {
-    for (size_t i = 0; i < 3; ++i)
-        free(a->names[i]);
+    for (size_t i = 0; i < 3; ++i) free(a->names[i]);
     yx_chain_storage_destroy(a);
     memset(a, 0, sizeof(*a));
 }
@@ -126,14 +135,10 @@ static bool yx_chain_unbounded(const yx_chain_frame *frame)
 }
 static bool yx_chain_put_frame(yx_writer *w, const yx_chain_frame *f)
 {
-    if (!yx_put_uint(w, 0) || !yx_put_uint(w, f->variant))
-        return false;
-    if ((f->variant == 0 || f->variant == 2 || f->variant == 3) &&
-        !yx_put_uint(w, f->literal_index))
-        return false;
+    if (!yx_put_uint(w, 0) || !yx_put_uint(w, f->variant)) return false;
+    if ((f->variant == 0 || f->variant == 2 || f->variant == 3) && !yx_put_uint(w, f->literal_index)) return false;
     if (f->variant == 3 || f->variant == 6) {
-        if (!yx_put_uint(w, f->previous) || !yx_put_uint(w, yx_chain_unbounded(f) ? 1 : 0) ||
-            !yx_put_uint(w, f->minimum) ||
+        if (!yx_put_uint(w, f->previous) || !yx_put_uint(w, yx_chain_unbounded(f) ? 1 : 0) || !yx_put_uint(w, f->minimum) ||
             (!yx_chain_unbounded(f) && !yx_put_uint(w, f->maximum)))
             return false;
     }
@@ -148,56 +153,37 @@ static yx_ser_result yx_chain_envelope(const yx_chain_archive *a, uint8_t **data
     size_t ac_length = 0;
     const uint8_t **bytes = NULL;
     size_t *widths = NULL;
-    if (!a->frame_count || !a->atom_count ||
-        a->atom_count > YX_CHAIN_MAX_ATOMS)
-        return YX_SER_UNSUPPORTED;
+    if (!a->frame_count || !a->atom_count || a->atom_count > YX_CHAIN_MAX_ATOMS) return YX_SER_UNSUPPORTED;
     bytes = malloc(a->atom_count * sizeof(*bytes));
     widths = malloc(a->atom_count * sizeof(*widths));
-    if (!bytes || !widths)
-        goto memory;
+    if (!bytes || !widths) goto memory;
     for (size_t i = 0; i < a->atom_count; ++i) {
         bytes[i] = a->atoms[i].atom.bytes;
         widths[i] = a->atoms[i].atom.length;
     }
-    if (!yx_ser_build_atom_ac(bytes, widths, a->atom_count, &ac, &ac_length))
-        goto memory;
-    if (!yx_put_bytes(&w, magic, sizeof(magic)) || !yx_put_uint(&w, 3))
-        goto memory;
+    if (!yx_ser_build_atom_ac(bytes, widths, a->atom_count, &ac, &ac_length)) goto memory;
+    if (!yx_put_bytes(&w, magic, sizeof(magic)) || !yx_put_uint(&w, 3)) goto memory;
     for (size_t i = 0; i < 3; ++i)
-        if (!yx_put_string(&w, a->names[i]))
-            goto memory;
-    if (!yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) || !yx_put_uint(&w, a->pool_count))
-        goto memory;
+        if (!yx_put_string(&w, a->names[i])) goto memory;
+    if (!yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) || !yx_put_uint(&w, a->pool_count)) goto memory;
     for (size_t i = 0; i < a->pool_count; ++i)
-        if (!yx_put_uint(&w, a->pool_lengths[i]) ||
-            !yx_put_bytes(&w, a->pool[i], a->pool_lengths[i]))
-            goto memory;
-    static const uint8_t before_kind[] = {0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 1},
-                         after_kind[] = {0, 0, 0, 0, 1};
-    if (!yx_put_uint(&w, a->wasm_length) || !yx_put_bytes(&w, a->wasm, a->wasm_length) ||
-        !yx_put_bytes(&w, before_kind, sizeof(before_kind)) || !yx_put_uint(&w, a->kind) ||
-        !yx_put_bytes(&w, after_kind, sizeof(after_kind)) || !yx_put_uint(&w, a->frame_count))
+        if (!yx_put_uint(&w, a->pool_lengths[i]) || !yx_put_bytes(&w, a->pool[i], a->pool_lengths[i])) goto memory;
+    static const uint8_t before_kind[] = {0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 1}, after_kind[] = {0, 0, 0, 0, 1};
+    if (!yx_put_uint(&w, a->wasm_length) || !yx_put_bytes(&w, a->wasm, a->wasm_length) || !yx_put_bytes(&w, before_kind, sizeof(before_kind)) ||
+        !yx_put_uint(&w, a->kind) || !yx_put_bytes(&w, after_kind, sizeof(after_kind)) || !yx_put_uint(&w, a->frame_count))
         goto memory;
     for (size_t i = 0; i < a->frame_count; ++i)
-        if (!yx_chain_put_frame(&w, &a->frames[i]))
-            goto memory;
-    if (!yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) ||
-        !yx_put_uint(&w, a->atom_count))
-        goto memory;
+        if (!yx_chain_put_frame(&w, &a->frames[i])) goto memory;
+    if (!yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) || !yx_put_uint(&w, 0) || !yx_put_uint(&w, a->atom_count)) goto memory;
     for (size_t i = 0; i < a->atom_count; ++i) {
         const yx_archive_regexp_atom *b = &a->atoms[i].atom;
-        if (!yx_put_uint(&w, a->atoms[i].frame) || !yx_put_uint(&w, b->length) ||
-            !yx_put_bytes(&w, b->bytes, b->length) || !yx_put_u8(&w, b->exact) ||
-            !yx_put_uint(&w, b->backtrack) || !yx_put_u8(&w, b->has_forward) ||
-            (b->has_forward && !yx_put_uint(&w, b->forward + 1)) ||
-            !yx_put_u8(&w, b->has_backward) ||
+        if (!yx_put_uint(&w, a->atoms[i].frame) || !yx_put_uint(&w, b->length) || !yx_put_bytes(&w, b->bytes, b->length) || !yx_put_u8(&w, b->exact) ||
+            !yx_put_uint(&w, b->backtrack) || !yx_put_u8(&w, b->has_forward) || (b->has_forward && !yx_put_uint(&w, b->forward + 1)) || !yx_put_u8(&w, b->has_backward) ||
             (b->has_backward && !yx_put_uint(&w, b->backward + 1)))
             goto memory;
     }
-    if (!yx_put_uint(&w, a->code_length) || !yx_put_bytes(&w, a->code, a->code_length) ||
-        !yx_put_uint(&w, sizeof(globals)) || !yx_put_bytes(&w, globals, sizeof(globals)) ||
-        !yx_put_uint(&w, ac_length) || !yx_put_bytes(&w, ac, ac_length) ||
-        !yx_put_bytes(&w, suffix, sizeof(suffix)))
+    if (!yx_put_uint(&w, a->code_length) || !yx_put_bytes(&w, a->code, a->code_length) || !yx_put_uint(&w, sizeof(globals)) ||
+        !yx_put_bytes(&w, globals, sizeof(globals)) || !yx_put_uint(&w, ac_length) || !yx_put_bytes(&w, ac, ac_length) || !yx_put_bytes(&w, suffix, sizeof(suffix)))
         goto memory;
     free(ac);
     free(bytes);
@@ -214,17 +200,14 @@ memory:
 }
 static uint64_t yx_chain_minimum(const yx_tr_node *n)
 {
-    if (n->kind == YX_TR_LITERAL)
-        return n->length;
-    if (n->kind == YX_TR_CLASS)
-        return 1;
+    if (n->kind == YX_TR_LITERAL) return n->length;
+    if (n->kind == YX_TR_CLASS) return 1;
     /* ClassUnicode::minimum_len: the UTF-8 length of the first scalar. */
     if (n->kind == YX_TR_SCALAR_CLASS) {
         uint32_t first = n->length ? ((const yx_re_range *)n->bytes)[0].first : 0;
         return first < 0x80 ? 1 : first < 0x800 ? 2 : first < 0x10000 ? 3 : 4;
     }
-    if (n->kind == YX_TR_CAPTURE)
-        return yx_chain_minimum(n->children[0]);
+    if (n->kind == YX_TR_CAPTURE) return yx_chain_minimum(n->children[0]);
     if (n->kind == YX_TR_REPEAT) {
         uint64_t v = yx_chain_minimum(n->children[0]);
         return v > UINT32_MAX / (n->minimum ? n->minimum : 1) ? UINT32_MAX : v * n->minimum;
@@ -233,57 +216,43 @@ static uint64_t yx_chain_minimum(const yx_tr_node *n)
     for (size_t i = 0; i < n->count; ++i) {
         uint64_t c = yx_chain_minimum(n->children[i]);
         if (n->kind == YX_TR_ALT) {
-            if (c < v)
-                v = c;
+            if (c < v) v = c;
         } else {
             v += c;
-            if (v > UINT32_MAX)
-                return UINT32_MAX;
+            if (v > UINT32_MAX) return UINT32_MAX;
         }
     }
     return v;
 }
 static bool yx_chain_literal(const yx_tr_node *n, yx_writer *w)
 {
-    if (n->kind == YX_TR_LITERAL)
-        return yx_put_bytes(w, n->bytes, n->length);
-    if (n->kind == YX_TR_EMPTY)
-        return true;
-    if (n->kind != YX_TR_CONCAT)
-        return false;
+    if (n->kind == YX_TR_LITERAL) return yx_put_bytes(w, n->bytes, n->length);
+    if (n->kind == YX_TR_EMPTY) return true;
+    if (n->kind != YX_TR_CONCAT) return false;
     for (size_t i = 0; i < n->count; ++i)
-        if (!yx_chain_literal(n->children[i], w))
-            return false;
+        if (!yx_chain_literal(n->children[i], w)) return false;
     return true;
 }
 static bool yx_chain_text(const yx_tr_node *n, yx_writer *w, size_t depth)
 {
-    if (depth > 250)
-        return false;
-    if (n->kind == YX_TR_EMPTY)
-        return true;
+    if (depth > 250) return false;
+    if (n->kind == YX_TR_EMPTY) return true;
     if (n->kind == YX_TR_LITERAL) {
         for (size_t i = 0; i < n->length; ++i)
-            if (!yx_tr_hex_text(w, n->bytes[i]))
-                return false;
+            if (!yx_tr_hex_text(w, n->bytes[i])) return false;
         return true;
     }
     if (n->kind == YX_TR_CLASS) {
         bool all = true;
         for (size_t i = 0; i < 32; ++i)
-            if (n->bitmap[i] != 255)
-                all = false;
-        if (all)
-            return yx_tr_text(w, ".");
-        if (!yx_tr_text(w, n->unicode_class ? "(" : "["))
-            return false;
+            if (n->bitmap[i] != 255) all = false;
+        if (all) return yx_tr_text(w, ".");
+        if (!yx_tr_text(w, n->unicode_class ? "(" : "[")) return false;
         bool first = true;
         for (unsigned b = 0; b < 256; ++b)
             if (yx_tr_has(n->bitmap, b)) {
-                if (n->unicode_class && !first && !yx_tr_text(w, "|"))
-                    return false;
-                if (!yx_tr_hex_text(w, (uint8_t)b))
-                    return false;
+                if (n->unicode_class && !first && !yx_tr_text(w, "|")) return false;
+                if (!yx_tr_hex_text(w, (uint8_t)b)) return false;
                 first = false;
             }
         return !first && yx_tr_text(w, n->unicode_class ? ")" : "]");
@@ -314,11 +283,13 @@ static bool yx_chain_text(const yx_tr_node *n, yx_writer *w, size_t depth)
                 bool quirk = i == q;
                 uint32_t low = ranges[i].first, high = quirk ? ranges[++i].last : ranges[i].last;
                 if (quirk || low > from) {
-                    snprintf(range, sizeof(range), "\\x{%x}-\\x{%x}", (unsigned)from,
-                             quirk ? 0xd7ffu : (unsigned)(low - 1));
+                    snprintf(range, sizeof(range), "\\x{%x}-\\x{%x}", (unsigned)from, quirk ? 0xd7ffu : (unsigned)(low - 1));
                     if (!yx_tr_text(w, range)) return false;
                 }
-                if (!quirk && high == 0x10ffff) { more = false; break; }
+                if (!quirk && high == 0x10ffff) {
+                    more = false;
+                    break;
+                }
                 from = quirk ? 0xe000 : high + 1;
             }
             if (more) {
@@ -341,88 +312,69 @@ static bool yx_chain_text(const yx_tr_node *n, yx_writer *w, size_t depth)
     }
     if (n->kind == YX_TR_REPEAT) {
         char suffix[64];
-        if (yx_tr_unbounded(n))
-            snprintf(suffix, sizeof(suffix), "{%u,}%s", n->minimum, n->greedy ? "" : "?");
-        else
-            snprintf(suffix, sizeof(suffix), "{%u,%u}%s", n->minimum, n->maximum,
-                     n->greedy ? "" : "?");
+        if (yx_tr_unbounded(n)) snprintf(suffix, sizeof(suffix), "{%u,}%s", n->minimum, n->greedy ? "" : "?");
+        else snprintf(suffix, sizeof(suffix), "{%u,%u}%s", n->minimum, n->maximum, n->greedy ? "" : "?");
         uint64_t min, max;
-        if (yx_tr_any_span(n->children[0], &min, &max) && min == 1 && max == 1)
-            return yx_tr_text(w, ".") && yx_tr_text(w, suffix);
-        return yx_tr_text(w, "(") && yx_chain_text(n->children[0], w, depth + 1) &&
-               yx_tr_text(w, ")") && yx_tr_text(w, suffix);
+        if (yx_tr_any_span(n->children[0], &min, &max) && min == 1 && max == 1) return yx_tr_text(w, ".") && yx_tr_text(w, suffix);
+        return yx_tr_text(w, "(") && yx_chain_text(n->children[0], w, depth + 1) && yx_tr_text(w, ")") && yx_tr_text(w, suffix);
     }
     bool group = n->kind == YX_TR_ALT;
-    if (group && !yx_tr_text(w, "("))
-        return false;
+    if (group && !yx_tr_text(w, "(")) return false;
     for (size_t i = 0; i < n->count; ++i)
-        if ((n->kind == YX_TR_ALT && i && !yx_tr_text(w, "|")) ||
-            !yx_chain_text(n->children[i], w, depth + 1))
-            return false;
+        if ((n->kind == YX_TR_ALT && i && !yx_tr_text(w, "|")) || !yx_chain_text(n->children[i], w, depth + 1)) return false;
     return !group || yx_tr_text(w, ")");
 }
 static bool yx_chain_add_atom(yx_chain_archive *a, size_t frame, const yx_archive_regexp_atom *atom)
 {
-    if (a->atom_count == YX_CHAIN_MAX_ATOMS)
-        return false;
+    if (a->atom_count == YX_CHAIN_MAX_ATOMS) return false;
     a->atoms[a->atom_count++] = (yx_chain_atom){*atom, frame};
     return true;
 }
-static bool yx_literal_atom_variants(yx_chain_archive *a, size_t frame,
-                                     yx_archive_regexp_atom *atom, size_t at, bool nocase);
+static bool yx_literal_atom_variants(yx_chain_archive *a, size_t frame, yx_archive_regexp_atom *atom, size_t at, bool nocase);
 /* Append what a failed FastVM compile of a piece leaves in the code vector
  * (re/fast/compiler.rs, Compiler::compile): the verifiers it emitted before
  * rejecting an atom shorter than two bytes, or, for a piece made of jumps
  * only (no atoms at all), the forward code of every piece and MATCH. */
 static bool yx_chain_fast_residue(const yx_fast_program *fast, yx_writer *code)
 {
-    if (fast->code.used)
-        return yx_put_bytes(code, fast->code.data, fast->code.used);
+    if (fast->code.used) return yx_put_bytes(code, fast->code.data, fast->code.used);
     for (size_t i = 0; i < fast->count; ++i)
-        if (fast->pieces[i].alternative_count)
-            return true;
+        if (fast->pieces[i].alternative_count) return true;
     for (size_t i = 0; i < fast->count; ++i)
-        if (!yx_fast_emit_piece(code, &fast->pieces[i]))
-            return false;
+        if (!yx_fast_emit_piece(code, &fast->pieces[i])) return false;
     return yx_put_u8(code, 0);
 }
 /* MAX_ATOM_SEARCH_BYTES of atoms/quality.rs. */
-enum { YX_CHAIN_ATOM_SEARCH_BYTES = 32768 };
-static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_tr_node *n,
-                                   uint16_t common, yx_writer *code, yx_writer *literal)
+enum {
+    YX_CHAIN_ATOM_SEARCH_BYTES = 32768
+};
+static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_tr_node *n, uint16_t common, yx_writer *code, yx_writer *literal)
 {
     yx_chain_frame *f = &a->frames[index];
     f->flags = (common & ~24u) | (index + 1 == a->frame_count ? 4 : 0);
-    if ((common & 24u) && !index)
-        f->flags |= 8;
-    if ((common & 24u) && index + 1 == a->frame_count)
-        f->flags |= 16;
+    if ((common & 24u) && !index) f->flags |= 8;
+    if ((common & 24u) && index + 1 == a->frame_count) f->flags |= 16;
     if (yx_chain_literal(n, literal) && literal->used) {
         f->variant = index ? 3 : 2;
         f->literal = literal->data;
         f->literal_length = literal->used;
         size_t pool = 0;
-        while (pool < a->pool_count && (a->pool_lengths[pool] != literal->used ||
-                                        memcmp(a->pool[pool], literal->data, literal->used)))
-            ++pool;
+        while (pool < a->pool_count && (a->pool_lengths[pool] != literal->used || memcmp(a->pool[pool], literal->data, literal->used))) ++pool;
         if (pool == a->pool_count) {
             a->pool[pool] = literal->data;
             a->pool_lengths[pool] = literal->used;
             ++a->pool_count;
         }
         f->literal_index = pool;
-        size_t searched = literal->used < YX_CHAIN_ATOM_SEARCH_BYTES ?
-            literal->used : YX_CHAIN_ATOM_SEARCH_BYTES;
+        size_t searched = literal->used < YX_CHAIN_ATOM_SEARCH_BYTES ? literal->used : YX_CHAIN_ATOM_SEARCH_BYTES;
         uint8_t *mask = malloc(searched);
-        if (!mask)
-            return false;
+        if (!mask) return false;
         memset(mask, 255, searched);
         yx_fast_literal l = {literal->data, mask, searched, false};
         size_t offset, width;
         yx_fast_best_atom(&l, &offset, &width);
         free(mask);
-        if (offset > UINT16_MAX)
-            return false;
+        if (offset > UINT16_MAX) return false;
         yx_archive_regexp_atom atom = {0};
         atom.length = width;
         atom.backtrack = (uint16_t)offset;
@@ -452,20 +404,16 @@ static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_t
         f->flags |= 64;
         for (size_t i = 0; i < fast->atom_count; ++i) {
             yx_archive_regexp_atom atom = fast->atoms[i];
-            if (atom.has_forward)
-                atom.forward += code->used;
-            if (atom.has_backward)
-                atom.backward += code->used;
-            if (!yx_chain_add_atom(a, index, &atom))
-                goto done;
+            if (atom.has_forward) atom.forward += code->used;
+            if (atom.has_backward) atom.backward += code->used;
+            if (!yx_chain_add_atom(a, index, &atom)) goto done;
         }
         ok = yx_put_bytes(code, fast->code.data, fast->code.used);
     } else {
         /* Compiler::c_regexp runs the FastVM compiler on the shared code
          * vector first; when it fails with FastIncompatible after emitting
          * its verifier, Thompson's code follows those unreferenced bytes. */
-        if (parsed && !yx_chain_fast_residue(fast, code))
-            goto done;
+        if (parsed && !yx_chain_fast_residue(fast, code)) goto done;
         yx_tr_program program = {0};
         bool greedy = false;
         if (!yx_tr_compile((char *)source.data, true, false, &program, &greedy)) {
@@ -486,8 +434,7 @@ static bool yx_chain_compile_frame(yx_chain_archive *a, size_t index, const yx_t
                 goto done;
             }
         }
-        ok = yx_put_bytes(code, program.forward.data, program.forward.used) &&
-             yx_put_bytes(code, program.backward.data, program.backward.used);
+        ok = yx_put_bytes(code, program.forward.data, program.forward.used) && yx_put_bytes(code, program.backward.data, program.backward.used);
         yx_tr_program_free(&program);
     }
 done:
@@ -497,19 +444,15 @@ done:
 }
 /* Literal and literal-alternative regular expressions retain their original
  * bytes in the pool. Case combinations affect atoms, never the pooled text. */
-static bool yx_literal_atom_variants(yx_chain_archive *a, size_t frame,
-                                     yx_archive_regexp_atom *atom, size_t at, bool nocase)
+static bool yx_literal_atom_variants(yx_chain_archive *a, size_t frame, yx_archive_regexp_atom *atom, size_t at, bool nocase)
 {
-    if (at == atom->length)
-        return yx_chain_add_atom(a, frame, atom);
+    if (at == atom->length) return yx_chain_add_atom(a, frame, atom);
     uint8_t byte = atom->bytes[at];
     if (nocase && byte < 128 && isalpha(byte)) {
         atom->bytes[at] = (uint8_t)tolower(byte);
-        if (!yx_literal_atom_variants(a, frame, atom, at + 1, nocase))
-            return false;
+        if (!yx_literal_atom_variants(a, frame, atom, at + 1, nocase)) return false;
         atom->bytes[at] = (uint8_t)toupper(byte);
-        if (!yx_literal_atom_variants(a, frame, atom, at + 1, nocase))
-            return false;
+        if (!yx_literal_atom_variants(a, frame, atom, at + 1, nocase)) return false;
         atom->bytes[at] = byte;
         return true;
     }
@@ -521,18 +464,15 @@ static bool yx_literal_frame_atoms(yx_chain_archive *a, size_t index)
     /* best_range_in_bytes (atoms/quality.rs) searches the first 32 KiB only
      * (MAX_ATOM_SEARCH_BYTES): the atom's u16 backtrack. A literal itself
      * has any length (SubPattern::Literal, c_alternation_literal). */
-    size_t searched = f->literal_length < YX_CHAIN_ATOM_SEARCH_BYTES ?
-        f->literal_length : YX_CHAIN_ATOM_SEARCH_BYTES;
+    size_t searched = f->literal_length < YX_CHAIN_ATOM_SEARCH_BYTES ? f->literal_length : YX_CHAIN_ATOM_SEARCH_BYTES;
     uint8_t *mask = malloc(searched ? searched : 1);
-    if (!mask)
-        return false;
+    if (!mask) return false;
     memset(mask, 255, searched);
     yx_fast_literal literal = {(uint8_t *)f->literal, mask, searched, false};
     size_t offset, width;
     yx_fast_best_atom(&literal, &offset, &width);
     free(mask);
-    if (offset > UINT16_MAX || !width)
-        return false;
+    if (offset > UINT16_MAX || !width) return false;
     yx_archive_regexp_atom atom = {0};
     atom.length = width;
     atom.backtrack = (uint16_t)offset;
@@ -540,11 +480,9 @@ static bool yx_literal_frame_atoms(yx_chain_archive *a, size_t index)
     memcpy(atom.bytes, f->literal + offset, width);
     return yx_literal_atom_variants(a, index, &atom, 0, (f->flags & 2u) != 0);
 }
-static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba_order,
-                                                uint8_t **data, size_t *length)
+static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba_order, uint8_t **data, size_t *length)
 {
-    if (!yx_fast_rule(rules))
-        return YX_SER_UNSUPPORTED;
+    if (!yx_fast_rule(rules)) return YX_SER_UNSUPPORTED;
     const YRX_RULE *r = &rules->rules[0];
     const YRX_PATTERN *p = &r->patterns[0];
     yx_writer hex = {0}, *literals = NULL;
@@ -561,32 +499,30 @@ static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba
         free(hex.data);
         return YX_SER_UNSUPPORTED;
     }
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp,
-                           .length = strlen(regexp),
-                           .dotall = (p->modifiers & YX_MOD_DOTALL) != 0,
-                           .nocase = (p->modifiers & YX_MOD_NOCASE) != 0};
+    yx_tr_parser parser = {
+        .text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = (p->modifiers & YX_MOD_DOTALL) != 0, .nocase = (p->modifiers & YX_MOD_NOCASE) != 0};
     yx_tr_node *root = yx_tr_expression(&parser), *n = root;
     yx_chain_archive a = {0};
     yx_ser_result result = YX_SER_UNSUPPORTED;
-    if (parser.oom) { result = YX_SER_NO_MEMORY; goto done; }
-    if (!root || parser.failed || parser.at != parser.length)
+    if (parser.oom) {
+        result = YX_SER_NO_MEMORY;
         goto done;
-    if (n->kind == YX_TR_CAPTURE)
-        n = n->children[0];
+    }
+    if (!root || parser.failed || parser.at != parser.length) goto done;
+    if (n->kind == YX_TR_CAPTURE) n = n->children[0];
     /* A concatenation of alternatives is a verifier pattern, even when its
      * language is finite. The upstream literal classifier is equally narrow. */
-    if (n->kind != YX_TR_LITERAL && n->kind != YX_TR_ALT)
-        goto done;
+    if (n->kind != YX_TR_LITERAL && n->kind != YX_TR_ALT) goto done;
     size_t alternatives = n->kind == YX_TR_ALT ? n->count : 1;
-    bool wide = (p->modifiers & YX_MOD_WIDE) != 0,
-         raw = !wide || (p->modifiers & YX_MOD_ASCII) != 0;
+    bool wide = (p->modifiers & YX_MOD_WIDE) != 0, raw = !wide || (p->modifiers & YX_MOD_ASCII) != 0;
     size_t variants = raw && wide ? 2u : 1u;
     if (!alternatives || alternatives > SIZE_MAX / variants) goto done;
     literal_count = alternatives * variants;
     if (literal_count > SIZE_MAX / sizeof(*literals)) goto done;
     literals = calloc(literal_count, sizeof(*literals));
     if (!literals || !yx_chain_frames_reserve(&a, literal_count) || !yx_chain_pool_reserve(&a, literal_count)) {
-        result = YX_SER_NO_MEMORY; goto done;
+        result = YX_SER_NO_MEMORY;
+        goto done;
     }
     a.names[0] = "default";
     a.names[1] = p->identifier;
@@ -600,43 +536,38 @@ static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba
     }
     for (size_t i = 0; i < alternatives; ++i) {
         const yx_tr_node *leaf = n->kind == YX_TR_ALT ? n->children[i] : n;
-        if (leaf->kind != YX_TR_LITERAL || !leaf->length || leaf->length > SIZE_MAX / 2)
-            goto done;
+        if (leaf->kind != YX_TR_LITERAL || !leaf->length || leaf->length > SIZE_MAX / 2) goto done;
         for (unsigned variant = raw ? 0 : 1; variant < (wide ? 2u : 1u); ++variant) {
             size_t index = a.frame_count++;
             yx_writer *literal = &literals[index];
             for (size_t j = 0; j < leaf->length; ++j)
-                if (!yx_put_u8(literal, leaf->bytes[j]) || (variant && !yx_put_u8(literal, 0)))
-                    goto done;
+                if (!yx_put_u8(literal, leaf->bytes[j]) || (variant && !yx_put_u8(literal, 0))) goto done;
             yx_chain_frame *f = &a.frames[index];
             f->literal = literal->data;
             f->literal_length = literal->used;
-            f->flags = (variant ? 1 : 0) | ((p->modifiers & YX_MOD_NOCASE) ? 2 : 0) |
-                       ((p->modifiers & YX_MOD_FULLWORD) ? 24 : 0);
+            f->flags = (variant ? 1 : 0) | ((p->modifiers & YX_MOD_NOCASE) ? 2 : 0) | ((p->modifiers & YX_MOD_FULLWORD) ? 24 : 0);
             size_t pool = 0;
-            while (pool < a.pool_count && (a.pool_lengths[pool] != literal->used ||
-                                           memcmp(a.pool[pool], literal->data, literal->used)))
-                ++pool;
+            while (pool < a.pool_count && (a.pool_lengths[pool] != literal->used || memcmp(a.pool[pool], literal->data, literal->used))) ++pool;
             if (pool == a.pool_count) {
                 a.pool[pool] = literal->data;
                 a.pool_lengths[pool] = literal->used;
                 ++a.pool_count;
             }
             f->literal_index = pool;
-            if (!yx_literal_frame_atoms(&a, index))
-                goto done;
+            if (!yx_literal_frame_atoms(&a, index)) goto done;
         }
     }
     uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
     memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
-    if (vba_order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true))
-        goto done;
+    if (vba_order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) goto done;
     a.wasm = wasm;
     a.wasm_length = sizeof(wasm);
     result = yx_chain_envelope(&a, data, length);
 done:
-    if (literals) for (size_t i = 0; i < literal_count; ++i) free(literals[i].data);
-    free(literals); yx_chain_storage_destroy(&a);
+    if (literals)
+        for (size_t i = 0; i < literal_count; ++i) free(literals[i].data);
+    free(literals);
+    yx_chain_storage_destroy(&a);
     free(hex.data);
     yx_tr_destroy(root);
     return result;
@@ -650,14 +581,17 @@ static bool yx_chain_expand_widths(yx_chain_archive *a, bool ascii_wide, yx_writ
     yx_chain_archive *out = calloc(1, sizeof(*out));
     if (!out) return false;
     if (!yx_chain_frames_reserve(out, frame_count) || !yx_chain_pool_reserve(out, frame_count)) {
-        yx_chain_storage_destroy(out); free(out); return false;
+        yx_chain_storage_destroy(out);
+        free(out);
+        return false;
     }
     out->kind = a->kind;
-    for (size_t i = 0; i < 3; ++i)
-        out->names[i] = a->names[i];
+    for (size_t i = 0; i < 3; ++i) out->names[i] = a->names[i];
     out->atoms = calloc(YX_CHAIN_MAX_ATOMS, sizeof(*out->atoms));
     if (!out->atoms) {
-        yx_chain_storage_destroy(out); free(out); return false;
+        yx_chain_storage_destroy(out);
+        free(out);
+        return false;
     }
     size_t previous[2] = {0, 0};
     bool ok = false;
@@ -671,23 +605,17 @@ static bool yx_chain_expand_widths(yx_chain_archive *a, bool ascii_wide, yx_writ
             yx_chain_frame *f = &out->frames[index];
             *f = *original;
             f->flags |= wide ? 1 : 0;
-            if (i)
-                f->previous = previous[wide ? 1 : 0];
+            if (i) f->previous = previous[wide ? 1 : 0];
             previous[wide ? 1 : 0] = index;
             if (literal) {
                 if (wide) {
                     for (size_t j = 0; j < original->literal_length; ++j)
-                        if (!yx_put_u8(&storage[index], original->literal[j]) ||
-                            !yx_put_u8(&storage[index], 0))
-                            goto done;
+                        if (!yx_put_u8(&storage[index], original->literal[j]) || !yx_put_u8(&storage[index], 0)) goto done;
                     f->literal = storage[index].data;
                     f->literal_length = storage[index].used;
                 }
                 size_t pool = 0;
-                while (pool < out->pool_count &&
-                       (out->pool_lengths[pool] != f->literal_length ||
-                        memcmp(out->pool[pool], f->literal, f->literal_length)))
-                    ++pool;
+                while (pool < out->pool_count && (out->pool_lengths[pool] != f->literal_length || memcmp(out->pool[pool], f->literal, f->literal_length))) ++pool;
                 if (pool == out->pool_count) {
                     out->pool[pool] = f->literal;
                     out->pool_lengths[pool] = f->literal_length;
@@ -695,18 +623,15 @@ static bool yx_chain_expand_widths(yx_chain_archive *a, bool ascii_wide, yx_writ
                 }
                 f->literal_index = pool;
                 size_t first = out->atom_count;
-                if (!yx_literal_frame_atoms(out, index))
-                    goto done;
+                if (!yx_literal_frame_atoms(out, index)) goto done;
                 if (f->flags & 24u)
-                    for (size_t j = first; j < out->atom_count; ++j)
-                        out->atoms[j].atom.exact = false;
+                    for (size_t j = first; j < out->atom_count; ++j) out->atoms[j].atom.exact = false;
             } else
                 for (size_t j = 0; j < a->atom_count; ++j)
                     if (a->atoms[j].frame == i) {
                         yx_archive_regexp_atom atom = a->atoms[j].atom;
                         if (wide) {
-                            if (atom.length > 4 || atom.backtrack > UINT16_MAX / 2)
-                                goto done;
+                            if (atom.length > 4 || atom.backtrack > UINT16_MAX / 2) goto done;
                             for (size_t k = atom.length; k > 0; --k) {
                                 atom.bytes[(k - 1) * 2] = atom.bytes[k - 1];
                                 atom.bytes[(k - 1) * 2 + 1] = 0;
@@ -714,33 +639,30 @@ static bool yx_chain_expand_widths(yx_chain_archive *a, bool ascii_wide, yx_writ
                             atom.length *= 2;
                             atom.backtrack *= 2;
                         }
-                        if (!yx_chain_add_atom(out, index, &atom))
-                            goto done;
+                        if (!yx_chain_add_atom(out, index, &atom)) goto done;
                     }
         }
     }
     yx_chain_storage_destroy(a);
     *a = *out;
-    out->frames = NULL; out->pool = NULL; out->pool_lengths = NULL; out->atoms = NULL;
+    out->frames = NULL;
+    out->pool = NULL;
+    out->pool_lengths = NULL;
+    out->atoms = NULL;
     ok = true;
 done:
     yx_chain_storage_destroy(out);
     free(out);
     return ok;
 }
-static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_order,
-                                               uint8_t **data, size_t *length)
+static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_order, uint8_t **data, size_t *length)
 {
     yx_ser_result literal_result = yx_encode_literal_patterns(rules, vba_order, data, length);
-    if (literal_result != YX_SER_UNSUPPORTED)
-        return literal_result;
-    if (!yx_fast_rule(rules))
-        return YX_SER_UNSUPPORTED;
+    if (literal_result != YX_SER_UNSUPPORTED) return literal_result;
+    if (!yx_fast_rule(rules)) return YX_SER_UNSUPPORTED;
     const YRX_RULE *r = &rules->rules[0];
     const YRX_PATTERN *p = &r->patterns[0];
-    if (p->modifiers &
-        ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD))
-        return YX_SER_UNSUPPORTED;
+    if (p->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD)) return YX_SER_UNSUPPORTED;
     yx_writer hex = {0}, code = {0}, *literals = NULL, *wide_literals = NULL;
     size_t *starts = NULL, *ends = NULL, literal_count = 0, wide_literal_count = 0;
     const char *regexp = p->regexp;
@@ -755,17 +677,16 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
         free(hex.data);
         return YX_SER_UNSUPPORTED;
     }
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp,
-                           .length = strlen(regexp),
-                           .dotall = (p->modifiers & YX_MOD_DOTALL) != 0,
-                           .nocase = (p->modifiers & YX_MOD_NOCASE) != 0};
+    yx_tr_parser parser = {
+        .text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = (p->modifiers & YX_MOD_DOTALL) != 0, .nocase = (p->modifiers & YX_MOD_NOCASE) != 0};
     yx_tr_node *root = yx_tr_expression(&parser);
     yx_ser_result result = YX_SER_UNSUPPORTED;
     yx_chain_archive a = {0};
-    if (parser.oom) { result = YX_SER_NO_MEMORY; goto done; }
-    if (!root || parser.failed || parser.at != parser.length ||
-        root->kind != YX_TR_CONCAT)
+    if (parser.oom) {
+        result = YX_SER_NO_MEMORY;
         goto done;
+    }
+    if (!root || parser.failed || parser.at != parser.length || root->kind != YX_TR_CONCAT) goto done;
     literal_count = root->count;
     size_t variants = (p->modifiers & (YX_MOD_WIDE | YX_MOD_ASCII)) == (YX_MOD_WIDE | YX_MOD_ASCII) ? 2u : 1u;
     if (literal_count > SIZE_MAX / variants) goto done;
@@ -773,10 +694,11 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
     if (wide_literal_count > SIZE_MAX / sizeof(*wide_literals) || literal_count > SIZE_MAX / sizeof(*starts)) goto done;
     literals = calloc(literal_count, sizeof(*literals));
     wide_literals = calloc(wide_literal_count, sizeof(*wide_literals));
-    starts = malloc(literal_count * sizeof(*starts)); ends = malloc(literal_count * sizeof(*ends));
-    if (!literals || !wide_literals || !starts || !ends ||
-        !yx_chain_frames_reserve(&a, literal_count) || !yx_chain_pool_reserve(&a, literal_count)) {
-        result = YX_SER_NO_MEMORY; goto done;
+    starts = malloc(literal_count * sizeof(*starts));
+    ends = malloc(literal_count * sizeof(*ends));
+    if (!literals || !wide_literals || !starts || !ends || !yx_chain_frames_reserve(&a, literal_count) || !yx_chain_pool_reserve(&a, literal_count)) {
+        result = YX_SER_NO_MEMORY;
+        goto done;
     }
     size_t start = 0, count = 0;
     uint32_t minimum = 0, maximum = UINT32_MAX;
@@ -784,14 +706,9 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
     for (size_t i = 0; i < root->count; ++i) {
         const yx_tr_node *n = root->children[i];
         uint64_t low, high;
-        if (i == start || n->kind != YX_TR_REPEAT || !yx_tr_any_span(n->children[0], &low, &high) ||
-            low != 1 || high != 1 ||
-            n->maximum <= 200)
-            continue;
-        yx_tr_node fragment = {
-            .kind = YX_TR_CONCAT, .children = root->children + start, .count = i - start};
-        if (yx_chain_minimum(&fragment) < 2)
-            continue;
+        if (i == start || n->kind != YX_TR_REPEAT || !yx_tr_any_span(n->children[0], &low, &high) || low != 1 || high != 1 || n->maximum <= 200) continue;
+        yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + start, .count = i - start};
+        if (yx_chain_minimum(&fragment) < 2) continue;
         starts[count] = start;
         ends[count] = i;
         a.frames[count].minimum = minimum;
@@ -805,8 +722,7 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
         start = i + 1;
     }
     if (start < root->count) {
-        yx_tr_node fragment = {
-            .kind = YX_TR_CONCAT, .children = root->children + start, .count = root->count - start};
+        yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + start, .count = root->count - start};
         if (count && yx_chain_minimum(&fragment) < 2) {
             ends[count - 1] = root->count;
         } else {
@@ -819,8 +735,7 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
             ++count;
         }
     }
-    if (count < 2)
-        goto done;
+    if (count < 2) goto done;
     a.frame_count = count;
     a.kind = (uint8_t)p->kind;
     a.names[0] = "default";
@@ -831,32 +746,31 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
         result = YX_SER_NO_MEMORY;
         goto done;
     }
-    uint16_t common = (p->kind == YX_PATTERN_REGEX && parser.saw_greedy ? 32 : 0) |
-                      ((p->modifiers & YX_MOD_NOCASE) ? 2 : 0) |
-                      ((p->modifiers & YX_MOD_FULLWORD) ? 24 : 0);
+    uint16_t common =
+        (p->kind == YX_PATTERN_REGEX && parser.saw_greedy ? 32 : 0) | ((p->modifiers & YX_MOD_NOCASE) ? 2 : 0) | ((p->modifiers & YX_MOD_FULLWORD) ? 24 : 0);
     for (size_t i = 0; i < count; ++i) {
-        yx_tr_node fragment = {.kind = YX_TR_CONCAT,
-                               .children = root->children + starts[i],
-                               .count = ends[i] - starts[i]};
-        if (!yx_chain_compile_frame(&a, i, &fragment, common, &code, &literals[i]))
-            goto done;
+        yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + starts[i], .count = ends[i] - starts[i]};
+        if (!yx_chain_compile_frame(&a, i, &fragment, common, &code, &literals[i])) goto done;
     }
-    if ((p->modifiers & YX_MOD_WIDE) &&
-        !yx_chain_expand_widths(&a, (p->modifiers & YX_MOD_ASCII) != 0, wide_literals))
-        goto done;
+    if ((p->modifiers & YX_MOD_WIDE) && !yx_chain_expand_widths(&a, (p->modifiers & YX_MOD_ASCII) != 0, wide_literals)) goto done;
     uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
     memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
-    if (vba_order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true))
-        goto done;
+    if (vba_order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) goto done;
     a.wasm = wasm;
     a.wasm_length = sizeof(wasm);
     a.code = code.data;
     a.code_length = code.used;
     result = yx_chain_envelope(&a, data, length);
 done:
-    if (literals) for (size_t i = 0; i < literal_count; ++i) free(literals[i].data);
-    if (wide_literals) for (size_t i = 0; i < wide_literal_count; ++i) free(wide_literals[i].data);
-    free(literals); free(wide_literals); free(starts); free(ends); yx_chain_storage_destroy(&a);
+    if (literals)
+        for (size_t i = 0; i < literal_count; ++i) free(literals[i].data);
+    if (wide_literals)
+        for (size_t i = 0; i < wide_literal_count; ++i) free(wide_literals[i].data);
+    free(literals);
+    free(wide_literals);
+    free(starts);
+    free(ends);
+    yx_chain_storage_destroy(&a);
     free(hex.data);
     free(code.data);
     yx_tr_destroy(root);
@@ -869,30 +783,22 @@ static bool yx_chain_structure(yx_chain_archive *a)
     size_t *children = malloc(a->frame_count * sizeof(*children));
     if (!children) return false;
     bool valid = false;
-    for (size_t i = 0; i < a->frame_count; ++i)
-        children[i] = SIZE_MAX;
+    for (size_t i = 0; i < a->frame_count; ++i) children[i] = SIZE_MAX;
     a->head_count = 0;
     for (size_t i = 0; i < a->frame_count; ++i) {
         const yx_chain_frame *f = &a->frames[i];
         bool head = f->variant == 2 || f->variant == 5;
         if (head) {
-            if (a->head_count == 2 || i > 1)
-                goto done;
+            if (a->head_count == 2 || i > 1) goto done;
             a->heads[a->head_count++] = i;
         } else {
-            if (f->previous >= i || children[f->previous] != SIZE_MAX ||
-                (f->flags & 35u) != (a->frames[f->previous].flags & 35u))
-                goto done;
+            if (f->previous >= i || children[f->previous] != SIZE_MAX || (f->flags & 35u) != (a->frames[f->previous].flags & 35u)) goto done;
             children[f->previous] = i;
         }
-        if ((f->flags & 8u) && !head)
-            goto done;
+        if ((f->flags & 8u) && !head) goto done;
     }
-    if (!a->head_count)
-        goto done;
-    if (a->head_count == 2 &&
-        (a->frames[a->heads[0]].flags & 1u) == (a->frames[a->heads[1]].flags & 1u))
-        goto done;
+    if (!a->head_count) goto done;
+    if (a->head_count == 2 && (a->frames[a->heads[0]].flags & 1u) == (a->frames[a->heads[1]].flags & 1u)) goto done;
     size_t visited = 0;
     for (size_t h = 0; h < a->head_count; ++h) {
         size_t at = a->heads[h], count = 0;
@@ -900,211 +806,158 @@ static bool yx_chain_structure(yx_chain_archive *a)
         for (;;) {
             const yx_chain_frame *f = &a->frames[at];
             bool last = children[at] == SIZE_MAX;
-            if (((f->flags & 4u) != 0) != last || ((f->flags & 16u) != 0) != (last && fullword))
-                goto done;
+            if (((f->flags & 4u) != 0) != last || ((f->flags & 16u) != 0) != (last && fullword)) goto done;
             ++visited;
             ++count;
-            if (last)
-                break;
+            if (last) break;
             at = children[at];
         }
-        if (count < 2)
-            goto done;
+        if (count < 2) goto done;
     }
     valid = visited == a->frame_count;
 done:
-    free(children); return valid;
+    free(children);
+    return valid;
 }
 static bool yx_chain_read(const uint8_t *data, size_t length, yx_chain_archive *a)
 {
     static const uint8_t magic[] = {'Y', 'A', 'R', 'A', '-', 'X', 0, 0, 12, 0, 0, 0};
-    static const uint8_t before_kind[] = {0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 1},
-                         after_kind[] = {0, 0, 0, 0, 1};
+    static const uint8_t before_kind[] = {0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 1}, after_kind[] = {0, 0, 0, 0, 1};
     static const uint8_t globals[] = {0, 0, 1, 0}, suffix[] = {0, 0, 1, 1, 1, 0};
     yx_reader r = {data, length, 0, false, false};
     uint64_t n;
     uint8_t flag;
     memset(a, 0, sizeof(*a));
-    if (!data || length < sizeof(magic) || memcmp(data, magic, sizeof(magic)))
-        return false;
+    if (!data || length < sizeof(magic) || memcmp(data, magic, sizeof(magic))) return false;
     r.at = sizeof(magic);
-    if (!yx_expect_uint(&r, 3))
-        goto fail;
+    if (!yx_expect_uint(&r, 3)) goto fail;
     for (size_t i = 0; i < 3; ++i)
-        if (!yx_get_string(&r, &a->names[i]))
-            goto fail;
-    if (strcmp(a->names[0], "default") || !yx_valid_rule_name(a->names[2]) ||
-        !strcmp(a->names[2], "default") || a->names[1][0] != '$' ||
-        !yx_valid_rule_name(a->names[1] + 1) || !yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) ||
-        !yx_get_uint(&r, &n) || n > length - r.at || !yx_chain_pool_reserve(a, (size_t)n))
+        if (!yx_get_string(&r, &a->names[i])) goto fail;
+    if (strcmp(a->names[0], "default") || !yx_valid_rule_name(a->names[2]) || !strcmp(a->names[2], "default") || a->names[1][0] != '$' ||
+        !yx_valid_rule_name(a->names[1] + 1) || !yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) || !yx_get_uint(&r, &n) || n > length - r.at ||
+        !yx_chain_pool_reserve(a, (size_t)n))
         goto fail;
     a->pool_count = (size_t)n;
     for (size_t i = 0; i < a->pool_count; ++i) {
-        if (!yx_get_uint(&r, &n) || !n || n > length - r.at)
-            goto fail;
+        if (!yx_get_uint(&r, &n) || !n || n > length - r.at) goto fail;
         a->pool[i] = data + r.at;
         a->pool_lengths[i] = (size_t)n;
         r.at += (size_t)n;
     }
-    if (!yx_get_uint(&r, &n) || n > length - r.at)
-        goto fail;
+    if (!yx_get_uint(&r, &n) || n > length - r.at) goto fail;
     a->wasm = data + r.at;
     a->wasm_length = (size_t)n;
     r.at += (size_t)n;
-    if (!yx_integer_wasm_bytes(&r, length, before_kind, sizeof(before_kind)) ||
-        !yx_get_uint(&r, &n) || n < 1 || n > 2)
-        goto fail;
+    if (!yx_integer_wasm_bytes(&r, length, before_kind, sizeof(before_kind)) || !yx_get_uint(&r, &n) || n < 1 || n > 2) goto fail;
     a->kind = (uint8_t)n;
-    if (!yx_integer_wasm_bytes(&r, length, after_kind, sizeof(after_kind)) ||
-        !yx_get_uint(&r, &n) || !n || n > (length - r.at) / 3 || !yx_chain_frames_reserve(a, (size_t)n))
+    if (!yx_integer_wasm_bytes(&r, length, after_kind, sizeof(after_kind)) || !yx_get_uint(&r, &n) || !n || n > (length - r.at) / 3 ||
+        !yx_chain_frames_reserve(a, (size_t)n))
         goto fail;
     a->frame_count = (size_t)n;
     for (size_t i = 0; i < a->frame_count; ++i) {
         yx_chain_frame *f = &a->frames[i];
-        if (!yx_expect_uint(&r, 0) || !yx_get_uint(&r, &n))
-            goto fail;
-        if (!i)
-            a->literal_only = n == 0;
-        if (a->literal_only ? n != 0 : (n != 2 && n != 3 && n != 5 && n != 6))
-            goto fail;
-        if (!a->literal_only && a->frame_count < 2)
-            goto fail;
+        if (!yx_expect_uint(&r, 0) || !yx_get_uint(&r, &n)) goto fail;
+        if (!i) a->literal_only = n == 0;
+        if (a->literal_only ? n != 0 : (n != 2 && n != 3 && n != 5 && n != 6)) goto fail;
+        if (!a->literal_only && a->frame_count < 2) goto fail;
         f->variant = (uint8_t)n;
         if (f->variant == 0 || f->variant == 2 || f->variant == 3) {
-            if (!yx_get_uint(&r, &n) || n >= a->pool_count)
-                goto fail;
+            if (!yx_get_uint(&r, &n) || n >= a->pool_count) goto fail;
             f->literal_index = (size_t)n;
             f->literal = a->pool[n];
             f->literal_length = a->pool_lengths[n];
         }
         if (!a->literal_only && (f->variant == 3 || f->variant == 6)) {
-            if (!yx_get_uint(&r, &n) || n >= i)
-                goto fail;
+            if (!yx_get_uint(&r, &n) || n >= i) goto fail;
             f->previous = (size_t)n;
             uint64_t kind;
-            if (!yx_get_uint(&r, &kind) || kind > 1 || !yx_get_uint(&r, &n) || n > UINT32_MAX)
-                goto fail;
+            if (!yx_get_uint(&r, &kind) || kind > 1 || !yx_get_uint(&r, &n) || n > UINT32_MAX) goto fail;
             f->minimum = (uint32_t)n;
-            if (kind)
-                f->maximum = UINT32_MAX;
+            if (kind) f->maximum = UINT32_MAX;
             else {
-                if (!yx_get_uint(&r, &n) || n > UINT32_MAX)
-                    goto fail;
+                if (!yx_get_uint(&r, &n) || n > UINT32_MAX) goto fail;
                 f->maximum = (uint32_t)n;
                 f->finite_maximum = n == UINT32_MAX;
             }
-            if (f->maximum < f->minimum ||
-                f->maximum <= 200)
-                goto fail;
+            if (f->maximum < f->minimum || f->maximum <= 200) goto fail;
         }
-        if (a->literal_only && !yx_expect_uint(&r, 0))
-            goto fail;
-        if (!yx_get_uint(&r, &n))
-            goto fail;
+        if (a->literal_only && !yx_expect_uint(&r, 0)) goto fail;
+        if (!yx_get_uint(&r, &n)) goto fail;
         if (a->literal_only) {
-            if ((n & ~27u) || ((n & 24u) && (n & 24u) != 24u))
-                goto fail;
-        } else if ((n & ~127u) || ((f->variant == 2 || f->variant == 3) && (n & 64u)))
-            goto fail;
+            if ((n & ~27u) || ((n & 24u) && (n & 24u) != 24u)) goto fail;
+        } else if ((n & ~127u) || ((f->variant == 2 || f->variant == 3) && (n & 64u))) goto fail;
         f->flags = (uint16_t)n;
-        if (a->kind == 1 && (n & 59u))
-            goto fail;
+        if (a->kind == 1 && (n & 59u)) goto fail;
     }
-    if (!a->literal_only && !yx_chain_structure(a))
-        goto fail;
-    if (!yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) ||
-        !yx_get_uint(&r, &n) || !n || n > YX_CHAIN_MAX_ATOMS || n > length - r.at)
+    if (!a->literal_only && !yx_chain_structure(a)) goto fail;
+    if (!yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) || !yx_expect_uint(&r, 0) || !yx_get_uint(&r, &n) || !n || n > YX_CHAIN_MAX_ATOMS || n > length - r.at)
         goto fail;
     a->atom_count = (size_t)n;
     a->atoms = calloc(a->atom_count, sizeof(*a->atoms));
-    if (!a->atoms)
-        goto fail;
+    if (!a->atoms) goto fail;
     for (size_t i = 0; i < a->atom_count; ++i) {
         yx_archive_regexp_atom *b = &a->atoms[i].atom;
-        if (!yx_get_uint(&r, &n) || n >= a->frame_count)
-            goto fail;
+        if (!yx_get_uint(&r, &n) || n >= a->frame_count) goto fail;
         a->atoms[i].frame = (size_t)n;
-        if (!yx_get_uint(&r, &n) || n > sizeof(b->bytes) || n > length - r.at)
-            goto fail;
+        if (!yx_get_uint(&r, &n) || n > sizeof(b->bytes) || n > length - r.at) goto fail;
         b->length = (size_t)n;
         memcpy(b->bytes, data + r.at, b->length);
         r.at += b->length;
-        if (!yx_get_u8(&r, &flag) || flag > 1)
-            goto fail;
+        if (!yx_get_u8(&r, &flag) || flag > 1) goto fail;
         b->exact = flag != 0;
-        if (!yx_get_uint(&r, &n) || n > UINT16_MAX)
-            goto fail;
+        if (!yx_get_uint(&r, &n) || n > UINT16_MAX) goto fail;
         b->backtrack = (uint16_t)n;
-        if (!yx_get_u8(&r, &flag) || flag > 1)
-            goto fail;
+        if (!yx_get_u8(&r, &flag) || flag > 1) goto fail;
         b->has_forward = flag != 0;
         if (flag) {
-            if (!yx_get_uint(&r, &n) || !n || n > UINT32_MAX)
-                goto fail;
+            if (!yx_get_uint(&r, &n) || !n || n > UINT32_MAX) goto fail;
             b->forward = (size_t)n - 1;
         }
-        if (!yx_get_u8(&r, &flag) || flag > 1)
-            goto fail;
+        if (!yx_get_u8(&r, &flag) || flag > 1) goto fail;
         b->has_backward = flag != 0;
         if (flag) {
-            if (!yx_get_uint(&r, &n) || !n || n > UINT32_MAX)
-                goto fail;
+            if (!yx_get_uint(&r, &n) || !n || n > UINT32_MAX) goto fail;
             b->backward = (size_t)n - 1;
         }
     }
-    if (!yx_get_uint(&r, &n) || n > length - r.at)
-        goto fail;
+    if (!yx_get_uint(&r, &n) || n > length - r.at) goto fail;
     a->code = data + r.at;
     a->code_length = (size_t)n;
     r.at += (size_t)n;
-    if (!yx_expect_uint(&r, sizeof(globals)) ||
-        !yx_integer_wasm_bytes(&r, length, globals, sizeof(globals)) || !yx_get_uint(&r, &n) ||
-        n > length - r.at)
-        goto fail;
+    if (!yx_expect_uint(&r, sizeof(globals)) || !yx_integer_wasm_bytes(&r, length, globals, sizeof(globals)) || !yx_get_uint(&r, &n) || n > length - r.at) goto fail;
     r.at += (size_t)n;
-    if (!yx_integer_wasm_bytes(&r, length, suffix, sizeof(suffix)))
-        goto fail;
+    if (!yx_integer_wasm_bytes(&r, length, suffix, sizeof(suffix))) goto fail;
     a->archive_length = r.at;
     return true;
 fail:
     yx_chain_destroy(a);
     return false;
 }
-static bool yx_chain_atom_equal(const yx_archive_regexp_atom *a, const yx_archive_regexp_atom *b,
-                                size_t base)
+static bool yx_chain_atom_equal(const yx_archive_regexp_atom *a, const yx_archive_regexp_atom *b, size_t base)
 {
-    return a->length == b->length && !memcmp(a->bytes, b->bytes, a->length) &&
-           a->exact == b->exact && a->backtrack == b->backtrack &&
-           a->has_forward == b->has_forward &&
-           (!a->has_forward || a->forward == b->forward + base) &&
-           a->has_backward == b->has_backward &&
-           (!a->has_backward || a->backward == b->backward + base);
+    return a->length == b->length && !memcmp(a->bytes, b->bytes, a->length) && a->exact == b->exact && a->backtrack == b->backtrack && a->has_forward == b->has_forward &&
+           (!a->has_forward || a->forward == b->forward + base) && a->has_backward == b->has_backward && (!a->has_backward || a->backward == b->backward + base);
 }
 /* A bounded hex jump token "[a]" or "[a-b]" of length bytes. */
 static bool yx_chain_hex_jump(const char *token, size_t length, unsigned long *min, unsigned long *max)
 {
     char *end;
-    if (length < 3 || token[0] != '[' || token[length - 1] != ']' || !isdigit((unsigned char)token[1]))
-        return false;
+    if (length < 3 || token[0] != '[' || token[length - 1] != ']' || !isdigit((unsigned char)token[1])) return false;
     *min = strtoul(token + 1, &end, 10);
     if (*end == ']') {
         *max = *min;
         return end == token + length - 1;
     }
-    if (*end != '-' || !isdigit((unsigned char)end[1]))
-        return false;
+    if (*end != '-' || !isdigit((unsigned char)end[1])) return false;
     *max = strtoul(end + 1, &end, 10);
     return end == token + length - 1 && *max >= *min;
 }
 static bool yx_chain_hex_jump_text(yx_writer *w, unsigned long min, unsigned long max)
 {
     char token[64];
-    if (!max)
-        return true;
-    if (min == max)
-        snprintf(token, sizeof(token), "[%lu] ", min);
-    else
-        snprintf(token, sizeof(token), "[%lu-%lu] ", min, max);
+    if (!max) return true;
+    if (min == max) snprintf(token, sizeof(token), "[%lu] ", min);
+    else snprintf(token, sizeof(token), "[%lu-%lu] ", min, max);
     return yx_tr_text(w, token);
 }
 /* One space-terminated token of yx_tr_hex_source text: the "(" that open
@@ -1116,13 +969,10 @@ typedef struct {
 static bool yx_chain_hex_token_at(const char *s, size_t n, size_t *at, yx_chain_hex_token *t)
 {
     size_t start = *at;
-    while (*at < n && s[*at] != ' ')
-        ++*at;
-    if (*at == n)
-        return false;
+    while (*at < n && s[*at] != ' ') ++*at;
+    if (*at == n) return false;
     t->open = 0;
-    while (start + t->open < *at && s[start + t->open] == '(')
-        ++t->open;
+    while (start + t->open < *at && s[start + t->open] == '(') ++t->open;
     t->core = s + start + t->open;
     t->length = *at - start - t->open;
     ++*at;
@@ -1138,32 +988,21 @@ static bool yx_chain_hex_edges(const yx_writer *hex, yx_writer *text)
     size_t n = hex->used, at = 0;
     yx_chain_hex_token previous = {NULL, 0, 0}, current, next;
     bool has_previous = false, has_next;
-    if (!n || s[n - 1] != ' ')
-        return yx_put_bytes(text, hex->data, n);
-    if (!yx_chain_hex_token_at(s, n, &at, &current))
-        return false;
+    if (!n || s[n - 1] != ' ') return yx_put_bytes(text, hex->data, n);
+    if (!yx_chain_hex_token_at(s, n, &at, &current)) return false;
     for (;;) {
         size_t after = at;
         has_next = after < n && yx_chain_hex_token_at(s, n, &after, &next);
         unsigned long a, b;
-        bool lead = !has_previous || current.open ||
-                    (previous.length == 1 && previous.core[0] == '|');
-        bool trail = !has_next || (!next.open && next.length == 1 &&
-                                   (next.core[0] == '|' || next.core[0] == ')'));
+        bool lead = !has_previous || current.open || (previous.length == 1 && previous.core[0] == '|');
+        bool trail = !has_next || (!next.open && next.length == 1 && (next.core[0] == '|' || next.core[0] == ')'));
         for (size_t i = 0; i < current.open; ++i)
-            if (!yx_put_u8(text, '('))
-                return false;
-        if (yx_chain_hex_jump(current.core, current.length, &a, &b) && (lead || trail) &&
-            a >= (lead && trail ? 2u : 1u)) {
+            if (!yx_put_u8(text, '(')) return false;
+        if (yx_chain_hex_jump(current.core, current.length, &a, &b) && (lead || trail) && a >= (lead && trail ? 2u : 1u)) {
             unsigned long edges = lead && trail ? 2u : 1u;
-            if ((lead && !yx_tr_text(text, "?? ")) ||
-                !yx_chain_hex_jump_text(text, a - edges, b - edges) ||
-                (trail && !yx_tr_text(text, "?? ")))
-                return false;
-        } else if (!yx_put_bytes(text, current.core, current.length) || !yx_put_u8(text, ' '))
-            return false;
-        if (!has_next)
-            return true;
+            if ((lead && !yx_tr_text(text, "?? ")) || !yx_chain_hex_jump_text(text, a - edges, b - edges) || (trail && !yx_tr_text(text, "?? "))) return false;
+        } else if (!yx_put_bytes(text, current.core, current.length) || !yx_put_u8(text, ' ')) return false;
+        if (!has_next) return true;
         previous = current;
         has_previous = true;
         current = next;
@@ -1174,44 +1013,32 @@ static bool yx_chain_hex_edges(const yx_writer *hex, yx_writer *text)
  * begin: text receives the forward one and end the end of the backward one.
  * Every atom of the piece points into them, and both hold the same literal
  * bytes (residue bytes misread as pattern bytes appear only forward). */
-static bool yx_chain_thompson_programs(const yx_chain_archive *a, size_t first, size_t count,
-                                       size_t begin, size_t *end, yx_writer *text)
+static bool yx_chain_thompson_programs(const yx_chain_archive *a, size_t first, size_t count, size_t begin, size_t *end, yx_writer *text)
 {
     yx_writer forward = {0}, backward = {0};
     size_t forward_end = begin, at;
     bool ok = false;
     while (forward_end < a->code_length) {
         size_t width = yx_tr_instruction_size(a->code + forward_end, a->code_length - forward_end);
-        if (!width)
-            goto done;
-        if (a->code[forward_end] == 0xaa && a->code[forward_end + 1] == 0)
-            break;
+        if (!width) goto done;
+        if (a->code[forward_end] == 0xaa && a->code[forward_end + 1] == 0) break;
         forward_end += width;
     }
-    if (forward_end + 2 >= a->code_length ||
-        !yx_tr_decode_region(a->code, begin, forward_end, &forward, 0))
-        goto done;
+    if (forward_end + 2 >= a->code_length || !yx_tr_decode_region(a->code, begin, forward_end, &forward, 0)) goto done;
     at = forward_end + 2;
     while (at < a->code_length) {
         size_t width = yx_tr_instruction_size(a->code + at, a->code_length - at);
-        if (!width)
-            goto done;
-        if (a->code[at] == 0xaa && a->code[at + 1] == 0)
-            break;
+        if (!width) goto done;
+        if (a->code[at] == 0xaa && a->code[at + 1] == 0) break;
         at += width;
     }
-    if (at + 2 > a->code_length || !yx_tr_decode_region(a->code, forward_end + 2, at, &backward, 0))
-        goto done;
+    if (at + 2 > a->code_length || !yx_tr_decode_region(a->code, forward_end + 2, at, &backward, 0)) goto done;
     at += 2;
     for (size_t i = 0; i < count; ++i) {
         const yx_archive_regexp_atom *b = &a->atoms[first + i].atom;
-        if (!b->has_forward || !b->has_backward || b->forward < begin ||
-            b->forward > forward_end || b->backward < forward_end + 2 || b->backward > at - 2)
-            goto done;
+        if (!b->has_forward || !b->has_backward || b->forward < begin || b->forward > forward_end || b->backward < forward_end + 2 || b->backward > at - 2) goto done;
     }
-    if (!yx_put_u8(&forward, 0) || !yx_put_u8(&backward, 0) ||
-        !yx_tr_same_literals((const char *)forward.data, (const char *)backward.data))
-        goto done;
+    if (!yx_put_u8(&forward, 0) || !yx_put_u8(&backward, 0) || !yx_tr_same_literals((const char *)forward.data, (const char *)backward.data)) goto done;
     --forward.used;
     *text = forward;
     forward = (yx_writer){0};
@@ -1226,28 +1053,23 @@ done:
  * pieces it lists: one forward sequence, or a backward sequence (the pieces
  * before the atom piece, in reverse order) up to first_end and then a
  * forward one. Compiling those pieces again must fail with the same bytes. */
-static bool yx_chain_residue_consistent(const yx_chain_archive *a, size_t begin, size_t first_end,
-                                        size_t end)
+static bool yx_chain_residue_consistent(const yx_chain_archive *a, size_t begin, size_t first_end, size_t end)
 {
     yx_fast_program *p = calloc(1, sizeof(*p));
     yx_writer residue = {0};
     size_t at = begin;
     bool ok = false;
-    if (!p)
-        return false;
-    if (!yx_fast_read_sequence(p, a->code, a->code_length, &at) || at != first_end)
-        goto done;
+    if (!p) return false;
+    if (!yx_fast_read_sequence(p, a->code, a->code_length, &at) || at != first_end) goto done;
     if (end != first_end) {
         for (size_t i = 0; i < p->count / 2; ++i) {
             yx_fast_piece swap = p->pieces[i];
             p->pieces[i] = p->pieces[p->count - i - 1];
             p->pieces[p->count - i - 1] = swap;
         }
-        if (!yx_fast_read_sequence(p, a->code, a->code_length, &at) || at != end)
-            goto done;
+        if (!yx_fast_read_sequence(p, a->code, a->code_length, &at) || at != end) goto done;
     }
-    ok = !yx_fast_compile_mode(p, true) && yx_chain_fast_residue(p, &residue) &&
-         residue.used == end - begin && !memcmp(residue.data, a->code + begin, residue.used);
+    ok = !yx_fast_compile_mode(p, true) && yx_chain_fast_residue(p, &residue) && residue.used == end - begin && !memcmp(residue.data, a->code + begin, residue.used);
 done:
     free(residue.data);
     yx_fast_program_destroy(p);
@@ -1259,73 +1081,56 @@ done:
  * rolled receives the forward program at start decoded with e{n,} rolled up
  * when it differs from the unrolled text and compiles back to exactly this
  * piece's code and atoms (Compiler::c_chain compiles every piece alone). */
-static bool yx_chain_rolled_piece(const yx_chain_archive *a, size_t first, size_t count, size_t start,
-                                  size_t end, const yx_writer *unrolled, yx_writer *rolled)
+static bool yx_chain_rolled_piece(const yx_chain_archive *a, size_t first, size_t count, size_t start, size_t end, const yx_writer *unrolled, yx_writer *rolled)
 {
     size_t forward_end = start;
     yx_tr_program program = {0};
     bool greedy = false, same = false;
     while (forward_end < end) {
         size_t width = yx_tr_instruction_size(a->code + forward_end, end - forward_end);
-        if (!width)
-            return false;
-        if (a->code[forward_end] == 0xaa && a->code[forward_end + 1] == 0)
-            break;
+        if (!width) return false;
+        if (a->code[forward_end] == 0xaa && a->code[forward_end + 1] == 0) break;
         forward_end += width;
     }
-    if (forward_end + 2 > end ||
-        !yx_tr_decode_region_mode(a->code, start, forward_end, rolled, 0, true) ||
-        (rolled->used == unrolled->used && !memcmp(rolled->data, unrolled->data, rolled->used)) ||
-        !yx_put_u8(rolled, 0))
+    if (forward_end + 2 > end || !yx_tr_decode_region_mode(a->code, start, forward_end, rolled, 0, true) ||
+        (rolled->used == unrolled->used && !memcmp(rolled->data, unrolled->data, rolled->used)) || !yx_put_u8(rolled, 0))
         return false;
-    if (yx_tr_compile((const char *)rolled->data, true, false, &program, &greedy) &&
-        program.forward.used == forward_end + 2 - start &&
-        program.backward.used == end - forward_end - 2 && program.atoms.count == count &&
-        !memcmp(program.forward.data, a->code + start, program.forward.used) &&
+    if (yx_tr_compile((const char *)rolled->data, true, false, &program, &greedy) && program.forward.used == forward_end + 2 - start &&
+        program.backward.used == end - forward_end - 2 && program.atoms.count == count && !memcmp(program.forward.data, a->code + start, program.forward.used) &&
         !memcmp(program.backward.data, a->code + forward_end + 2, program.backward.used)) {
         same = true;
         for (size_t i = 0; i < count && same; ++i) {
             const yx_tr_atom_entry *b = &program.atoms.items[i];
             const yx_archive_regexp_atom *atom = &a->atoms[first + i].atom;
-            same = atom->length == b->length && !memcmp(atom->bytes, b->bytes, b->length) &&
-                   atom->exact == b->exact && atom->has_forward && atom->has_backward &&
-                   atom->forward == start + b->forward &&
-                   atom->backward == start + program.forward.used + b->backward;
+            same = atom->length == b->length && !memcmp(atom->bytes, b->bytes, b->length) && atom->exact == b->exact && atom->has_forward && atom->has_backward &&
+                   atom->forward == start + b->forward && atom->backward == start + program.forward.used + b->backward;
         }
     }
     yx_tr_program_free(&program);
     --rolled->used;
     return same;
 }
-static bool yx_chain_decode_frame(const yx_chain_archive *a, size_t index, size_t *cursor,
-                                  size_t *atom_at, yx_writer *text)
+static bool yx_chain_decode_frame(const yx_chain_archive *a, size_t index, size_t *cursor, size_t *atom_at, yx_writer *text)
 {
     const yx_chain_frame *f = &a->frames[index];
     size_t first = *atom_at;
-    while (*atom_at < a->atom_count && a->atoms[*atom_at].frame == index)
-        ++*atom_at;
+    while (*atom_at < a->atom_count && a->atoms[*atom_at].frame == index) ++*atom_at;
     size_t count = *atom_at - first;
-    if (!count)
-        return false;
+    if (!count) return false;
     if (f->variant == 2 || f->variant == 3) {
-        if (count != 1)
-            return false;
+        if (count != 1) return false;
         const yx_archive_regexp_atom *atom = &a->atoms[first].atom;
-        if (atom->has_forward || atom->has_backward || !atom->length || atom->length > 4 ||
-            atom->backtrack > f->literal_length ||
-            atom->length > f->literal_length - atom->backtrack ||
-            memcmp(atom->bytes, f->literal + atom->backtrack, atom->length) ||
+        if (atom->has_forward || atom->has_backward || !atom->length || atom->length > 4 || atom->backtrack > f->literal_length ||
+            atom->length > f->literal_length - atom->backtrack || memcmp(atom->bytes, f->literal + atom->backtrack, atom->length) ||
             atom->exact != (atom->length == f->literal_length && !(f->flags & 24u)))
             return false;
         uint8_t *masks = malloc(f->literal_length);
-        if (!masks)
-            return false;
+        if (!masks) return false;
         memset(masks, 255, f->literal_length);
         yx_fast_literal literal = {(uint8_t *)f->literal, masks, f->literal_length, false};
         size_t offset, width;
         yx_fast_best_atom(&literal, &offset, &width);
-        bool ok = offset == atom->backtrack && width == atom->length &&
-                  yx_fast_source_literal(text, &literal, a->kind == 1);
+        bool ok = offset == atom->backtrack && width == atom->length && yx_fast_source_literal(text, &literal, a->kind == 1);
         free(masks);
         return ok;
     }
@@ -1334,42 +1139,31 @@ static bool yx_chain_decode_frame(const yx_chain_archive *a, size_t index, size_
     bool ok = false;
     if (f->flags & 64u) {
         yx_fast_program *p = calloc(1, sizeof(*p));
-        if (!p)
-            return false;
+        if (!p) return false;
         p->flags = f->flags & ~4u;
         const yx_archive_regexp_atom *atom = &a->atoms[first].atom;
-        if (!atom->has_forward || atom->forward < begin || atom->forward >= a->code_length)
-            goto fast_done;
+        if (!atom->has_forward || atom->forward < begin || atom->forward >= a->code_length) goto fast_done;
         if (atom->has_backward) {
-            if (atom->backward != begin ||
-                !yx_fast_read_sequence(p, a->code, a->code_length, &end) || end != atom->forward)
-                goto fast_done;
+            if (atom->backward != begin || !yx_fast_read_sequence(p, a->code, a->code_length, &end) || end != atom->forward) goto fast_done;
             for (size_t i = 0; i < p->count / 2; ++i) {
                 yx_fast_piece swap = p->pieces[i];
                 p->pieces[i] = p->pieces[p->count - i - 1];
                 p->pieces[p->count - i - 1] = swap;
             }
-        } else if (atom->forward != begin)
-            goto fast_done;
+        } else if (atom->forward != begin) goto fast_done;
         bool dotall = false;
-        if (!yx_fast_read_sequence(p, a->code, a->code_length, &end) ||
-            !yx_fast_compile_mode(p, true) || p->code.used != end - begin ||
-            memcmp(p->code.data, a->code + begin, p->code.used) || p->atom_count != count ||
-            !yx_fast_source(p, a->kind == 1, &source, &dotall))
+        if (!yx_fast_read_sequence(p, a->code, a->code_length, &end) || !yx_fast_compile_mode(p, true) || p->code.used != end - begin ||
+            memcmp(p->code.data, a->code + begin, p->code.used) || p->atom_count != count || !yx_fast_source(p, a->kind == 1, &source, &dotall))
             goto fast_done;
         for (size_t i = 0; i < count; ++i)
-            if (!yx_chain_atom_equal(&a->atoms[first + i].atom, &p->atoms[i], begin))
-                goto fast_done;
+            if (!yx_chain_atom_equal(&a->atoms[first + i].atom, &p->atoms[i], begin)) goto fast_done;
         if (a->kind == 2 && !dotall) {
             for (size_t i = 0; i < source.used; ++i) {
                 if (source.data[i] == '.') {
-                    if (!yx_tr_text(text, "[^\\x0a]"))
-                        goto fast_done;
-                } else if (!yx_put_u8(text, source.data[i]))
-                    goto fast_done;
+                    if (!yx_tr_text(text, "[^\\x0a]")) goto fast_done;
+                } else if (!yx_put_u8(text, source.data[i])) goto fast_done;
             }
-        } else if (!yx_put_bytes(text, source.data, source.used))
-            goto fast_done;
+        } else if (!yx_put_bytes(text, source.data, source.used)) goto fast_done;
         ok = true;
     fast_done:
         yx_fast_program_destroy(p);
@@ -1380,22 +1174,17 @@ static bool yx_chain_decode_frame(const yx_chain_archive *a, size_t index, size_
          * FastVM leaves when it rejects the pieces it describes. */
         size_t candidates[3] = {begin, 0, 0}, candidate_count = 1, at = begin;
         for (unsigned sequence = 0; sequence < 2; ++sequence) {
-            if (at >= a->code_length || a->code[at] < 1 || a->code[at] > 7)
-                break;
+            if (at >= a->code_length || a->code[at] < 1 || a->code[at] > 7) break;
             yx_fast_program *probe = calloc(1, sizeof(*probe));
-            if (!probe)
-                goto done;
-            bool parsed = yx_fast_read_sequence(probe, a->code, a->code_length, &at) &&
-                          at < a->code_length;
+            if (!probe) goto done;
+            bool parsed = yx_fast_read_sequence(probe, a->code, a->code_length, &at) && at < a->code_length;
             yx_fast_program_destroy(probe);
             bool unused = parsed;
             for (size_t i = 0; i < count && unused; ++i) {
                 const yx_archive_regexp_atom *b = &a->atoms[first + i].atom;
-                if (!b->has_forward || !b->has_backward || b->forward < at || b->backward < at)
-                    unused = false;
+                if (!b->has_forward || !b->has_backward || b->forward < at || b->backward < at) unused = false;
             }
-            if (!unused)
-                break;
+            if (!unused) break;
             candidates[candidate_count++] = at;
         }
         bool decoded = false;
@@ -1403,39 +1192,32 @@ static bool yx_chain_decode_frame(const yx_chain_archive *a, size_t index, size_
         for (size_t c = candidate_count; c-- > 0 && !decoded;) {
             free(source.data);
             source = (yx_writer){0};
-            decoded = yx_chain_thompson_programs(a, first, count, candidates[c], &end, &source) &&
-                      (!c || yx_chain_residue_consistent(a, begin, candidates[1], candidates[c]));
+            decoded =
+                yx_chain_thompson_programs(a, first, count, candidates[c], &end, &source) && (!c || yx_chain_residue_consistent(a, begin, candidates[1], candidates[c]));
             start = candidates[c];
         }
-        if (!decoded)
-            goto done;
+        if (!decoded) goto done;
         yx_writer rolled = {0};
         if (yx_chain_rolled_piece(a, first, count, start, end, &source, &rolled)) {
             free(source.data);
             source = rolled;
-        } else
-            free(rolled.data);
+        } else free(rolled.data);
         if (a->kind == 1) {
-            if (!yx_put_u8(&source, 0))
-                goto done;
+            if (!yx_put_u8(&source, 0)) goto done;
             yx_tr_parser parser = {.text = source.data, .length = source.used - 1, .literal_alternations = true};
             yx_tr_node *n = yx_tr_expression(&parser);
             yx_writer hex = {0};
-            ok = n && !parser.failed && !parser.oom && parser.at == parser.length &&
-                 yx_tr_hex_source(n, &hex) && yx_chain_hex_edges(&hex, text);
+            ok = n && !parser.failed && !parser.oom && parser.at == parser.length && yx_tr_hex_source(n, &hex) && yx_chain_hex_edges(&hex, text);
             free(hex.data);
             yx_tr_destroy(n);
-        } else
-            ok = yx_put_bytes(text, source.data, source.used);
+        } else ok = yx_put_bytes(text, source.data, source.used);
     }
 done:
     free(source.data);
-    if (ok)
-        *cursor = end;
+    if (ok) *cursor = end;
     return ok;
 }
-static bool yx_chain_normalize_path(const yx_chain_archive *a, size_t head, yx_chain_archive *out,
-                                    yx_writer *storage)
+static bool yx_chain_normalize_path(const yx_chain_archive *a, size_t head, yx_chain_archive *out, yx_writer *storage)
 {
     memset(out, 0, sizeof(*out));
     out->kind = a->kind;
@@ -1453,150 +1235,111 @@ static bool yx_chain_normalize_path(const yx_chain_archive *a, size_t head, yx_c
         f->flags &= ~1u;
         f->previous = index ? index - 1 : 0;
         size_t first = 0;
-        while (first < a->atom_count && a->atoms[first].frame < current)
-            ++first;
-        if (first == a->atom_count || a->atoms[first].frame != current)
-            return false;
+        while (first < a->atom_count && a->atoms[first].frame < current) ++first;
+        if (first == a->atom_count || a->atoms[first].frame != current) return false;
         bool literal = f->variant == 2 || f->variant == 3;
         if (literal) {
             size_t cursor = 0, atom_at = first;
             yx_writer ignored = {0};
             bool valid = yx_chain_decode_frame(a, current, &cursor, &atom_at, &ignored);
             free(ignored.data);
-            if (!valid)
-                return false;
+            if (!valid) return false;
             if (wide) {
-                if (f->literal_length % 2)
-                    return false;
+                if (f->literal_length % 2) return false;
                 for (size_t j = 0; j < f->literal_length; j += 2) {
-                    if (f->literal[j + 1] || !yx_put_u8(&storage[index], f->literal[j]))
-                        return false;
+                    if (f->literal[j + 1] || !yx_put_u8(&storage[index], f->literal[j])) return false;
                 }
                 f->literal = storage[index].data;
                 f->literal_length = storage[index].used;
             }
             size_t start = out->atom_count;
-            if (!yx_literal_frame_atoms(out, index))
-                return false;
+            if (!yx_literal_frame_atoms(out, index)) return false;
             if (f->flags & 24u)
-                for (size_t j = start; j < out->atom_count; ++j)
-                    out->atoms[j].atom.exact = false;
+                for (size_t j = start; j < out->atom_count; ++j) out->atoms[j].atom.exact = false;
         } else
             for (size_t j = first; j < a->atom_count && a->atoms[j].frame == current; ++j) {
                 yx_archive_regexp_atom atom = a->atoms[j].atom;
                 if (wide) {
-                    if (atom.length % 2 || atom.backtrack % 2)
-                        return false;
+                    if (atom.length % 2 || atom.backtrack % 2) return false;
                     for (size_t k = 0; k < atom.length; k += 2) {
-                        if (atom.bytes[k + 1])
-                            return false;
+                        if (atom.bytes[k + 1]) return false;
                         atom.bytes[k / 2] = atom.bytes[k];
                     }
                     atom.length /= 2;
                     atom.backtrack /= 2;
                 }
-                if (!yx_chain_add_atom(out, index, &atom))
-                    return false;
+                if (!yx_chain_add_atom(out, index, &atom)) return false;
             }
         size_t next = SIZE_MAX;
         for (size_t j = current + 1; j < a->frame_count; ++j)
-            if ((a->frames[j].variant == 3 || a->frames[j].variant == 6) &&
-                a->frames[j].previous == current) {
+            if ((a->frames[j].variant == 3 || a->frames[j].variant == 6) && a->frames[j].previous == current) {
                 next = j;
                 break;
             }
-        if (next == SIZE_MAX)
-            break;
+        if (next == SIZE_MAX) break;
         current = next;
     }
     return true;
 }
 static bool yx_chain_same_paths(const yx_chain_archive *a, const yx_chain_archive *b)
 {
-    if (a->frame_count != b->frame_count || a->atom_count != b->atom_count)
-        return false;
+    if (a->frame_count != b->frame_count || a->atom_count != b->atom_count) return false;
     for (size_t i = 0; i < a->frame_count; ++i) {
         const yx_chain_frame *x = &a->frames[i], *y = &b->frames[i];
-        if (x->variant != y->variant || x->flags != y->flags || x->minimum != y->minimum ||
-            x->maximum != y->maximum || x->finite_maximum != y->finite_maximum ||
-            x->literal_length != y->literal_length ||
-            (x->literal_length && memcmp(x->literal, y->literal, x->literal_length)))
+        if (x->variant != y->variant || x->flags != y->flags || x->minimum != y->minimum || x->maximum != y->maximum || x->finite_maximum != y->finite_maximum ||
+            x->literal_length != y->literal_length || (x->literal_length && memcmp(x->literal, y->literal, x->literal_length)))
             return false;
     }
     for (size_t i = 0; i < a->atom_count; ++i)
-        if (a->atoms[i].frame != b->atoms[i].frame ||
-            !yx_chain_atom_equal(&a->atoms[i].atom, &b->atoms[i].atom, 0))
-            return false;
+        if (a->atoms[i].frame != b->atoms[i].frame || !yx_chain_atom_equal(&a->atoms[i].atom, &b->atoms[i].atom, 0)) return false;
     return true;
 }
-static bool yx_literal_decode_source(const yx_chain_archive *a, yx_writer *source, bool *wide,
-                                     bool *ascii_wide)
+static bool yx_literal_decode_source(const yx_chain_archive *a, yx_writer *source, bool *wide, bool *ascii_wide)
 {
-    if (a->code_length)
-        return false;
+    if (a->code_length) return false;
     yx_chain_archive expected = *a;
     expected.atom_count = 0;
     expected.atoms = calloc(YX_CHAIN_MAX_ATOMS, sizeof(*expected.atoms));
-    if (!expected.atoms)
-        return false;
+    if (!expected.atoms) return false;
     bool valid = true;
-    for (size_t i = 0; i < a->frame_count && valid; ++i)
-        valid = yx_literal_frame_atoms(&expected, i);
-    if (expected.atom_count != a->atom_count)
-        valid = false;
+    for (size_t i = 0; i < a->frame_count && valid; ++i) valid = yx_literal_frame_atoms(&expected, i);
+    if (expected.atom_count != a->atom_count) valid = false;
     for (size_t i = 0; i < a->atom_count && valid; ++i)
-        if (expected.atoms[i].frame != a->atoms[i].frame ||
-            !yx_chain_atom_equal(&a->atoms[i].atom, &expected.atoms[i].atom, 0))
-            valid = false;
+        if (expected.atoms[i].frame != a->atoms[i].frame || !yx_chain_atom_equal(&a->atoms[i].atom, &expected.atoms[i].atom, 0)) valid = false;
     free(expected.atoms);
-    if (!valid)
-        return false;
+    if (!valid) return false;
     *wide = (a->frames[0].flags & 1u) != 0;
     *ascii_wide = false;
     for (size_t i = 1; i < a->frame_count; ++i)
-        if ((a->frames[i].flags & 1u) != (*wide ? 1u : 0u))
-            *ascii_wide = true;
-    if (*ascii_wide && (*wide || a->frame_count % 2))
-        return false;
+        if ((a->frames[i].flags & 1u) != (*wide ? 1u : 0u)) *ascii_wide = true;
+    if (*ascii_wide && (*wide || a->frame_count % 2)) return false;
     size_t stride = *ascii_wide ? 2 : 1, alternatives = a->frame_count / stride;
-    if (a->kind == 1 && alternatives > 1 && !yx_tr_text(source, "("))
-        return false;
+    if (a->kind == 1 && alternatives > 1 && !yx_tr_text(source, "(")) return false;
     for (size_t i = 0; i < a->frame_count; i += stride) {
         const yx_chain_frame *f = &a->frames[i];
-        if ((f->flags & ~1u) != (a->frames[0].flags & ~1u) || (f->flags & 1u) != (*wide ? 1u : 0u))
-            return false;
+        if ((f->flags & ~1u) != (a->frames[0].flags & ~1u) || (f->flags & 1u) != (*wide ? 1u : 0u)) return false;
         if (*ascii_wide) {
             const yx_chain_frame *w = &a->frames[i + 1];
-            if (w->flags != (f->flags | 1u) || w->literal_length != f->literal_length * 2)
-                return false;
+            if (w->flags != (f->flags | 1u) || w->literal_length != f->literal_length * 2) return false;
             for (size_t j = 0; j < f->literal_length; ++j)
-                if (w->literal[j * 2] != f->literal[j] || w->literal[j * 2 + 1])
-                    return false;
+                if (w->literal[j * 2] != f->literal[j] || w->literal[j * 2 + 1]) return false;
         }
-        if (i && !yx_tr_text(source, "|"))
-            return false;
-        if (*wide && f->literal_length % 2)
-            return false;
+        if (i && !yx_tr_text(source, "|")) return false;
+        if (*wide && f->literal_length % 2) return false;
         for (size_t j = 0; j < f->literal_length; j += *wide ? 2 : 1) {
-            if (*wide && f->literal[j + 1])
-                return false;
+            if (*wide && f->literal[j + 1]) return false;
             if (a->kind == 1) {
                 char text[4];
                 snprintf(text, sizeof(text), "%02X ", f->literal[j]);
-                if (!yx_tr_text(source, text))
-                    return false;
-            } else if (f->literal[j] >= 32 && f->literal[j] < 127 &&
-                       !strchr(".\\/[](){}?*+^$|", f->literal[j])) {
-                if (!yx_put_u8(source, f->literal[j]))
-                    return false;
-            } else if (!yx_tr_hex_text(source, f->literal[j]))
-                return false;
+                if (!yx_tr_text(source, text)) return false;
+            } else if (f->literal[j] >= 32 && f->literal[j] < 127 && !strchr(".\\/[](){}?*+^$|", f->literal[j])) {
+                if (!yx_put_u8(source, f->literal[j])) return false;
+            } else if (!yx_tr_hex_text(source, f->literal[j])) return false;
         }
     }
     return a->kind != 1 || alternatives <= 1 || yx_tr_text(source, ")");
 }
-static yx_ser_result yx_decode_chained_pattern(const uint8_t *data, size_t length,
-                                               yx_ser_rule **rules, size_t *rule_count)
+static yx_ser_result yx_decode_chained_pattern(const uint8_t *data, size_t length, yx_ser_rule **rules, size_t *rule_count)
 {
     yx_chain_archive a;
     yx_writer source = {0}, *normalized_literals[2] = {NULL, NULL};
@@ -1605,13 +1348,11 @@ static yx_ser_result yx_decode_chained_pattern(const uint8_t *data, size_t lengt
     uint8_t *expected = NULL;
     size_t expected_length = 0;
     yx_ser_result result = YX_SER_UNSUPPORTED;
-    if (!yx_chain_read(data, length, &a))
-        return result;
+    if (!yx_chain_read(data, length, &a)) return result;
     size_t cursor = 0, atom_at = 0;
     bool wide = false, ascii_wide = false;
     if (a.literal_only) {
-        if (!yx_literal_decode_source(&a, &source, &wide, &ascii_wide))
-            goto done;
+        if (!yx_literal_decode_source(&a, &source, &wide, &ascii_wide)) goto done;
         atom_at = a.atom_count;
     } else if (a.head_count == 2 || (a.frames[a.heads[0]].flags & 1u)) {
         normalized = calloc(2, sizeof(*normalized));
@@ -1622,11 +1363,13 @@ static yx_ser_result yx_decode_chained_pattern(const uint8_t *data, size_t lengt
         for (size_t h = 0; h < a.head_count; ++h) {
             if (a.frame_count > SIZE_MAX / sizeof(**normalized_literals)) goto done;
             normalized_literals[h] = calloc(a.frame_count, sizeof(**normalized_literals));
-            if (!normalized_literals[h]) { result = YX_SER_NO_MEMORY; goto done; }
+            if (!normalized_literals[h]) {
+                result = YX_SER_NO_MEMORY;
+                goto done;
+            }
             if (!yx_chain_normalize_path(&a, a.heads[h], &normalized[h], normalized_literals[h])) goto done;
         }
-        if (a.head_count == 2 && !yx_chain_same_paths(&normalized[0], &normalized[1]))
-            goto done;
+        if (a.head_count == 2 && !yx_chain_same_paths(&normalized[0], &normalized[1])) goto done;
         view = &normalized[0];
         wide = true;
         ascii_wide = a.head_count == 2;
@@ -1636,37 +1379,26 @@ static yx_ser_result yx_decode_chained_pattern(const uint8_t *data, size_t lengt
             char gap[96];
             const yx_chain_frame *f = &view->frames[i];
             if (a.kind == 1) {
-                if (yx_chain_unbounded(f))
-                    snprintf(gap, sizeof(gap), " [%u-] ", f->minimum);
-                else
-                    snprintf(gap, sizeof(gap), " [%u-%u] ", f->minimum, f->maximum);
+                if (yx_chain_unbounded(f)) snprintf(gap, sizeof(gap), " [%u-] ", f->minimum);
+                else snprintf(gap, sizeof(gap), " [%u-%u] ", f->minimum, f->maximum);
             } else {
-                if (yx_chain_unbounded(f))
-                    snprintf(gap, sizeof(gap), ".{%u,}%s", f->minimum, (f->flags & 32u) ? "" : "?");
-                else
-                    snprintf(gap, sizeof(gap), ".{%u,%u}%s", f->minimum, f->maximum,
-                             (f->flags & 32u) ? "" : "?");
+                if (yx_chain_unbounded(f)) snprintf(gap, sizeof(gap), ".{%u,}%s", f->minimum, (f->flags & 32u) ? "" : "?");
+                else snprintf(gap, sizeof(gap), ".{%u,%u}%s", f->minimum, f->maximum, (f->flags & 32u) ? "" : "?");
             }
-            if (!yx_tr_text(&source, gap))
-                goto done;
+            if (!yx_tr_text(&source, gap)) goto done;
         }
-        if (!yx_chain_decode_frame(view, i, &cursor, &atom_at, &source))
-            goto done;
+        if (!yx_chain_decode_frame(view, i, &cursor, &atom_at, &source)) goto done;
     }
-    if (cursor != view->code_length || atom_at != view->atom_count)
-        goto done;
+    if (cursor != view->code_length || atom_at != view->atom_count) goto done;
     for (unsigned order = 0; order < 2; ++order) {
         uint8_t wasm[sizeof(yx_single_text_pattern_wasm)];
         memcpy(wasm, yx_single_text_pattern_wasm, sizeof(wasm));
-        if (order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true))
-            continue;
+        if (order && !yx_reorder_pattern_wasm(wasm, sizeof(wasm), true)) continue;
         a.wasm = wasm;
         a.wasm_length = sizeof(wasm);
         result = yx_chain_envelope(&a, &expected, &expected_length);
-        if (result != YX_SER_SUCCESS)
-            goto done;
-        bool matches =
-            expected_length == a.archive_length && !memcmp(data, expected, expected_length);
+        if (result != YX_SER_SUCCESS) goto done;
+        bool matches = expected_length == a.archive_length && !memcmp(data, expected, expected_length);
         free(expected);
         expected = NULL;
         if (!matches) {
@@ -1709,7 +1441,8 @@ done:
         free(normalized);
     }
     for (size_t h = 0; h < 2; ++h) {
-        if (normalized_literals[h]) for (size_t i = 0; i < a.frame_count; ++i) free(normalized_literals[h][i].data);
+        if (normalized_literals[h])
+            for (size_t i = 0; i < a.frame_count; ++i) free(normalized_literals[h][i].data);
         free(normalized_literals[h]);
     }
     free(expected);

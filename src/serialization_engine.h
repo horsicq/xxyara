@@ -35,7 +35,8 @@ static bool yx_se_any_byte(const yx_tr_node *node)
     /* re::hir::any_byte also accepts a Unicode class of every scalar. */
     if (node && node->kind == YX_TR_SCALAR_CLASS) return yx_u8_any(node);
     if (!node || node->kind != YX_TR_CLASS || node->unicode_class) return false;
-    for (unsigned b = 0; b < 256; ++b) if (!yx_tr_has(node->bitmap, b)) return false;
+    for (unsigned b = 0; b < 256; ++b)
+        if (!yx_tr_has(node->bitmap, b)) return false;
     return true;
 }
 
@@ -43,31 +44,31 @@ static uint64_t yx_se_minimum_length(const yx_tr_node *node)
 {
     uint64_t total = 0, best = UINT64_MAX;
     switch (node->kind) {
-    case YX_TR_LITERAL: return node->length;
-    case YX_TR_CLASS: return 1;
-    /* ClassUnicode::minimum_len: the UTF-8 length of its first scalar. */
-    case YX_TR_SCALAR_CLASS: {
-        uint32_t first = node->length ? ((const yx_re_range *)node->bytes)[0].first : 0;
-        return first < 0x80 ? 1 : first < 0x800 ? 2 : first < 0x10000 ? 3 : 4;
-    }
-    case YX_TR_REPEAT: {
-        uint64_t child = node->count ? yx_se_minimum_length(node->children[0]) : 0;
-        return child && node->minimum > UINT64_MAX / child ? UINT64_MAX : child * node->minimum;
-    }
-    case YX_TR_CONCAT:
-        for (size_t i = 0; i < node->count; ++i) {
-            uint64_t child = yx_se_minimum_length(node->children[i]);
-            total = child > UINT64_MAX - total ? UINT64_MAX : total + child;
+        case YX_TR_LITERAL: return node->length;
+        case YX_TR_CLASS: return 1;
+        /* ClassUnicode::minimum_len: the UTF-8 length of its first scalar. */
+        case YX_TR_SCALAR_CLASS: {
+            uint32_t first = node->length ? ((const yx_re_range *)node->bytes)[0].first : 0;
+            return first < 0x80 ? 1 : first < 0x800 ? 2 : first < 0x10000 ? 3 : 4;
         }
-        return total;
-    case YX_TR_ALT:
-        for (size_t i = 0; i < node->count; ++i) {
-            uint64_t child = yx_se_minimum_length(node->children[i]);
-            if (child < best) best = child;
+        case YX_TR_REPEAT: {
+            uint64_t child = node->count ? yx_se_minimum_length(node->children[0]) : 0;
+            return child && node->minimum > UINT64_MAX / child ? UINT64_MAX : child * node->minimum;
         }
-        return node->count ? best : 0;
-    case YX_TR_CAPTURE: return node->count ? yx_se_minimum_length(node->children[0]) : 0;
-    default: return 0;
+        case YX_TR_CONCAT:
+            for (size_t i = 0; i < node->count; ++i) {
+                uint64_t child = yx_se_minimum_length(node->children[i]);
+                total = child > UINT64_MAX - total ? UINT64_MAX : total + child;
+            }
+            return total;
+        case YX_TR_ALT:
+            for (size_t i = 0; i < node->count; ++i) {
+                uint64_t child = yx_se_minimum_length(node->children[i]);
+                if (child < best) best = child;
+            }
+            return node->count ? best : 0;
+        case YX_TR_CAPTURE: return node->count ? yx_se_minimum_length(node->children[0]) : 0;
+        default: return 0;
     }
 }
 
@@ -86,7 +87,9 @@ static bool yx_se_has_large_gap(const yx_tr_node *root)
             uint64_t maximum = yx_tr_unbounded(item) ? UINT32_MAX : item->maximum;
             if (chunks && maximum > 200) {
                 if (chunk_minimum >= 2) {
-                    ++pieces; chunks = false; chunk_minimum = 0;
+                    ++pieces;
+                    chunks = false;
+                    chunk_minimum = 0;
                     continue;
                 }
                 /* The short chunk and the gap merge into the next chunk. */
@@ -116,27 +119,33 @@ static bool yx_se_alternation_literal(const yx_tr_node *node)
 static bool yx_se_masked_literal(const yx_tr_node *node)
 {
     switch (node->kind) {
-    case YX_TR_LITERAL: return true;
-    case YX_TR_REPEAT:
-        /* Only fixed any-byte gaps of at most PATTERN_CHAINING_THRESHOLD
-         * (200) bytes become mask bytes; a longer one is a FastVM jump,
-         * which its 4096-byte scan limit bounds. */
-        return node->count && !yx_tr_unbounded(node) && node->minimum == node->maximum &&
-               node->minimum <= 200 && yx_se_any_byte(node->children[0]);
-    case YX_TR_CONCAT: case YX_TR_CAPTURE:
-        for (size_t i = 0; i < node->count; ++i)
-            if (!yx_se_masked_literal(node->children[i])) return false;
-        return true;
-    case YX_TR_CLASS: {
-        unsigned first = 256, last = 0, count = 0, bits = 0;
-        if (node->unicode_class) return false;
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) { if (first == 256) first = b; last = b; ++count; }
-        if (!count) return false;
-        for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b) && (b & first) != first) return false;
-        for (unsigned k = 0; k < 8; ++k) bits += ((first ^ last) >> k) & 1u;
-        return (1u << bits) == count;
-    }
-    default: return false;
+        case YX_TR_LITERAL: return true;
+        case YX_TR_REPEAT:
+            /* Only fixed any-byte gaps of at most PATTERN_CHAINING_THRESHOLD
+             * (200) bytes become mask bytes; a longer one is a FastVM jump,
+             * which its 4096-byte scan limit bounds. */
+            return node->count && !yx_tr_unbounded(node) && node->minimum == node->maximum && node->minimum <= 200 && yx_se_any_byte(node->children[0]);
+        case YX_TR_CONCAT:
+        case YX_TR_CAPTURE:
+            for (size_t i = 0; i < node->count; ++i)
+                if (!yx_se_masked_literal(node->children[i])) return false;
+            return true;
+        case YX_TR_CLASS: {
+            unsigned first = 256, last = 0, count = 0, bits = 0;
+            if (node->unicode_class) return false;
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(node->bitmap, b)) {
+                    if (first == 256) first = b;
+                    last = b;
+                    ++count;
+                }
+            if (!count) return false;
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(node->bitmap, b) && (b & first) != first) return false;
+            for (unsigned k = 0; k < 8; ++k) bits += ((first ^ last) >> k) & 1u;
+            return (1u << bits) == count;
+        }
+        default: return false;
     }
 }
 
@@ -150,8 +159,10 @@ static bool yx_se_atoms(yx_rx_sub *sub, const yx_archive_regexp_atom *atoms, siz
         yx_rx_atom *to = &sub->atoms[i];
         if (from->length > (wide ? 4u : 8u)) return false;
         for (size_t j = 0; j < from->length; ++j) {
-            if (wide) { to->bytes[2 * j] = from->bytes[j]; to->bytes[2 * j + 1] = 0; }
-            else to->bytes[j] = from->bytes[j];
+            if (wide) {
+                to->bytes[2 * j] = from->bytes[j];
+                to->bytes[2 * j + 1] = 0;
+            } else to->bytes[j] = from->bytes[j];
         }
         to->length = (uint8_t)(from->length * (wide ? 2 : 1));
         to->backtrack = (size_t)from->backtrack * (wide ? 2 : 1);
@@ -181,10 +192,16 @@ static bool yx_ft_class(yx_ft_splitter *s, const yx_tr_node *node)
     yx_fast_program *p = s->p;
     unsigned first = 256, last = 0, count = 0, bits = 0;
     bool cube = true;
-    for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b)) { if (first == 256) first = b; last = b; ++count; }
+    for (unsigned b = 0; b < 256; ++b)
+        if (yx_tr_has(node->bitmap, b)) {
+            if (first == 256) first = b;
+            last = b;
+            ++count;
+        }
     if (!count) return false;
     /* class_to_masked_byte */
-    for (unsigned b = 0; b < 256; ++b) if (yx_tr_has(node->bitmap, b) && (b & first) != first) cube = false;
+    for (unsigned b = 0; b < 256; ++b)
+        if (yx_tr_has(node->bitmap, b) && (b & first) != first) cube = false;
     for (unsigned k = 0; k < 8; ++k) bits += ((first ^ last) >> k) & 1u;
     if (cube && (1u << bits) == count) return yx_fast_append(p, (uint8_t)first, (uint8_t)~(first ^ last));
     if (s->in_alternation) return false;
@@ -193,15 +210,24 @@ static bool yx_ft_class(yx_ft_splitter *s, const yx_tr_node *node)
     size_t n = 0;
     bool ok = items != NULL;
     for (unsigned b = 0; ok && b < 256;) {
-        if (!yx_tr_has(node->bitmap, b)) { ++b; continue; }
+        if (!yx_tr_has(node->bitmap, b)) {
+            ++b;
+            continue;
+        }
         unsigned end = b, range_bits = 0;
         while (end + 1 < 256 && yx_tr_has(node->bitmap, end + 1)) ++end;
         for (unsigned k = 0; k < 8; ++k) range_bits += ((b ^ end) >> k) & 1u;
         if ((b & end) != b || (1u << range_bits) != end - b + 1) ok = false;
         else {
-            items[n].bytes = malloc(1); items[n].mask = malloc(1); items[n].length = 1; items[n].force_masked = true;
+            items[n].bytes = malloc(1);
+            items[n].mask = malloc(1);
+            items[n].length = 1;
+            items[n].force_masked = true;
             if (!items[n].bytes || !items[n].mask) ok = false;
-            else { items[n].bytes[0] = (uint8_t)b; items[n].mask[0] = (uint8_t)~(b ^ end); }
+            else {
+                items[n].bytes[0] = (uint8_t)b;
+                items[n].mask[0] = (uint8_t)~(b ^ end);
+            }
             ++n;
         }
         b = end + 1;
@@ -212,7 +238,9 @@ static bool yx_ft_class(yx_ft_splitter *s, const yx_tr_node *node)
         return false;
     }
     yx_fast_piece *piece = &p->pieces[p->count++];
-    piece->kind = 7; piece->alternatives = items; piece->alternative_count = n;
+    piece->kind = 7;
+    piece->alternatives = items;
+    piece->alternative_count = n;
     return true;
 }
 
@@ -224,8 +252,12 @@ static bool yx_ft_take_alternative(yx_ft_splitter *s)
     literal->length = p->bytes.used;
     literal->bytes = p->bytes.used ? p->bytes.data : malloc(1);
     literal->mask = p->bytes.used ? p->mask.data : malloc(1);
-    if (!p->bytes.used) { free(p->bytes.data); free(p->mask.data); }
-    p->bytes = (yx_writer){0}; p->mask = (yx_writer){0};
+    if (!p->bytes.used) {
+        free(p->bytes.data);
+        free(p->mask.data);
+    }
+    p->bytes = (yx_writer){0};
+    p->mask = (yx_writer){0};
     return literal->bytes && literal->mask;
 }
 
@@ -234,53 +266,61 @@ static bool yx_ft_split(yx_ft_splitter *s, const yx_tr_node *node, size_t depth)
     yx_fast_program *p = s->p;
     if (depth > 250) return false;
     switch (node->kind) {
-    case YX_TR_EMPTY: return true;
-    case YX_TR_LITERAL:
-        for (size_t i = 0; i < node->length; ++i) if (!yx_fast_append(p, node->bytes[i], 255)) return false;
-        return true;
-    case YX_TR_CLASS:
-        if (s->in_repetition) return true;
-        return !node->unicode_class && yx_ft_class(s, node);
-    /* A Unicode class is FastIncompatible unless it is the gap of a
-     * repetition, which the repetition has checked. */
-    case YX_TR_SCALAR_CLASS: return s->in_repetition;
-    case YX_TR_LOOK: return false;
-    case YX_TR_CAPTURE: case YX_TR_CONCAT:
-        for (size_t i = 0; i < node->count; ++i) if (!yx_ft_split(s, node->children[i], depth + 1)) return false;
-        return true;
-    case YX_TR_REPEAT: {
-        if (s->in_repetition || s->in_alternation || !node->count) return false;
-        const yx_tr_node *sub = node->children[0];
-        bool newline, unbounded = yx_tr_unbounded(node);
-        if (!yx_tr_gap_class(sub, &newline)) return false;
-        if (!yx_fast_jump(p, node->minimum, unbounded ? UINT32_MAX : node->maximum, newline, unbounded)) return false;
-        s->in_repetition = true;
-        bool ok = yx_ft_split(s, sub, depth + 1);
-        s->in_repetition = false;
-        return ok;
-    }
-    case YX_TR_ALT: {
-        if (s->in_repetition || s->in_alternation || node->count > 255 || !yx_fast_flush(p)) return false;
-        s->in_alternation = true; s->alternative_count = 0;
-        s->alternatives = calloc(256, sizeof(*s->alternatives));
-        if (!s->alternatives) return false;
-        bool ok = true;
-        for (size_t i = 0; ok && i < node->count; ++i) {
-            if (i) ok = yx_ft_take_alternative(s);
-            if (ok) ok = yx_ft_split(s, node->children[i], depth + 1);
+        case YX_TR_EMPTY: return true;
+        case YX_TR_LITERAL:
+            for (size_t i = 0; i < node->length; ++i)
+                if (!yx_fast_append(p, node->bytes[i], 255)) return false;
+            return true;
+        case YX_TR_CLASS:
+            if (s->in_repetition) return true;
+            return !node->unicode_class && yx_ft_class(s, node);
+        /* A Unicode class is FastIncompatible unless it is the gap of a
+         * repetition, which the repetition has checked. */
+        case YX_TR_SCALAR_CLASS: return s->in_repetition;
+        case YX_TR_LOOK: return false;
+        case YX_TR_CAPTURE:
+        case YX_TR_CONCAT:
+            for (size_t i = 0; i < node->count; ++i)
+                if (!yx_ft_split(s, node->children[i], depth + 1)) return false;
+            return true;
+        case YX_TR_REPEAT: {
+            if (s->in_repetition || s->in_alternation || !node->count) return false;
+            const yx_tr_node *sub = node->children[0];
+            bool newline, unbounded = yx_tr_unbounded(node);
+            if (!yx_tr_gap_class(sub, &newline)) return false;
+            if (!yx_fast_jump(p, node->minimum, unbounded ? UINT32_MAX : node->maximum, newline, unbounded)) return false;
+            s->in_repetition = true;
+            bool ok = yx_ft_split(s, sub, depth + 1);
+            s->in_repetition = false;
+            return ok;
         }
-        if (ok) ok = yx_ft_take_alternative(s);
-        if (ok && !yx_fast_piece_reserve(p)) ok = false;
-        if (ok) {
-            yx_fast_piece *piece = &p->pieces[p->count++];
-            piece->kind = 7; piece->alternatives = s->alternatives; piece->alternative_count = s->alternative_count;
-        } else {
-            for (size_t i = 0; i < s->alternative_count; ++i) yx_fast_literal_destroy(&s->alternatives[i]);
-            free(s->alternatives);
+        case YX_TR_ALT: {
+            if (s->in_repetition || s->in_alternation || node->count > 255 || !yx_fast_flush(p)) return false;
+            s->in_alternation = true;
+            s->alternative_count = 0;
+            s->alternatives = calloc(256, sizeof(*s->alternatives));
+            if (!s->alternatives) return false;
+            bool ok = true;
+            for (size_t i = 0; ok && i < node->count; ++i) {
+                if (i) ok = yx_ft_take_alternative(s);
+                if (ok) ok = yx_ft_split(s, node->children[i], depth + 1);
+            }
+            if (ok) ok = yx_ft_take_alternative(s);
+            if (ok && !yx_fast_piece_reserve(p)) ok = false;
+            if (ok) {
+                yx_fast_piece *piece = &p->pieces[p->count++];
+                piece->kind = 7;
+                piece->alternatives = s->alternatives;
+                piece->alternative_count = s->alternative_count;
+            } else {
+                for (size_t i = 0; i < s->alternative_count; ++i) yx_fast_literal_destroy(&s->alternatives[i]);
+                free(s->alternatives);
+            }
+            s->alternatives = NULL;
+            s->alternative_count = 0;
+            s->in_alternation = false;
+            return ok;
         }
-        s->alternatives = NULL; s->alternative_count = 0; s->in_alternation = false;
-        return ok;
-    }
     }
     return false;
 }
@@ -317,7 +357,12 @@ char *yx_ser_gap_head_regexp(const YRX_PATTERN *pattern)
         if (item->kind == YX_TR_REPEAT && item->count && yx_se_any_byte(item->children[0]) && chunks) {
             uint64_t maximum = yx_tr_unbounded(item) ? UINT32_MAX : item->maximum;
             if (maximum > 200) {
-                if (chunk_minimum >= 2) { ++pieces; chunks = false; chunk_minimum = 0; continue; }
+                if (chunk_minimum >= 2) {
+                    ++pieces;
+                    chunks = false;
+                    chunk_minimum = 0;
+                    continue;
+                }
                 chunk_minimum += yx_se_minimum_length(item);
                 continue;
             }
@@ -342,14 +387,12 @@ char *yx_ser_gap_head_regexp(const YRX_PATTERN *pattern)
         yx_tr_node *rest = yx_tr_expression(&prefix);
         /* The head keeps every child but the gap. */
         bool complete = rest && !prefix.failed && !prefix.oom && prefix.at == k &&
-            (root->count == 2 ? rest->kind == root->children[0]->kind :
-             rest->kind == YX_TR_CONCAT && rest->count == root->count - 1);
+                        (root->count == 2 ? rest->kind == root->children[0]->kind : rest->kind == YX_TR_CONCAT && rest->count == root->count - 1);
         /* The head keeps the pattern's greediness (set_greedy), which a
          * regexp or masked-literal head carries as its GreedyRegexp flag. A
          * head without quantifiers of a greedy pattern gets a greedy empty
          * repetition, which adds nothing to the HIR. */
-        bool marker = complete && parser.saw_greedy && !parser.saw_lazy && !prefix.saw_greedy &&
-                      !yx_se_alternation_literal(rest);
+        bool marker = complete && parser.saw_greedy && !parser.saw_lazy && !prefix.saw_greedy && !yx_se_alternation_literal(rest);
         yx_tr_destroy(rest);
         if (marker) {
             /* In the gap's place, where the gap's own flags apply: text
@@ -358,7 +401,10 @@ char *yx_ser_gap_head_regexp(const YRX_PATTERN *pattern)
             static const char mark[] = "(?:){1}";
             size_t n = sizeof(mark) - 1;
             char *marked = realloc(candidate, k + n + 1);
-            if (!marked) { free(candidate); goto done; }
+            if (!marked) {
+                free(candidate);
+                goto done;
+            }
             memmove(marked + gap->start + n, marked + gap->start, k - gap->start + 1);
             memcpy(marked + gap->start, mark, n);
             candidate = marked;
@@ -389,17 +435,22 @@ static bool yx_ser_gap_heads(const YRX_RULES *rules, YRX_RULES *copy, bool *fail
                 size_t n = strlen(pattern->gap_head_regexp) + 1;
                 if (!(head = malloc(n))) goto failure;
                 memcpy(head, pattern->gap_head_regexp, n);
-            } else if (pattern->kind == YX_PATTERN_REGEX && pattern->regexp)
-                head = yx_ser_gap_head_regexp(pattern);
+            } else if (pattern->kind == YX_PATTERN_REGEX && pattern->regexp) head = yx_ser_gap_head_regexp(pattern);
             if (!head) continue;
             if (!copies) {
                 copies = malloc(rules->rule_count * sizeof(*copies));
-                if (!copies) { free(head); goto failure; }
+                if (!copies) {
+                    free(head);
+                    goto failure;
+                }
                 memcpy(copies, rules->rules, rules->rule_count * sizeof(*copies));
             }
             if (copies[i].patterns == rules->rules[i].patterns) {
                 YRX_PATTERN *patterns = malloc(rules->rules[i].pattern_count * sizeof(*patterns));
-                if (!patterns) { free(head); goto failure; }
+                if (!patterns) {
+                    free(head);
+                    goto failure;
+                }
                 memcpy(patterns, rules->rules[i].patterns, rules->rules[i].pattern_count * sizeof(*patterns));
                 copies[i].patterns = patterns;
             }
@@ -425,8 +476,7 @@ static void yx_ser_gap_heads_free(const YRX_RULES *rules, YRX_RULES *copy)
     for (size_t i = 0; i < rules->rule_count; ++i) {
         if (copy->rules[i].patterns == rules->rules[i].patterns) continue;
         for (size_t j = 0; j < rules->rules[i].pattern_count; ++j)
-            if (copy->rules[i].patterns[j].regexp != rules->rules[i].patterns[j].regexp)
-                free(copy->rules[i].patterns[j].regexp);
+            if (copy->rules[i].patterns[j].regexp != rules->rules[i].patterns[j].regexp) free(copy->rules[i].patterns[j].regexp);
         free(copy->rules[i].patterns);
     }
     free(copy->rules);
@@ -442,43 +492,57 @@ static void yx_ser_gap_heads_free(const YRX_RULES *rules, YRX_RULES *copy)
  * A copy of rules with the rewritten texts; false when nothing changes (or *failed on allocation failure).
  * Release it with yx_ser_spellings_free. */
 static int yx_ser_hex_digit(unsigned char c)
-{ return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
 /* NULL when the text stays as it is; *failed on allocation failure. */
 static char *yx_ser_scalar_regexp(const char *text, bool *failed)
 {
     if (!text || (!strstr(text, "\\x{") && !strstr(text, "\\u") && !strstr(text, "\\U"))) return NULL;
     yx_writer out = {0};
-    bool unicode[64]; size_t depth = 0, class_depth = 0; bool changed = false;
+    bool unicode[64];
+    size_t depth = 0, class_depth = 0;
+    bool changed = false;
     unicode[0] = false;
     for (const unsigned char *at = (const unsigned char *)text; *at;) {
         if (*at == '\\' && at[1]) {
-            uint32_t scalar = 0; size_t width = 0;
+            uint32_t scalar = 0;
+            size_t width = 0;
             if (!class_depth && !unicode[depth]) {
                 if (at[1] == 'x' && at[2] == '{') {
                     size_t i = 3, digits = 0;
                     while (yx_ser_hex_digit(at[i]) >= 0 && digits < 8) {
-                        scalar = scalar << 4 | (uint32_t)yx_ser_hex_digit(at[i]); ++i; ++digits;
+                        scalar = scalar << 4 | (uint32_t)yx_ser_hex_digit(at[i]);
+                        ++i;
+                        ++digits;
                     }
                     if (digits && at[i] == '}') width = i + 1;
                 } else if (at[1] == 'u' || at[1] == 'U') {
                     size_t digits = at[1] == 'u' ? 4 : 8, i = 0;
                     while (i < digits && yx_ser_hex_digit(at[2 + i]) >= 0) {
-                        scalar = scalar << 4 | (uint32_t)yx_ser_hex_digit(at[2 + i]); ++i;
+                        scalar = scalar << 4 | (uint32_t)yx_ser_hex_digit(at[2 + i]);
+                        ++i;
                     }
                     if (i == digits) width = 2 + digits;
                 }
             }
             if (width && scalar <= 0x10ffff && !(scalar >= 0xd800 && scalar <= 0xdfff)) {
-                uint8_t utf8[4]; size_t n = 0; char piece[8];
+                uint8_t utf8[4];
+                size_t n = 0;
+                char piece[8];
                 if (scalar < 0x80) utf8[n++] = (uint8_t)scalar;
                 else if (scalar < 0x800) {
-                    utf8[n++] = (uint8_t)(0xc0 | scalar >> 6); utf8[n++] = (uint8_t)(0x80 | (scalar & 0x3f));
+                    utf8[n++] = (uint8_t)(0xc0 | scalar >> 6);
+                    utf8[n++] = (uint8_t)(0x80 | (scalar & 0x3f));
                 } else if (scalar < 0x10000) {
-                    utf8[n++] = (uint8_t)(0xe0 | scalar >> 12); utf8[n++] = (uint8_t)(0x80 | (scalar >> 6 & 0x3f));
+                    utf8[n++] = (uint8_t)(0xe0 | scalar >> 12);
+                    utf8[n++] = (uint8_t)(0x80 | (scalar >> 6 & 0x3f));
                     utf8[n++] = (uint8_t)(0x80 | (scalar & 0x3f));
                 } else {
-                    utf8[n++] = (uint8_t)(0xf0 | scalar >> 18); utf8[n++] = (uint8_t)(0x80 | (scalar >> 12 & 0x3f));
-                    utf8[n++] = (uint8_t)(0x80 | (scalar >> 6 & 0x3f)); utf8[n++] = (uint8_t)(0x80 | (scalar & 0x3f));
+                    utf8[n++] = (uint8_t)(0xf0 | scalar >> 18);
+                    utf8[n++] = (uint8_t)(0x80 | (scalar >> 12 & 0x3f));
+                    utf8[n++] = (uint8_t)(0x80 | (scalar >> 6 & 0x3f));
+                    utf8[n++] = (uint8_t)(0x80 | (scalar & 0x3f));
                 }
                 if (n > 1 && !yx_put_bytes(&out, "(?:", 3)) goto no_memory;
                 for (size_t i = 0; i < n; ++i) {
@@ -486,7 +550,8 @@ static char *yx_ser_scalar_regexp(const char *text, bool *failed)
                     if (!yx_put_bytes(&out, piece, 4)) goto no_memory;
                 }
                 if (n > 1 && !yx_put_u8(&out, ')')) goto no_memory;
-                at += width; changed = true;
+                at += width;
+                changed = true;
                 continue;
             }
             if (!yx_put_bytes(&out, at, 2)) goto no_memory;
@@ -517,7 +582,8 @@ static char *yx_ser_scalar_regexp(const char *text, bool *failed)
             bool inherited = unicode[depth];
             if (at[1] == '?' && at[2] != 'P' && at[2] != '<' && at[2] != '\'') {
                 /* `(?flags)` changes the enclosing group, `(?flags:` opens one. */
-                size_t i = 2; bool value = inherited, negative = false;
+                size_t i = 2;
+                bool value = inherited, negative = false;
                 for (; at[i] && at[i] != ')' && at[i] != ':'; ++i) {
                     if (at[i] == '-') negative = true;
                     else if (at[i] == 'u') value = !negative;
@@ -533,7 +599,9 @@ static char *yx_ser_scalar_regexp(const char *text, bool *failed)
             }
             if (depth + 1 >= sizeof(unicode) / sizeof(unicode[0])) goto unchanged;
             unicode[++depth] = inherited;
-        } else if (*at == ')') { if (depth) --depth; }
+        } else if (*at == ')') {
+            if (depth) --depth;
+        }
         if (!yx_put_u8(&out, *at++)) goto no_memory;
     }
     if (!changed) goto unchanged;
@@ -546,7 +614,9 @@ unchanged:
     return NULL;
 }
 static bool yx_ser_ident_byte(unsigned char c)
-{ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 0x80; }
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 0x80;
+}
 static bool yx_ser_has_non_ascii(const char *text)
 {
     for (const unsigned char *at = (const unsigned char *)text; at && *at; ++at)
@@ -563,7 +633,8 @@ typedef struct yx_ser_variable_names {
 static char *yx_ser_ascii_variables(const yx_ser_variable_names *names, const char *text, bool *failed)
 {
     if (!text || !yx_ser_has_non_ascii(text)) return NULL;
-    yx_writer out = {0}; bool changed = false;
+    yx_writer out = {0};
+    bool changed = false;
     size_t prefix_length = strlen(names->prefix);
     for (const unsigned char *at = (const unsigned char *)text; *at;) {
         if (*at == '"') {
@@ -588,8 +659,12 @@ static char *yx_ser_ascii_variables(const yx_ser_variable_names *names, const ch
             if (!yx_put_u8(&out, *at++)) goto no_memory;
             continue;
         }
-        const unsigned char *end = at; bool plain = true;
-        while (yx_ser_ident_byte(*end)) { plain &= *end < 0x80; ++end; }
+        const unsigned char *end = at;
+        bool plain = true;
+        while (yx_ser_ident_byte(*end)) {
+            plain &= *end < 0x80;
+            ++end;
+        }
         size_t length = (size_t)(end - at);
         bool rule_name = false;
         for (size_t i = 0; !plain && i < names->rule_name_count && !rule_name; ++i)
@@ -606,8 +681,9 @@ static char *yx_ser_ascii_variables(const yx_ser_variable_names *names, const ch
                 length = (size_t)(end - at);
             }
         }
-        if (plain || rule_name) { if (!yx_put_bytes(&out, at, length)) goto no_memory; }
-        else {
+        if (plain || rule_name) {
+            if (!yx_put_bytes(&out, at, length)) goto no_memory;
+        } else {
             if (!yx_put_bytes(&out, names->prefix, prefix_length)) goto no_memory;
             for (size_t i = 0; i < length; ++i) {
                 char piece[4];
@@ -633,10 +709,8 @@ static void yx_ser_spellings_free(const YRX_RULES *rules, YRX_RULES *copy)
         if (copy->rules[i].condition_text != rules->rules[i].condition_text) free(copy->rules[i].condition_text);
         if (copy->rules[i].patterns == rules->rules[i].patterns) continue;
         for (size_t j = 0; j < rules->rules[i].pattern_count; ++j) {
-            if (copy->rules[i].patterns[j].regexp != rules->rules[i].patterns[j].regexp)
-                free(copy->rules[i].patterns[j].regexp);
-            if (copy->rules[i].patterns[j].gap_head_regexp != rules->rules[i].patterns[j].gap_head_regexp)
-                free(copy->rules[i].patterns[j].gap_head_regexp);
+            if (copy->rules[i].patterns[j].regexp != rules->rules[i].patterns[j].regexp) free(copy->rules[i].patterns[j].regexp);
+            if (copy->rules[i].patterns[j].gap_head_regexp != rules->rules[i].patterns[j].gap_head_regexp) free(copy->rules[i].patterns[j].gap_head_regexp);
         }
         free(copy->rules[i].patterns);
     }
@@ -649,15 +723,13 @@ static bool yx_ser_spellings(const YRX_RULES *rules, YRX_RULES *copy, bool *fail
     yx_ser_variable_names names = {0};
     bool variables = false;
     *failed = false;
-    for (size_t i = 0; rules && rules->rules && i < rules->rule_count && !variables; ++i)
-        variables = yx_ser_has_non_ascii(rules->rules[i].condition_text);
+    for (size_t i = 0; rules && rules->rules && i < rules->rule_count && !variables; ++i) variables = yx_ser_has_non_ascii(rules->rules[i].condition_text);
     if (variables) {
         /* A prefix no condition and no rule name contains: a new name can meet no existing identifier. */
         names.rule_names = malloc(rules->rule_count * sizeof(*names.rule_names));
         if (!names.rule_names) goto failure;
         for (size_t i = 0; i < rules->rule_count; ++i)
-            if (yx_ser_has_non_ascii(rules->rules[i].identifier))
-                names.rule_names[names.rule_name_count++] = rules->rules[i].identifier;
+            if (yx_ser_has_non_ascii(rules->rules[i].identifier)) names.rule_names[names.rule_name_count++] = rules->rules[i].identifier;
         for (unsigned attempt = 0;; ++attempt) {
             bool used = false;
             snprintf(names.prefix, sizeof(names.prefix), "yxv%u_", attempt);
@@ -673,7 +745,10 @@ static bool yx_ser_spellings(const YRX_RULES *rules, YRX_RULES *copy, bool *fail
         if (condition) {
             if (!copies) {
                 copies = malloc(rules->rule_count * sizeof(*copies));
-                if (!copies) { free(condition); goto failure; }
+                if (!copies) {
+                    free(condition);
+                    goto failure;
+                }
                 memcpy(copies, rules->rules, rules->rule_count * sizeof(*copies));
             }
             copies[i].condition_text = condition;
@@ -685,12 +760,18 @@ static bool yx_ser_spellings(const YRX_RULES *rules, YRX_RULES *copy, bool *fail
             if (!regexp) continue;
             if (!copies) {
                 copies = malloc(rules->rule_count * sizeof(*copies));
-                if (!copies) { free(regexp); goto failure; }
+                if (!copies) {
+                    free(regexp);
+                    goto failure;
+                }
                 memcpy(copies, rules->rules, rules->rule_count * sizeof(*copies));
             }
             if (copies[i].patterns == rules->rules[i].patterns) {
                 YRX_PATTERN *patterns = malloc(rules->rules[i].pattern_count * sizeof(*patterns));
-                if (!patterns) { free(regexp); goto failure; }
+                if (!patterns) {
+                    free(regexp);
+                    goto failure;
+                }
                 memcpy(patterns, rules->rules[i].patterns, rules->rules[i].pattern_count * sizeof(*patterns));
                 copies[i].patterns = patterns;
             }
@@ -735,8 +816,13 @@ failure:
  * (yx_sg_literal_bytes, yx_sg_literal_run). Repeat counts, thread priority
  * and assertions only remove paths, so ignoring them keeps the conditions
  * necessary. */
-enum { YX_SG_NODES = 1024, YX_SG_CANDIDATES = 64, YX_SG_SUCCESSORS = 256, YX_SG_MIN_REJECTED = 64,
-       YX_SG_STARTS = 16 };
+enum {
+    YX_SG_NODES = 1024,
+    YX_SG_CANDIDATES = 64,
+    YX_SG_SUCCESSORS = 256,
+    YX_SG_MIN_REJECTED = 64,
+    YX_SG_STARTS = 16
+};
 typedef struct {
     size_t ip;
     uint8_t set[32];
@@ -767,8 +853,7 @@ static int32_t yx_sg_i32(const uint8_t *p)
 
 /* One PikeVM instruction as regex_vm.c decodes it: its byte set or its
  * epsilon successors. -1 for an unknown or truncated instruction. */
-static int yx_sg_decode(const uint8_t *code, size_t length, size_t ip, uint8_t set[32],
-                        size_t *next, size_t *count)
+static int yx_sg_decode(const uint8_t *code, size_t length, size_t ip, uint8_t set[32], size_t *next, size_t *count)
 {
     const uint8_t *c = code + ip;
     size_t n = length - ip;
@@ -782,50 +867,64 @@ static int yx_sg_decode(const uint8_t *code, size_t length, size_t ip, uint8_t s
     }
     if (n < 2) return -1;
     switch (c[1]) {
-    case 0x00: return 2;
-    case 0x01: case 0x02:
-        if (n < 8 || !yx_sg_target(ip, yx_sg_i32(c + 4), length, &next[1])) return -1;
-        next[0] = ip + 8; *count = 2;
-        return next[0] < length ? 1 : -1;
-    case 0x03:
-        if (n < 5 || n - 5 < (size_t)c[4] * 4 || c[4] > YX_SG_SUCCESSORS) return -1;
-        for (size_t k = 0; k < c[4]; ++k)
-            if (!yx_sg_target(ip, yx_sg_i32(c + 5 + 4 * k), length, &next[(*count)++])) return -1;
-        return 1;
-    case 0x04:
-        if (n < 6 || !yx_sg_target(ip, yx_sg_i32(c + 2), length, &next[0])) return -1;
-        *count = 1;
-        return 1;
-    case 0x05: memset(set, 255, 32); next[(*count)++] = ip + 2; break;
-    case 0x06:
-        if (n < 4) return -1;
-        for (unsigned b = 0; b < 256; ++b) if ((b & c[3]) == c[2]) yx_tr_set(set, b);
-        next[(*count)++] = ip + 4;
-        break;
-    case 0x07:
-        if (n < 3) return -1;
-        for (unsigned b = 0; b < 256; ++b) if ((b >= 'A' && b <= 'Z' ? b + 32 : b) == c[2]) yx_tr_set(set, b);
-        next[(*count)++] = ip + 3;
-        break;
-    case 0x08:
-        if (n < 34) return -1;
-        memcpy(set, c + 2, 32);
-        next[(*count)++] = ip + 34;
-        break;
-    case 0x09:
-        if (n < 3 || n - 3 < (size_t)c[2] * 2) return -1;
-        for (size_t k = 0; k < c[2]; ++k)
-            for (unsigned b = c[3 + 2 * k]; b <= c[4 + 2 * k]; ++b) yx_tr_set(set, b);
-        next[(*count)++] = ip + 3 + 2 * (size_t)c[2];
-        break;
-    case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f: case 0x12: case 0x13:
-        next[(*count)++] = ip + 2;
-        return next[0] < length ? 1 : -1;
-    case 0x10: case 0x11:
-        if (n < 14 || !yx_sg_target(ip, yx_sg_i32(c + 2), length, &next[1])) return -1;
-        next[0] = ip + 14; *count = 2;
-        return next[0] < length ? 1 : -1;
-    default: return -1;
+        case 0x00: return 2;
+        case 0x01:
+        case 0x02:
+            if (n < 8 || !yx_sg_target(ip, yx_sg_i32(c + 4), length, &next[1])) return -1;
+            next[0] = ip + 8;
+            *count = 2;
+            return next[0] < length ? 1 : -1;
+        case 0x03:
+            if (n < 5 || n - 5 < (size_t)c[4] * 4 || c[4] > YX_SG_SUCCESSORS) return -1;
+            for (size_t k = 0; k < c[4]; ++k)
+                if (!yx_sg_target(ip, yx_sg_i32(c + 5 + 4 * k), length, &next[(*count)++])) return -1;
+            return 1;
+        case 0x04:
+            if (n < 6 || !yx_sg_target(ip, yx_sg_i32(c + 2), length, &next[0])) return -1;
+            *count = 1;
+            return 1;
+        case 0x05:
+            memset(set, 255, 32);
+            next[(*count)++] = ip + 2;
+            break;
+        case 0x06:
+            if (n < 4) return -1;
+            for (unsigned b = 0; b < 256; ++b)
+                if ((b & c[3]) == c[2]) yx_tr_set(set, b);
+            next[(*count)++] = ip + 4;
+            break;
+        case 0x07:
+            if (n < 3) return -1;
+            for (unsigned b = 0; b < 256; ++b)
+                if ((b >= 'A' && b <= 'Z' ? b + 32 : b) == c[2]) yx_tr_set(set, b);
+            next[(*count)++] = ip + 3;
+            break;
+        case 0x08:
+            if (n < 34) return -1;
+            memcpy(set, c + 2, 32);
+            next[(*count)++] = ip + 34;
+            break;
+        case 0x09:
+            if (n < 3 || n - 3 < (size_t)c[2] * 2) return -1;
+            for (size_t k = 0; k < c[2]; ++k)
+                for (unsigned b = c[3 + 2 * k]; b <= c[4 + 2 * k]; ++b) yx_tr_set(set, b);
+            next[(*count)++] = ip + 3 + 2 * (size_t)c[2];
+            break;
+        case 0x0a:
+        case 0x0b:
+        case 0x0c:
+        case 0x0d:
+        case 0x0e:
+        case 0x0f:
+        case 0x12:
+        case 0x13: next[(*count)++] = ip + 2; return next[0] < length ? 1 : -1;
+        case 0x10:
+        case 0x11:
+            if (n < 14 || !yx_sg_target(ip, yx_sg_i32(c + 2), length, &next[1])) return -1;
+            next[0] = ip + 14;
+            *count = 2;
+            return next[0] < length ? 1 : -1;
+        default: return -1;
     }
     return next[0] < length ? 0 : -1;
 }
@@ -833,7 +932,9 @@ static int yx_sg_decode(const uint8_t *code, size_t length, size_t ip, uint8_t s
 /* The instructions reachable from start, with successor indices. */
 static bool yx_sg_build(yx_sg_graph *g, size_t start)
 {
-    enum { SLOTS = 4 * YX_SG_NODES };
+    enum {
+        SLOTS = 4 * YX_SG_NODES
+    };
     size_t next[YX_SG_SUCCESSORS], *slots = malloc(SLOTS * sizeof(*slots));
     bool ok = false;
     g->nodes = calloc(YX_SG_NODES, sizeof(*g->nodes));
@@ -876,13 +977,15 @@ done:
 
 static bool yx_sg_meets(const uint8_t a[32], const uint8_t b[32])
 {
-    for (size_t i = 0; i < 32; ++i) if (a[i] & b[i]) return true;
+    for (size_t i = 0; i < 32; ++i)
+        if (a[i] & b[i]) return true;
     return false;
 }
 
 static bool yx_sg_within(const uint8_t a[32], const uint8_t b[32])
 {
-    for (size_t i = 0; i < 32; ++i) if (a[i] & ~b[i]) return false;
+    for (size_t i = 0; i < 32; ++i)
+        if (a[i] & ~b[i]) return false;
     return true;
 }
 
@@ -901,8 +1004,7 @@ static unsigned yx_sg_popcount(const uint8_t set[32])
 }
 
 /* The run set for stop, or false when stop is no barrier. */
-static bool yx_sg_barrier(const yx_sg_graph *g, const uint8_t stop[32], uint8_t run[32], size_t *stack,
-                          uint8_t *seen)
+static bool yx_sg_barrier(const yx_sg_graph *g, const uint8_t stop[32], uint8_t run[32], size_t *stack, uint8_t *seen)
 {
     size_t used = 0;
     memset(run, 0, 32);
@@ -975,8 +1077,7 @@ static bool yx_sg_literal_bytes(const yx_sg_graph *g, size_t first, yx_rx_guard 
         if (byte < 0) break;
         trial->literal[trial->literal_length++] = (uint8_t)byte;
         at = g->edges[g->nodes[at].first];
-        for (size_t hops = 0; hops < g->node_count && g->nodes[at].kind == 1 && g->nodes[at].count == 1; ++hops)
-            at = g->edges[g->nodes[at].first];
+        for (size_t hops = 0; hops < g->node_count && g->nodes[at].kind == 1 && g->nodes[at].count == 1; ++hops) at = g->edges[g->nodes[at].first];
     }
     return trial->literal_length >= 3;
 }
@@ -994,7 +1095,8 @@ static bool yx_sg_literal_run(const yx_sg_graph *g, size_t first, yx_rx_guard *t
         const yx_sg_node *node = &g->nodes[index];
         if (index == first) continue;
         if (node->kind == 2) return false; /* first does not dominate Match */
-        if (node->kind == 0) for (size_t i = 0; i < 32; ++i) trial->run[i] |= node->set[i];
+        if (node->kind == 0)
+            for (size_t i = 0; i < 32; ++i) trial->run[i] |= node->set[i];
         for (size_t k = 0; k < node->count; ++k) {
             size_t to = g->edges[node->first + k];
             if (seen[to]) continue;
@@ -1008,11 +1110,10 @@ static bool yx_sg_literal_run(const yx_sg_graph *g, size_t first, yx_rx_guard *t
 /* The guard of the forward program at start for the given atoms: the
  * barrier useful to the most atoms, then the one that rejects the most byte
  * values (at least YX_SG_MIN_REJECTED). */
-static bool yx_sg_guard(const uint8_t *code, size_t length, size_t start, const yx_rx_atom *const *atoms,
-                        size_t atom_count, yx_rx_guard *guard)
+static bool yx_sg_guard(const uint8_t *code, size_t length, size_t start, const yx_rx_atom *const *atoms, size_t atom_count, yx_rx_guard *guard)
 {
     yx_sg_graph g = {code, length, NULL, 0, NULL, 0, 0};
-    uint8_t (*candidates)[32] = NULL;
+    uint8_t(*candidates)[32] = NULL;
     size_t *stack = NULL, candidate_count = 0, best_useful = 0;
     uint8_t *seen = NULL;
     unsigned best = 0;
@@ -1053,14 +1154,17 @@ static bool yx_sg_guard(const uint8_t *code, size_t length, size_t start, const 
          * a candidate that cannot replace the guard skips the dominance
          * search (yx_sg_literal_run) as it would be rejected after it. */
         for (size_t a = 0; a < atom_count; ++a) useful += yx_sg_useful(&trial, atoms[a]);
-        if (!useful || useful < best_useful ||
-            (useful == best_useful && trial.literal_length <= guard->literal_length)) continue;
+        if (!useful || useful < best_useful || (useful == best_useful && trial.literal_length <= guard->literal_length)) continue;
         if (!yx_sg_literal_run(&g, i, &trial, stack, seen)) continue;
         best_useful = useful;
         *guard = trial;
     }
 done:
-    free(g.nodes); free(g.edges); free(candidates); free(stack); free(seen);
+    free(g.nodes);
+    free(g.edges);
+    free(candidates);
+    free(stack);
+    free(seen);
     return best_useful != 0;
 }
 
@@ -1095,7 +1199,8 @@ static void yx_se_guards(yx_rx_program *out)
         }
     for (size_t k = 0; k < used; ++k) {
         size_t n = 0;
-        for (size_t i = 0; i < total; ++i) if (owner[i] == k) group[n++] = atoms[i];
+        for (size_t i = 0; i < total; ++i)
+            if (owner[i] == k) group[n++] = atoms[i];
         if (!yx_sg_guard(out->code, out->code_length, starts[k], group, n, &guards[kept])) continue;
         for (size_t i = 0; i < total; ++i)
             if (owner[i] == k && yx_sg_useful(&guards[kept], atoms[i])) atoms[i]->guard = &guards[kept];
@@ -1107,7 +1212,10 @@ static void yx_se_guards(yx_rx_program *out)
         guards = NULL;
     }
 done:
-    free(owner); free(atoms); free(group); free(guards);
+    free(owner);
+    free(atoms);
+    free(group);
+    free(guards);
 }
 
 /* Returns 1 with a program, 0 when the pattern is not a regexp
@@ -1124,39 +1232,44 @@ int yx_ser_regexp_program(const YRX_PATTERN *pattern, yx_rx_program *out)
     unsigned flags = 0;
     int result = 0;
     memset(out, 0, sizeof(*out));
-    if (!pattern || (!hex && (pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)) ||
-        (hex && !pattern->hex_atoms) ||
-        (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE |
-                                YX_MOD_FULLWORD | YX_MOD_PRIVATE))) return 0;
+    if (!pattern || (!hex && (pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)) || (hex && !pattern->hex_atoms) ||
+        (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_PRIVATE)))
+        return 0;
     bool dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0, nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0, ascii = (pattern->modifiers & YX_MOD_ASCII) != 0;
     const char *regexp = pattern->gap_head_regexp ? pattern->gap_head_regexp : pattern->regexp;
     if (hex) {
-        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) { result = hex_text.data ? 0 : -1; goto done; }
+        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) {
+            result = hex_text.data ? 0 : -1;
+            goto done;
+        }
         regexp = (const char *)hex_text.data;
     }
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
-                           .dotall = dotall, .nocase = nocase};
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = dotall, .nocase = nocase};
     root = yx_tr_expression(&parser);
     if (!root || parser.failed || parser.oom || parser.at != parser.length) {
-        result = parser.oom ? -1 : 0; goto done;
+        result = parser.oom ? -1 : 0;
+        goto done;
     }
-    if (yx_se_has_large_gap(root) || yx_se_alternation_literal(root) ||
-        (!nocase && !wide && yx_se_masked_literal(root))) goto done;
+    if (yx_se_has_large_gap(root) || yx_se_alternation_literal(root) || (!nocase && !wide && yx_se_masked_literal(root))) goto done;
     /* FastVM first, as yx_encode_fast_regex decides. */
     fast = calloc(1, sizeof(*fast));
-    if (!fast) { result = -1; goto done; }
+    if (!fast) {
+        result = -1;
+        goto done;
+    }
     fast->flags = 64;
     fast->nocase = nocase;
-    bool parsed = hex ? yx_fast_hex_sequence(fast, pattern->hex_atoms, pattern->hex_atom_count)
-                      : yx_ft_regex(fast, root, parser.saw_greedy && !parser.saw_lazy);
+    bool parsed = hex ? yx_fast_hex_sequence(fast, pattern->hex_atoms, pattern->hex_atom_count) : yx_ft_regex(fast, root, parser.saw_greedy && !parser.saw_lazy);
     /* The literal and masked-literal sub-pattern kinds were ruled out
      * above, so FastVM compiles whatever its splitter accepts. */
     fast->force_regexp = true;
     if (parsed && yx_fast_compile(fast)) {
         out->code = malloc(fast->code.used ? fast->code.used : 1);
-        if (!out->code) { result = -1; goto done; }
+        if (!out->code) {
+            result = -1;
+            goto done;
+        }
         if (fast->code.used) memcpy(out->code, fast->code.data, fast->code.used);
         out->code_length = fast->code.used;
         atoms = fast->atoms;
@@ -1168,18 +1281,22 @@ int yx_ser_regexp_program(const YRX_PATTERN *pattern, yx_rx_program *out)
         /* FastVM is incompatible, or it emitted its verifier and then
          * rejected atoms shorter than two bytes; those bytes stay in front
          * of the Thompson program. */
-        if (parsed) { leftover = fast->code; fast->code = (yx_writer){0}; }
+        if (parsed) {
+            leftover = fast->code;
+            fast->code = (yx_writer){0};
+        }
         if (!yx_tr_compile(regexp, dotall, nocase, &thompson, &greedy)) goto done;
         size_t total = leftover.used + thompson.forward.used + thompson.backward.used;
         out->code = malloc(total ? total : 1);
         atoms = calloc(thompson.atoms.count ? thompson.atoms.count : 1, sizeof(*atoms));
-        if (!out->code || !atoms) { result = -1; goto done; }
+        if (!out->code || !atoms) {
+            result = -1;
+            goto done;
+        }
         /* An empty writer has no buffer; memcpy needs one even for 0 bytes. */
         if (leftover.used) memcpy(out->code, leftover.data, leftover.used);
-        if (thompson.forward.used)
-            memcpy(out->code + leftover.used, thompson.forward.data, thompson.forward.used);
-        if (thompson.backward.used)
-            memcpy(out->code + leftover.used + thompson.forward.used, thompson.backward.data, thompson.backward.used);
+        if (thompson.forward.used) memcpy(out->code + leftover.used, thompson.forward.data, thompson.forward.used);
+        if (thompson.backward.used) memcpy(out->code + leftover.used + thompson.forward.used, thompson.backward.data, thompson.backward.used);
         out->code_length = total;
         atom_count = thompson.atoms.count;
         for (size_t i = 0; i < atom_count; ++i) {
@@ -1198,12 +1315,18 @@ int yx_ser_regexp_program(const YRX_PATTERN *pattern, yx_rx_program *out)
     if (wide) {
         yx_rx_sub *sub = &out->subs[out->sub_count++];
         sub->flags = flags | YX_RX_WIDE;
-        if (!yx_se_atoms(sub, atoms, atom_count, true)) { result = -1; goto done; }
+        if (!yx_se_atoms(sub, atoms, atom_count, true)) {
+            result = -1;
+            goto done;
+        }
     }
     if (!wide || ascii) {
         yx_rx_sub *sub = &out->subs[out->sub_count++];
         sub->flags = flags;
-        if (!yx_se_atoms(sub, atoms, atom_count, false)) { result = -1; goto done; }
+        if (!yx_se_atoms(sub, atoms, atom_count, false)) {
+            result = -1;
+            goto done;
+        }
     }
     yx_se_guards(out);
     result = yx_rx_program_prepare(out) ? 1 : -1;
@@ -1288,8 +1411,7 @@ int yx_ser_regexp_program_copy(const yx_rx_program *from, yx_rx_program *out)
         else memset(to->atoms, 0, sizeof(*to->atoms));
         to->atom_count = sub->atom_count;
         for (size_t a = 0; a < sub->atom_count; ++a)
-            if (sub->atoms[a].guard)
-                to->atoms[a].guard = out->guards + (sub->atoms[a].guard - from->guards);
+            if (sub->atoms[a].guard) to->atoms[a].guard = out->guards + (sub->atoms[a].guard - from->guards);
     }
     if (yx_rx_program_prepare(out)) return 1;
 failed:
@@ -1314,15 +1436,13 @@ int yx_ser_literal_branches(const YRX_PATTERN *pattern, uint8_t **bytes, size_t 
     if (pattern->kind == YX_PATTERN_HEX) {
         /* The hex form yx_ser_regexp_program parses for the same decision. */
         if (!pattern->hex_atoms) return 0;
-        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) {
+        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) {
             int failed = hex_text.data ? 0 : -1;
             free(hex_text.data);
             return failed;
         }
         regexp = (const char *)hex_text.data;
-    } else if (pattern->kind != YX_PATTERN_REGEX || !regexp || pattern->gap_head_regexp)
-        return 0;
+    } else if (pattern->kind != YX_PATTERN_REGEX || !regexp || pattern->gap_head_regexp) return 0;
     yx_tr_parser parser = {.text = (const uint8_t *)regexp,
                            .length = strlen(regexp),
                            .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0,
@@ -1346,8 +1466,10 @@ int yx_ser_literal_branches(const YRX_PATTERN *pattern, uint8_t **bytes, size_t 
     *bytes = malloc(total);
     *offsets = malloc((count + 1) * sizeof(**offsets));
     if (!*bytes || !*offsets) {
-        free(*bytes); free(*offsets);
-        *bytes = NULL; *offsets = NULL;
+        free(*bytes);
+        free(*offsets);
+        *bytes = NULL;
+        *offsets = NULL;
         result = -1;
         goto done;
     }
@@ -1368,17 +1490,21 @@ done:
  * searched (wide: every byte followed by a zero), and its best atom
  * (best_atom_in_bytes: exact when it is the whole literal) or, with nocase,
  * that atom's case combinations. */
-static bool yx_se_literal_item(yx_rx_literal *item, const uint8_t *bytes, size_t length, bool wide,
-                               unsigned flags)
+static bool yx_se_literal_item(yx_rx_literal *item, const uint8_t *bytes, size_t length, bool wide, unsigned flags)
 {
     size_t encoded = length * (wide ? 2 : 1), offset = 0, width = 0, letters = 0, count;
     uint8_t *masks = malloc(encoded ? encoded : 1), atom[8];
     memset(item, 0, sizeof(*item));
     item->bytes = malloc(encoded ? encoded : 1);
-    if (!item->bytes || !masks) { free(masks); return false; }
+    if (!item->bytes || !masks) {
+        free(masks);
+        return false;
+    }
     for (size_t i = 0; i < length; ++i) {
-        if (wide) { item->bytes[2 * i] = bytes[i]; item->bytes[2 * i + 1] = 0; }
-        else item->bytes[i] = bytes[i];
+        if (wide) {
+            item->bytes[2 * i] = bytes[i];
+            item->bytes[2 * i + 1] = 0;
+        } else item->bytes[i] = bytes[i];
     }
     item->length = encoded;
     item->sub.flags = flags | (wide ? YX_RX_WIDE : 0);
@@ -1422,13 +1548,13 @@ yx_rx_literals *yx_ser_literal_set(const YRX_PATTERN *pattern)
     size_t *offsets = NULL;
     yx_rx_literals *set = NULL;
     if (!pattern || (pattern->kind != YX_PATTERN_REGEX && pattern->kind != YX_PATTERN_HEX) ||
-        (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE |
-                                YX_MOD_FULLWORD | YX_MOD_PRIVATE))) return NULL;
+        (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_PRIVATE)))
+        return NULL;
     int count = yx_ser_literal_branches(pattern, &bytes, &offsets);
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     bool raw = !wide || (pattern->modifiers & YX_MOD_ASCII) != 0;
-    unsigned flags = ((pattern->modifiers & YX_MOD_NOCASE) ? YX_RX_NOCASE : 0) |
-                     ((pattern->modifiers & YX_MOD_FULLWORD) ? YX_RX_FULLWORD_LEFT | YX_RX_FULLWORD_RIGHT : 0);
+    unsigned flags =
+        ((pattern->modifiers & YX_MOD_NOCASE) ? YX_RX_NOCASE : 0) | ((pattern->modifiers & YX_MOD_FULLWORD) ? YX_RX_FULLWORD_LEFT | YX_RX_FULLWORD_RIGHT : 0);
     bool ok = count >= 2;
     if (ok) {
         set = calloc(1, sizeof(*set));
@@ -1448,15 +1574,17 @@ yx_rx_literals *yx_ser_literal_set(const YRX_PATTERN *pattern)
     }
     free(bytes);
     free(offsets);
-    if (!ok) { yx_rx_literals_free(set); set = NULL; }
+    if (!ok) {
+        yx_rx_literals_free(set);
+        set = NULL;
+    }
     return set;
 }
 
 /* The reference's automaton atoms for one pattern, in insertion order:
  * regexp sub-patterns from their program, and plain, nocase, wide or ascii
  * literals as c_literal_pattern builds them. Other kinds are not modeled. */
-static bool yx_se_push_atom(yx_rx_atom **atoms, size_t *count, size_t *capacity, const uint8_t *bytes,
-                            size_t length)
+static bool yx_se_push_atom(yx_rx_atom **atoms, size_t *count, size_t *capacity, const uint8_t *bytes, size_t length)
 {
     if (length > 8) return false;
     if (*count == *capacity) {
@@ -1488,16 +1616,14 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom
         const yx_rx_program *program = pattern->rx_program;
         for (size_t s = 0; s < program->sub_count; ++s)
             for (size_t a = 0; a < program->subs[s].atom_count; ++a)
-                if (!yx_se_push_atom(atoms, count, &capacity, program->subs[s].atoms[a].bytes,
-                                     program->subs[s].atoms[a].length)) goto fail;
+                if (!yx_se_push_atom(atoms, count, &capacity, program->subs[s].atoms[a].bytes, program->subs[s].atoms[a].length)) goto fail;
         return 1;
     }
     if (pattern->rx_literals) {
         const yx_rx_literals *set = pattern->rx_literals;
         for (size_t s = 0; s < set->count; ++s)
             for (size_t a = 0; a < set->items[s].sub.atom_count; ++a)
-                if (!yx_se_push_atom(atoms, count, &capacity, set->items[s].sub.atoms[a].bytes,
-                                     set->items[s].sub.atoms[a].length)) goto fail;
+                if (!yx_se_push_atom(atoms, count, &capacity, set->items[s].sub.atoms[a].bytes, set->items[s].sub.atoms[a].length)) goto fail;
         return 1;
     }
     if (pattern->kind == YX_PATTERN_REGEX) {
@@ -1512,28 +1638,30 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom
             int literal = yx_tv_regexp_literal(pattern, true, &bytes, &length);
             if (literal != 1) return literal;
             memset(&text, 0, sizeof(text));
-            text.kind = YX_PATTERN_TEXT; text.bytes = bytes; text.length = length;
+            text.kind = YX_PATTERN_TEXT;
+            text.bytes = bytes;
+            text.length = length;
             text.modifiers = pattern->modifiers & ~(unsigned)YX_MOD_DOTALL;
             literal = yx_ser_pattern_reference_atoms_status(&text, atoms, count);
             free(bytes);
             return literal;
         }
     }
-    if (pattern->kind == YX_PATTERN_HEX && !pattern->hex_has_jump && pattern->bytes && pattern->mask &&
-        pattern->length && !(pattern->modifiers & ~(unsigned)YX_MOD_PRIVATE)) {
+    if (pattern->kind == YX_PATTERN_HEX && !pattern->hex_has_jump && pattern->bytes && pattern->mask && pattern->length &&
+        !(pattern->modifiers & ~(unsigned)YX_MOD_PRIVATE)) {
         bool literal = true;
         for (size_t i = 0; literal && i < pattern->length; ++i) literal = pattern->mask[i] == 0xff;
         if (literal) {
             YRX_PATTERN text;
             memset(&text, 0, sizeof(text));
-            text.kind = YX_PATTERN_TEXT; text.bytes = pattern->bytes; text.length = pattern->length;
+            text.kind = YX_PATTERN_TEXT;
+            text.bytes = pattern->bytes;
+            text.length = pattern->length;
             return yx_ser_pattern_reference_atoms_status(&text, atoms, count);
         }
     }
-    if (pattern->kind == YX_PATTERN_HEX || pattern->kind == YX_PATTERN_REGEX)
-        return yx_hc_reference_atoms(pattern, atoms, count);
-    if (pattern->kind != YX_PATTERN_TEXT || !pattern->length ||
-        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_PRIVATE)))
+    if (pattern->kind == YX_PATTERN_HEX || pattern->kind == YX_PATTERN_REGEX) return yx_hc_reference_atoms(pattern, atoms, count);
+    if (pattern->kind != YX_PATTERN_TEXT || !pattern->length || (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE | YX_MOD_FULLWORD | YX_MOD_PRIVATE)))
         return 0;
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0, ascii = (pattern->modifiers & YX_MOD_ASCII) != 0;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
@@ -1542,10 +1670,16 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom
         if (as_wide ? !wide : (wide && !ascii)) continue;
         size_t length = pattern->length * (as_wide ? 2 : 1);
         uint8_t *bytes = malloc(length), *masks = malloc(length);
-        if (!bytes || !masks) { free(bytes); free(masks); goto fail; }
+        if (!bytes || !masks) {
+            free(bytes);
+            free(masks);
+            goto fail;
+        }
         for (size_t i = 0; i < pattern->length; ++i) {
-            if (as_wide) { bytes[2 * i] = pattern->bytes[i]; bytes[2 * i + 1] = 0; }
-            else bytes[i] = pattern->bytes[i];
+            if (as_wide) {
+                bytes[2 * i] = pattern->bytes[i];
+                bytes[2 * i + 1] = 0;
+            } else bytes[i] = pattern->bytes[i];
         }
         memset(masks, 255, length);
         yx_fast_literal literal = {bytes, masks, length, false};
@@ -1553,7 +1687,8 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom
         yx_fast_best_atom(&literal, &offset, &width);
         uint8_t atom[8];
         memcpy(atom, bytes + offset, width);
-        free(bytes); free(masks);
+        free(bytes);
+        free(masks);
         if (!nocase) {
             if (!yx_se_push_atom(atoms, count, &capacity, atom, width)) goto fail;
             continue;
@@ -1599,8 +1734,7 @@ bool yx_ser_pattern_reference_atoms(const YRX_PATTERN *pattern, yx_rx_atom **ato
 #define YX_CS_PROGRAM_LIMIT ((size_t)50 * 1024 * 1024)
 static int yx_cs_append(yx_writer *out, const void *data, size_t length)
 {
-    if (out->used > YX_CS_PROGRAM_LIMIT || length > YX_CS_PROGRAM_LIMIT - out->used)
-        return 0;
+    if (out->used > YX_CS_PROGRAM_LIMIT || length > YX_CS_PROGRAM_LIMIT - out->used) return 0;
     return yx_put_bytes(out, data, length) ? 1 : -1;
 }
 static int yx_cs_emit(const yx_tr_node *node, yx_writer *out, size_t depth)
@@ -1613,15 +1747,12 @@ static int yx_cs_emit(const yx_tr_node *node, yx_writer *out, size_t depth)
         for (size_t i = 0; i < node->length; ++i) {
             int status = yx_cs_append(out, node->bytes + i, 1);
             if (status != 1) return status;
-            if (node->bytes[i] == 0xaa && (status = yx_cs_append(out, node->bytes + i, 1)) != 1)
-                return status;
+            if (node->bytes[i] == 0xaa && (status = yx_cs_append(out, node->bytes + i, 1)) != 1) return status;
         }
         return 1;
     }
-    if (node->kind == YX_TR_CLASS)
-        return yx_tr_class_code(out, node->bitmap, false) ? 1 : -1;
-    if (node->kind == YX_TR_LOOK)
-        return yx_tr_instr(out, node->look, 0, 0) ? 1 : -1;
+    if (node->kind == YX_TR_CLASS) return yx_tr_class_code(out, node->bitmap, false) ? 1 : -1;
+    if (node->kind == YX_TR_LOOK) return yx_tr_instr(out, node->look, 0, 0) ? 1 : -1;
     if (node->kind == YX_TR_CONCAT || node->kind == YX_TR_CAPTURE) {
         for (size_t i = 0; i < node->count; ++i) {
             int status = yx_cs_emit(node->children[i], out, depth + 1);
@@ -1635,32 +1766,42 @@ static int yx_cs_emit(const yx_tr_node *node, yx_writer *out, size_t depth)
         int status = 1;
         for (size_t i = 0; i < node->count; ++i) {
             size_t branch = out->used;
-            if (i + 1 < node->count && !yx_tr_instr(out, 1, 0, 0)) { status = -1; break; }
+            if (i + 1 < node->count && !yx_tr_instr(out, 1, 0, 0)) {
+                status = -1;
+                break;
+            }
             status = yx_cs_emit(node->children[i], out, depth + 1);
             if (status != 1) break;
             if (i + 1 < node->count) {
                 jumps[i] = out->used;
                 if (!yx_tr_instr(out, 4, 0, 0) || !yx_tr_patch(out, branch, 4, out->used)) {
-                    status = -1; break;
+                    status = -1;
+                    break;
                 }
             }
         }
         if (status == 1)
             for (size_t i = 0; i + 1 < node->count; ++i)
-                if (!yx_tr_patch(out, jumps[i], 2, out->used)) { status = 0; break; }
+                if (!yx_tr_patch(out, jumps[i], 2, out->used)) {
+                    status = 0;
+                    break;
+                }
         free(jumps);
         return status;
     }
     if (node->kind == YX_TR_REPEAT && node->count == 1) {
         yx_writer child = {0};
         int status = yx_cs_emit(node->children[0], &child, depth + 1);
-        if (status != 1 || !child.used) { free(child.data); return status; }
+        if (status != 1 || !child.used) {
+            free(child.data);
+            return status;
+        }
         size_t remaining = YX_CS_PROGRAM_LIMIT - out->used;
         uint64_t required = (uint64_t)node->minimum * child.used;
-        uint64_t tail = yx_tr_unbounded(node) ? 14u + child.used :
-            (uint64_t)(node->maximum - node->minimum) * (8u + child.used);
+        uint64_t tail = yx_tr_unbounded(node) ? 14u + child.used : (uint64_t)(node->maximum - node->minimum) * (8u + child.used);
         if (required > remaining || tail > remaining - required) {
-            free(child.data); return 0;
+            free(child.data);
+            return 0;
         }
         for (uint32_t i = 0; i < node->minimum; ++i) {
             status = yx_cs_append(out, child.data, child.used);
@@ -1668,52 +1809,61 @@ static int yx_cs_emit(const yx_tr_node *node, yx_writer *out, size_t depth)
         }
         if (yx_tr_unbounded(node)) {
             size_t branch = out->used;
-            if (!yx_tr_instr(out, 2, 0, 0)) { status = -1; goto repeat_done; }
+            if (!yx_tr_instr(out, 2, 0, 0)) {
+                status = -1;
+                goto repeat_done;
+            }
             status = yx_cs_append(out, child.data, child.used);
             if (status != 1) goto repeat_done;
             size_t jump = out->used;
-            if (!yx_tr_instr(out, 4, 0, 0) || !yx_tr_patch(out, jump, 2, branch) ||
-                !yx_tr_patch(out, branch, 4, out->used)) status = -1;
+            if (!yx_tr_instr(out, 4, 0, 0) || !yx_tr_patch(out, jump, 2, branch) || !yx_tr_patch(out, branch, 4, out->used)) status = -1;
         } else {
             size_t end = out->used + (size_t)tail;
             for (uint32_t i = node->minimum; i < node->maximum; ++i) {
                 size_t branch = out->used;
                 if (!yx_tr_instr(out, 2, 0, 0) || !yx_tr_patch(out, branch, 4, end)) {
-                    status = -1; break;
+                    status = -1;
+                    break;
                 }
                 status = yx_cs_append(out, child.data, child.used);
                 if (status != 1) break;
             }
         }
-repeat_done:
+    repeat_done:
         free(child.data);
         return status;
     }
     return 0;
 }
 
-int yx_ser_search_program(const char *regexp, size_t length, bool dotall,
-                           bool nocase, uint8_t **code, size_t *code_length)
+int yx_ser_search_program(const char *regexp, size_t length, bool dotall, bool nocase, uint8_t **code, size_t *code_length)
 {
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = length,
-                           .dotall = dotall, .nocase = nocase, .condition_only = true};
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = length, .dotall = dotall, .nocase = nocase, .condition_only = true};
     yx_tr_node *root = NULL;
     yx_writer program = {0};
     int status = 0;
-    *code = NULL; *code_length = 0;
+    *code = NULL;
+    *code_length = 0;
     if (!regexp || strlen(regexp) != length) return 0;
     root = yx_tr_expression(&parser);
-    if (parser.oom) { status = -1; goto done; }
+    if (parser.oom) {
+        status = -1;
+        goto done;
+    }
     if (!root || parser.failed || parser.at != parser.length) goto done;
     /* An explicit lazy any-byte prefix implements unanchored search, including
      * invalid UTF-8 bytes around Unicode-scoped atoms and empty end matches. */
-    if (!yx_tr_instr(&program, 2, 0, 0) || !yx_tr_instr(&program, 5, 0, 0) ||
-        !yx_tr_instr(&program, 4, 0, 0) || !yx_tr_patch(&program, 10, 2, 0) ||
-        !yx_tr_patch(&program, 0, 4, program.used)) { status = -1; goto done; }
+    if (!yx_tr_instr(&program, 2, 0, 0) || !yx_tr_instr(&program, 5, 0, 0) || !yx_tr_instr(&program, 4, 0, 0) || !yx_tr_patch(&program, 10, 2, 0) ||
+        !yx_tr_patch(&program, 0, 4, program.used)) {
+        status = -1;
+        goto done;
+    }
     status = yx_cs_emit(root, &program, 0);
     if (status == 1 && !yx_tr_instr(&program, 0, 0, 0)) status = -1;
     if (status == 1) {
-        *code = program.data; *code_length = program.used; program.data = NULL;
+        *code = program.data;
+        *code_length = program.used;
+        program.data = NULL;
     }
 done:
     yx_tr_destroy(root);
@@ -1734,46 +1884,49 @@ static bool yx_ss_slow_bytes(const uint8_t *bytes, size_t length)
 {
     if (length == 1) return true;
     if (!length || (bytes[0] != 0x00 && bytes[0] != 0x90 && bytes[0] != 0xff)) return false;
-    for (size_t i = 1; i < length; ++i) if (bytes[i] != bytes[0]) return false;
+    for (size_t i = 1; i < length; ++i)
+        if (bytes[i] != bytes[0]) return false;
     return true;
 }
 
 /* The bytes and mask of Hir::try_extract_literal_with_mask: literals, byte
  * classes that are one masked byte, and fixed any-byte gaps of at most 200
  * bytes, through concatenations and capture groups. */
-static bool yx_ss_masked_bytes(const yx_tr_node *node, yx_writer *bytes, yx_writer *mask,
-                               size_t depth)
+static bool yx_ss_masked_bytes(const yx_tr_node *node, yx_writer *bytes, yx_writer *mask, size_t depth)
 {
     unsigned first = 256, last = 0, count = 0, bits = 0;
     if (depth > 250) return false;
     switch (node->kind) {
-    case YX_TR_LITERAL:
-        for (size_t i = 0; i < node->length; ++i)
-            if (!yx_put_u8(bytes, node->bytes[i]) || !yx_put_u8(mask, 0xff)) return false;
-        return true;
-    case YX_TR_REPEAT:
-        if (!node->count || yx_tr_unbounded(node) || node->minimum != node->maximum ||
-            node->minimum > 200 || !yx_se_any_byte(node->children[0])) return false;
-        for (uint32_t i = 0; i < node->minimum; ++i)
-            if (!yx_put_u8(bytes, 0) || !yx_put_u8(mask, 0)) return false;
-        return true;
-    case YX_TR_CONCAT: case YX_TR_CAPTURE:
-        for (size_t i = 0; i < node->count; ++i)
-            if (!yx_ss_masked_bytes(node->children[i], bytes, mask, depth + 1)) return false;
-        return true;
-    case YX_TR_CLASS:
-        /* class_to_masked_byte accepts byte classes only. */
-        if (node->unicode_class) return false;
-        for (unsigned b = 0; b < 256; ++b)
-            if (yx_tr_has(node->bitmap, b)) { if (first == 256) first = b; last = b; ++count; }
-        if (!count) return false;
-        for (unsigned b = 0; b < 256; ++b)
-            if (yx_tr_has(node->bitmap, b) && (b & first) != first) return false;
-        for (unsigned k = 0; k < 8; ++k) bits += ((first ^ last) >> k) & 1u;
-        if ((1u << bits) != count) return false;
-        return yx_put_u8(bytes, (uint8_t)first) && yx_put_u8(mask, (uint8_t)~(first ^ last));
-    default:
-        return false;
+        case YX_TR_LITERAL:
+            for (size_t i = 0; i < node->length; ++i)
+                if (!yx_put_u8(bytes, node->bytes[i]) || !yx_put_u8(mask, 0xff)) return false;
+            return true;
+        case YX_TR_REPEAT:
+            if (!node->count || yx_tr_unbounded(node) || node->minimum != node->maximum || node->minimum > 200 || !yx_se_any_byte(node->children[0])) return false;
+            for (uint32_t i = 0; i < node->minimum; ++i)
+                if (!yx_put_u8(bytes, 0) || !yx_put_u8(mask, 0)) return false;
+            return true;
+        case YX_TR_CONCAT:
+        case YX_TR_CAPTURE:
+            for (size_t i = 0; i < node->count; ++i)
+                if (!yx_ss_masked_bytes(node->children[i], bytes, mask, depth + 1)) return false;
+            return true;
+        case YX_TR_CLASS:
+            /* class_to_masked_byte accepts byte classes only. */
+            if (node->unicode_class) return false;
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(node->bitmap, b)) {
+                    if (first == 256) first = b;
+                    last = b;
+                    ++count;
+                }
+            if (!count) return false;
+            for (unsigned b = 0; b < 256; ++b)
+                if (yx_tr_has(node->bitmap, b) && (b & first) != first) return false;
+            for (unsigned k = 0; k < 8; ++k) bits += ((first ^ last) >> k) & 1u;
+            if ((1u << bits) != count) return false;
+            return yx_put_u8(bytes, (uint8_t)first) && yx_put_u8(mask, (uint8_t)~(first ^ last));
+        default: return false;
     }
 }
 
@@ -1821,15 +1974,17 @@ static int yx_ss_masked_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, si
     if (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_FULLWORD | YX_MOD_PRIVATE)) return 0;
     if (pattern->kind == YX_PATTERN_HEX) {
         if (!pattern->hex_atoms) return 0;
-        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) { result = hex_text.data ? 0 : -1; goto done; }
+        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) {
+            result = hex_text.data ? 0 : -1;
+            goto done;
+        }
         regexp = (const char *)hex_text.data;
     } else if (pattern->kind != YX_PATTERN_REGEX || !regexp || pattern->gap_head_regexp) return 0;
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
-                           .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0};
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0};
     root = yx_tr_expression(&parser);
     if (!root || parser.failed || parser.oom || parser.at != parser.length) {
-        result = parser.oom ? -1 : 0; goto done;
+        result = parser.oom ? -1 : 0;
+        goto done;
     }
     if (yx_se_has_large_gap(root) || yx_se_alternation_literal(root) || !yx_se_masked_literal(root)) goto done;
     if (!yx_ss_masked_bytes(root, &bytes, &mask, 0) || !bytes.used) goto done;
@@ -1859,16 +2014,24 @@ static int yx_ss_masked_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, si
             for (size_t i = width; i-- > 0;) {
                 uint8_t fixed = mask.data[offset + i], value = (uint8_t)(bytes.data[offset + i] & fixed);
                 for (unsigned k = 0; k < 8; ++k)
-                    if (!((fixed >> k) & 1u)) { value |= (uint8_t)((rest & 1u) << k); rest >>= 1; }
+                    if (!((fixed >> k) & 1u)) {
+                        value |= (uint8_t)((rest & 1u) << k);
+                        rest >>= 1;
+                    }
                 atom[i] = value;
             }
-            if (!yx_se_push_atom(atoms, count, capacity, atom, width)) { result = -1; goto done; }
+            if (!yx_se_push_atom(atoms, count, capacity, atom, width)) {
+                result = -1;
+                goto done;
+            }
         }
         result = 1;
     }
 done:
     yx_tr_destroy(root);
-    free(hex_text.data); free(bytes.data); free(mask.data);
+    free(hex_text.data);
+    free(bytes.data);
+    free(mask.data);
     return result;
 }
 
@@ -1876,22 +2039,24 @@ done:
  * c_literal_pattern adds them: for the wide form, then the plain one, the
  * best atom under every xor key, or the best atoms of the three base64
  * forms (base64_patterns), plain and then wide. */
-static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, size_t *count,
-                                    size_t *capacity)
+static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, size_t *count, size_t *capacity)
 {
     static const char standard[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0, ascii = (pattern->modifiers & YX_MOD_ASCII) != 0;
     bool xored = (pattern->modifiers & YX_MOD_XOR) != 0;
     unsigned base64 = pattern->modifiers & (YX_MOD_BASE64 | YX_MOD_BASE64WIDE);
     if (!pattern->bytes || !pattern->length || xored == (base64 != 0) ||
-        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_PRIVATE | YX_MOD_XOR |
-                                YX_MOD_BASE64 | YX_MOD_BASE64WIDE)) ||
-        (base64 && pattern->length < 2) || pattern->length > (SIZE_MAX - 16) / 8) return 0;
+        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_PRIVATE | YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE)) ||
+        (base64 && pattern->length < 2) || pattern->length > (SIZE_MAX - 16) / 8)
+        return 0;
     size_t room = pattern->length * 2 + 2, encoded_room = (room / 3 + 1) * 4 * 2;
     size_t mask_room = encoded_room > room ? encoded_room : room;
     uint8_t *plain = malloc(room), *encoded = malloc(encoded_room), *masks = malloc(mask_room);
     int result = 1;
-    if (!plain || !encoded || !masks) { result = -1; goto done; }
+    if (!plain || !encoded || !masks) {
+        result = -1;
+        goto done;
+    }
     memset(masks, 255, mask_room);
     for (unsigned variant = 0; result == 1 && variant < 2; ++variant) {
         bool as_wide = variant == 0;
@@ -1900,8 +2065,10 @@ static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **ato
         /* Two bytes in front for the base64 forms of "XX" + s and "X" + s. */
         plain[0] = plain[1] = 'X';
         for (size_t i = 0; i < pattern->length; ++i) {
-            if (as_wide) { plain[2 + 2 * i] = pattern->bytes[i]; plain[2 + 2 * i + 1] = 0; }
-            else plain[2 + i] = pattern->bytes[i];
+            if (as_wide) {
+                plain[2 + 2 * i] = pattern->bytes[i];
+                plain[2 + 2 * i + 1] = 0;
+            } else plain[2 + i] = pattern->bytes[i];
         }
         if (xored) {
             yx_fast_literal literal = {plain + 2, masks, length, false};
@@ -1917,24 +2084,31 @@ static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **ato
             const char *alphabet = kind ? pattern->base64wide_alphabet : pattern->base64_alphabet;
             if (!(base64 & (kind ? YX_MOD_BASE64WIDE : YX_MOD_BASE64))) continue;
             if (!alphabet) alphabet = standard;
-            if (strlen(alphabet) != 64) { result = 0; break; }
+            if (strlen(alphabet) != 64) {
+                result = 0;
+                break;
+            }
             for (size_t skip = 0; result == 1 && skip < 3; ++skip) {
                 const uint8_t *in = plain + skip;
                 size_t n = length + 2 - skip, used = 0;
                 for (size_t i = 0; i < n; i += 3) {
-                    uint32_t group = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) |
-                                     (i + 2 < n ? in[i + 2] : 0);
+                    uint32_t group = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
                     size_t symbols = n - i >= 3 ? 4 : n - i + 1;
-                    for (size_t k = 0; k < symbols; ++k)
-                        encoded[used++] = (uint8_t)alphabet[(group >> (18 - 6 * k)) & 63u];
+                    for (size_t k = 0; k < symbols; ++k) encoded[used++] = (uint8_t)alphabet[(group >> (18 - 6 * k)) & 63u];
                 }
                 size_t begin = skip == 0 ? 3 : skip == 1 ? 2 : 0, end = used - (n % 3 ? 1 : 0);
-                if (end <= begin) { result = 0; break; }
+                if (end <= begin) {
+                    result = 0;
+                    break;
+                }
                 size_t form = end - begin;
                 if (kind) {
                     /* The base64 form as a wide string, in place from its end. */
                     memmove(encoded, encoded + begin, form);
-                    for (size_t i = form; i-- > 0;) { encoded[2 * i] = encoded[i]; encoded[2 * i + 1] = 0; }
+                    for (size_t i = form; i-- > 0;) {
+                        encoded[2 * i] = encoded[i];
+                        encoded[2 * i + 1] = 0;
+                    }
                     begin = 0;
                     form *= 2;
                 }
@@ -1945,7 +2119,9 @@ static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **ato
         }
     }
 done:
-    free(plain); free(encoded); free(masks);
+    free(plain);
+    free(encoded);
+    free(masks);
     return result;
 }
 
@@ -1961,8 +2137,7 @@ int yx_ser_search_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom **atoms, s
     *atoms = NULL;
     *count = 0;
     if (pattern->kind == YX_PATTERN_TEXT) result = yx_ss_encoded_text_atoms(pattern, atoms, count, &capacity);
-    else if (!pattern->rx_program && !pattern->rx_chain)
-        result = yx_ss_masked_atoms(pattern, atoms, count, &capacity);
+    else if (!pattern->rx_program && !pattern->rx_chain) result = yx_ss_masked_atoms(pattern, atoms, count, &capacity);
     if (result != 1) {
         free(*atoms);
         *atoms = NULL;
@@ -1987,9 +2162,7 @@ static bool yx_ss_alternation_literal(const yx_tr_node *node)
 /* FastVM rejects Unicode classes anywhere in the regexp. */
 static bool yx_ss_unicode_class(const yx_tr_node *node, size_t depth)
 {
-    if (depth > 250 || node->kind == YX_TR_SCALAR_CLASS ||
-        ((node->kind == YX_TR_CLASS || node->kind == YX_TR_ALT) && node->unicode_class))
-        return true;
+    if (depth > 250 || node->kind == YX_TR_SCALAR_CLASS || ((node->kind == YX_TR_CLASS || node->kind == YX_TR_ALT) && node->unicode_class)) return true;
     for (size_t i = 0; i < node->count; ++i)
         if (yx_ss_unicode_class(node->children[i], depth + 1)) return true;
     return false;
@@ -2020,22 +2193,22 @@ static bool yx_ss_warning_neutral(const char *text)
  * dotall and nocase), or NULL. When the warning parse of regexp equals the
  * scanner's, the Thompson atoms come from yx_tr_compile, whose per-thread
  * cache then also serves the scanner program built from the same source. */
-static int yx_ss_regexp_atoms(const yx_tr_node *node, const YRX_PATTERN *hex,
-                              const char *regexp, bool dotall, bool nocase,
-                              size_t *count, size_t *minimum, size_t *maximum)
+static int yx_ss_regexp_atoms(const yx_tr_node *node, const YRX_PATTERN *hex, const char *regexp, bool dotall, bool nocase, size_t *count, size_t *minimum,
+                              size_t *maximum)
 {
     yx_fast_program *fast;
     yx_tr_program program = {0};
     unsigned split = 0;
     bool ok;
-    *count = 0; *minimum = SIZE_MAX; *maximum = 0;
+    *count = 0;
+    *minimum = SIZE_MAX;
+    *maximum = 0;
     if (!yx_ss_unicode_class(node, 0)) {
         fast = calloc(1, sizeof(*fast));
         if (!fast) return -1;
         fast->flags = 64;
         fast->force_regexp = true;
-        ok = hex ? yx_fast_hex_sequence(fast, hex->hex_atoms, hex->hex_atom_count)
-                 : yx_ft_regex(fast, node, false);
+        ok = hex ? yx_fast_hex_sequence(fast, hex->hex_atoms, hex->hex_atom_count) : yx_ft_regex(fast, node, false);
         if (ok && yx_fast_compile_mode(fast, true)) {
             *count = fast->atom_count;
             for (size_t i = 0; i < fast->atom_count; ++i) {
@@ -2052,9 +2225,7 @@ static int yx_ss_regexp_atoms(const yx_tr_node *node, const YRX_PATTERN *hex,
          * has none, which the count below also assumes. */
         bool greedy;
         ok = yx_tr_compile(regexp, dotall, nocase, &program, &greedy);
-    } else
-        ok = yx_tr_compile_node(node, &program, &split, 0, false, false) &&
-             yx_tr_fold_events(&program.events, &program.atoms);
+    } else ok = yx_tr_compile_node(node, &program, &split, 0, false, false) && yx_tr_fold_events(&program.events, &program.atoms);
     if (ok) {
         /* No atoms: a single zero-length atom covers the regexp. */
         *count = program.atoms.count ? program.atoms.count : 1;
@@ -2079,8 +2250,7 @@ static uint8_t yx_ss_classify(size_t count, size_t minimum, size_t maximum)
     return minimum == 2 && maximum == 2 && count > 2700 ? 1 : 0;
 }
 
-static int yx_ss_call(const yx_tr_node *node, const YRX_PATTERN *hex, const char *regexp,
-                      bool dotall, bool nocase, uint8_t *calls, size_t *call_count)
+static int yx_ss_call(const yx_tr_node *node, const YRX_PATTERN *hex, const char *regexp, bool dotall, bool nocase, uint8_t *calls, size_t *call_count)
 {
     size_t count, minimum, maximum;
     int result = yx_ss_regexp_atoms(node, hex, regexp, dotall, nocase, &count, &minimum, &maximum);
@@ -2096,8 +2266,7 @@ static int yx_ss_call(const yx_tr_node *node, const YRX_PATTERN *hex, const char
  * an alternation of literals and a masked literal (without nocase or wide)
  * are not compiled by c_regexp. Returns 1, 0 when the pattern is outside
  * the parser's grammar, -1 on allocation failure; the caller frees *calls. */
-static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *literal_slow,
-                                        uint8_t **calls, size_t *call_count)
+static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *literal_slow, uint8_t **calls, size_t *call_count)
 {
     bool hex = pattern && pattern->kind == YX_PATTERN_HEX;
     yx_writer hex_text = {0};
@@ -2107,19 +2276,16 @@ static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *litera
     *literal_slow = false;
     *calls = NULL;
     *call_count = 0;
-    if (!pattern || (!hex && (pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)) ||
-        (hex && !pattern->hex_atoms)) return 0;
+    if (!pattern || (!hex && (pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)) || (hex && !pattern->hex_atoms)) return 0;
     bool dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0;
     bool nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0;
     bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
     const char *regexp = pattern->regexp;
     if (hex) {
-        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
-            !yx_put_u8(&hex_text, 0)) goto done;
+        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) goto done;
         regexp = (const char *)hex_text.data;
     }
-    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
-                           .dotall = dotall, .nocase = nocase, .warning_only = true};
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp), .dotall = dotall, .nocase = nocase, .warning_only = true};
     root = yx_tr_expression(&parser);
     if (!root || parser.failed || parser.oom || parser.at != parser.length) {
         result = parser.oom ? -1 : 0;
@@ -2129,7 +2295,10 @@ static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *litera
     *calls = malloc(root->count + 1);
     starts = malloc((root->count + 1) * sizeof(*starts));
     ends = malloc((root->count + 1) * sizeof(*ends));
-    if (!*calls || !starts || !ends) { result = -1; goto done; }
+    if (!*calls || !starts || !ends) {
+        result = -1;
+        goto done;
+    }
     /* Hir::split_at_large_gaps: a top-level concatenation splits at any-byte
      * gaps longer than 200 bytes when the piece before the gap matches at
      * least 2 bytes; a short final piece rejoins the previous one, and a
@@ -2143,8 +2312,7 @@ static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *litera
         pieces = 0;
         for (size_t i = 0; i < root->count; ++i) {
             const yx_tr_node *item = root->children[i];
-            if (item->kind == YX_TR_REPEAT && item->count && !chunk_empty &&
-                (yx_tr_unbounded(item) ? UINT32_MAX : item->maximum) > 200 &&
+            if (item->kind == YX_TR_REPEAT && item->count && !chunk_empty && (yx_tr_unbounded(item) ? UINT32_MAX : item->maximum) > 200 &&
                 yx_se_any_byte(item->children[0])) {
                 uint64_t minimum = 0;
                 for (size_t j = chunk; j < i; ++j) {
@@ -2174,15 +2342,14 @@ static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *litera
         }
     }
     for (size_t i = 0; i < pieces; ++i) {
-        yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + starts[i],
-                               .count = ends[i] - starts[i]};
+        yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + starts[i], .count = ends[i] - starts[i]};
         const yx_tr_node *node = &fragment;
-        bool whole = root->kind != YX_TR_CONCAT ||
-                     (starts[i] == 0 && ends[i] == root->count);
+        bool whole = root->kind != YX_TR_CONCAT || (starts[i] == 0 && ends[i] == root->count);
         int status;
         if (whole) node = root;
         else if (fragment.count == 1) node = fragment.children[0];
-        else for (size_t j = 0; j < fragment.count; ++j) fragment.has_look |= fragment.children[j]->has_look;
+        else
+            for (size_t j = 0; j < fragment.count; ++j) fragment.has_look |= fragment.children[j]->has_look;
         if (pieces > 1) {
             /* c_chain: each piece that is not a literal goes to c_regexp. */
             if (node->kind == YX_TR_LITERAL) continue;
@@ -2191,13 +2358,18 @@ static int yx_ser_slow_pattern_uncached(const YRX_PATTERN *pattern, bool *litera
             if (yx_ss_alternation_literal(node)) break;
             if (!nocase && !wide) {
                 status = yx_ss_masked_literal(node);
-                if (status < 0) { result = -1; goto done; }
+                if (status < 0) {
+                    result = -1;
+                    goto done;
+                }
                 if (status) break;
             }
-            status = yx_ss_call(node, hex && whole ? pattern : NULL, whole ? regexp : NULL,
-                                dotall, nocase, *calls, call_count);
+            status = yx_ss_call(node, hex && whole ? pattern : NULL, whole ? regexp : NULL, dotall, nocase, *calls, call_count);
         }
-        if (status != 1) { result = status; goto done; }
+        if (status != 1) {
+            result = status;
+            goto done;
+        }
     }
     result = 1;
 done:
@@ -2225,8 +2397,7 @@ typedef struct {
     size_t call_count;
 } yx_ss_memo_value;
 
-int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow,
-                        uint8_t **calls, size_t *call_count)
+int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow, uint8_t **calls, size_t *call_count)
 {
     unsigned char value[sizeof(yx_ss_memo_value) + 256];
     yx_ss_memo_value head;
@@ -2234,8 +2405,7 @@ int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow,
     uint64_t tag;
     const void *hit;
     int result;
-    if (!pattern || pattern->kind != YX_PATTERN_REGEX || !pattern->regexp)
-        return yx_ser_slow_pattern_uncached(pattern, literal_slow, calls, call_count);
+    if (!pattern || pattern->kind != YX_PATTERN_REGEX || !pattern->regexp) return yx_ser_slow_pattern_uncached(pattern, literal_slow, calls, call_count);
     length = strlen(pattern->regexp);
     tag = YX_MEMO_TAG(YX_MEMO_SLOW_PATTERN, (unsigned)pattern->kind, pattern->modifiers);
     hit = yx_compile_memo_find(tag, pattern->regexp, length, &stored);
@@ -2251,8 +2421,7 @@ int yx_ser_slow_pattern(const YRX_PATTERN *pattern, bool *literal_slow,
                     *literal_slow = false;
                     return -1;
                 }
-                if (head.call_count)
-                    memcpy(*calls, (const unsigned char *)hit + sizeof(head), head.call_count);
+                if (head.call_count) memcpy(*calls, (const unsigned char *)hit + sizeof(head), head.call_count);
                 *call_count = head.call_count;
             }
             return head.result;

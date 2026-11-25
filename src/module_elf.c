@@ -36,8 +36,7 @@ bool yx_elf_field_supported(const char *member)
     return xx_elf_yx_field_supported(member);
 }
 
-bool yx_elf_field(const uint8_t *data, size_t size, const char *member,
-                  uint64_t *value)
+bool yx_elf_field(const uint8_t *data, size_t size, const char *member, uint64_t *value)
 {
     return xx_elf_yx_field(data, size, member, value);
 }
@@ -47,43 +46,32 @@ bool yx_elf_constant(const char *member, uint64_t *value)
     return xx_elf_yx_constant(member, value);
 }
 
-bool yx_elf_collection_count(const uint8_t *data, size_t size,
-                              const char *member, uint64_t *count)
+bool yx_elf_collection_count(const uint8_t *data, size_t size, const char *member, uint64_t *count)
 {
     return xx_elf_yx_collection_count(data, size, member, count);
 }
 
-bool yx_elf_indexed_field_supported(const char *collection,
-                                     const char *member)
+bool yx_elf_indexed_field_supported(const char *collection, const char *member)
 {
     return xx_elf_yx_indexed_field_supported(collection, member);
 }
 
-bool yx_elf_indexed_field(const uint8_t *data, size_t size,
-                           const char *collection, uint64_t index,
-                           const char *member, uint64_t *value)
+bool yx_elf_indexed_field(const uint8_t *data, size_t size, const char *collection, uint64_t index, const char *member, uint64_t *value)
 {
-    return xx_elf_yx_indexed_field(data, size, collection, index, member,
-                                   value);
+    return xx_elf_yx_indexed_field(data, size, collection, index, member, value);
 }
 
-bool yx_elf_indexed_string_field_supported(const char *collection,
-                                            const char *member)
+bool yx_elf_indexed_string_field_supported(const char *collection, const char *member)
 {
     return xx_elf_yx_indexed_string_field_supported(collection, member);
 }
 
-bool yx_elf_indexed_string_field(const uint8_t *data, size_t size,
-                                  const char *collection, uint64_t index,
-                                  const char *member,
-                                  const uint8_t **bytes, size_t *length)
+bool yx_elf_indexed_string_field(const uint8_t *data, size_t size, const char *collection, uint64_t index, const char *member, const uint8_t **bytes, size_t *length)
 {
-    return xx_elf_yx_indexed_string_field(data, size, collection, index,
-                                          member, bytes, length);
+    return xx_elf_yx_indexed_string_field(data, size, collection, index, member, bytes, length);
 }
 
-bool yx_elf_utf8_lossy(const uint8_t *bytes, size_t length, char *out,
-                        size_t capacity, size_t *written)
+bool yx_elf_utf8_lossy(const uint8_t *bytes, size_t length, char *out, size_t capacity, size_t *written)
 {
     return xx_string_utf8_lossy(bytes, length, out, capacity, written);
 }

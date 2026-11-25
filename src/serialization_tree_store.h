@@ -33,7 +33,7 @@
 
 typedef struct yx_tree_store {
     unsigned char **parked; /* head bytes, then inline nodes [0, count) */
-    size_t *sizes; /* bytes of each parked block */
+    size_t *sizes;          /* bytes of each parked block */
     size_t count;
     yx_integer_expr *scratch;
     size_t open, zeroed; /* rule held by the scratch (SIZE_MAX: none); nodes past count to clear */
@@ -77,16 +77,21 @@ static bool yx_tree_store_park(yx_tree_store *s, size_t i)
      * for the nodes a later emission adds). */
     if (t->extra_nodes && t->count <= YX_INTEGER_EXPR_LIMIT / 2) {
         if (t->count) memcpy(t->nodes, t->extra_nodes, t->count * sizeof(yx_integer_expr_node));
-        free(t->extra_nodes); t->extra_nodes = NULL; t->node_capacity = 0;
-    } else if (t->extra_nodes && t->count <= SIZE_MAX / 2 / sizeof(yx_integer_expr_node) &&
-               t->count * 2 < t->node_capacity) {
+        free(t->extra_nodes);
+        t->extra_nodes = NULL;
+        t->node_capacity = 0;
+    } else if (t->extra_nodes && t->count <= SIZE_MAX / 2 / sizeof(yx_integer_expr_node) && t->count * 2 < t->node_capacity) {
         yx_integer_expr_node *fit = realloc(t->extra_nodes, t->count * 2 * sizeof(*fit));
-        if (fit) { t->extra_nodes = fit; t->node_capacity = t->count * 2; }
+        if (fit) {
+            t->extra_nodes = fit;
+            t->node_capacity = t->count * 2;
+        }
     }
     /* The failed loop decodes a decode remembers only spare it work: a
      * parked tree is not decoded again. */
     free(t->loop_failures);
-    t->loop_failures = NULL; t->loop_failure_count = t->loop_failure_capacity = 0;
+    t->loop_failures = NULL;
+    t->loop_failure_count = t->loop_failure_capacity = 0;
     size_t nodes = yx_tree_inline_nodes(t);
     if (i >= s->count || nodes > (SIZE_MAX - YX_TREE_HEAD) / sizeof(yx_integer_expr_node)) return false;
     size_t size = YX_TREE_HEAD + nodes * sizeof(yx_integer_expr_node);
@@ -100,9 +105,12 @@ static bool yx_tree_store_park(yx_tree_store *s, size_t i)
     s->parked[i] = block;
     if (t->count > s->zeroed) s->zeroed = t->count;
     /* The scratch no longer owns the moved pointers. */
-    t->extra_nodes = NULL; t->node_capacity = 0;
-    t->bindings = NULL; t->binding_count = t->binding_capacity = 0;
-    t->loop_failures = NULL; t->loop_failure_count = t->loop_failure_capacity = 0;
+    t->extra_nodes = NULL;
+    t->node_capacity = 0;
+    t->bindings = NULL;
+    t->binding_count = t->binding_capacity = 0;
+    t->loop_failures = NULL;
+    t->loop_failure_count = t->loop_failure_capacity = 0;
     s->open = SIZE_MAX;
     return true;
 }
@@ -144,8 +152,7 @@ static yx_integer_expr *yx_tree_store_copy(yx_tree_store *s, const yx_integer_ex
     size_t nodes = yx_tree_inline_nodes(from);
     if (nodes > YX_INTEGER_EXPR_LIMIT) return NULL;
     memcpy(t, from, YX_TREE_HEAD_BEFORE);
-    memcpy((unsigned char *)t + YX_TREE_HEAD_AFTER_AT, (const unsigned char *)from + YX_TREE_HEAD_AFTER_AT,
-           YX_TREE_HEAD_AFTER);
+    memcpy((unsigned char *)t + YX_TREE_HEAD_AFTER_AT, (const unsigned char *)from + YX_TREE_HEAD_AFTER_AT, YX_TREE_HEAD_AFTER);
     if (nodes) memcpy(t->nodes, from->nodes, nodes * sizeof(yx_integer_expr_node));
     s->zeroed = from->count;
     return t;

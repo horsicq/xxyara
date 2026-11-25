@@ -31,14 +31,12 @@ bool yx_crx_parse(const uint8_t *data, size_t size, yx_crx_result *result)
     return xx_crx_yx_parse(data, size, result);
 }
 
-bool yx_crx_parse_output(const uint8_t *data, size_t size,
-                          yx_crx_result *result)
+bool yx_crx_parse_output(const uint8_t *data, size_t size, yx_crx_result *result)
 {
     return xx_crx_yx_parse_output(data, size, result);
 }
 
-uint8_t *yx_crx_complete_terminal_signature(const uint8_t *data, size_t size,
-                                              size_t *adjusted_size)
+uint8_t *yx_crx_complete_terminal_signature(const uint8_t *data, size_t size, size_t *adjusted_size)
 {
     return xx_crx_yx_complete_terminal_signature(data, size, adjusted_size);
 }

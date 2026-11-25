@@ -52,11 +52,9 @@ void yx_dex_destroy(yx_dex_result *result);
    false when absent, while `is_dex` and repeated-field lengths are defined
    even for arbitrary non-DEX input. */
 bool yx_dex_numeric_field_supported(const char *path);
-bool yx_dex_numeric_field(const yx_dex_result *result, const char *path,
-                          uint64_t *value);
+bool yx_dex_numeric_field(const yx_dex_result *result, const char *path, uint64_t *value);
 bool yx_dex_string_field_supported(const char *path);
-bool yx_dex_string_field(const yx_dex_result *result, const char *path,
-                         const uint8_t **bytes, size_t *length);
+bool yx_dex_string_field(const yx_dex_result *result, const char *path, const uint8_t **bytes, size_t *length);
 bool yx_dex_constant(const char *name, uint64_t *value);
 
 /* Collection names: strings, types, protos, fields, methods, class_defs,
@@ -65,43 +63,25 @@ bool yx_dex_constant(const char *name, uint64_t *value);
    YARA-X exposes map_list.items.len() == 1 when map_list is absent, although
    all fields of that placeholder item are undefined. */
 bool yx_dex_collection_supported(const char *collection);
-bool yx_dex_collection_count(const yx_dex_result *result,
-                              const char *collection, uint64_t *count);
-bool yx_dex_indexed_numeric_field_supported(const char *collection,
-                                              const char *member);
-bool yx_dex_indexed_numeric_field(const yx_dex_result *result,
-                                   const char *collection, uint64_t index,
-                                   const char *member, uint64_t *value);
-bool yx_dex_indexed_string_field_supported(const char *collection,
-                                             const char *member);
-bool yx_dex_indexed_string_field(const yx_dex_result *result,
-                                  const char *collection, uint64_t index,
-                                  const char *member,
-                                  const uint8_t **bytes, size_t *length);
+bool yx_dex_collection_count(const yx_dex_result *result, const char *collection, uint64_t *count);
+bool yx_dex_indexed_numeric_field_supported(const char *collection, const char *member);
+bool yx_dex_indexed_numeric_field(const yx_dex_result *result, const char *collection, uint64_t index, const char *member, uint64_t *value);
+bool yx_dex_indexed_string_field_supported(const char *collection, const char *member);
+bool yx_dex_indexed_string_field(const yx_dex_result *result, const char *collection, uint64_t index, const char *member, const uint8_t **bytes, size_t *length);
 
 /* Nested arrays are `protos[i].parameters[j]` and
    `methods[i].proto.parameters[j]`. The nested member is `parameters` or
    `proto.parameters`, respectively. */
-bool yx_dex_nested_collection_count(const yx_dex_result *result,
-                                      const char *collection, uint64_t index,
-                                      const char *nested, uint64_t *count);
-bool yx_dex_nested_indexed_string(const yx_dex_result *result,
-                                    const char *collection, uint64_t index,
-                                    const char *nested, uint64_t nested_index,
-                                    const uint8_t **bytes, size_t *length);
+bool yx_dex_nested_collection_count(const yx_dex_result *result, const char *collection, uint64_t index, const char *nested, uint64_t *count);
+bool yx_dex_nested_indexed_string(const yx_dex_result *result, const char *collection, uint64_t index, const char *nested, uint64_t nested_index, const uint8_t **bytes,
+                                  size_t *length);
 
 /* Exported module functions. Predicates are defined as false for non-DEX
    input. checksum/signature are undefined on non-DEX input. The SHA-1 digest
    and header signature are lowercase hexadecimal strings. */
-bool yx_dex_contains_string(const yx_dex_result *result,
-                             const uint8_t *bytes, size_t length,
-                             bool *found);
-bool yx_dex_contains_method(const yx_dex_result *result,
-                             const uint8_t *bytes, size_t length,
-                             bool *found);
-bool yx_dex_contains_class(const yx_dex_result *result,
-                            const uint8_t *bytes, size_t length,
-                            bool *found);
+bool yx_dex_contains_string(const yx_dex_result *result, const uint8_t *bytes, size_t length, bool *found);
+bool yx_dex_contains_method(const yx_dex_result *result, const uint8_t *bytes, size_t length, bool *found);
+bool yx_dex_contains_class(const yx_dex_result *result, const uint8_t *bytes, size_t length, bool *found);
 bool yx_dex_checksum(const yx_dex_result *result, uint64_t *value);
 bool yx_dex_signature(const yx_dex_result *result, char out[41]);
 

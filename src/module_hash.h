@@ -45,20 +45,15 @@ typedef struct {
 /* Hash exactly `size` bytes, including embedded NULs. A NULL bytes pointer
  * with size zero denotes the empty string. False means invalid arguments or
  * a digest backend failure. */
-bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes,
-                   size_t size, yx_hash_value *out);
+bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes, size_t size, yx_hash_value *out);
 
 /* Hash [offset, offset + size) in scanned_data. False means YARA-X's
  * undefined value: negative or out-of-bounds ranges are not truncated.
  * offset == scanned_size with size == 0 is valid. */
-bool yx_hash_range(yx_hash_algorithm algorithm, const uint8_t *scanned_data,
-                   size_t scanned_size, int64_t offset, int64_t size,
-                   yx_hash_value *out);
+bool yx_hash_range(yx_hash_algorithm algorithm, const uint8_t *scanned_data, size_t scanned_size, int64_t offset, int64_t size, yx_hash_value *out);
 
 void yx_hash_cache_reset(void);
-bool yx_hash_cache_get(yx_hash_algorithm algorithm, int64_t offset, int64_t size,
-                        yx_hash_value *out);
-void yx_hash_cache_put(yx_hash_algorithm algorithm, int64_t offset, int64_t size,
-                        const yx_hash_value *value);
+bool yx_hash_cache_get(yx_hash_algorithm algorithm, int64_t offset, int64_t size, yx_hash_value *out);
+void yx_hash_cache_put(yx_hash_algorithm algorithm, int64_t offset, int64_t size, const yx_hash_value *value);
 
 #endif

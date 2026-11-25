@@ -25,21 +25,21 @@
  * This reference data preserves byte-exact public CLI completion output.
  *
  * Copyright (c) 2024. The YARA-X Authors. All Rights Reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without modification,
  * are permitted provided that the following conditions are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright notice, this
  *    list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright notice,
  *    this list of conditions and the following disclaimer in the documentation
  *    and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its contributors
  *    may be used to endorse or promote products derived from this software without
  *    specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -82,8 +82,7 @@ static const char yx_cli_completion_bash_0[] =
     "d=\"yr__subcmd__fix__subcmd__help__subcmd__warnings\"\n                ;;\n         "
     "   yr__subcmd__help,check)\n                cmd=\"yr__subcmd__help__subcmd__check\""
     "\n                ;;\n            yr__subcmd__help,compile)\n                cmd=\"y"
-    "r__subcmd__help__subcmd__compile\"\n              "
-    ;
+    "r__subcmd__help__subcmd__compile\"\n              ";
 static const char yx_cli_completion_bash_1[] =
     "  ;;\n            yr__subcmd__help,completion)\n                cmd=\"yr__subcmd__h"
     "elp__subcmd__completion\"\n                ;;\n            yr__subcmd__help,deps)\n "
@@ -110,8 +109,7 @@ static const char yx_cli_completion_bash_1[] =
     "             ;;\n            esac\n            COMPREPLY=( $(compgen -W \"${opts}\" "
     "-- \"${cur}\") )\n            return 0\n            ;;\n        yr__subcmd__check)\n  "
     "          opts=\"-f -r -p -h --filter --recursive --threads --help\"\n            i"
-    "f [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; th"
-    ;
+    "f [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; th";
 static const char yx_cli_completion_bash_2[] =
     "en\n                COMPREPLY=( $(compgen -W \"${opts}\" -- \"${cur}\") )\n           "
     "     return 0\n            fi\n            case \"${prev}\" in\n                --fil"
@@ -138,8 +136,7 @@ static const char yx_cli_completion_bash_2[] =
     "          ;;\n                --disable-warnings)\n                    COMPREPLY=("
     "$(compgen -f \"${cur}\"))\n                    return 0\n                    ;;\n    "
     "            -w)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n         "
-    "           return 0\n                    ;;\n     "
-    ;
+    "           return 0\n                    ;;\n     ";
 static const char yx_cli_completion_bash_3[] =
     "           --ignore-module)\n                    COMPREPLY=($(compgen -f \"${cur}\""
     "))\n                    return 0\n                    ;;\n                -I)\n     "
@@ -166,8 +163,7 @@ static const char yx_cli_completion_bash_3[] =
     "         COMPREPLY=($(compgen -f \"${cur}\"))\n                    return 0\n       "
     "             ;;\n                *)\n                    COMPREPLY=()\n            "
     "        ;;\n            esac\n            COMPREPLY=( $(compgen -W \"${opts}\" -- \"$"
-    "{cur}\") )\n            return 0\n            ;;\n  "
-    ;
+    "{cur}\") )\n            return 0\n            ;;\n  ";
 static const char yx_cli_completion_bash_4[] =
     "      yr__subcmd__dump)\n            opts=\"-m -o -h --module --no-colors --output"
     "-format --help\"\n            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then\n"
@@ -194,8 +190,7 @@ static const char yx_cli_completion_bash_4[] =
     "|| ${COMP_CWORD} -eq 3 ]] ; then\n                COMPREPLY=( $(compgen -W \"${opt"
     "s}\" -- \"${cur}\") )\n                return 0\n            fi\n            case \"${p"
     "rev}\" in\n                --filter)\n                    COMPREPLY=($(compgen -f \""
-    "${cur}\"))\n                    return 0\n         "
-    ;
+    "${cur}\"))\n                    return 0\n         ";
 static const char yx_cli_completion_bash_5[] =
     "           ;;\n                -f)\n                    COMPREPLY=($(compgen -f \"$"
     "{cur}\"))\n                    return 0\n                    ;;\n                --r"
@@ -222,8 +217,7 @@ static const char yx_cli_completion_bash_5[] =
     "         return 0\n            ;;\n        yr__subcmd__fix__subcmd__help__subcmd__"
     "help)\n            opts=\"\"\n            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 "
     "]] ; then\n                COMPREPLY=( $(compgen -W \"${opts}\" -- \"${cur}\") )\n    "
-    "            return 0\n            fi\n            "
-    ;
+    "            return 0\n            fi\n            ";
 static const char yx_cli_completion_bash_6[] =
     "case \"${prev}\" in\n                *)\n                    COMPREPLY=()\n          "
     "          ;;\n            esac\n            COMPREPLY=( $(compgen -W \"${opts}\" -- "
@@ -250,8 +244,7 @@ static const char yx_cli_completion_bash_6[] =
     "   -I)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                  "
     "  return 0\n                    ;;\n                --include-dir)\n               "
     "     COMPREPLY=($(compgen -f \"${cur}\"))\n                    return 0\n           "
-    "         ;;\n                *)\n                 "
-    ;
+    "         ;;\n                *)\n                 ";
 static const char yx_cli_completion_bash_7[] =
     "   COMPREPLY=()\n                    ;;\n            esac\n            COMPREPLY=( "
     "$(compgen -W \"${opts}\" -- \"${cur}\") )\n            return 0\n            ;;\n      "
@@ -278,8 +271,7 @@ static const char yx_cli_completion_bash_7[] =
     "-eq 3 ]] ; then\n                COMPREPLY=( $(compgen -W \"${opts}\" -- \"${cur}\") "
     ")\n                return 0\n            fi\n            case \"${prev}\" in\n        "
     "        *)\n                    COMPREPLY=()\n                    ;;\n            e"
-    "sac\n            COMPREPLY=( $(compgen -W \"${opts"
-    ;
+    "sac\n            COMPREPLY=( $(compgen -W \"${opts";
 static const char yx_cli_completion_bash_8[] =
     "}\" -- \"${cur}\") )\n            return 0\n            ;;\n        yr__subcmd__help__"
     "subcmd__compile)\n            opts=\"\"\n            if [[ ${cur} == -* || ${COMP_CW"
@@ -306,8 +298,7 @@ static const char yx_cli_completion_bash_8[] =
     "esac\n            COMPREPLY=( $(compgen -W \"${opts}\" -- \"${cur}\") )\n            r"
     "eturn 0\n            ;;\n        yr__subcmd__help__subcmd__fix)\n            opts=\""
     "encoding warnings\"\n            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; th"
-    "en\n                COMPREPLY=( $(compgen -W \"${o"
-    ;
+    "en\n                COMPREPLY=( $(compgen -W \"${o";
 static const char yx_cli_completion_bash_9[] =
     "pts}\" -- \"${cur}\") )\n                return 0\n            fi\n            case \"$"
     "{prev}\" in\n                *)\n                    COMPREPLY=()\n                 "
@@ -334,8 +325,7 @@ static const char yx_cli_completion_bash_9[] =
     "COMP_CWORD} -eq 3 ]] ; then\n                COMPREPLY=( $(compgen -W \"${opts}\" -"
     "- \"${cur}\") )\n                return 0\n            fi\n            case \"${prev}\""
     " in\n                *)\n                    COMPREPLY=()\n                    ;;\n "
-    "           esac\n            COMPREPLY=( $(compge"
-    ;
+    "           esac\n            COMPREPLY=( $(compge";
 static const char yx_cli_completion_bash_10[] =
     "n -W \"${opts}\" -- \"${cur}\") )\n            return 0\n            ;;\n        yr__su"
     "bcmd__help__subcmd__scan)\n            opts=\"\"\n            if [[ ${cur} == -* || "
@@ -362,8 +352,7 @@ static const char yx_cli_completion_bash_10[] =
     "     ;;\n                -w)\n                    COMPREPLY=($(compgen -f \"${cur}\""
     "))\n                    return 0\n                    ;;\n                --ignore-"
     "module)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                 "
-    "   return 0\n                    ;;\n             "
-    ;
+    "   return 0\n                    ;;\n             ";
 static const char yx_cli_completion_bash_11[] =
     "   -I)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                  "
     "  return 0\n                    ;;\n                --include-dir)\n               "
@@ -390,8 +379,7 @@ static const char yx_cli_completion_bash_11[] =
     "          ;;\n                --tag)\n                    COMPREPLY=($(compgen -f "
     "\"${cur}\"))\n                    return 0\n                    ;;\n                -"
     "t)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                    re"
-    "turn 0\n                    ;;\n                --"
-    ;
+    "turn 0\n                    ;;\n                --";
 static const char yx_cli_completion_bash_12[] =
     "threads)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                "
     "    return 0\n                    ;;\n                -p)\n                    COMP"
@@ -404,29 +392,18 @@ static const char yx_cli_completion_bash_12[] =
     "}\" -- \"${cur}\") )\n            return 0\n            ;;\n    esac\n}\n\nif [[ \"${BASH_"
     "VERSINFO[0]}\" -eq 4 && \"${BASH_VERSINFO[1]}\" -ge 4 || \"${BASH_VERSINFO[0]}\" -gt "
     "4 ]]; then\n    complete -F _yr -o nosort -o bashdefault -o default yr\nelse\n    c"
-    "omplete -F _yr -o bashdefault -o default yr\nfi\n"
-    ;
+    "omplete -F _yr -o bashdefault -o default yr\nfi\n";
 
 static const yx_cli_completion_chunk yx_cli_completion_bash_chunks[] = {
-    {yx_cli_completion_bash_0, sizeof(yx_cli_completion_bash_0) - 1},
-    {yx_cli_completion_bash_1, sizeof(yx_cli_completion_bash_1) - 1},
-    {yx_cli_completion_bash_2, sizeof(yx_cli_completion_bash_2) - 1},
-    {yx_cli_completion_bash_3, sizeof(yx_cli_completion_bash_3) - 1},
-    {yx_cli_completion_bash_4, sizeof(yx_cli_completion_bash_4) - 1},
-    {yx_cli_completion_bash_5, sizeof(yx_cli_completion_bash_5) - 1},
-    {yx_cli_completion_bash_6, sizeof(yx_cli_completion_bash_6) - 1},
-    {yx_cli_completion_bash_7, sizeof(yx_cli_completion_bash_7) - 1},
-    {yx_cli_completion_bash_8, sizeof(yx_cli_completion_bash_8) - 1},
-    {yx_cli_completion_bash_9, sizeof(yx_cli_completion_bash_9) - 1},
-    {yx_cli_completion_bash_10, sizeof(yx_cli_completion_bash_10) - 1},
-    {yx_cli_completion_bash_11, sizeof(yx_cli_completion_bash_11) - 1},
+    {yx_cli_completion_bash_0, sizeof(yx_cli_completion_bash_0) - 1},   {yx_cli_completion_bash_1, sizeof(yx_cli_completion_bash_1) - 1},
+    {yx_cli_completion_bash_2, sizeof(yx_cli_completion_bash_2) - 1},   {yx_cli_completion_bash_3, sizeof(yx_cli_completion_bash_3) - 1},
+    {yx_cli_completion_bash_4, sizeof(yx_cli_completion_bash_4) - 1},   {yx_cli_completion_bash_5, sizeof(yx_cli_completion_bash_5) - 1},
+    {yx_cli_completion_bash_6, sizeof(yx_cli_completion_bash_6) - 1},   {yx_cli_completion_bash_7, sizeof(yx_cli_completion_bash_7) - 1},
+    {yx_cli_completion_bash_8, sizeof(yx_cli_completion_bash_8) - 1},   {yx_cli_completion_bash_9, sizeof(yx_cli_completion_bash_9) - 1},
+    {yx_cli_completion_bash_10, sizeof(yx_cli_completion_bash_10) - 1}, {yx_cli_completion_bash_11, sizeof(yx_cli_completion_bash_11) - 1},
     {yx_cli_completion_bash_12, sizeof(yx_cli_completion_bash_12) - 1},
 };
-const yx_cli_completion_script yx_cli_completion_bash = {
-    yx_cli_completion_bash_chunks,
-    sizeof(yx_cli_completion_bash_chunks) /
-        sizeof(yx_cli_completion_bash_chunks[0])
-};
+const yx_cli_completion_script yx_cli_completion_bash = {yx_cli_completion_bash_chunks, sizeof(yx_cli_completion_bash_chunks) / sizeof(yx_cli_completion_bash_chunks[0])};
 
 static const char yx_cli_completion_elvish_0[] =
     "\nuse builtin;\nuse str;\n\nset edit:completion:arg-completer[yr] = {|@words|\n    fn"
@@ -454,8 +431,7 @@ static const char yx_cli_completion_elvish_0[] =
     "cified module'\n            cand --include-dir 'Directory in which to search for "
     "included files'\n            cand --max-matches-per-pattern 'Maximum number of ma"
     "tches per pattern'\n            cand -x 'Pass FILE''s content as extra data to MO"
-    "DULE'\n            cand --module-data 'Pass FILE'"
-    ;
+    "DULE'\n            cand --module-data 'Pass FILE'";
 static const char yx_cli_completion_elvish_1[] =
     "'s content as extra data to MODULE'\n            cand -o 'Output format for resul"
     "ts'\n            cand --output-format 'Output format for results'\n            can"
@@ -482,8 +458,7 @@ static const char yx_cli_completion_elvish_1[] =
     "t-meta 'Print rule metadata'\n            cand -e 'Print rule namespace'\n        "
     "    cand --print-namespace 'Print rule namespace'\n            cand -g 'Print rul"
     "e tags'\n            cand --print-tags 'Print rule tags'\n            cand --profi"
-    "ling 'Show profiling information'\n            ca"
-    ;
+    "ling 'Show profiling information'\n            ca";
 static const char yx_cli_completion_elvish_2[] =
     "nd --relaxed-re-syntax 'Use a more relaxed syntax check while parsing regular ex"
     "pressions'\n            cand --scan-list 'Indicate that TARGET_PATH is a file con"
@@ -510,8 +485,7 @@ static const char yx_cli_completion_elvish_2[] =
     "rint help (see more with ''--help'')'\n            cand --help 'Print help (see m"
     "ore with ''--help'')'\n        }\n        &'yr;dump'= {\n            cand -m 'Modul"
     "e name'\n            cand --module 'Module name'\n            cand -o 'Desired out"
-    "put format'\n            cand --output-format 'De"
-    ;
+    "put format'\n            cand --output-format 'De";
 static const char yx_cli_completion_elvish_3[] =
     "sired output format'\n            cand --no-colors 'Turn off colors in YAML outpu"
     "t'\n            cand -h 'Print help (see more with ''--help'')'\n            cand "
@@ -538,8 +512,7 @@ static const char yx_cli_completion_elvish_3[] =
     "       cand -d 'Define external variable'\n            cand --define 'Define exte"
     "rnal variable'\n            cand -w 'Disable warnings'\n            cand --disable"
     "-warnings 'Disable warnings'\n            cand -I 'Ignore rules that use the spec"
-    "ified module'\n            cand --ignore-module '"
-    ;
+    "ified module'\n            cand --ignore-module '";
 static const char yx_cli_completion_elvish_4[] =
     "Ignore rules that use the specified module'\n            cand --include-dir 'Dire"
     "ctory in which to search for included files'\n            cand --ignore-invalid-r"
@@ -566,30 +539,22 @@ static const char yx_cli_completion_elvish_4[] =
     "shell'\n            cand deps 'Show rule dependencies'\n            cand help 'Pri"
     "nt this message or the help of the given subcommand(s)'\n        }\n        &'yr;h"
     "elp;scan'= {\n        }\n        &'yr;help;compile'= {\n        }\n        &'yr;help"
-    ";check'= {\n        }\n        &'yr;help;dump'= {\n"
-    ;
+    ";check'= {\n        }\n        &'yr;help;dump'= {\n";
 static const char yx_cli_completion_elvish_5[] =
     "        }\n        &'yr;help;fmt'= {\n        }\n        &'yr;help;fix'= {\n        "
     "    cand encoding 'Convert source files to UTF-8'\n            cand warnings 'Aut"
     "omatically fix warnings'\n        }\n        &'yr;help;fix;encoding'= {\n        }\n"
     "        &'yr;help;fix;warnings'= {\n        }\n        &'yr;help;completion'= {\n  "
     "      }\n        &'yr;help;deps'= {\n        }\n        &'yr;help;help'= {\n        "
-    "}\n    ]\n    $completions[$command]\n}\n"
-    ;
+    "}\n    ]\n    $completions[$command]\n}\n";
 
 static const yx_cli_completion_chunk yx_cli_completion_elvish_chunks[] = {
-    {yx_cli_completion_elvish_0, sizeof(yx_cli_completion_elvish_0) - 1},
-    {yx_cli_completion_elvish_1, sizeof(yx_cli_completion_elvish_1) - 1},
-    {yx_cli_completion_elvish_2, sizeof(yx_cli_completion_elvish_2) - 1},
-    {yx_cli_completion_elvish_3, sizeof(yx_cli_completion_elvish_3) - 1},
-    {yx_cli_completion_elvish_4, sizeof(yx_cli_completion_elvish_4) - 1},
-    {yx_cli_completion_elvish_5, sizeof(yx_cli_completion_elvish_5) - 1},
+    {yx_cli_completion_elvish_0, sizeof(yx_cli_completion_elvish_0) - 1}, {yx_cli_completion_elvish_1, sizeof(yx_cli_completion_elvish_1) - 1},
+    {yx_cli_completion_elvish_2, sizeof(yx_cli_completion_elvish_2) - 1}, {yx_cli_completion_elvish_3, sizeof(yx_cli_completion_elvish_3) - 1},
+    {yx_cli_completion_elvish_4, sizeof(yx_cli_completion_elvish_4) - 1}, {yx_cli_completion_elvish_5, sizeof(yx_cli_completion_elvish_5) - 1},
 };
-const yx_cli_completion_script yx_cli_completion_elvish = {
-    yx_cli_completion_elvish_chunks,
-    sizeof(yx_cli_completion_elvish_chunks) /
-        sizeof(yx_cli_completion_elvish_chunks[0])
-};
+const yx_cli_completion_script yx_cli_completion_elvish = {yx_cli_completion_elvish_chunks,
+                                                           sizeof(yx_cli_completion_elvish_chunks) / sizeof(yx_cli_completion_elvish_chunks[0])};
 
 static const char yx_cli_completion_fish_0[] =
     "# Print an optspec for argparse to handle cmd's options that are independent of "
@@ -617,8 +582,7 @@ static const char yx_cli_completion_fish_0[] =
     "le dependencies'\ncomplete -c yr -n \"__fish_yr_needs_command\" -f -a \"help\" -d 'Pr"
     "int this message or the help of the given subcommand(s)'\ncomplete -c yr -n \"__fi"
     "sh_yr_using_subcommand scan\" -l cpu-limit -d 'Limit the CPU usage of the scan (p"
-    "ercentage from 1 to 99)' -r\ncomplete -c yr -n \"_"
-    ;
+    "ercentage from 1 to 99)' -r\ncomplete -c yr -n \"_";
 static const char yx_cli_completion_fish_1[] =
     "_fish_yr_using_subcommand scan\" -s d -l define -d 'Define external variable' -r\n"
     "complete -c yr -n \"__fish_yr_using_subcommand scan\" -s w -l disable-warnings -d "
@@ -645,8 +609,7 @@ static const char yx_cli_completion_fish_1[] =
     "le with compiled rules'\ncomplete -c yr -n \"__fish_yr_using_subcommand scan\" -s c"
     " -l count -d 'Print only the number of matches per file'\ncomplete -c yr -n \"__fi"
     "sh_yr_using_subcommand scan\" -l disable-console-logs -d 'Disable printing consol"
-    "e log messages'\ncomplete -c yr -n \"__fish_yr_usi"
-    ;
+    "e log messages'\ncomplete -c yr -n \"__fish_yr_usi";
 static const char yx_cli_completion_fish_2[] =
     "ng_subcommand scan\" -s f -l fast-scan -d 'Enable fast-scan mode'\ncomplete -c yr "
     "-n \"__fish_yr_using_subcommand scan\" -l ignore-invalid-rules -d 'Ignore rules th"
@@ -673,8 +636,7 @@ static const char yx_cli_completion_fish_2[] =
     "es' -r -F\ncomplete -c yr -n \"__fish_yr_using_subcommand compile\" -s o -l output "
     "-d 'Output file with compiled results' -r -F\ncomplete -c yr -n \"__fish_yr_using_"
     "subcommand compile\" -l ignore-invalid-rules -d 'Ignore rules that fail to compil"
-    "e and continue with the valid ones'\ncomplete -c "
-    ;
+    "e and continue with the valid ones'\ncomplete -c ";
 static const char yx_cli_completion_fish_3[] =
     "yr -n \"__fish_yr_using_subcommand compile\" -l path-as-namespace -d 'Use file pat"
     "h as rule namespace'\ncomplete -c yr -n \"__fish_yr_using_subcommand compile\" -l r"
@@ -701,8 +663,7 @@ static const char yx_cli_completion_fish_3[] =
     "ore with \\'--help\\')'\ncomplete -c yr -n \"__fish_yr_using_subcommand fix; and not"
     " __fish_seen_subcommand_from encoding warnings help\" -s h -l help -d 'Print help"
     "'\ncomplete -c yr -n \"__fish_yr_using_subcommand fix; and not __fish_seen_subcomm"
-    "and_from encoding warnings help\" -f -a \"encoding"
-    ;
+    "and_from encoding warnings help\" -f -a \"encoding";
 static const char yx_cli_completion_fish_4[] =
     "\" -d 'Convert source files to UTF-8'\ncomplete -c yr -n \"__fish_yr_using_subcomma"
     "nd fix; and not __fish_seen_subcommand_from encoding warnings help\" -f -a \"warni"
@@ -729,8 +690,7 @@ static const char yx_cli_completion_fish_4[] =
     "es' -r -F\ncomplete -c yr -n \"__fish_yr_using_subcommand fix; and __fish_seen_sub"
     "command_from warnings\" -l ignore-invalid-rules -d 'Ignore rules that fail to com"
     "pile and continue with the valid ones'\ncomplete -c yr -n \"__fish_yr_using_subcom"
-    "mand fix; and __fish_seen_subcommand_from warnin"
-    ;
+    "mand fix; and __fish_seen_subcommand_from warnin";
 static const char yx_cli_completion_fish_5[] =
     "gs\" -l path-as-namespace -d 'Use file path as rule namespace'\ncomplete -c yr -n "
     "\"__fish_yr_using_subcommand fix; and __fish_seen_subcommand_from warnings\" -l re"
@@ -757,8 +717,7 @@ static const char yx_cli_completion_fish_5[] =
     "ish_yr_using_subcommand help; and not __fish_seen_subcommand_from scan compile c"
     "heck dump fmt fix completion deps help\" -f -a \"dump\" -d 'Show the data produced "
     "by YARA modules for a file'\ncomplete -c yr -n \"__fish_yr_using_subcommand help; "
-    "and not __fish_seen_subcommand_from scan compile"
-    ;
+    "and not __fish_seen_subcommand_from scan compile";
 static const char yx_cli_completion_fish_6[] =
     " check dump fmt fix completion deps help\" -f -a \"fmt\" -d 'Format YARA source fil"
     "es'\ncomplete -c yr -n \"__fish_yr_using_subcommand help; and not __fish_seen_subc"
@@ -774,23 +733,15 @@ static const char yx_cli_completion_fish_6[] =
     " subcommand(s)'\ncomplete -c yr -n \"__fish_yr_using_subcommand help; and __fish_s"
     "een_subcommand_from fix\" -f -a \"encoding\" -d 'Convert source files to UTF-8'\ncom"
     "plete -c yr -n \"__fish_yr_using_subcommand help; and __fish_seen_subcommand_from"
-    " fix\" -f -a \"warnings\" -d 'Automatically fix warnings'\n"
-    ;
+    " fix\" -f -a \"warnings\" -d 'Automatically fix warnings'\n";
 
 static const yx_cli_completion_chunk yx_cli_completion_fish_chunks[] = {
-    {yx_cli_completion_fish_0, sizeof(yx_cli_completion_fish_0) - 1},
-    {yx_cli_completion_fish_1, sizeof(yx_cli_completion_fish_1) - 1},
-    {yx_cli_completion_fish_2, sizeof(yx_cli_completion_fish_2) - 1},
-    {yx_cli_completion_fish_3, sizeof(yx_cli_completion_fish_3) - 1},
-    {yx_cli_completion_fish_4, sizeof(yx_cli_completion_fish_4) - 1},
-    {yx_cli_completion_fish_5, sizeof(yx_cli_completion_fish_5) - 1},
+    {yx_cli_completion_fish_0, sizeof(yx_cli_completion_fish_0) - 1}, {yx_cli_completion_fish_1, sizeof(yx_cli_completion_fish_1) - 1},
+    {yx_cli_completion_fish_2, sizeof(yx_cli_completion_fish_2) - 1}, {yx_cli_completion_fish_3, sizeof(yx_cli_completion_fish_3) - 1},
+    {yx_cli_completion_fish_4, sizeof(yx_cli_completion_fish_4) - 1}, {yx_cli_completion_fish_5, sizeof(yx_cli_completion_fish_5) - 1},
     {yx_cli_completion_fish_6, sizeof(yx_cli_completion_fish_6) - 1},
 };
-const yx_cli_completion_script yx_cli_completion_fish = {
-    yx_cli_completion_fish_chunks,
-    sizeof(yx_cli_completion_fish_chunks) /
-        sizeof(yx_cli_completion_fish_chunks[0])
-};
+const yx_cli_completion_script yx_cli_completion_fish = {yx_cli_completion_fish_chunks, sizeof(yx_cli_completion_fish_chunks) / sizeof(yx_cli_completion_fish_chunks[0])};
 
 static const char yx_cli_completion_powershell_0[] =
     "\nusing namespace System.Management.Automation\nusing namespace System.Management."
@@ -818,8 +769,7 @@ static const char yx_cli_completion_powershell_0[] =
     "  [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterVal"
     "ue, 'Check if source files are syntactically correct')\n            [CompletionRe"
     "sult]::new('dump', 'dump', [CompletionResultType]::ParameterValue, 'Show the dat"
-    "a produced by YARA modules for a file')\n        "
-    ;
+    "a produced by YARA modules for a file')\n        ";
 static const char yx_cli_completion_powershell_1[] =
     "    [CompletionResult]::new('fmt', 'fmt', [CompletionResultType]::ParameterValue"
     ", 'Format YARA source files')\n            [CompletionResult]::new('fix', 'fix', "
@@ -846,8 +796,7 @@ static const char yx_cli_completion_powershell_1[] =
     "meterName, 'Directory in which to search for included files')\n            [Compl"
     "etionResult]::new('--max-matches-per-pattern', '--max-matches-per-pattern', [Com"
     "pletionResultType]::ParameterName, 'Maximum number of matches per pattern')\n    "
-    "        [CompletionResult]::new('-x', '-x', [Com"
-    ;
+    "        [CompletionResult]::new('-x', '-x', [Com";
 static const char yx_cli_completion_powershell_2[] =
     "pletionResultType]::ParameterName, 'Pass FILE''s content as extra data to MODULE"
     "')\n            [CompletionResult]::new('--module-data', '--module-data', [Comple"
@@ -874,8 +823,7 @@ static const char yx_cli_completion_powershell_2[] =
     "e the given number of threads')\n            [CompletionResult]::new('-a', '-a', "
     "[CompletionResultType]::ParameterName, 'Abort scanning after the given number of"
     " seconds')\n            [CompletionResult]::new('--timeout', '--timeout', [Comple"
-    "tionResultType]::ParameterName, 'Abort scanning "
-    ;
+    "tionResultType]::ParameterName, 'Abort scanning ";
 static const char yx_cli_completion_powershell_3[] =
     "after the given number of seconds')\n            [CompletionResult]::new('-C', '-"
     "C ', [CompletionResultType]::ParameterName, 'Indicate that RULES_PATH is a file "
@@ -902,8 +850,7 @@ static const char yx_cli_completion_powershell_3[] =
     " as rule namespace')\n            [CompletionResult]::new('-m', '-m', [Completion"
     "ResultType]::ParameterName, 'Print rule metadata')\n            [CompletionResult"
     "]::new('--print-meta', '--print-meta', [CompletionResultType]::ParameterName, 'P"
-    "rint rule metadata')\n            [CompletionResu"
-    ;
+    "rint rule metadata')\n            [CompletionResu";
 static const char yx_cli_completion_powershell_4[] =
     "lt]::new('-e', '-e', [CompletionResultType]::ParameterName, 'Print rule namespac"
     "e')\n            [CompletionResult]::new('--print-namespace', '--print-namespace'"
@@ -930,8 +877,7 @@ static const char yx_cli_completion_powershell_4[] =
     "s')\n            [CompletionResult]::new('-I', '-I ', [CompletionResultType]::Par"
     "ameterName, 'Ignore rules that use the specified module')\n            [Completio"
     "nResult]::new('--ignore-module', '--ignore-module', [CompletionResultType]::Para"
-    "meterName, 'Ignore rules that use the specified "
-    ;
+    "meterName, 'Ignore rules that use the specified ";
 static const char yx_cli_completion_powershell_5[] =
     "module')\n            [CompletionResult]::new('--include-dir', '--include-dir', ["
     "CompletionResultType]::ParameterName, 'Directory in which to search for included"
@@ -958,8 +904,7 @@ static const char yx_cli_completion_powershell_5[] =
     "--recursive', [CompletionResultType]::ParameterName, 'Walk directories recursive"
     "ly up to a given depth')\n            [CompletionResult]::new('-p', '-p', [Comple"
     "tionResultType]::ParameterName, 'Use the given number of threads')\n            ["
-    "CompletionResult]::new('--threads', '--threads',"
-    ;
+    "CompletionResult]::new('--threads', '--threads',";
 static const char yx_cli_completion_powershell_6[] =
     " [CompletionResultType]::ParameterName, 'Use the given number of threads')\n     "
     "       [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName"
@@ -986,8 +931,7 @@ static const char yx_cli_completion_powershell_6[] =
     "]::new('--tab-size', '--tab-size', [CompletionResultType]::ParameterName, 'Tab s"
     "ize (in spaces) used in source files')\n            [CompletionResult]::new('-c',"
     " '-c', [CompletionResultType]::ParameterName, 'Run in ''check'' mode')\n         "
-    "   [CompletionResult]::new('--check', '--check',"
-    ;
+    "   [CompletionResult]::new('--check', '--check',";
 static const char yx_cli_completion_powershell_7[] =
     " [CompletionResultType]::ParameterName, 'Run in ''check'' mode')\n            [Co"
     "mpletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print h"
@@ -1014,8 +958,7 @@ static const char yx_cli_completion_powershell_7[] =
     "            [CompletionResult]::new('--threads', '--threads', [CompletionResultT"
     "ype]::ParameterName, 'Use the given number of threads')\n            [CompletionR"
     "esult]::new('-d', '-d', [CompletionResultType]::ParameterName, 'Don''t modify so"
-    "urce files')\n            [CompletionResult]::new"
-    ;
+    "urce files')\n            [CompletionResult]::new";
 static const char yx_cli_completion_powershell_8[] =
     "('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Don''t modify"
     " source files')\n            [CompletionResult]::new('-h', '-h', [CompletionResul"
@@ -1042,8 +985,7 @@ static const char yx_cli_completion_powershell_8[] =
     "syntax', '--relaxed-re-syntax', [CompletionResultType]::ParameterName, 'Use a mo"
     "re relaxed syntax check while parsing regular expressions')\n            [Complet"
     "ionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help ("
-    "see more with ''--help'')')\n            [Complet"
-    ;
+    "see more with ''--help'')')\n            [Complet";
 static const char yx_cli_completion_powershell_9[] =
     "ionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Prin"
     "t help (see more with ''--help'')')\n            break\n        }\n        'yr;fix;"
@@ -1070,8 +1012,7 @@ static const char yx_cli_completion_powershell_9[] =
     " a file or directory')\n            [CompletionResult]::new('compile', 'compile',"
     " [CompletionResultType]::ParameterValue, 'Compile rules to binary form')\n       "
     "     [CompletionResult]::new('check', 'check', [CompletionResultType]::Parameter"
-    "Value, 'Check if source files are syntactically "
-    ;
+    "Value, 'Check if source files are syntactically ";
 static const char yx_cli_completion_powershell_10[] =
     "correct')\n            [CompletionResult]::new('dump', 'dump', [CompletionResultT"
     "ype]::ParameterValue, 'Show the data produced by YARA modules for a file')\n     "
@@ -1096,27 +1037,18 @@ static const char yx_cli_completion_powershell_10[] =
     "      break\n        }\n        'yr;help;deps' {\n            break\n        }\n     "
     "   'yr;help;help' {\n            break\n        }\n    })\n\n    $completions.Where{ "
     "$_.CompletionText -like \"$wordToComplete*\" } |\n        Sort-Object -Property Lis"
-    "tItemText\n}\n"
-    ;
+    "tItemText\n}\n";
 
 static const yx_cli_completion_chunk yx_cli_completion_powershell_chunks[] = {
-    {yx_cli_completion_powershell_0, sizeof(yx_cli_completion_powershell_0) - 1},
-    {yx_cli_completion_powershell_1, sizeof(yx_cli_completion_powershell_1) - 1},
-    {yx_cli_completion_powershell_2, sizeof(yx_cli_completion_powershell_2) - 1},
-    {yx_cli_completion_powershell_3, sizeof(yx_cli_completion_powershell_3) - 1},
-    {yx_cli_completion_powershell_4, sizeof(yx_cli_completion_powershell_4) - 1},
-    {yx_cli_completion_powershell_5, sizeof(yx_cli_completion_powershell_5) - 1},
-    {yx_cli_completion_powershell_6, sizeof(yx_cli_completion_powershell_6) - 1},
-    {yx_cli_completion_powershell_7, sizeof(yx_cli_completion_powershell_7) - 1},
-    {yx_cli_completion_powershell_8, sizeof(yx_cli_completion_powershell_8) - 1},
-    {yx_cli_completion_powershell_9, sizeof(yx_cli_completion_powershell_9) - 1},
+    {yx_cli_completion_powershell_0, sizeof(yx_cli_completion_powershell_0) - 1},   {yx_cli_completion_powershell_1, sizeof(yx_cli_completion_powershell_1) - 1},
+    {yx_cli_completion_powershell_2, sizeof(yx_cli_completion_powershell_2) - 1},   {yx_cli_completion_powershell_3, sizeof(yx_cli_completion_powershell_3) - 1},
+    {yx_cli_completion_powershell_4, sizeof(yx_cli_completion_powershell_4) - 1},   {yx_cli_completion_powershell_5, sizeof(yx_cli_completion_powershell_5) - 1},
+    {yx_cli_completion_powershell_6, sizeof(yx_cli_completion_powershell_6) - 1},   {yx_cli_completion_powershell_7, sizeof(yx_cli_completion_powershell_7) - 1},
+    {yx_cli_completion_powershell_8, sizeof(yx_cli_completion_powershell_8) - 1},   {yx_cli_completion_powershell_9, sizeof(yx_cli_completion_powershell_9) - 1},
     {yx_cli_completion_powershell_10, sizeof(yx_cli_completion_powershell_10) - 1},
 };
-const yx_cli_completion_script yx_cli_completion_powershell = {
-    yx_cli_completion_powershell_chunks,
-    sizeof(yx_cli_completion_powershell_chunks) /
-        sizeof(yx_cli_completion_powershell_chunks[0])
-};
+const yx_cli_completion_script yx_cli_completion_powershell = {yx_cli_completion_powershell_chunks,
+                                                               sizeof(yx_cli_completion_powershell_chunks) / sizeof(yx_cli_completion_powershell_chunks[0])};
 
 static const char yx_cli_completion_zsh_0[] =
     "#compdef yr\n\nautoload -U is-at-least\n\n_yr() {\n    typeset -A opt_args\n    typese"
@@ -1144,8 +1076,7 @@ static const char yx_cli_completion_zsh_0[] =
     "\"\nndjson\\:\"Newline delimited JSON (i.e\\: one JSON object per line)\"\njson\\:\"JSON "
     "output (i.e\\: one JSON object for all results, only printed out at the end)\"))' "
     "\\\n'--output-format=[Output format for results]:FORMAT:((text\\:\"Default output fo"
-    "rmat\"\nndjson\\:\"Newline delimited JSON (i.e\\: one"
-    ;
+    "rmat\"\nndjson\\:\"Newline delimited JSON (i.e\\: one";
 static const char yx_cli_completion_zsh_1[] =
     " JSON object per line)\"\njson\\:\"JSON output (i.e\\: one JSON object for all result"
     "s, only printed out at the end)\"))' \\\n'-s+[Print matching patterns]::N:_default'"
@@ -1172,8 +1103,7 @@ static const char yx_cli_completion_zsh_1[] =
     "Show profiling information]' \\\n'--relaxed-re-syntax[Use a more relaxed syntax ch"
     "eck while parsing regular expressions]' \\\n'--scan-list[Indicate that TARGET_PATH"
     " is a file containing the paths to be scanned]' \\\n'-h[Print help (see more with "
-    "'\\''--help'\\'')]' \\\n'--help[Print help (see more"
-    ;
+    "'\\''--help'\\'')]' \\\n'--help[Print help (see more";
 static const char yx_cli_completion_zsh_2[] =
     " with '\\''--help'\\'')]' \\\n':[NAMESPACE:]RULES_PATH -- Path to a YARA source file"
     " or directory (optionally prefixed with a namespace):_default' \\\n':TARGET_PATH -"
@@ -1200,8 +1130,7 @@ static const char yx_cli_completion_zsh_2[] =
     "M_THREADS:_default' \\\n'--threads=[Use the given number of threads]:NUM_THREADS:_"
     "default' \\\n'-h[Print help (see more with '\\''--help'\\'')]' \\\n'--help[Print help "
     "(see more with '\\''--help'\\'')]' \\\n':RULES_PATH -- Path to YARA source file or d"
-    "irectory:_files' \\\n&& ret=0\n;;\n(dump)\n_arguments"
-    ;
+    "irectory:_files' \\\n&& ret=0\n;;\n(dump)\n_arguments";
 static const char yx_cli_completion_zsh_3[] =
     " \"${_arguments_options[@]}\" : \\\n'*-m+[Module name]: :(lnk macho elf pe dotnet ol"
     "ecf vba crx dex zip)' \\\n'*--module=[Module name]: :(lnk macho elf pe dotnet olecf vb"
@@ -1228,8 +1157,7 @@ static const char yx_cli_completion_zsh_3[] =
     "s recursively up to a given depth]::MAX_DEPTH:_default' \\\n'-p+[Use the given num"
     "ber of threads]:NUM_THREADS:_default' \\\n'--threads=[Use the given number of thre"
     "ads]:NUM_THREADS:_default' \\\n'-d[Don'\\''t modify source files]' \\\n'--dry-run[Don"
-    "'\\''t modify source files]' \\\n'-h[Print help (se"
-    ;
+    "'\\''t modify source files]' \\\n'-h[Print help (se";
 static const char yx_cli_completion_zsh_4[] =
     "e more with '\\''--help'\\'')]' \\\n'--help[Print help (see more with '\\''--help'\\''"
     ")]' \\\n':RULES_PATH -- Path to YARA source file or directory:_files' \\\n&& ret=0\n;"
@@ -1256,8 +1184,7 @@ static const char yx_cli_completion_zsh_4[] =
     "ts_options[@]}\" : \\\n'-h[Print help (see more with '\\''--help'\\'')]' \\\n'--help[Pr"
     "int help (see more with '\\''--help'\\'')]' \\\n':SHELL -- Shell name:(bash elvish f"
     "ish powershell zsh)' \\\n&& ret=0\n;;\n(deps)\n_arguments \"${_arguments_options[@]}\" "
-    ": \\\n'*-r+[Rules to display dependency informatio"
-    ;
+    ": \\\n'*-r+[Rules to display dependency informatio";
 static const char yx_cli_completion_zsh_5[] =
     "n for]: :_default' \\\n'*--rule=[Rules to display dependency information for]: :_d"
     "efault' \\\n'-h[Print help]' \\\n'--help[Print help]' \\\n':RULES_PATH -- Path to YARA"
@@ -1284,8 +1211,7 @@ static const char yx_cli_completion_zsh_5[] =
     "p:Show the data produced by YARA modules for a file' \\\n'fmt:Format YARA source f"
     "iles' \\\n'fix:Utilities for fixing source code' \\\n'completion:Output shell comple"
     "tion code for the specified shell' \\\n'deps:Show rule dependencies' \\\n'help:Print"
-    " this message or the help of the given subcomman"
-    ;
+    " this message or the help of the given subcomman";
 static const char yx_cli_completion_zsh_6[] =
     "d(s)' \\\n    )\n    _describe -t commands 'yr commands' commands \"$@\"\n}\n(( $+funct"
     "ions[_yr__subcmd__check_commands] )) ||\n_yr__subcmd__check_commands() {\n    loca"
@@ -1312,8 +1238,7 @@ static const char yx_cli_completion_zsh_6[] =
     "p of the given subcommand(s)' \\\n    )\n    _describe -t commands 'yr fix help com"
     "mands' commands \"$@\"\n}\n(( $+functions[_yr__subcmd__fix__subcmd__help__subcmd__en"
     "coding_commands] )) ||\n_yr__subcmd__fix__subcmd__help__subcmd__encoding_commands"
-    "() {\n    local commands; commands=()\n    _descri"
-    ;
+    "() {\n    local commands; commands=()\n    _descri";
 static const char yx_cli_completion_zsh_7[] =
     "be -t commands 'yr fix help encoding commands' commands \"$@\"\n}\n(( $+functions[_y"
     "r__subcmd__fix__subcmd__help__subcmd__help_commands] )) ||\n_yr__subcmd__fix__sub"
@@ -1340,8 +1265,7 @@ static const char yx_cli_completion_zsh_7[] =
     "ctions[_yr__subcmd__help__subcmd__compile_commands] )) ||\n_yr__subcmd__help__sub"
     "cmd__compile_commands() {\n    local commands; commands=()\n    _describe -t comma"
     "nds 'yr help compile commands' commands \"$@\"\n}\n(( $+functions[_yr__subcmd__help_"
-    "_subcmd__completion_commands] )) ||\n_yr__subcmd_"
-    ;
+    "_subcmd__completion_commands] )) ||\n_yr__subcmd_";
 static const char yx_cli_completion_zsh_8[] =
     "_help__subcmd__completion_commands() {\n    local commands; commands=()\n    _desc"
     "ribe -t commands 'yr help completion commands' commands \"$@\"\n}\n(( $+functions[_y"
@@ -1368,36 +1292,24 @@ static const char yx_cli_completion_zsh_8[] =
     "tions[_yr__subcmd__help__subcmd__scan_commands] )) ||\n_yr__subcmd__help__subcmd_"
     "_scan_commands() {\n    local commands; commands=()\n    _describe -t commands 'yr"
     " help scan commands' commands \"$@\"\n}\n(( $+functions[_yr__subcmd__scan_commands] "
-    ")) ||\n_yr__subcmd__scan_commands() {\n    local c"
-    ;
+    ")) ||\n_yr__subcmd__scan_commands() {\n    local c";
 static const char yx_cli_completion_zsh_9[] =
     "ommands; commands=()\n    _describe -t commands 'yr scan commands' commands \"$@\"\n"
-    "}\n\nif [ \"$funcstack[1]\" = \"_yr\" ]; then\n    _yr \"$@\"\nelse\n    compdef _yr yr\nfi\n"
-    ;
+    "}\n\nif [ \"$funcstack[1]\" = \"_yr\" ]; then\n    _yr \"$@\"\nelse\n    compdef _yr yr\nfi\n";
 
 static const yx_cli_completion_chunk yx_cli_completion_zsh_chunks[] = {
-    {yx_cli_completion_zsh_0, sizeof(yx_cli_completion_zsh_0) - 1},
-    {yx_cli_completion_zsh_1, sizeof(yx_cli_completion_zsh_1) - 1},
-    {yx_cli_completion_zsh_2, sizeof(yx_cli_completion_zsh_2) - 1},
-    {yx_cli_completion_zsh_3, sizeof(yx_cli_completion_zsh_3) - 1},
-    {yx_cli_completion_zsh_4, sizeof(yx_cli_completion_zsh_4) - 1},
-    {yx_cli_completion_zsh_5, sizeof(yx_cli_completion_zsh_5) - 1},
-    {yx_cli_completion_zsh_6, sizeof(yx_cli_completion_zsh_6) - 1},
-    {yx_cli_completion_zsh_7, sizeof(yx_cli_completion_zsh_7) - 1},
-    {yx_cli_completion_zsh_8, sizeof(yx_cli_completion_zsh_8) - 1},
-    {yx_cli_completion_zsh_9, sizeof(yx_cli_completion_zsh_9) - 1},
+    {yx_cli_completion_zsh_0, sizeof(yx_cli_completion_zsh_0) - 1}, {yx_cli_completion_zsh_1, sizeof(yx_cli_completion_zsh_1) - 1},
+    {yx_cli_completion_zsh_2, sizeof(yx_cli_completion_zsh_2) - 1}, {yx_cli_completion_zsh_3, sizeof(yx_cli_completion_zsh_3) - 1},
+    {yx_cli_completion_zsh_4, sizeof(yx_cli_completion_zsh_4) - 1}, {yx_cli_completion_zsh_5, sizeof(yx_cli_completion_zsh_5) - 1},
+    {yx_cli_completion_zsh_6, sizeof(yx_cli_completion_zsh_6) - 1}, {yx_cli_completion_zsh_7, sizeof(yx_cli_completion_zsh_7) - 1},
+    {yx_cli_completion_zsh_8, sizeof(yx_cli_completion_zsh_8) - 1}, {yx_cli_completion_zsh_9, sizeof(yx_cli_completion_zsh_9) - 1},
 };
-const yx_cli_completion_script yx_cli_completion_zsh = {
-    yx_cli_completion_zsh_chunks,
-    sizeof(yx_cli_completion_zsh_chunks) /
-        sizeof(yx_cli_completion_zsh_chunks[0])
-};
+const yx_cli_completion_script yx_cli_completion_zsh = {yx_cli_completion_zsh_chunks, sizeof(yx_cli_completion_zsh_chunks) / sizeof(yx_cli_completion_zsh_chunks[0])};
 
 const char yx_cli_completion_help_short[] =
     "Output shell completion code for the specified shell\n\nUsage:\n  yr completion <SH"
     "ELL>\n\nArguments:\n  <SHELL>  Shell name [possible values: bash, elvish, fish, pow"
-    "ershell, zsh]\n\nOptions:\n  -h, --help  Print help (see more with '--help')\n"
-    ;
+    "ershell, zsh]\n\nOptions:\n  -h, --help  Print help (see more with '--help')\n";
 const size_t yx_cli_completion_help_short_length = sizeof(yx_cli_completion_help_short) - 1;
 
 const char yx_cli_completion_help_long[] =
@@ -1405,6 +1317,5 @@ const char yx_cli_completion_help_long[] =
     "ash > $(brew --prefix)/etc/bash_completion.d/yr\nyr completion zsh > \"${fpath[1]}"
     "/_yr\"\n\nUsage:\n  yr completion <SHELL>\n\nArguments:\n  <SHELL>\n          Shell name"
     "\n          \n          [possible values: bash, elvish, fish, powershell, zsh]\n\nOp"
-    "tions:\n  -h, --help\n          Print help (see a summary with '-h')\n"
-    ;
+    "tions:\n  -h, --help\n          Print help (see a summary with '-h')\n";
 const size_t yx_cli_completion_help_long_length = sizeof(yx_cli_completion_help_long) - 1;

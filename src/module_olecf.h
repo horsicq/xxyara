@@ -49,13 +49,11 @@ bool yx_olecf_is_olecf(const uint8_t *data, size_t size);
 
 /* Always defined for valid arguments, including count zero on non-OLECF.
  * Returns false only for invalid arguments or allocation failure. */
-bool yx_olecf_stream_count(const uint8_t *data, size_t size,
-                            uint64_t *count);
+bool yx_olecf_stream_count(const uint8_t *data, size_t size, uint64_t *count);
 
 /* The zero-based stream index follows the order in YARA-X's IndexMap.
  * Returns false when index is out of range or the file is invalid. */
-bool yx_olecf_stream_get(const uint8_t *data, size_t size,
-                          uint64_t index, yx_olecf_stream *stream);
+bool yx_olecf_stream_get(const uint8_t *data, size_t size, uint64_t index, yx_olecf_stream *stream);
 
 /* A compound file parsed once, for readers of stream contents (the msi
  * module). It mirrors YARA-X's Olecf (lib/src/modules/olecf/parser.rs). */
@@ -66,8 +64,7 @@ void yx_olecf_close(yx_olecf_document *document);
 size_t yx_olecf_sector_size(const yx_olecf_document *document);
 size_t yx_olecf_entry_count(const yx_olecf_document *document);
 /* Directory entries in IndexMap order (Olecf::streams). */
-const yx_olecf_stream *yx_olecf_entry(const yx_olecf_document *document,
-                                      size_t index);
+const yx_olecf_stream *yx_olecf_entry(const yx_olecf_document *document, size_t index);
 
 /* Contents of entry `index`, like Olecf::get_stream_data: entries smaller
  * than 4096 bytes other than the root storage are read through the MiniFAT
@@ -75,8 +72,6 @@ const yx_olecf_stream *yx_olecf_entry(const yx_olecf_document *document,
  * borrows from the scanned data (*owner is NULL); any other chain is
  * gathered into *owner, which the caller frees, and *bytes points into it.
  * Fails for a broken, cyclic or truncated chain or a stream above 256 MiB. */
-bool yx_olecf_entry_data(const yx_olecf_document *document, size_t index,
-                         const uint8_t **bytes, size_t *size,
-                         uint8_t **owner);
+bool yx_olecf_entry_data(const yx_olecf_document *document, size_t index, const uint8_t **bytes, size_t *size, uint8_t **owner);
 
 #endif

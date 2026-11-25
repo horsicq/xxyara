@@ -61,8 +61,7 @@ typedef struct yx_sc_result {
 
 /* Returns false when the check could not complete (allocation failure,
  * nesting or fuel limits); the result is then empty. */
-bool yx_syntax_check(const uint8_t *source, size_t length,
-                     yx_sc_result *result);
+bool yx_syntax_check(const uint8_t *source, size_t length, yx_sc_result *result);
 void yx_sc_result_free(yx_sc_result *result);
 
 #ifdef __cplusplus

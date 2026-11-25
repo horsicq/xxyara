@@ -35,12 +35,14 @@ typedef struct {
     yx_hash_value value;
     bool occupied;
 } yx_hash_cache_entry;
-typedef struct { yx_hash_cache_entry *entries; size_t count, capacity; } yx_hash_cache;
+typedef struct {
+    yx_hash_cache_entry *entries;
+    size_t count, capacity;
+} yx_hash_cache;
 static yx_thread_storage yx_hash_storage = YX_THREAD_STORAGE_INIT;
 static _Thread_local yx_hash_cache *yx_hash_thread_cache;
 
-static size_t yx_hash_cache_bucket(yx_hash_algorithm algorithm, int64_t offset,
-                                   int64_t size, size_t capacity)
+static size_t yx_hash_cache_bucket(yx_hash_algorithm algorithm, int64_t offset, int64_t size, size_t capacity)
 {
     uint64_t key = (uint64_t)offset ^ ((uint64_t)size + UINT64_C(0x9e3779b97f4a7c15));
     key ^= (uint64_t)algorithm * UINT64_C(0x517cc1b727220a95);
@@ -64,8 +66,7 @@ void yx_hash_cache_reset(void)
     cache->count = 0;
 }
 
-bool yx_hash_cache_get(yx_hash_algorithm algorithm, int64_t offset, int64_t size,
-                        yx_hash_value *out)
+bool yx_hash_cache_get(yx_hash_algorithm algorithm, int64_t offset, int64_t size, yx_hash_value *out)
 {
     yx_hash_cache *cache = yx_hash_thread_cache;
     if (!out || !cache || !cache->count) return false;
@@ -81,12 +82,9 @@ bool yx_hash_cache_get(yx_hash_algorithm algorithm, int64_t offset, int64_t size
     return false;
 }
 
-void yx_hash_cache_put(yx_hash_algorithm algorithm, int64_t offset, int64_t size,
-                        const yx_hash_value *value)
+void yx_hash_cache_put(yx_hash_algorithm algorithm, int64_t offset, int64_t size, const yx_hash_value *value)
 {
-    if (!yx_hash_thread_cache)
-        yx_hash_thread_cache = yx_thread_storage_get(&yx_hash_storage,
-                    sizeof(*yx_hash_thread_cache), yx_hash_cache_destroy);
+    if (!yx_hash_thread_cache) yx_hash_thread_cache = yx_thread_storage_get(&yx_hash_storage, sizeof(*yx_hash_thread_cache), yx_hash_cache_destroy);
     yx_hash_cache *cache = yx_hash_thread_cache;
     if (!cache || !value) return;
     if (cache->count >= cache->capacity / 2) {
@@ -131,8 +129,7 @@ static uint32_t yx_checksum32(const uint8_t *bytes, size_t size)
     return (uint32_t)xx_bytestats_sum(bytes, size);
 }
 
-bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes,
-                   size_t size, yx_hash_value *out)
+bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes, size_t size, yx_hash_value *out)
 {
     uint8_t digest[XX_SHA256_DIGEST_SIZE];
     unsigned digest_size;
@@ -150,19 +147,19 @@ bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes,
         return true;
     }
     switch (algorithm) {
-    case YX_HASH_MD5:
-        digest_size = XX_MD5_DIGEST_SIZE;
-        hashed = xx_md5_memory(bytes, size, digest);
-        break;
-    case YX_HASH_SHA1:
-        digest_size = XX_SHA1_DIGEST_SIZE;
-        hashed = xx_sha1_memory(bytes, size, digest);
-        break;
-    case YX_HASH_SHA256:
-        digest_size = XX_SHA256_DIGEST_SIZE;
-        hashed = xx_sha256_memory(bytes, size, digest);
-        break;
-    default: return false;
+        case YX_HASH_MD5:
+            digest_size = XX_MD5_DIGEST_SIZE;
+            hashed = xx_md5_memory(bytes, size, digest);
+            break;
+        case YX_HASH_SHA1:
+            digest_size = XX_SHA1_DIGEST_SIZE;
+            hashed = xx_sha1_memory(bytes, size, digest);
+            break;
+        case YX_HASH_SHA256:
+            digest_size = XX_SHA256_DIGEST_SIZE;
+            hashed = xx_sha256_memory(bytes, size, digest);
+            break;
+        default: return false;
     }
     if (!hashed) return false;
     for (unsigned i = 0; i < digest_size; ++i) {
@@ -174,17 +171,12 @@ bool yx_hash_bytes(yx_hash_algorithm algorithm, const uint8_t *bytes,
     return true;
 }
 
-bool yx_hash_range(yx_hash_algorithm algorithm, const uint8_t *scanned_data,
-                   size_t scanned_size, int64_t offset, int64_t size,
-                   yx_hash_value *out)
+bool yx_hash_range(yx_hash_algorithm algorithm, const uint8_t *scanned_data, size_t scanned_size, int64_t offset, int64_t size, yx_hash_value *out)
 {
     const uint8_t *slice;
     if (!out) return false;
     memset(out, 0, sizeof(*out));
-    if ((!scanned_data && scanned_size) || offset < 0 || size < 0 ||
-        (uint64_t)offset > scanned_size ||
-        (uint64_t)size > scanned_size - (uint64_t)offset)
-        return false;
+    if ((!scanned_data && scanned_size) || offset < 0 || size < 0 || (uint64_t)offset > scanned_size || (uint64_t)size > scanned_size - (uint64_t)offset) return false;
     slice = scanned_data ? scanned_data + (size_t)offset : NULL;
     return yx_hash_bytes(algorithm, slice, (size_t)size, out);
 }

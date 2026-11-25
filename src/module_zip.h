@@ -44,8 +44,7 @@ typedef xx_zip_yx_result yx_zip_result;
 bool yx_zip_parse(const uint8_t *data, size_t size, yx_zip_result *result);
 /* Decode the validated zip.Zip protobuf supplied by the scanner output API.
  * Optional fields remain absent when their protobuf field is absent. */
-bool yx_zip_parse_output(const uint8_t *data, size_t size,
-                         yx_zip_result *result);
+bool yx_zip_parse_output(const uint8_t *data, size_t size, yx_zip_result *result);
 void yx_zip_result_free(yx_zip_result *result);
 
 /* Inline zip.Compression enum constants, e.g. "DEFLATED" and "UNKNOWN". */

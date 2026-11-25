@@ -19,13 +19,32 @@
  * SOFTWARE.
  */
 
-
 /* Public VT field types and access rules from YARA-X 1.21.0 protobufs. */
 #ifndef XXYARA_VT_SCHEMA_H
 #define XXYARA_VT_SCHEMA_H
-typedef enum { YX_VT_INT, YX_VT_FLOAT, YX_VT_BOOL, YX_VT_STRING, YX_VT_STRUCT, YX_VT_ARRAY, YX_VT_MAP } yx_vt_type;
-typedef struct { const char *path; yx_vt_type type; unsigned indices; unsigned string_keys; bool element; } yx_vt_field;
-typedef struct { const char *path; const char *title; const char *label; const char *accept[4]; const char *reject; } yx_vt_acl;
+typedef enum {
+    YX_VT_INT,
+    YX_VT_FLOAT,
+    YX_VT_BOOL,
+    YX_VT_STRING,
+    YX_VT_STRUCT,
+    YX_VT_ARRAY,
+    YX_VT_MAP
+} yx_vt_type;
+typedef struct {
+    const char *path;
+    yx_vt_type type;
+    unsigned indices;
+    unsigned string_keys;
+    bool element;
+} yx_vt_field;
+typedef struct {
+    const char *path;
+    const char *title;
+    const char *label;
+    const char *accept[4];
+    const char *reject;
+} yx_vt_acl;
 static const yx_vt_field yx_vt_fields[] = {
     {"vt.metadata", YX_VT_STRUCT, 0, 0, false},
     {"vt.metadata.sha256", YX_VT_STRING, 0, 0, false},
@@ -1204,22 +1223,46 @@ static const yx_vt_acl yx_vt_acls[] = {
     {"vt.metadata.submitter", "vt.metadata.submitter is not supported in Retrohunt", "this field is not supported in Retrohunt", {NULL}, "retrohunt"},
     {"vt.metadata.itw.url", "vt.net.url is supported only in rulesets matching against URLs", "this field is supported for URLs only", {"url", "file"}, NULL},
     {"vt.metadata.itw.url.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
-    {"vt.metadata.itw.ip", "vt.net.ip is supported only in rulesets matching against URLs, domains or IPs", "this field is supported for URLs, domains and IPs only", {"url", "domain", "ip_address", "file"}, NULL},
-    {"vt.metadata.itw.ip.first_whois", "vt.net.ip.first_whois is supported in rulesets matching against IPs", "this field is supported for IPs only", {"ip_address"}, NULL},
+    {"vt.metadata.itw.ip",
+     "vt.net.ip is supported only in rulesets matching against URLs, domains or IPs",
+     "this field is supported for URLs, domains and IPs only",
+     {"url", "domain", "ip_address", "file"},
+     NULL},
+    {"vt.metadata.itw.ip.first_whois",
+     "vt.net.ip.first_whois is supported in rulesets matching against IPs",
+     "this field is supported for IPs only",
+     {"ip_address"},
+     NULL},
     {"vt.metadata.itw.ip.new_whois", "vt.net.ip.new_whois is supported in rulesets matching against IPs", "this field is supported for IPs only", {"ip_address"}, NULL},
     {"vt.metadata.itw.ip.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
-    {"vt.metadata.itw.domain", "vt.net.domain is supported only in rulesets matching against URLs or domains", "this field is supported for URLs and domains only", {"url", "domain", "file"}, NULL},
+    {"vt.metadata.itw.domain",
+     "vt.net.domain is supported only in rulesets matching against URLs or domains",
+     "this field is supported for URLs and domains only",
+     {"url", "domain", "file"},
+     NULL},
     {"vt.metadata.itw.domain.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
     {"vt.metadata.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
     {"vt.behaviour", "vt.behaviour is supported only in rulesets matching against files", "this field is supported for files only", {"file"}, NULL},
-    {"vt.net", "vt.net is not supported in rulesets matching against files", "this field is not supported for files, consider using `vt.metadata.itw`", {"url", "domain", "ip_address"}, NULL},
+    {"vt.net",
+     "vt.net is not supported in rulesets matching against files",
+     "this field is not supported for files, consider using `vt.metadata.itw`",
+     {"url", "domain", "ip_address"},
+     NULL},
     {"vt.net.url", "vt.net.url is supported only in rulesets matching against URLs", "this field is supported for URLs only", {"url", "file"}, NULL},
     {"vt.net.url.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
-    {"vt.net.ip", "vt.net.ip is supported only in rulesets matching against URLs, domains or IPs", "this field is supported for URLs, domains and IPs only", {"url", "domain", "ip_address", "file"}, NULL},
+    {"vt.net.ip",
+     "vt.net.ip is supported only in rulesets matching against URLs, domains or IPs",
+     "this field is supported for URLs, domains and IPs only",
+     {"url", "domain", "ip_address", "file"},
+     NULL},
     {"vt.net.ip.first_whois", "vt.net.ip.first_whois is supported in rulesets matching against IPs", "this field is supported for IPs only", {"ip_address"}, NULL},
     {"vt.net.ip.new_whois", "vt.net.ip.new_whois is supported in rulesets matching against IPs", "this field is supported for IPs only", {"ip_address"}, NULL},
     {"vt.net.ip.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
-    {"vt.net.domain", "vt.net.domain is supported only in rulesets matching against URLs or domains", "this field is supported for URLs and domains only", {"url", "domain", "file"}, NULL},
+    {"vt.net.domain",
+     "vt.net.domain is supported only in rulesets matching against URLs or domains",
+     "this field is supported for URLs and domains only",
+     {"url", "domain", "file"},
+     NULL},
     {"vt.net.domain.gti_assessment", "unknown field or method `gti_assessment`", "this field or method doesn't exist", {"gti", "staff"}, NULL},
 };
 #endif

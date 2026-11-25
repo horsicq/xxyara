@@ -47,9 +47,7 @@ void yx_magic_thread_cache_reset(void);
  * bytes, including embedded NULs. A NULL data pointer is valid only for an
  * empty scan. False means the YARA-X undefined value (or invalid arguments).
  * Both functions cache successful results, including an empty result. */
-bool yx_magic_type(yx_magic_cache *cache, const uint8_t *data, size_t size,
-                   const char **out, size_t *out_length);
-bool yx_magic_mime_type(yx_magic_cache *cache, const uint8_t *data, size_t size,
-                        const char **out, size_t *out_length);
+bool yx_magic_type(yx_magic_cache *cache, const uint8_t *data, size_t size, const char **out, size_t *out_length);
+bool yx_magic_mime_type(yx_magic_cache *cache, const uint8_t *data, size_t size, const char **out, size_t *out_length);
 
 #endif

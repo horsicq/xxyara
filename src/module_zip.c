@@ -31,8 +31,7 @@ bool yx_zip_parse(const uint8_t *data, size_t size, yx_zip_result *result)
     return xx_zip_yx_parse(data, size, result);
 }
 
-bool yx_zip_parse_output(const uint8_t *data, size_t size,
-                         yx_zip_result *result)
+bool yx_zip_parse_output(const uint8_t *data, size_t size, yx_zip_result *result)
 {
     return xx_zip_yx_parse_output(data, size, result);
 }

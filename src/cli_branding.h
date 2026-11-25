@@ -43,11 +43,13 @@
 #define YX_CLI_PACKAGE_NAME "xxyara"
 
 /* The first lines of `xxyara help`, up to the blank line before "Usage:". */
-#define YX_CLI_BANNER \
-    "xxyara " XXYARA_CLI_VERSION ", the pattern matching swiss army knife " \
-    "(YARA-X " YX_CLI_VERSION " compatible).\n" \
-    "\n" \
-    "Copyright (c) 2026 hors\n" \
+#define YX_CLI_BANNER                                                                \
+    "xxyara " XXYARA_CLI_VERSION                                                     \
+    ", the pattern matching swiss army knife "                                       \
+    "(YARA-X " YX_CLI_VERSION                                                        \
+    " compatible).\n"                                                                \
+    "\n"                                                                             \
+    "Copyright (c) 2026 hors\n"                                                      \
     "Based on the original YARA-X by Victor M. Alvarez <vmalvarez@virustotal.com>\n" \
     "https://github.com/horsicq/xxyara\n"
 
@@ -58,9 +60,10 @@
 
 #define YX_CLI_PROGRAM_NAME "yr"
 #define YX_CLI_PACKAGE_NAME "yara-x-cli"
-#define YX_CLI_BANNER \
-    "YARA-X " YX_CLI_VERSION ", the pattern matching swiss army knife.\n" \
-    "\n" \
+#define YX_CLI_BANNER                            \
+    "YARA-X " YX_CLI_VERSION                     \
+    ", the pattern matching swiss army knife.\n" \
+    "\n"                                         \
     "Victor M. Alvarez <vmalvarez@virustotal.com>\n"
 #define YX_CLI_VERSION_LINE "yara-x-cli " YX_CLI_VERSION "\n"
 

@@ -37,22 +37,19 @@ typedef struct {
     size_t size;
 } yx_msi_context;
 
-static void yx_msi_hasher(void *opaque, yx_authenticode_update_fn update,
-                          void *state)
+static void yx_msi_hasher(void *opaque, yx_authenticode_update_fn update, void *state)
 {
     const yx_msi_context *context = (const yx_msi_context *)opaque;
     (void)xx_msi_yx_hash_input(context->data, context->size, update, state);
 }
 
-bool yx_msi_hash_input(const uint8_t *data, size_t size,
-                       yx_authenticode_update_fn update, void *state)
+bool yx_msi_hash_input(const uint8_t *data, size_t size, yx_authenticode_update_fn update, void *state)
 {
     if (!update) return false;
     return xx_msi_yx_hash_input(data, size, update, state);
 }
 
-bool yx_msi_signatures(const uint8_t *data, size_t size,
-                       yx_pe_signature_result *result)
+bool yx_msi_signatures(const uint8_t *data, size_t size, yx_pe_signature_result *result)
 {
     yx_olecf_document *document;
     size_t count, index;
@@ -66,8 +63,7 @@ bool yx_msi_signatures(const uint8_t *data, size_t size,
     /* Msi::parse: the first entry named DigitalSignature, after cleaning. */
     count = yx_olecf_entry_count(document);
     for (index = 0; index < count; ++index)
-        if (xx_msi_yx_name_is(yx_olecf_entry(document, index),
-                              "DigitalSignature")) break;
+        if (xx_msi_yx_name_is(yx_olecf_entry(document, index), "DigitalSignature")) break;
     if (index < count) {
         const uint8_t *bytes;
         size_t length;
@@ -77,8 +73,7 @@ bool yx_msi_signatures(const uint8_t *data, size_t size,
             yx_msi_context context;
             context.data = data;
             context.size = size;
-            ok = yx_authenticode_parse_blob(bytes, length, yx_msi_hasher,
-                                            &context, result);
+            ok = yx_authenticode_parse_blob(bytes, length, yx_msi_hasher, &context, result);
             free(owner);
         }
     }

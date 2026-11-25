@@ -36,9 +36,7 @@ static void yx_magic_thread_destroy(void *pointer)
 }
 yx_magic_cache *yx_magic_thread_cache(void)
 {
-    if (!yx_magic_tls)
-        yx_magic_tls = yx_thread_storage_get(&yx_magic_storage, sizeof(*yx_magic_tls),
-                                             yx_magic_thread_destroy);
+    if (!yx_magic_tls) yx_magic_tls = yx_thread_storage_get(&yx_magic_storage, sizeof(*yx_magic_tls), yx_magic_thread_destroy);
     return yx_magic_tls;
 }
 void yx_magic_thread_cache_reset(void)
@@ -93,10 +91,7 @@ static char *yx_magic_utf8_lossy(const char *source, size_t *out_length)
                 unsigned char current = bytes[i + valid];
                 if (current < 0x80 || current > 0xBF) break;
                 if (valid == 1 &&
-                    ((first == 0xE0 && current < 0xA0) ||
-                     (first == 0xED && current > 0x9F) ||
-                     (first == 0xF0 && current < 0x90) ||
-                     (first == 0xF4 && current > 0x8F)))
+                    ((first == 0xE0 && current < 0xA0) || (first == 0xED && current > 0x9F) || (first == 0xF0 && current < 0x90) || (first == 0xF4 && current > 0x8F)))
                     break;
                 ++valid;
             }
@@ -117,9 +112,7 @@ static char *yx_magic_utf8_lossy(const char *source, size_t *out_length)
     return result;
 }
 
-static bool yx_magic_get(yx_magic_cache *cache, const uint8_t *data,
-                         size_t size, bool mime, const char **out,
-                         size_t *out_length)
+static bool yx_magic_get(yx_magic_cache *cache, const uint8_t *data, size_t size, bool mime, const char **out, size_t *out_length)
 {
     static const uint8_t empty = 0;
     char **slot;
@@ -147,8 +140,7 @@ static bool yx_magic_get(yx_magic_cache *cache, const uint8_t *data,
         cache->cookie = cookie;
     }
     cookie = (magic_t)cache->cookie;
-    if (magic_setflags(cookie, mime ? MAGIC_MIME_TYPE : MAGIC_NONE) != 0)
-        return false;
+    if (magic_setflags(cookie, mime ? MAGIC_MIME_TYPE : MAGIC_NONE) != 0) return false;
     description = magic_buffer(cookie, data ? data : &empty, size);
     if (!description) return false;
     *slot = yx_magic_utf8_lossy(description, slot_length);
@@ -158,14 +150,12 @@ static bool yx_magic_get(yx_magic_cache *cache, const uint8_t *data,
     return true;
 }
 
-bool yx_magic_type(yx_magic_cache *cache, const uint8_t *data, size_t size,
-                   const char **out, size_t *out_length)
+bool yx_magic_type(yx_magic_cache *cache, const uint8_t *data, size_t size, const char **out, size_t *out_length)
 {
     return yx_magic_get(cache, data, size, false, out, out_length);
 }
 
-bool yx_magic_mime_type(yx_magic_cache *cache, const uint8_t *data,
-                        size_t size, const char **out, size_t *out_length)
+bool yx_magic_mime_type(yx_magic_cache *cache, const uint8_t *data, size_t size, const char **out, size_t *out_length)
 {
     return yx_magic_get(cache, data, size, true, out, out_length);
 }

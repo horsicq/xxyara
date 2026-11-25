@@ -36,8 +36,7 @@ void yx_vba_result_free(yx_vba_result *result)
     xx_vba_yx_result_free(result);
 }
 
-bool yx_vba_decompress(const uint8_t *data, size_t size,
-                       uint8_t **output, size_t *output_size)
+bool yx_vba_decompress(const uint8_t *data, size_t size, uint8_t **output, size_t *output_size)
 {
     return xx_vba_yx_decompress(data, size, output, output_size);
 }

@@ -37,12 +37,10 @@
  * signature all leave result->count at zero: msi.is_signed is then false
  * and msi.signatures empty, never undefined (msi/mod.rs). False is returned
  * only for invalid arguments or allocation failure. */
-bool yx_msi_signatures(const uint8_t *data, size_t size,
-                       yx_pe_signature_result *result);
+bool yx_msi_signatures(const uint8_t *data, size_t size, yx_pe_signature_result *result);
 
 /* The MSI Authenticode hash input (MsiHasher, msi/parser.rs) of an OLECF
  * file, fed to `update`; exposed for tests. False for non-OLECF input. */
-bool yx_msi_hash_input(const uint8_t *data, size_t size,
-                       yx_authenticode_update_fn update, void *state);
+bool yx_msi_hash_input(const uint8_t *data, size_t size, yx_authenticode_update_fn update, void *state);
 
 #endif

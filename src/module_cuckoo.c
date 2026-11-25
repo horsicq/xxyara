@@ -30,8 +30,7 @@
  * through an incompatible pointer type. A NULL out stays NULL, so xxfclib
  * still rejects it instead of returning a report nobody can free. */
 
-bool yx_cuckoo_report_parse(const uint8_t *json, size_t size,
-                            yx_cuckoo_report **out)
+bool yx_cuckoo_report_parse(const uint8_t *json, size_t size, yx_cuckoo_report **out)
 {
     xx_cuckoo_yx_report *report = NULL;
     bool ok = xx_cuckoo_yx_report_parse(json, size, out ? &report : NULL);
@@ -39,13 +38,10 @@ bool yx_cuckoo_report_parse(const uint8_t *json, size_t size,
     return ok;
 }
 
-bool yx_cuckoo_report_parse_ex(const uint8_t *json, size_t size,
-    yx_cuckoo_report **out, char *error, size_t error_capacity)
+bool yx_cuckoo_report_parse_ex(const uint8_t *json, size_t size, yx_cuckoo_report **out, char *error, size_t error_capacity)
 {
     xx_cuckoo_yx_report *report = NULL;
-    bool ok = xx_cuckoo_yx_report_parse_ex(json, size,
-                                           out ? &report : NULL,
-                                           error, error_capacity);
+    bool ok = xx_cuckoo_yx_report_parse_ex(json, size, out ? &report : NULL, error, error_capacity);
     if (out) *out = (yx_cuckoo_report *)(void *)report;
     return ok;
 }
@@ -55,13 +51,7 @@ void yx_cuckoo_report_free(yx_cuckoo_report *report)
     xx_cuckoo_yx_report_free((xx_cuckoo_yx_report *)(void *)report);
 }
 
-bool yx_cuckoo_query(const yx_cuckoo_report *report,
-                     const char *function, yx_cuckoo_match_fn matches,
-                     void *opaque, bool has_port, int64_t port,
-                     uint64_t *count)
+bool yx_cuckoo_query(const yx_cuckoo_report *report, const char *function, yx_cuckoo_match_fn matches, void *opaque, bool has_port, int64_t port, uint64_t *count)
 {
-    return xx_cuckoo_yx_query((const xx_cuckoo_yx_report *)(const void *)report,
-                              function,
-                              matches, opaque,
-                              has_port, port, count);
+    return xx_cuckoo_yx_query((const xx_cuckoo_yx_report *)(const void *)report, function, matches, opaque, has_port, port, count);
 }

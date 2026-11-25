@@ -382,7 +382,9 @@ typedef struct yx_patch_note {
  * one long line with a warning per pattern would otherwise store the line
  * once per warning: quadratic memory. A stored warning that refers to rows
  * starts with YX_WARNING_COMPACT; see yx_warning_compact in xxyara.c. */
-enum { YX_WARNING_RECENT_ROWS = 8 };
+enum {
+    YX_WARNING_RECENT_ROWS = 8
+};
 typedef struct yx_warning_rows {
     char **items;
     size_t *lengths;
@@ -470,13 +472,11 @@ bool yx_compiler_warning_skipped(const YRX_COMPILER *compiler, const char *code)
 char *yx_compiler_warning_json(const YRX_COMPILER *compiler, size_t index);
 /* True when the text of some warning's JSON contains `needle`, which must
  * lie outside a report's rendered text (a "code" field, for example). */
-bool yx_compiler_warnings_contain(const YRX_COMPILER *compiler,
-                                  const char *needle);
+bool yx_compiler_warnings_contain(const YRX_COMPILER *compiler, const char *needle);
 /* A plain report as YRX_COLORIZE_ERRORS renders it, using the patch notes
  * of `compiler` (may be NULL). The caller frees it; NULL: not a report or
  * out of memory. */
-char *yx_compiler_colorize_report(const YRX_COMPILER *compiler,
-                                  const char *text);
+char *yx_compiler_colorize_report(const YRX_COMPILER *compiler, const char *text);
 
 /* Borrowed until the next scan, matching yrx_scanner_set_module_data. */
 typedef struct yx_scanner_module_data {
@@ -576,9 +576,7 @@ struct YRX_SCANNER {
 
 /* The parser appends all successfully parsed rules to compiler->rules. */
 YRX_RESULT yx_parse_source(YRX_COMPILER *compiler, const char *source, const char *origin);
-YRX_RESULT yx_compiler_add_source_bytes(YRX_COMPILER *compiler,
-                                        const uint8_t *source, size_t length,
-                                        const char *origin);
+YRX_RESULT yx_compiler_add_source_bytes(YRX_COMPILER *compiler, const uint8_t *source, size_t length, const char *origin);
 /* Sources of `limit` bytes or more fail with "source file is too large"
  * (YARA-X: u32::MAX). Tests lower the limit; 0 restores the default. */
 void yx_set_source_size_limit(size_t limit);
@@ -592,241 +590,69 @@ extern _Thread_local bool yx_condition_relaxed_regexps;
 bool yx_module_function_path(const char *path, size_t length, bool *help);
 extern _Thread_local bool yx_deserialize_error_detail;
 char *yx_normalize_regexp_braces(const char *body, bool relaxed);
-void yx_compiler_order_source_diagnostics(YRX_COMPILER *compiler,
-                                          size_t start, const char *origin);
-YRX_RESULT yx_include_source(YRX_COMPILER *compiler, const char *filename,
-                             size_t filename_length, const char *source,
-                             const char *origin, size_t include_line,
+void yx_compiler_order_source_diagnostics(YRX_COMPILER *compiler, size_t start, const char *origin);
+YRX_RESULT yx_include_source(YRX_COMPILER *compiler, const char *filename, size_t filename_length, const char *source, const char *origin, size_t include_line,
                              size_t include_start, size_t include_end);
 /* Import policy: 0 means fatal error, 1 accepted, 2 ignored, 3 unknown. */
-int yx_compiler_check_import(YRX_COMPILER *compiler, const char *module,
-                             const char *source, const char *origin,
-                             size_t start, size_t end);
-int yx_compiler_unknown_identifier_error(YRX_COMPILER *compiler,
-                                          const char *identifier,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end);
-int yx_compiler_unknown_module_field_error(YRX_COMPILER *compiler,
-                                            const char *field,
-                                            const char *source,
-                                            const char *origin,
-                                            size_t start, size_t end);
-int yx_compiler_custom_error(YRX_COMPILER *compiler,
-                              const char *title, const char *label,
-                              const char *source, const char *origin,
-                              size_t start, size_t end);
-int yx_compiler_vt_acl_error(YRX_COMPILER *compiler,
-                              const char *field,
-                              const char *source,
-                              const char *origin,
-                              size_t start, size_t end);
-int yx_compiler_entrypoint_unsupported_error(YRX_COMPILER *compiler,
-                                             const char *source,
-                                             const char *origin,
-                                             size_t start, size_t end);
-int yx_compiler_duplicate_pattern_error(YRX_COMPILER *compiler,
-                                        const char *identifier,
-                                        const char *source,
-                                        const char *origin,
-                                        size_t duplicate_start,
-                                        size_t duplicate_end,
-                                        size_t existing_start,
-                                        size_t existing_end);
-int yx_compiler_duplicate_pattern_value_warning(
-    YRX_COMPILER *compiler, const char *identifier,
-    const char *source, const char *origin,
-    size_t duplicate_start, size_t duplicate_end,
-    size_t existing_start, size_t existing_end);
-int yx_compiler_duplicate_import_warning(
-    YRX_COMPILER *compiler, const char *module, const char *source,
-    const char *origin, size_t first_start, size_t first_end,
-    size_t duplicate_start, size_t duplicate_end);
-int yx_compiler_too_many_patterns_error(YRX_COMPILER *compiler,
-                                        const char *source,
-                                        const char *origin,
-                                        size_t start, size_t end);
-int yx_compiler_include_error(YRX_COMPILER *compiler, const char *source,
-                              const char *origin, size_t start, size_t end,
-                              const char *error);
-int yx_compiler_condition_too_large_error(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end);
-int yx_compiler_mixed_greediness_error(YRX_COMPILER *compiler,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t greedy_start,
-                                      size_t greedy_end,
-                                      size_t lazy_start,
-                                      size_t lazy_end);
-int yx_compiler_duplicate_tag_error(YRX_COMPILER *compiler,
-                                    const char *tag,
-                                    const char *source,
-                                    const char *origin,
-                                    size_t start, size_t end);
-int yx_compiler_unknown_pattern_error(YRX_COMPILER *compiler,
-                                      const char *pattern,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end);
-int yx_compiler_unused_pattern_error(YRX_COMPILER *compiler,
-                                    const char *pattern,
-                                    const char *source,
-                                    const char *origin,
-                                    size_t start, size_t end);
-int yx_compiler_empty_pattern_set_error(YRX_COMPILER *compiler,
-                                        const char *source,
-                                        const char *origin,
-                                        size_t start, size_t end,
-                                        const char *note);
-int yx_compiler_unexpected_negative_error(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end);
-int yx_compiler_invalid_escape_error(YRX_COMPILER *compiler,
-                                     const char *source,
-                                     const char *origin,
-                                     size_t start, size_t end,
-                                     bool hexadecimal);
-int yx_compiler_invalid_regexp_error(YRX_COMPILER *compiler,
-                                     const char *source,
-                                     const char *origin,
-                                     size_t start, size_t end,
-                                     const char *label,
-                                     const char *note);
-int yx_compiler_arbitrary_regexp_prefix_error(YRX_COMPILER *compiler,
-                                              const char *source,
-                                              const char *origin,
-                                              size_t start, size_t end);
-int yx_compiler_invalid_pattern_error(YRX_COMPILER *compiler,
-                                      const char *identifier,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end,
-                                      const char *label,
+int yx_compiler_check_import(YRX_COMPILER *compiler, const char *module, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unknown_identifier_error(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unknown_module_field_error(YRX_COMPILER *compiler, const char *field, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_custom_error(YRX_COMPILER *compiler, const char *title, const char *label, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_vt_acl_error(YRX_COMPILER *compiler, const char *field, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_entrypoint_unsupported_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_duplicate_pattern_error(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t duplicate_start,
+                                        size_t duplicate_end, size_t existing_start, size_t existing_end);
+int yx_compiler_duplicate_pattern_value_warning(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t duplicate_start,
+                                                size_t duplicate_end, size_t existing_start, size_t existing_end);
+int yx_compiler_duplicate_import_warning(YRX_COMPILER *compiler, const char *module, const char *source, const char *origin, size_t first_start, size_t first_end,
+                                         size_t duplicate_start, size_t duplicate_end);
+int yx_compiler_too_many_patterns_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_include_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *error);
+int yx_compiler_condition_too_large_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_mixed_greediness_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t greedy_start, size_t greedy_end, size_t lazy_start,
+                                       size_t lazy_end);
+int yx_compiler_duplicate_tag_error(YRX_COMPILER *compiler, const char *tag, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unknown_pattern_error(YRX_COMPILER *compiler, const char *pattern, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unused_pattern_error(YRX_COMPILER *compiler, const char *pattern, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_empty_pattern_set_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *note);
+int yx_compiler_unexpected_negative_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_invalid_escape_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, bool hexadecimal);
+int yx_compiler_invalid_regexp_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *label, const char *note);
+int yx_compiler_arbitrary_regexp_prefix_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_invalid_pattern_error(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t start, size_t end, const char *label,
                                       const char *note);
-int yx_compiler_invalid_integer_error(YRX_COMPILER *compiler,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end,
-                                      const char *range);
-int yx_compiler_number_out_of_range_error(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end,
-                                          const char *range);
-int yx_compiler_invalid_range_error(YRX_COMPILER *compiler,
-                                    const char *source,
-                                    const char *origin,
-                                    size_t start, size_t end,
-                                    int64_t lower, int64_t upper);
-int yx_compiler_unexpected_escape_sequence_error(YRX_COMPILER *compiler,
-                                                 const char *source,
-                                                 const char *origin,
-                                                 size_t start, size_t end);
-int yx_compiler_invalid_base64_alphabet_error(YRX_COMPILER *compiler,
-                                              const char *source,
-                                              const char *origin,
-                                              size_t start, size_t end,
-                                              const char *label);
-int yx_compiler_duplicate_modifier_error(YRX_COMPILER *compiler,
-                                         const char *source,
-                                         const char *origin,
-                                         size_t start, size_t end);
-int yx_compiler_invalid_modifier_error(YRX_COMPILER *compiler,
-                                       const char *source,
-                                       const char *origin,
-                                       size_t start, size_t end,
-                                       const char *label);
-int yx_compiler_invalid_regexp_modifier_error(YRX_COMPILER *compiler,
-                                              const char *source,
-                                              const char *origin,
-                                              size_t start, size_t end);
-int yx_compiler_invalid_modifier_combination_error(
-    YRX_COMPILER *compiler, const char *source, const char *origin,
-    const char *first, size_t first_start, size_t first_end,
-    const char *second, size_t second_start, size_t second_end);
-int yx_compiler_wrong_type_error(YRX_COMPILER *compiler,
-                                 const char *source,
-                                 const char *origin,
-                                 size_t start, size_t end,
-                                 const char *expected,
-                                 const char *actual);
-int yx_compiler_wrong_type_help_error(YRX_COMPILER *compiler,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end,
-                                      const char *expected,
-                                      const char *actual,
+int yx_compiler_invalid_integer_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *range);
+int yx_compiler_number_out_of_range_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *range);
+int yx_compiler_invalid_range_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, int64_t lower, int64_t upper);
+int yx_compiler_unexpected_escape_sequence_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_invalid_base64_alphabet_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *label);
+int yx_compiler_duplicate_modifier_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_invalid_modifier_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *label);
+int yx_compiler_invalid_regexp_modifier_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_invalid_modifier_combination_error(YRX_COMPILER *compiler, const char *source, const char *origin, const char *first, size_t first_start,
+                                                   size_t first_end, const char *second, size_t second_start, size_t second_end);
+int yx_compiler_wrong_type_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *expected, const char *actual);
+int yx_compiler_wrong_type_help_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *expected, const char *actual,
                                       const char *help);
-int yx_compiler_nonbool_function_warning(YRX_COMPILER *compiler,
-                                         const char *source,
-                                         const char *origin,
-                                         size_t start, size_t end);
-int yx_compiler_wrong_arguments_error(YRX_COMPILER *compiler,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end,
-                                      const char *note);
-int yx_compiler_mismatching_types_error(YRX_COMPILER *compiler,
-                                       const char *source,
-                                       const char *origin,
-                                       size_t first_start, size_t first_end,
-                                       const char *first_type,
-                                       size_t second_start, size_t second_end,
-                                       const char *second_type);
-int yx_compiler_assignment_mismatch_error(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t binding_start,
-                                          size_t binding_end,
-                                          size_t binding_count,
-                                          size_t iterable_start,
-                                          size_t iterable_end,
-                                          size_t iterable_count);
-int yx_compiler_method_binding_error(YRX_COMPILER *compiler,
-                                      const char *source,
-                                      const char *origin,
-                                      size_t start, size_t end);
-int yx_compiler_syntax_error(YRX_COMPILER *compiler,
-                             const char *source,
-                             const char *origin,
-                             size_t start, size_t end,
-                             const char *label);
-int yx_compiler_too_many_variables_error(YRX_COMPILER *compiler,
-                                         const char *source,
-                                         const char *origin,
-                                         size_t start, size_t end);
-int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler,
-                                       const char *condition,
-                                       const char *source, const char *origin,
-                                       size_t condition_offset, size_t limit,
+int yx_compiler_nonbool_function_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_wrong_arguments_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *note);
+int yx_compiler_mismatching_types_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t first_start, size_t first_end, const char *first_type,
+                                        size_t second_start, size_t second_end, const char *second_type);
+int yx_compiler_assignment_mismatch_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t binding_start, size_t binding_end, size_t binding_count,
+                                          size_t iterable_start, size_t iterable_end, size_t iterable_count);
+int yx_compiler_method_binding_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_syntax_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, const char *label);
+int yx_compiler_too_many_variables_error(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler, const char *condition, const char *source, const char *origin, size_t condition_offset, size_t limit,
                                        size_t first_type_warning);
-void yx_compiler_order_raised_warnings(YRX_COMPILER *compiler,
-                                       size_t first_type_warning, size_t first_new);
-bool yx_compiler_json_span(const YRX_COMPILER *compiler, const char *span,
-                           size_t *start, size_t *end);
-bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler,
-                                    size_t mark, size_t *end);
-bool yx_compiler_semantic_error_span(const YRX_COMPILER *compiler,
-                                     size_t mark, size_t *start, size_t *end);
-void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first,
-                                     size_t error_mark, size_t error_start,
-                                     size_t error_end,
-                                     size_t converted_end);
-int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler,
-                                          const char *identifier,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end,
-                                          uint64_t lower, uint64_t upper,
-                                          bool has_lower, bool has_upper);
-int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler,
-                                    const YRX_PATTERN *pattern,
-                                    const char *source,
-                                    const char *origin,
-                                    size_t start, size_t end);
+void yx_compiler_order_raised_warnings(YRX_COMPILER *compiler, size_t first_type_warning, size_t first_new);
+bool yx_compiler_json_span(const YRX_COMPILER *compiler, const char *span, size_t *start, size_t *end);
+bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler, size_t mark, size_t *end);
+bool yx_compiler_semantic_error_span(const YRX_COMPILER *compiler, size_t mark, size_t *start, size_t *end);
+void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first, size_t error_mark, size_t error_start, size_t error_end, size_t converted_end);
+int yx_compiler_consecutive_jumps_warning(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t start, size_t end,
+                                          uint64_t lower, uint64_t upper, bool has_lower, bool has_upper);
+int yx_compiler_text_as_hex_warning(YRX_COMPILER *compiler, const YRX_PATTERN *pattern, const char *source, const char *origin, size_t start, size_t end);
 YRX_RESULT yx_compile_quiet(const char *source, YRX_RULES **out);
 /* Between begin and end (nested, per thread), compiled and deserialized
  * rules are inspected only: their scanner programs and candidate plans are
@@ -844,8 +670,7 @@ unsigned yx_parallel_threads(size_t count, size_t per_thread);
 void yx_parallel_run(size_t count, unsigned threads, void (*fn)(size_t index, void *context), void *context);
 /* As yx_parallel_run, with its own serial start (serial_ns) and measured
  * work per helper (thread_ns), for loops of a few milliseconds. */
-void yx_parallel_run_ex(size_t count, unsigned threads, uint64_t serial_ns, uint64_t thread_ns,
-                        void (*fn)(size_t index, void *context), void *context);
+void yx_parallel_run_ex(size_t count, unsigned threads, uint64_t serial_ns, uint64_t thread_ns, void (*fn)(size_t index, void *context), void *context);
 #ifdef XXYARA_VERIFY_LOAD
 /* Verify builds: whether two compiled patterns agree in every field the
  * parser sets. */
@@ -861,109 +686,50 @@ void yx_async_wait(yx_async *task);
 /* `compiled` false: the literal check Compiler::c_rule runs over every
  * pattern; true: the c_regexp check of a regexp or hex pattern the rule
  * compiles. */
-int yx_compiler_slow_pattern_warning(YRX_COMPILER *compiler,
-                                     const YRX_RULE *rule,
-                                     const YRX_PATTERN *pattern,
-                                     const char *source,
-                                     const char *origin,
-                                     bool compiled);
-int yx_compiler_potentially_slow_loop_warning(YRX_COMPILER *compiler,
-                                              const char *source,
-                                              const char *origin,
-                                              size_t start, size_t end);
-int yx_compiler_unused_identifier_warning(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end);
-int yx_compiler_too_many_iterations_warning(YRX_COMPILER *compiler,
-                                            const char *source,
-                                            const char *origin,
-                                            size_t start, size_t end,
-                                            uint64_t iterations);
-int yx_compiler_unsatisfiable_pattern_at_warning(
-    YRX_COMPILER *compiler, const char *source, const char *origin,
-    size_t quantifier_start, size_t quantifier_end,
-    size_t at_start, size_t at_end);
-int yx_compiler_unsatisfiable_pair_warning(
-    YRX_COMPILER *compiler, const char *source, const char *origin,
-    size_t first_start, size_t first_end, const char *first_label,
-    size_t second_start, size_t second_end, const char *second_label);
+int yx_compiler_slow_pattern_warning(YRX_COMPILER *compiler, const YRX_RULE *rule, const YRX_PATTERN *pattern, const char *source, const char *origin, bool compiled);
+int yx_compiler_potentially_slow_loop_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unused_identifier_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_too_many_iterations_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, uint64_t iterations);
+int yx_compiler_unsatisfiable_pattern_at_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t quantifier_start, size_t quantifier_end,
+                                                 size_t at_start, size_t at_end);
+int yx_compiler_unsatisfiable_pair_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t first_start, size_t first_end, const char *first_label,
+                                           size_t second_start, size_t second_end, const char *second_label);
 /* `start`..`quantifier_end` is the zero quantifier the help replaces with
  * `none`; the label covers `start`..`end`. */
-int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler,
-                                       const char *source,
-                                       const char *origin,
-                                       size_t start, size_t quantifier_end,
-                                       size_t end);
+int yx_compiler_ambiguous_expr_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t quantifier_end, size_t end);
 /* invariant_expr of `<n> of <items>` with n above the number of items,
  * raised at source position `raised`. */
-int yx_compiler_excess_quantifier_warning(YRX_COMPILER *compiler,
-                                          const char *source,
-                                          const char *origin,
-                                          size_t start, size_t end,
-                                          size_t raised, int64_t required,
+int yx_compiler_excess_quantifier_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end, size_t raised, int64_t required,
                                           size_t available);
 /* Records that the warning added since `count` warnings was raised at
  * source position `raised`. */
-bool yx_compiler_warning_raised_at(YRX_COMPILER *compiler, size_t count,
-                                   size_t raised);
-int yx_compiler_nonbool_integer_warning(YRX_COMPILER *compiler,
-                                        const char *source,
-                                        const char *origin,
-                                        size_t start, size_t end);
-int yx_compiler_unintended_pattern_in_set_warning(
-    YRX_COMPILER *compiler, const char *source, const char *origin,
-    const char *pattern_name, const char *set_name, size_t set_name_length,
-    const char *first_name, size_t first_name_length, bool first_wildcard,
-    size_t first_start, size_t first_end,
-    const char *second_name, size_t second_name_length, bool second_wildcard,
-    size_t second_start, size_t second_end);
-int yx_compiler_redundant_case_modifier_warning(YRX_COMPILER *compiler,
-                                                const char *source,
-                                                const char *origin,
-                                                size_t suffix_start,
-                                                size_t nocase_start,
+bool yx_compiler_warning_raised_at(YRX_COMPILER *compiler, size_t count, size_t raised);
+int yx_compiler_nonbool_integer_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_unintended_pattern_in_set_warning(YRX_COMPILER *compiler, const char *source, const char *origin, const char *pattern_name, const char *set_name,
+                                                  size_t set_name_length, const char *first_name, size_t first_name_length, bool first_wildcard, size_t first_start,
+                                                  size_t first_end, const char *second_name, size_t second_name_length, bool second_wildcard, size_t second_start,
+                                                  size_t second_end);
+int yx_compiler_redundant_case_modifier_warning(YRX_COMPILER *compiler, const char *source, const char *origin, size_t suffix_start, size_t nocase_start,
                                                 size_t nocase_end);
-int yx_compiler_conflicting_rule_error(YRX_COMPILER *compiler,
-                                       const char *identifier,
-                                       const char *source,
-                                       const char *origin,
-                                       size_t start, size_t end);
-int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler,
-                                     const YRX_RULE *duplicate,
-                                     const YRX_RULE *existing,
-                                     const char *source);
+int yx_compiler_conflicting_rule_error(YRX_COMPILER *compiler, const char *identifier, const char *source, const char *origin, size_t start, size_t end);
+int yx_compiler_duplicate_rule_error(YRX_COMPILER *compiler, const YRX_RULE *duplicate, const YRX_RULE *existing, const char *source);
 /* Returns 1 if the rule is skipped, 0 if it is compiled, -1 on error. */
-int yx_compiler_skip_ignored_rule(YRX_COMPILER *compiler,
-                                  const char *condition,
-                                  const char *rule_name,
-                                  const char *namespace_name,
-                                  const char *source,
-                                  const char *origin,
-                                  size_t condition_offset);
+int yx_compiler_skip_ignored_rule(YRX_COMPILER *compiler, const char *condition, const char *rule_name, const char *namespace_name, const char *source,
+                                  const char *origin, size_t condition_offset);
 /* Records warnings for conditions whose truth value is fixed at compile time. */
-int yx_compiler_type_warning(YRX_COMPILER *compiler,
-    const char *source, const char *origin, const char *kind,
-    size_t start, size_t end, size_t other_start, size_t other_end,
-    const char *type);
-int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler,
-                                         const char *condition,
-                                         const YRX_RULE *rule,
-                                         const char *source,
-                                         const char *origin,
-                                         size_t condition_offset,
-                                         size_t first_type_warning);
+int yx_compiler_type_warning(YRX_COMPILER *compiler, const char *source, const char *origin, const char *kind, size_t start, size_t end, size_t other_start,
+                             size_t other_end, const char *type);
+int yx_compiler_warn_invariant_condition(YRX_COMPILER *compiler, const char *condition, const YRX_RULE *rule, const char *source, const char *origin,
+                                         size_t condition_offset, size_t first_type_warning);
 void yx_free_rule(YRX_RULE *rule);
 void yx_free_rules(YRX_RULES *rules);
 
 /* The scanner stores matches in pattern. Exact literals use xxfclib search. */
-YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                           size_t max_matches, bool fast_scan);
+YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t max_matches, bool fast_scan);
 
 /* Searches and verifies all three base64 alignment permutations. The
  * function appends matches to pattern->matches and returns 0 on failure. */
-int yx_scan_base64(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                   size_t limit, bool first_only);
+int yx_scan_base64(YRX_PATTERN *pattern, const uint8_t *data, size_t size, size_t limit, bool first_only);
 
 /* Returns 1 for a nonempty regex, 0 when it can match an empty input,
  * and -1 for an invalid regex or matcher failure. */
@@ -971,20 +737,15 @@ int yx_validate_regex(const YRX_PATTERN *pattern);
 /* True when one repeated byte class alone disables the small Teddy path. */
 bool yx_regex_many_single_byte_atoms(const YRX_PATTERN *pattern);
 /* Shared YARA-X regex shape checks for pattern and condition regexes. */
-int yx_regex_validate_shape(const char *regexp, bool dotall,
-                            bool matches_expr);
+int yx_regex_validate_shape(const char *regexp, bool dotall, bool matches_expr);
 /* YARA-X's E045 check for a /s regexp: true when its outermost
  * concatenation starts with an arbitrary-length run of any byte; the span
  * (offsets into regexp) is stored when requested. */
-bool yx_regex_arbitrary_prefix(const char *regexp, size_t length, bool dotall,
-                               size_t *start, size_t *end);
+bool yx_regex_arbitrary_prefix(const char *regexp, size_t length, bool dotall, size_t *start, size_t *end);
 /* Condition regexes use a 50 MiB regex-automata NFA budget. */
-bool yx_regex_automata_size_large(const char *body, size_t length,
-                                  unsigned modifiers);
-bool yx_regex_nesting_error(const char *body, size_t length,
-                            size_t *start, size_t *width);
-bool yx_regex_can_match_empty(const char *body, size_t length,
-                              unsigned modifiers);
+bool yx_regex_automata_size_large(const char *body, size_t length, unsigned modifiers);
+bool yx_regex_nesting_error(const char *body, size_t length, size_t *start, size_t *width);
+bool yx_regex_can_match_empty(const char *body, size_t length, unsigned modifiers);
 /* First syntax error of regex-syntax's AST parser (regex_ast_error.inc): a
  * label, a byte span in the body (empty when start == end) and a note. */
 typedef struct {
@@ -992,11 +753,9 @@ typedef struct {
     const char *label;
     char note[128];
 } yx_regex_ast_err;
-bool yx_regex_ast_error(const char *body, size_t length,
-                        yx_regex_ast_err *out);
+bool yx_regex_ast_error(const char *body, size_t length, yx_regex_ast_err *out);
 /* Report syntax errors in inline flag groups containing the CRLF flag. */
-int yx_regex_inline_r_flag_error(const char *regexp, size_t length,
-                                 size_t *error_at, const char **error_label);
+int yx_regex_inline_r_flag_error(const char *regexp, size_t length, size_t *error_at, const char **error_label);
 /* Alphabetic escapes rejected by regex-syntax in both pattern contexts. */
 bool yx_regex_unrecognized_escape(unsigned char escaped);
 /* Compile-only copy with valid x-mode hex escapes made contiguous. */
@@ -1005,8 +764,7 @@ char *yx_regex_compact_extended_hex(const char *regexp);
 char *yx_regex_group_utf8_literals(const char *regexp);
 
 /* The native CLI preserves byte-counted logs and permits NULL to disable. */
-YRX_RESULT yx_scanner_on_console_log_raw(YRX_SCANNER *scanner,
-                                       YRX_CONSOLE_CALLBACK callback);
+YRX_RESULT yx_scanner_on_console_log_raw(YRX_SCANNER *scanner, YRX_CONSOLE_CALLBACK callback);
 
 /* Per-thread memo of pure compile-time results (thread_storage.h; one table
  * per thread, in match.c). A tag names the function (YX_MEMO_TAG) and holds
@@ -1019,12 +777,9 @@ enum {
     YX_MEMO_MANY_SINGLE_BYTE_ATOMS = 4,
     YX_MEMO_REGEXP_LITERAL_ATOMS = 5
 };
-#define YX_MEMO_TAG(function, flags, modifiers) \
-    (((uint64_t)(function) << 48) | ((uint64_t)(flags) << 32) | (uint64_t)(uint32_t)(modifiers))
-const void *yx_compile_memo_find(uint64_t tag, const void *key, size_t key_length,
-                                 size_t *value_length);
-void yx_compile_memo_store(uint64_t tag, const void *key, size_t key_length,
-                           const void *value, size_t value_length);
+#define YX_MEMO_TAG(function, flags, modifiers) (((uint64_t)(function) << 48) | ((uint64_t)(flags) << 32) | (uint64_t)(uint32_t)(modifiers))
+const void *yx_compile_memo_find(uint64_t tag, const void *key, size_t key_length, size_t *value_length);
+void yx_compile_memo_store(uint64_t tag, const void *key, size_t key_length, const void *value, size_t value_length);
 /* The calling thread's compile memo and memoized regexp compilations, moved
  * out (NULL without memory), and merged into another thread's memos there.
  * A parallel loop's helpers hand theirs to the calling thread. */
@@ -1037,7 +792,6 @@ void yx_compile_memos_adopt(struct yx_compile_memos *taken);
 size_t yx_compile_memos_leftover(const struct yx_compile_memos *taken);
 void yx_compile_memos_release(struct yx_compile_memos *taken);
 /* match.c: a regexp plan copied for a pattern with the same plan inputs. */
-struct yx_candidate_plan *yx_candidate_plan_clone(const struct yx_candidate_plan *plan,
-                                                  const YRX_PATTERN *pattern);
+struct yx_candidate_plan *yx_candidate_plan_clone(const struct yx_candidate_plan *plan, const YRX_PATTERN *pattern);
 
 #endif

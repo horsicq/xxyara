@@ -30,8 +30,8 @@
 #define XXYARA_SERIALIZATION_HIR_CHAIN_H
 
 typedef struct {
-    size_t start, end;      /* children [start, end) of the root concatenation */
-    const yx_tr_node *gap;  /* the gap in front of the piece, NULL for the head */
+    size_t start, end;     /* children [start, end) of the root concatenation */
+    const yx_tr_node *gap; /* the gap in front of the piece, NULL for the head */
 } yx_hc_piece;
 
 static uint64_t yx_hc_minimum(const yx_tr_node *root, size_t start, size_t end)
@@ -55,17 +55,15 @@ static size_t yx_hc_split(const yx_tr_node *root, yx_hc_piece *pieces)
     if (root->kind != YX_TR_CONCAT) return 0;
     for (size_t i = 0; i < root->count; ++i) {
         const yx_tr_node *item = root->children[i];
-        if (item->kind == YX_TR_REPEAT && item->count && i > chunk &&
-            (yx_tr_unbounded(item) ? UINT32_MAX : item->maximum) > 200 &&
-            yx_se_any_byte(item->children[0]) && yx_hc_minimum(root, chunk, i) >= 2) {
+        if (item->kind == YX_TR_REPEAT && item->count && i > chunk && (yx_tr_unbounded(item) ? UINT32_MAX : item->maximum) > 200 && yx_se_any_byte(item->children[0]) &&
+            yx_hc_minimum(root, chunk, i) >= 2) {
             pieces[count++] = (yx_hc_piece){chunk, i, gap};
             gap = item;
             chunk = i + 1;
         }
     }
     if (chunk == root->count) return count;
-    if (!count || yx_hc_minimum(root, chunk, root->count) >= 2)
-        pieces[count++] = (yx_hc_piece){chunk, root->count, gap};
+    if (!count || yx_hc_minimum(root, chunk, root->count) >= 2) pieces[count++] = (yx_hc_piece){chunk, root->count, gap};
     else pieces[count - 1].end = root->count;
     return count;
 }
@@ -74,8 +72,7 @@ static size_t yx_hc_split(const yx_tr_node *root, yx_hc_piece *pieces)
  * piece, else the Thompson compiler. Its sub-patterns as c_chain adds them:
  * the wide one first, then the raw one, each with the extra flags. Returns
  * 1, 0 when the piece cannot be built, -1 on allocation failure. */
-static int yx_hc_program(const yx_tr_node *node, bool nocase, bool greedy, bool raw, bool wide, unsigned extra,
-                         yx_rx_program *out)
+static int yx_hc_program(const yx_tr_node *node, bool nocase, bool greedy, bool raw, bool wide, unsigned extra, yx_rx_program *out)
 {
     yx_fast_program *fast = calloc(1, sizeof(*fast));
     yx_tr_program thompson = {0};
@@ -98,18 +95,18 @@ static int yx_hc_program(const yx_tr_node *node, bool nocase, bool greedy, bool 
         atom_count = fast->atom_count;
         flags = YX_RX_FAST | ((fast->flags & 32u) ? YX_RX_GREEDY : 0);
     } else {
-        if (!yx_tr_compile_node(node, &thompson, &split, 0, false, false) ||
-            !yx_tr_fold_events(&thompson.events, &thompson.atoms)) { result = 0; goto done; }
-        if (!thompson.atoms.count &&
-            !yx_tr_atoms_add(&thompson.atoms, (yx_tr_atom_entry){.backward = thompson.backward.used})) goto done;
+        if (!yx_tr_compile_node(node, &thompson, &split, 0, false, false) || !yx_tr_fold_events(&thompson.events, &thompson.atoms)) {
+            result = 0;
+            goto done;
+        }
+        if (!thompson.atoms.count && !yx_tr_atoms_add(&thompson.atoms, (yx_tr_atom_entry){.backward = thompson.backward.used})) goto done;
         if (!yx_tr_pair(&thompson, 0, &split, 0)) goto done;
         size_t total = thompson.forward.used + thompson.backward.used;
         out->code = malloc(total ? total : 1);
         owned = atoms = calloc(thompson.atoms.count ? thompson.atoms.count : 1, sizeof(*atoms));
         if (!out->code || !atoms) goto done;
         if (thompson.forward.used) memcpy(out->code, thompson.forward.data, thompson.forward.used);
-        if (thompson.backward.used)
-            memcpy(out->code + thompson.forward.used, thompson.backward.data, thompson.backward.used);
+        if (thompson.backward.used) memcpy(out->code + thompson.forward.used, thompson.backward.data, thompson.backward.used);
         out->code_length = total;
         atom_count = thompson.atoms.count;
         for (size_t i = 0; i < atom_count; ++i) {
@@ -143,27 +140,30 @@ done:
 /* The pattern's HIR and its chain pieces, when split_at_large_gaps makes a
  * chain of at least two pieces. *root and *pieces belong to the caller.
  * *oom (when given) is set after an allocation failure. */
-static size_t yx_hc_parse_status(const YRX_PATTERN *pattern, yx_tr_node **root, yx_hc_piece **pieces, bool *greedy,
-                                 bool *oom)
+static size_t yx_hc_parse_status(const YRX_PATTERN *pattern, yx_tr_node **root, yx_hc_piece **pieces, bool *greedy, bool *oom)
 {
-    *root = NULL; *pieces = NULL;
+    *root = NULL;
+    *pieces = NULL;
     if (!pattern || pattern->kind != YX_PATTERN_REGEX || !pattern->regexp || pattern->gap_head_regexp) return 0;
     /* Without one of these there is no repetition above 200 bytes. */
     if (!strpbrk(pattern->regexp, "*+{")) return 0;
-    yx_tr_parser parser = {.text = (const uint8_t *)pattern->regexp, .length = strlen(pattern->regexp),
+    yx_tr_parser parser = {.text = (const uint8_t *)pattern->regexp,
+                           .length = strlen(pattern->regexp),
                            .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0,
                            .nocase = (pattern->modifiers & YX_MOD_NOCASE) != 0};
     *root = yx_tr_expression(&parser);
     size_t count = 0;
-    if (*root && !parser.failed && !parser.oom && parser.at == parser.length &&
-        (*root)->kind == YX_TR_CONCAT && (*pieces = malloc((*root)->count * sizeof(**pieces))) != NULL)
+    if (*root && !parser.failed && !parser.oom && parser.at == parser.length && (*root)->kind == YX_TR_CONCAT &&
+        (*pieces = malloc((*root)->count * sizeof(**pieces))) != NULL)
         count = yx_hc_split(*root, *pieces);
-    else if (oom && (parser.oom || (*root && !parser.failed && parser.at == parser.length &&
-                                    (*root)->kind == YX_TR_CONCAT))) *oom = true;
+    else if (oom && (parser.oom || (*root && !parser.failed && parser.at == parser.length && (*root)->kind == YX_TR_CONCAT))) *oom = true;
     if (greedy) *greedy = parser.saw_greedy && !parser.saw_lazy;
     if (count < 2) {
-        yx_tr_destroy(*root); free(*pieces);
-        *root = NULL; *pieces = NULL; count = 0;
+        yx_tr_destroy(*root);
+        free(*pieces);
+        *root = NULL;
+        *pieces = NULL;
+        count = 0;
     }
     return count;
 }
@@ -175,9 +175,11 @@ static size_t yx_hc_parse(const YRX_PATTERN *pattern, yx_tr_node **root, yx_hc_p
 
 static bool yx_hc_is_chain(const YRX_PATTERN *pattern)
 {
-    yx_tr_node *root; yx_hc_piece *pieces;
+    yx_tr_node *root;
+    yx_hc_piece *pieces;
     size_t count = yx_hc_parse(pattern, &root, &pieces, NULL);
-    yx_tr_destroy(root); free(pieces);
+    yx_tr_destroy(root);
+    free(pieces);
     return count >= 2;
 }
 
@@ -199,8 +201,7 @@ static bool yx_hc_hex_text_supported(const yx_hex_atom *atoms, size_t count, siz
             while (i + 1 < count && atoms[i + 1].kind == YX_HEX_JUMP) {
                 const yx_hex_atom *next = &atoms[++i];
                 min += next->minimum;
-                max = max == UINT64_MAX || (next->maximum == UINT32_MAX && !next->finite_maximum) ?
-                    UINT64_MAX : max + next->maximum;
+                max = max == UINT64_MAX || (next->maximum == UINT32_MAX && !next->finite_maximum) ? UINT64_MAX : max + next->maximum;
             }
             if (min > UINT32_MAX || (max != UINT64_MAX && max > UINT32_MAX)) return false;
         } else if (a->kind != YX_HEX_BYTE) return false;
@@ -214,13 +215,12 @@ static size_t yx_hc_hex_parse_status(const YRX_PATTERN *pattern, yx_tr_node **ro
 {
     yx_writer text = {0};
     size_t count = 0;
-    *root = NULL; *pieces = NULL;
-    if (!pattern || pattern->kind != YX_PATTERN_HEX || !pattern->hex_atoms || !pattern->hex_has_jump ||
-        (pattern->modifiers & ~YX_MOD_PRIVATE)) return 0;
+    *root = NULL;
+    *pieces = NULL;
+    if (!pattern || pattern->kind != YX_PATTERN_HEX || !pattern->hex_atoms || !pattern->hex_has_jump || (pattern->modifiers & ~YX_MOD_PRIVATE)) return 0;
     /* Only a top-level jump above 200 bytes splits the hex form. */
     bool large = false;
-    for (size_t i = 0; !large && i < pattern->hex_atom_count; ++i)
-        large = pattern->hex_atoms[i].kind == YX_HEX_JUMP && pattern->hex_atoms[i].maximum > 200;
+    for (size_t i = 0; !large && i < pattern->hex_atom_count; ++i) large = pattern->hex_atoms[i].kind == YX_HEX_JUMP && pattern->hex_atoms[i].maximum > 200;
     if (!large) return 0;
     if (!yx_tr_hex_regex(&text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&text, 0)) {
         if (oom && yx_hc_hex_text_supported(pattern->hex_atoms, pattern->hex_atom_count, 0)) *oom = true;
@@ -229,15 +229,17 @@ static size_t yx_hc_hex_parse_status(const YRX_PATTERN *pattern, yx_tr_node **ro
     }
     yx_tr_parser parser = {.text = text.data, .length = text.used - 1};
     *root = yx_tr_expression(&parser);
-    if (*root && !parser.failed && !parser.oom && parser.at == parser.length &&
-        (*root)->kind == YX_TR_CONCAT && (*pieces = malloc((*root)->count * sizeof(**pieces))) != NULL)
+    if (*root && !parser.failed && !parser.oom && parser.at == parser.length && (*root)->kind == YX_TR_CONCAT &&
+        (*pieces = malloc((*root)->count * sizeof(**pieces))) != NULL)
         count = yx_hc_split(*root, *pieces);
-    else if (oom && (parser.oom || (*root && !parser.failed && parser.at == parser.length &&
-                                    (*root)->kind == YX_TR_CONCAT))) *oom = true;
+    else if (oom && (parser.oom || (*root && !parser.failed && parser.at == parser.length && (*root)->kind == YX_TR_CONCAT))) *oom = true;
     free(text.data);
     if (count < 2) {
-        yx_tr_destroy(*root); free(*pieces);
-        *root = NULL; *pieces = NULL; count = 0;
+        yx_tr_destroy(*root);
+        free(*pieces);
+        *root = NULL;
+        *pieces = NULL;
+        count = 0;
     }
     return count;
 }
@@ -252,7 +254,8 @@ bool yx_ser_hex_chain(const YRX_PATTERN *pattern)
     yx_tr_node *root;
     yx_hc_piece *pieces;
     size_t count = yx_hc_hex_parse(pattern, &root, &pieces);
-    yx_tr_destroy(root); free(pieces);
+    yx_tr_destroy(root);
+    free(pieces);
     return count >= 2;
 }
 
@@ -268,10 +271,10 @@ static int yx_hc_chain_status(const YRX_PATTERN *pattern)
     yx_tr_node *root;
     yx_hc_piece *pieces;
     bool oom = false;
-    size_t count = pattern && pattern->kind == YX_PATTERN_HEX ?
-        yx_hc_hex_parse_status(pattern, &root, &pieces, &oom) :
-        yx_hc_parse_status(pattern, &root, &pieces, NULL, &oom);
-    yx_tr_destroy(root); free(pieces);
+    size_t count =
+        pattern && pattern->kind == YX_PATTERN_HEX ? yx_hc_hex_parse_status(pattern, &root, &pieces, &oom) : yx_hc_parse_status(pattern, &root, &pieces, NULL, &oom);
+    yx_tr_destroy(root);
+    free(pieces);
     return count >= 2 ? 1 : oom ? -1 : 0;
 }
 
@@ -295,21 +298,25 @@ int yx_ser_hex_chain_gate(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **
     yx_rx_program program;
     bool built = false;
     int result = 0;
-    *bytes = NULL; *offsets = NULL;
+    *bytes = NULL;
+    *offsets = NULL;
     bool parse_oom = false;
-    if ((pattern && pattern->kind == YX_PATTERN_REGEX ? yx_hc_parse_status(pattern, &root, &pieces, NULL, &parse_oom) :
-         yx_hc_hex_parse_status(pattern, &root, &pieces, &parse_oom)) < 2) {
-        yx_tr_destroy(root); free(pieces);
+    if ((pattern && pattern->kind == YX_PATTERN_REGEX ? yx_hc_parse_status(pattern, &root, &pieces, NULL, &parse_oom)
+                                                      : yx_hc_hex_parse_status(pattern, &root, &pieces, &parse_oom)) < 2) {
+        yx_tr_destroy(root);
+        free(pieces);
         return parse_oom ? -1 : 0;
     }
-    yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + pieces[0].start,
-                           .count = pieces[0].end - pieces[0].start};
+    yx_tr_node fragment = {.kind = YX_TR_CONCAT, .children = root->children + pieces[0].start, .count = pieces[0].end - pieces[0].start};
     const yx_tr_node *node = fragment.count == 1 ? fragment.children[0] : &fragment;
     size_t branches = 1, total = 0;
     if (node->kind == YX_TR_LITERAL) total = node->length;
     else {
         int made = yx_hc_program(node, false, false, true, false, 0, &program);
-        if (made != 1) { result = made ? -1 : 0; goto done; }
+        if (made != 1) {
+            result = made ? -1 : 0;
+            goto done;
+        }
         built = true;
         branches = 0;
         for (size_t s = 0; s < program.sub_count; ++s)
@@ -322,7 +329,10 @@ int yx_ser_hex_chain_gate(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **
     if (!branches || !total || branches > INT_MAX - 1) goto done;
     *bytes = malloc(total);
     *offsets = malloc((branches + 1) * sizeof(**offsets));
-    if (!*bytes || !*offsets) { result = -1; goto done; }
+    if (!*bytes || !*offsets) {
+        result = -1;
+        goto done;
+    }
     (*offsets)[0] = 0;
     if (!built) {
         memcpy(*bytes, node->bytes, node->length);
@@ -339,11 +349,14 @@ int yx_ser_hex_chain_gate(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **
     result = (int)branches;
 done:
     if (result <= 0) {
-        free(*bytes); free(*offsets);
-        *bytes = NULL; *offsets = NULL;
+        free(*bytes);
+        free(*offsets);
+        *bytes = NULL;
+        *offsets = NULL;
     }
     if (built) yx_rx_program_free(&program);
-    yx_tr_destroy(root); free(pieces);
+    yx_tr_destroy(root);
+    free(pieces);
     return result;
 }
 
@@ -366,10 +379,10 @@ typedef struct {
 
 typedef struct {
     const yx_tr_node *node;
-    yx_tr_node fragment;     /* holds the children of a piece of several */
-    unsigned flags;          /* YX_RX_FULLWORD_LEFT / RIGHT of its sub-patterns */
-    yx_rx_program program;   /* a regexp piece's sub-patterns, the wide one first */
-    yx_hc_atom *atoms;       /* a literal piece's atoms */
+    yx_tr_node fragment;   /* holds the children of a piece of several */
+    unsigned flags;        /* YX_RX_FULLWORD_LEFT / RIGHT of its sub-patterns */
+    yx_rx_program program; /* a regexp piece's sub-patterns, the wide one first */
+    yx_hc_atom *atoms;     /* a literal piece's atoms */
     size_t atom_first, atom_count;
 } yx_hc_part;
 
@@ -410,8 +423,10 @@ static bool yx_hc_literal_atoms(yx_hc_part *part, bool wide, bool nocase)
     bool ok = bytes && masks && length && yx_ser_pattern_reference_atoms(&text, &items, &n) && n;
     if (ok) {
         for (size_t i = 0; i < node->length; ++i) {
-            if (wide) { bytes[2 * i] = node->bytes[i]; bytes[2 * i + 1] = 0; }
-            else bytes[i] = node->bytes[i];
+            if (wide) {
+                bytes[2 * i] = node->bytes[i];
+                bytes[2 * i + 1] = 0;
+            } else bytes[i] = node->bytes[i];
         }
         memset(masks, 255, length);
         yx_fast_literal literal = {bytes, masks, length, false};
@@ -428,7 +443,9 @@ static bool yx_hc_literal_atoms(yx_hc_part *part, bool wide, bool nocase)
             atom->wide = wide;
         }
     }
-    free(items); free(bytes); free(masks);
+    free(items);
+    free(bytes);
+    free(masks);
     return ok;
 }
 
@@ -439,9 +456,8 @@ static int yx_hc_chain_build(const YRX_PATTERN *pattern, yx_hc_chain *chain)
     bool oom = false;
     memset(chain, 0, sizeof(*chain));
     if (!pattern) return 0;
-    size_t count = pattern->kind == YX_PATTERN_HEX ?
-        yx_hc_hex_parse_status(pattern, &chain->root, &chain->pieces, &oom) :
-        yx_hc_parse_status(pattern, &chain->root, &chain->pieces, &chain->greedy, &oom);
+    size_t count = pattern->kind == YX_PATTERN_HEX ? yx_hc_hex_parse_status(pattern, &chain->root, &chain->pieces, &oom)
+                                                   : yx_hc_parse_status(pattern, &chain->root, &chain->pieces, &chain->greedy, &oom);
     if (count < 2) return oom ? -1 : 0;
     chain->count = count;
     chain->wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
@@ -452,11 +468,10 @@ static int yx_hc_chain_build(const YRX_PATTERN *pattern, yx_hc_chain *chain)
     if (!chain->parts) return -1;
     for (size_t i = 0; i < count; ++i) {
         yx_hc_part *part = &chain->parts[i];
-        part->fragment = (yx_tr_node){.kind = YX_TR_CONCAT, .children = chain->root->children + chain->pieces[i].start,
-                                      .count = chain->pieces[i].end - chain->pieces[i].start};
+        part->fragment =
+            (yx_tr_node){.kind = YX_TR_CONCAT, .children = chain->root->children + chain->pieces[i].start, .count = chain->pieces[i].end - chain->pieces[i].start};
         part->node = part->fragment.count == 1 ? part->fragment.children[0] : &part->fragment;
-        for (size_t j = 0; part->fragment.count > 1 && j < part->fragment.count; ++j)
-            part->fragment.has_look |= part->fragment.children[j]->has_look;
+        for (size_t j = 0; part->fragment.count > 1 && j < part->fragment.count; ++j) part->fragment.has_look |= part->fragment.children[j]->has_look;
         if (fullword && !i) part->flags |= YX_RX_FULLWORD_LEFT;
         if (fullword && i + 1 == count) part->flags |= YX_RX_FULLWORD_RIGHT;
         part->atom_first = chain->atom_count;
@@ -466,8 +481,7 @@ static int yx_hc_chain_build(const YRX_PATTERN *pattern, yx_hc_chain *chain)
                 if ((wide ? chain->wide : chain->raw) && !yx_hc_literal_atoms(part, wide, chain->nocase)) return -1;
             }
         } else {
-            int built = yx_hc_program(part->node, chain->nocase, chain->greedy, chain->raw, chain->wide, part->flags,
-                                      &part->program);
+            int built = yx_hc_program(part->node, chain->nocase, chain->greedy, chain->raw, chain->wide, part->flags, &part->program);
             if (built != 1) return built ? -1 : -2;
             for (size_t s = 0; s < part->program.sub_count; ++s) part->atom_count += part->program.subs[s].atom_count;
         }
@@ -505,12 +519,10 @@ static int yx_hc_reference_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms,
     *count = 0;
     for (size_t i = 0; ok && i < chain->count; ++i) {
         const yx_hc_part *part = &chain->parts[i];
-        for (size_t k = 0; ok && part->atoms && k < part->atom_count; ++k)
-            ok = yx_se_push_atom(atoms, count, &capacity, part->atoms[k].bytes, part->atoms[k].length);
+        for (size_t k = 0; ok && part->atoms && k < part->atom_count; ++k) ok = yx_se_push_atom(atoms, count, &capacity, part->atoms[k].bytes, part->atoms[k].length);
         for (size_t s = 0; ok && s < part->program.sub_count; ++s)
             for (size_t a = 0; ok && a < part->program.subs[s].atom_count; ++a)
-                ok = yx_se_push_atom(atoms, count, &capacity, part->program.subs[s].atoms[a].bytes,
-                                     part->program.subs[s].atoms[a].length);
+                ok = yx_se_push_atom(atoms, count, &capacity, part->program.subs[s].atoms[a].bytes, part->program.subs[s].atoms[a].length);
     }
     if (chain == &local) yx_hc_chain_free(&local);
     if (!ok) {
@@ -524,7 +536,9 @@ static int yx_hc_reference_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms,
 
 /* k1, k2, k3: Aho-Corasick order (end, longer atoms first, atom order) or
  * Teddy order (start, bucket, atom id). */
-typedef struct { size_t index, position, k1, k2, k3; } yx_hc_hit;
+typedef struct {
+    size_t index, position, k1, k2, k3;
+} yx_hc_hit;
 
 static int yx_hc_hit_compare(const void *left, const void *right)
 {
@@ -535,15 +549,19 @@ static int yx_hc_hit_compare(const void *left, const void *right)
 }
 
 /* A match and its place in the order handle_sub_pattern_match saw it. */
-typedef struct { size_t start, end, index; } yx_hc_entry;
-typedef struct { yx_hc_entry *items; size_t count, capacity; } yx_hc_entries;
+typedef struct {
+    size_t start, end, index;
+} yx_hc_entry;
+typedef struct {
+    yx_hc_entry *items;
+    size_t count, capacity;
+} yx_hc_entries;
 
 static bool yx_hc_append(yx_hc_entries *list, size_t start, size_t end, size_t index)
 {
     if (list->count == list->capacity) {
         size_t capacity = list->capacity ? list->capacity * 2 : 64;
-        yx_hc_entry *items = capacity <= SIZE_MAX / sizeof(*items) ?
-            realloc(list->items, capacity * sizeof(*items)) : NULL;
+        yx_hc_entry *items = capacity <= SIZE_MAX / sizeof(*items) ? realloc(list->items, capacity * sizeof(*items)) : NULL;
         if (!items) return false;
         list->items = items;
         list->capacity = capacity;
@@ -600,14 +618,17 @@ typedef struct {
     yx_hc_entry *by_end;
     size_t count, *next;
     uint32_t *seen, generation;
-    bool ordered;          /* by_end is in tracking order */
-    bool compress;         /* behind an unbounded gap */
+    bool ordered;  /* by_end is in tracking order */
+    bool compress; /* behind an unbounded gap */
     yx_hc_ends smallest;
 } yx_hc_level;
 
 static void yx_hc_level_free(yx_hc_level *level)
 {
-    free(level->items.items); free(level->by_end); free(level->next); free(level->seen);
+    free(level->items.items);
+    free(level->by_end);
+    free(level->next);
+    free(level->seen);
     free(level->smallest.slots);
 }
 
@@ -642,8 +663,8 @@ static bool yx_hc_level_finish(yx_hc_level *level, bool greedy)
     if (level->compress && !greedy)
         for (size_t k = 0; k < level->smallest.capacity; ++k)
             if (level->smallest.slots[k].start != SIZE_MAX &&
-                !yx_hc_append(&level->items, level->smallest.slots[k].start, level->smallest.slots[k].end,
-                              level->items.count)) return false;
+                !yx_hc_append(&level->items, level->smallest.slots[k].start, level->smallest.slots[k].end, level->items.count))
+                return false;
     free(level->smallest.slots);
     level->smallest = (yx_hc_ends){0};
     size_t n = level->items.count;
@@ -654,8 +675,7 @@ static bool yx_hc_level_finish(yx_hc_level *level, bool greedy)
     size_t unique = 0;
     level->ordered = true;
     for (size_t m = 0; m < n; ++m) {
-        if (unique && level->by_end[unique - 1].start == level->by_end[m].start &&
-            level->by_end[unique - 1].end == level->by_end[m].end) continue;
+        if (unique && level->by_end[unique - 1].start == level->by_end[m].start && level->by_end[unique - 1].end == level->by_end[m].end) continue;
         if (unique && level->by_end[m].index < level->by_end[unique - 1].index) level->ordered = false;
         level->by_end[unique++] = level->by_end[m];
     }
@@ -683,8 +703,7 @@ static size_t yx_hc_first_end(const yx_hc_level *level, size_t bound)
 
 /* [*first, *last): the spans of level whose end is a valid gap before a
  * match of the next piece starting at start (start - end in the gap). */
-static void yx_hc_gap_range(const yx_hc_level *level, const yx_tr_node *gap, size_t start,
-                            size_t *first, size_t *last)
+static void yx_hc_gap_range(const yx_hc_level *level, const yx_tr_node *gap, size_t start, size_t *first, size_t *last)
 {
     *first = *last = 0;
     if (start < gap->minimum) return;
@@ -730,7 +749,7 @@ typedef struct {
     YRX_PATTERN *pattern;
     const uint8_t *data;
     size_t size, piece, events, steps;
-    yx_hc_level *levels;     /* [2 * piece + wide], every piece but the last */
+    yx_hc_level *levels; /* [2 * piece + wide], every piece but the last */
     yx_hc_entries frontier, reached;
     yx_hc_list list;
     bool teddy;
@@ -780,11 +799,11 @@ static bool yx_hc_verify(yx_hc_scan_state *s, size_t wide, size_t start, size_t 
                 level->seen[entry->index] = level->generation;
                 if (!yx_hc_append(&s->reached, entry->start, entry->end, entry->index)) return false;
             }
-            if (!level->ordered && s->reached.count - mark > 1)
-                qsort(s->reached.items + mark, s->reached.count - mark, sizeof(*s->reached.items),
-                      yx_hc_index_compare);
+            if (!level->ordered && s->reached.count - mark > 1) qsort(s->reached.items + mark, s->reached.count - mark, sizeof(*s->reached.items), yx_hc_index_compare);
         }
-        yx_hc_entries swap = s->frontier; s->frontier = s->reached; s->reached = swap;
+        yx_hc_entries swap = s->frontier;
+        s->frontier = s->reached;
+        s->reached = swap;
     }
     for (size_t f = 0; f < s->frontier.count; ++f)
         if (!yx_hc_track(&s->list, s->frontier.items[f].start, end, greedy)) return false;
@@ -806,7 +825,10 @@ static bool yx_hc_event(void *context, unsigned flags, size_t start, size_t end)
     return yx_hc_level_add(&s->levels[2 * i + wide], start, end, s->chain->greedy);
 }
 
-typedef struct { yx_hc_hit *items; size_t used, capacity; } yx_hc_heap;
+typedef struct {
+    yx_hc_hit *items;
+    size_t used, capacity;
+} yx_hc_heap;
 
 static bool yx_hc_heap_push(yx_hc_heap *h, yx_hc_hit hit)
 {
@@ -820,7 +842,9 @@ static bool yx_hc_heap_push(yx_hc_heap *h, yx_hc_hit hit)
     size_t i = h->used++;
     h->items[i] = hit;
     while (i && yx_hc_hit_compare(&h->items[i], &h->items[(i - 1) / 2]) < 0) {
-        yx_hc_hit swap = h->items[i]; h->items[i] = h->items[(i - 1) / 2]; h->items[(i - 1) / 2] = swap;
+        yx_hc_hit swap = h->items[i];
+        h->items[i] = h->items[(i - 1) / 2];
+        h->items[(i - 1) / 2] = swap;
         i = (i - 1) / 2;
     }
     return true;
@@ -835,7 +859,9 @@ static yx_hc_hit yx_hc_heap_pop(yx_hc_heap *h)
         if (left < h->used && yx_hc_hit_compare(&h->items[left], &h->items[best]) < 0) best = left;
         if (right < h->used && yx_hc_hit_compare(&h->items[right], &h->items[best]) < 0) best = right;
         if (best == i) break;
-        yx_hc_hit swap = h->items[i]; h->items[i] = h->items[best]; h->items[best] = swap;
+        yx_hc_hit swap = h->items[i];
+        h->items[i] = h->items[best];
+        h->items[best] = swap;
         i = best;
     }
     return top;
@@ -843,17 +869,15 @@ static yx_hc_hit yx_hc_heap_pop(yx_hc_heap *h)
 
 /* The next occurrence of a literal piece's atom at or after from, as a hit
  * in the reference's search order. */
-static bool yx_hc_literal_hit(const yx_hc_scan_state *s, const yx_hc_part *part, size_t k, size_t from,
-                              yx_hc_hit *hit)
+static bool yx_hc_literal_hit(const yx_hc_scan_state *s, const yx_hc_part *part, size_t k, size_t from, yx_hc_hit *hit)
 {
     const yx_hc_atom *atom = &part->atoms[k];
     if (atom->length > s->size || from > s->size - atom->length) return false;
     int64_t found = xx_data_find_bytes_buffer_optimize(s->data, s->size, from, atom->bytes, atom->length, NULL);
     if (found < 0) return false;
     size_t id = part->atom_first + k, position = (size_t)found;
-    *hit = s->teddy ?
-        (yx_hc_hit){k, position, position, s->pattern->rx_order_buckets[id], s->pattern->rx_order_ids[id]} :
-        (yx_hc_hit){k, position, position + atom->length, SIZE_MAX - atom->length, id};
+    *hit = s->teddy ? (yx_hc_hit){k, position, position, s->pattern->rx_order_buckets[id], s->pattern->rx_order_ids[id]}
+                    : (yx_hc_hit){k, position, position + atom->length, SIZE_MAX - atom->length, id};
     return true;
 }
 
@@ -889,10 +913,8 @@ static bool yx_hc_literal_events(yx_hc_scan_state *s, const yx_hc_part *part)
             }
             /* verify_full_word */
             if (match && atom->wide) {
-                if ((part->flags & YX_RX_FULLWORD_LEFT) && at >= 2 && !data[at - 1] && yx_hc_word(data[at - 2]))
-                    match = false;
-                if ((part->flags & YX_RX_FULLWORD_RIGHT) && end + 1 < size && !data[end + 1] &&
-                    yx_hc_word(data[end])) match = false;
+                if ((part->flags & YX_RX_FULLWORD_LEFT) && at >= 2 && !data[at - 1] && yx_hc_word(data[at - 2])) match = false;
+                if ((part->flags & YX_RX_FULLWORD_RIGHT) && end + 1 < size && !data[end + 1] && yx_hc_word(data[end])) match = false;
             } else if (match) {
                 if ((part->flags & YX_RX_FULLWORD_LEFT) && at >= 1 && yx_hc_word(data[at - 1])) match = false;
                 if ((part->flags & YX_RX_FULLWORD_RIGHT) && end < size && yx_hc_word(data[end])) match = false;
@@ -920,8 +942,7 @@ static int yx_hc_match_compare(const void *left, const void *right)
  * they come: only the unconfirmed matches are kept. emit receives each match
  * by increasing offset. 1, 0 on failure or an expired deadline, -2 when the
  * pattern is not a chain or a piece cannot be built. */
-static int yx_hc_join_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                           bool (*emit)(size_t, size_t, void *), void *context)
+static int yx_hc_join_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t, size_t, void *), void *context)
 {
     yx_hc_chain local;
     const yx_hc_chain *built_chain = pattern->rx_chain;
@@ -940,14 +961,12 @@ static int yx_hc_join_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
     s.pattern = pattern;
     s.data = data;
     s.size = size;
-    s.teddy = pattern->rx_teddy && pattern->rx_order_ids && pattern->rx_order_buckets &&
-              size >= pattern->rx_teddy_minimum;
+    s.teddy = pattern->rx_teddy && pattern->rx_order_ids && pattern->rx_order_buckets && size >= pattern->rx_teddy_minimum;
     s.levels = calloc(2 * (chain.count - 1), sizeof(*s.levels));
     yx_rx_match *matches = NULL;
     int result = 0;
     if (!s.levels) goto done;
-    for (size_t i = 0; i + 1 < chain.count; ++i)
-        s.levels[2 * i].compress = s.levels[2 * i + 1].compress = yx_tr_unbounded(chain.pieces[i + 1].gap);
+    for (size_t i = 0; i + 1 < chain.count; ++i) s.levels[2 * i].compress = s.levels[2 * i + 1].compress = yx_tr_unbounded(chain.pieces[i + 1].gap);
     for (size_t i = 0; i < chain.count; ++i) {
         const yx_hc_part *part = &chain.parts[i];
         s.piece = i;
@@ -962,12 +981,10 @@ static int yx_hc_join_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
             }
             list.each = yx_hc_event;
             list.each_context = &s;
-            if (!yx_rx_scan_ordered(&part->program, data, size, pattern->deadline, &list, s.teddy ? &order : NULL))
-                goto done;
+            if (!yx_rx_scan_ordered(&part->program, data, size, pattern->deadline, &list, s.teddy ? &order : NULL)) goto done;
         }
         if (yx_scan_deadline_reached(pattern->deadline)) goto done;
-        if (i + 1 < chain.count && (!yx_hc_level_finish(&s.levels[2 * i], chain.greedy) ||
-                                    !yx_hc_level_finish(&s.levels[2 * i + 1], chain.greedy))) goto done;
+        if (i + 1 < chain.count && (!yx_hc_level_finish(&s.levels[2 * i], chain.greedy) || !yx_hc_level_finish(&s.levels[2 * i + 1], chain.greedy))) goto done;
         /* No unconfirmed match: no later match is within_valid_distance. */
         if (i + 1 < chain.count && !s.levels[2 * i].count && !s.levels[2 * i + 1].count) break;
     }
@@ -985,7 +1002,8 @@ done:
     free(matches);
     for (size_t i = 0; s.levels && i < 2 * (chain.count - 1); ++i) yx_hc_level_free(&s.levels[i]);
     free(s.levels);
-    free(s.frontier.items); free(s.reached.items);
+    free(s.frontier.items);
+    free(s.reached.items);
     free(s.list.ends.slots);
     if (built_chain == &local) yx_hc_chain_free(&local);
     return result;
@@ -993,21 +1011,18 @@ done:
 
 /* Chains of pieces FastVM's splitter does not describe, from
  * yx_ser_scan_large_fast_chain. Returns 1, or 0 on failure. */
-static int yx_hc_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                      bool (*emit)(size_t, size_t, void *), void *context)
+static int yx_hc_scan(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t, size_t, void *), void *context)
 {
     return yx_hc_join_scan(pattern, data, size, emit, context) == 1;
 }
 
-int yx_ser_scan_hex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                          bool (*emit)(size_t, size_t, void *), void *context)
+int yx_ser_scan_hex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t, size_t, void *), void *context)
 {
     if (!pattern || pattern->kind != YX_PATTERN_HEX) return -2;
     return yx_hc_join_scan(pattern, data, size, emit, context);
 }
 
-int yx_ser_scan_regex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
-                            bool (*emit)(size_t, size_t, void *), void *context)
+int yx_ser_scan_regex_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size, bool (*emit)(size_t, size_t, void *), void *context)
 {
     if (!pattern || pattern->kind != YX_PATTERN_REGEX) return -2;
     return yx_hc_join_scan(pattern, data, size, emit, context);

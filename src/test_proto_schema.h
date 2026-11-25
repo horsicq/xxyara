@@ -201,7 +201,12 @@ static const yx_vt_field yx_tp_fields[] = {
     {"test_proto2.NestedProto2", YX_VT_STRUCT, 0, 0, false},
 };
 
-typedef enum { YX_TP_UNDEFINED, YX_TP_CONSTANT, YX_TP_SCAN_SIZE, YX_TP_METADATA } yx_tp_native_kind;
+typedef enum {
+    YX_TP_UNDEFINED,
+    YX_TP_CONSTANT,
+    YX_TP_SCAN_SIZE,
+    YX_TP_METADATA
+} yx_tp_native_kind;
 typedef struct {
     const char *path;
     yx_vt_type type;
@@ -341,37 +346,37 @@ static const yx_tp_native_field yx_tp_native_fields[] = {
     {"test_proto2.INLINE_0x2000", YX_VT_INT, YX_TP_CONSTANT, INT64_C(8192), 0.0, NULL, 0},
 };
 
-static yx_global_scalar_value yx_tp_int_items[] = { {.integer=1}, {.integer=10}, {.integer=100} };
+static yx_global_scalar_value yx_tp_int_items[] = {{.integer = 1}, {.integer = 10}, {.integer = 100}};
 static yx_global_array yx_tp_int_array = {YX_GLOBAL_INT, yx_tp_int_items, 3};
-static yx_global_scalar_value yx_tp_float_items[] = { {.floating=1.0}, {.floating=10.0}, {.floating=100.0} };
+static yx_global_scalar_value yx_tp_float_items[] = {{.floating = 1.0}, {.floating = 10.0}, {.floating = 100.0}};
 static yx_global_array yx_tp_float_array = {YX_GLOBAL_FLOAT, yx_tp_float_items, 3};
-static yx_global_scalar_value yx_tp_bool_items[] = { {.boolean=false}, {.boolean=true} };
+static yx_global_scalar_value yx_tp_bool_items[] = {{.boolean = false}, {.boolean = true}};
 static yx_global_array yx_tp_bool_array = {YX_GLOBAL_BOOL, yx_tp_bool_items, 2};
-static yx_global_scalar_value yx_tp_string_items[] = { {.string={"foo",3}}, {.string={"bar",3}}, {.string={"baz",3}} };
+static yx_global_scalar_value yx_tp_string_items[] = {{.string = {"foo", 3}}, {.string = {"bar", 3}}, {.string = {"baz", 3}}};
 static yx_global_array yx_tp_string_array = {YX_GLOBAL_STR, yx_tp_string_items, 3};
 
 static yx_global_field yx_tp_nested_fields_0[] = {
-    {"nested_int32_zero", YX_GLOBAL_INT, {.integer=0}},
-    {"nested_int64_zero", YX_GLOBAL_INT, {.integer=0}},
-    {"nested_int32_one", YX_GLOBAL_INT, {.integer=1}},
-    {"nested_int64_one", YX_GLOBAL_INT, {.integer=1}},
-    {"nested_bool", YX_GLOBAL_BOOL, {.boolean=false}},
-    {"nested_string", YX_GLOBAL_STR, {.string={"foo",3}}},
-    {"nested_array_int64", YX_GLOBAL_ARRAY, {.array=&yx_tp_int_array}},
+    {"nested_int32_zero", YX_GLOBAL_INT, {.integer = 0}},
+    {"nested_int64_zero", YX_GLOBAL_INT, {.integer = 0}},
+    {"nested_int32_one", YX_GLOBAL_INT, {.integer = 1}},
+    {"nested_int64_one", YX_GLOBAL_INT, {.integer = 1}},
+    {"nested_bool", YX_GLOBAL_BOOL, {.boolean = false}},
+    {"nested_string", YX_GLOBAL_STR, {.string = {"foo", 3}}},
+    {"nested_array_int64", YX_GLOBAL_ARRAY, {.array = &yx_tp_int_array}},
 };
 static yx_global_object yx_tp_nested_object_0 = {yx_tp_nested_fields_0, 7};
 
 static yx_global_field yx_tp_nested_fields_1[] = {
-    {"nested_int32_zero", YX_GLOBAL_INT, {.integer=0}},
-    {"nested_int64_zero", YX_GLOBAL_INT, {.integer=0}},
-    {"nested_int32_one", YX_GLOBAL_INT, {.integer=1}},
-    {"nested_int64_one", YX_GLOBAL_INT, {.integer=1}},
-    {"nested_bool", YX_GLOBAL_BOOL, {.boolean=true}},
-    {"nested_string", YX_GLOBAL_STR, {.string={"foo",3}}},
-    {"nested_array_int64", YX_GLOBAL_ARRAY, {.array=&yx_tp_int_array}},
+    {"nested_int32_zero", YX_GLOBAL_INT, {.integer = 0}},
+    {"nested_int64_zero", YX_GLOBAL_INT, {.integer = 0}},
+    {"nested_int32_one", YX_GLOBAL_INT, {.integer = 1}},
+    {"nested_int64_one", YX_GLOBAL_INT, {.integer = 1}},
+    {"nested_bool", YX_GLOBAL_BOOL, {.boolean = true}},
+    {"nested_string", YX_GLOBAL_STR, {.string = {"foo", 3}}},
+    {"nested_array_int64", YX_GLOBAL_ARRAY, {.array = &yx_tp_int_array}},
 };
 static yx_global_object yx_tp_nested_object_1 = {yx_tp_nested_fields_1, 7};
-static yx_global_scalar_value yx_tp_nested_items[] = { {.object=&yx_tp_nested_object_0}, {.object=&yx_tp_nested_object_1} };
+static yx_global_scalar_value yx_tp_nested_items[] = {{.object = &yx_tp_nested_object_0}, {.object = &yx_tp_nested_object_1}};
 static yx_global_array yx_tp_nested_array = {YX_GLOBAL_STRUCT, yx_tp_nested_items, 2};
 
 static const yx_module_array_desc yx_tp_arrays[] = {
@@ -398,21 +403,27 @@ typedef struct {
 /* Every native test map has one entry. Map values remain typed even when
  * an injected output leaves the map empty. */
 static const yx_tp_native_map yx_tp_maps[] = {
-    {"test_proto2.map_string_struct", YX_VT_STRING, YX_VT_STRUCT, "foo", 0, {.object=&yx_tp_nested_object_0}, &yx_tp_nested_array},
-    {"test_proto2.map_string_int64", YX_VT_STRING, YX_VT_INT, "one", 0, {.integer=1}, NULL},
-    {"test_proto2.map_string_string", YX_VT_STRING, YX_VT_STRING, "foo", 0, {.string={"FOO",3}}, NULL},
-    {"test_proto2.map_string_bool", YX_VT_STRING, YX_VT_BOOL, "foo", 0, {.boolean=true}, NULL},
-    {"test_proto2.map_string_float", YX_VT_STRING, YX_VT_FLOAT, "one", 0, {.floating=1.0}, NULL},
-    {"test_proto2.map_int64_struct", YX_VT_INT, YX_VT_STRUCT, NULL, 100, {.object=&yx_tp_nested_object_0}, &yx_tp_nested_array},
-    {"test_proto2.map_int64_int64", YX_VT_INT, YX_VT_INT, NULL, 100, {.integer=1000}, NULL},
-    {"test_proto2.map_int64_string", YX_VT_INT, YX_VT_STRING, NULL, 100, {.string={"one thousand",12}}, NULL},
-    {"test_proto2.map_int64_bool", YX_VT_INT, YX_VT_BOOL, NULL, 100, {.boolean=true}, NULL},
-    {"test_proto2.map_int64_float", YX_VT_INT, YX_VT_FLOAT, NULL, 100, {.floating=1000.0}, NULL},
+    {"test_proto2.map_string_struct", YX_VT_STRING, YX_VT_STRUCT, "foo", 0, {.object = &yx_tp_nested_object_0}, &yx_tp_nested_array},
+    {"test_proto2.map_string_int64", YX_VT_STRING, YX_VT_INT, "one", 0, {.integer = 1}, NULL},
+    {"test_proto2.map_string_string", YX_VT_STRING, YX_VT_STRING, "foo", 0, {.string = {"FOO", 3}}, NULL},
+    {"test_proto2.map_string_bool", YX_VT_STRING, YX_VT_BOOL, "foo", 0, {.boolean = true}, NULL},
+    {"test_proto2.map_string_float", YX_VT_STRING, YX_VT_FLOAT, "one", 0, {.floating = 1.0}, NULL},
+    {"test_proto2.map_int64_struct", YX_VT_INT, YX_VT_STRUCT, NULL, 100, {.object = &yx_tp_nested_object_0}, &yx_tp_nested_array},
+    {"test_proto2.map_int64_int64", YX_VT_INT, YX_VT_INT, NULL, 100, {.integer = 1000}, NULL},
+    {"test_proto2.map_int64_string", YX_VT_INT, YX_VT_STRING, NULL, 100, {.string = {"one thousand", 12}}, NULL},
+    {"test_proto2.map_int64_bool", YX_VT_INT, YX_VT_BOOL, NULL, 100, {.boolean = true}, NULL},
+    {"test_proto2.map_int64_float", YX_VT_INT, YX_VT_FLOAT, NULL, 100, {.floating = 1000.0}, NULL},
 };
 
 /* Functions are implemented by the evaluator; the listed receiver is empty
  * for module functions and names the protobuf message for methods. */
-typedef struct { const char *path, *receiver; yx_vt_type result; unsigned argc; yx_vt_type args[2]; bool may_be_undefined; } yx_tp_function;
+typedef struct {
+    const char *path, *receiver;
+    yx_vt_type result;
+    unsigned argc;
+    yx_vt_type args[2];
+    bool may_be_undefined;
+} yx_tp_function;
 static const yx_tp_function yx_tp_functions[] = {
     {"test_proto2.add", "", YX_VT_INT, 2, {YX_VT_INT, YX_VT_INT}, false},
     {"test_proto2.add", "", YX_VT_FLOAT, 2, {YX_VT_FLOAT, YX_VT_FLOAT}, false},

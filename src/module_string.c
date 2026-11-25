@@ -28,17 +28,15 @@
 bool yx_string_length(const uint8_t *bytes, size_t size, int64_t *out)
 {
     if (!out || (!bytes && size) || size > INT64_MAX) return false;
-    *out = (int64_t) size;
+    *out = (int64_t)size;
     return true;
 }
 
 /* Rust's i64::from_str_radix; a base outside 2..36 is undefined. */
-bool yx_string_to_int_base(const uint8_t *bytes, size_t size, int64_t base,
-                           int64_t *out)
+bool yx_string_to_int_base(const uint8_t *bytes, size_t size, int64_t base, int64_t *out)
 {
     if (base < 2 || base > 36) return false;
-    return xx_str_to_i64_radix((const char *) bytes, size, (unsigned) base,
-                               out);
+    return xx_str_to_i64_radix((const char *)bytes, size, (unsigned)base, out);
 }
 
 bool yx_string_to_int(const uint8_t *bytes, size_t size, int64_t *out)

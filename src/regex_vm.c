@@ -86,24 +86,27 @@
 
 typedef struct {
     const uint8_t *data;
-    size_t at, end;          /* forward: at..end; backward: begin..at */
+    size_t at, end; /* forward: at..end; backward: begin..at */
     bool backwards, wide, zero_first;
     size_t valid_pairs;
     bool has_error;
     size_t error_pos;
 } yx_rx_iter;
 
-static void yx_rx_iter_init(yx_rx_iter *it, const uint8_t *data, size_t begin,
-                            size_t end, bool backwards, bool wide,
-                            bool zero_first)
+static void yx_rx_iter_init(yx_rx_iter *it, const uint8_t *data, size_t begin, size_t end, bool backwards, bool wide, bool zero_first)
 {
     memset(it, 0, sizeof(*it));
     it->data = data;
     it->backwards = backwards;
     it->wide = wide;
     it->zero_first = zero_first;
-    if (backwards) { it->at = end; it->end = begin; }
-    else { it->at = begin; it->end = end; }
+    if (backwards) {
+        it->at = end;
+        it->end = begin;
+    } else {
+        it->at = begin;
+        it->end = end;
+    }
 }
 
 /* The PikeVM's iterators are specialised by direction and width: callers
@@ -129,11 +132,17 @@ YX_RX_INLINE int yx_rx_iter_next(yx_rx_iter *it, bool backwards, bool wide)
     second = yx_rx_iter_raw(it, backwards);
     if (second < 0) return -1;
     if (backwards) {
-        if (first != 0 && !it->has_error) { it->has_error = true; it->error_pos = it->valid_pairs; }
+        if (first != 0 && !it->has_error) {
+            it->has_error = true;
+            it->error_pos = it->valid_pairs;
+        }
         ++it->valid_pairs;
         return second;
     }
-    if (second != 0 && !it->has_error) { it->has_error = true; it->error_pos = it->valid_pairs; }
+    if (second != 0 && !it->has_error) {
+        it->has_error = true;
+        it->error_pos = it->valid_pairs;
+    }
     ++it->valid_pairs;
     return first;
 }
@@ -142,37 +151,62 @@ YX_RX_INLINE int yx_rx_iter_next(yx_rx_iter *it, bool backwards, bool wide)
 /* PikeVM.                                                             */
 
 enum {
-    YX_PI_MATCH = 0x00, YX_PI_SPLIT_A = 0x01, YX_PI_SPLIT_B = 0x02,
-    YX_PI_SPLIT_N = 0x03, YX_PI_JUMP = 0x04, YX_PI_ANY_BYTE = 0x05,
-    YX_PI_MASKED_BYTE = 0x06, YX_PI_NOCASE = 0x07, YX_PI_BITMAP = 0x08,
-    YX_PI_RANGES = 0x09, YX_PI_START = 0x0A, YX_PI_END = 0x0B,
-    YX_PI_WORD_BOUNDARY = 0x0C, YX_PI_WORD_BOUNDARY_NEG = 0x0D,
-    YX_PI_WORD_START = 0x0E, YX_PI_WORD_END = 0x0F,
-    YX_PI_REPEAT_GREEDY = 0x10, YX_PI_REPEAT_NON_GREEDY = 0x11,
-    YX_PI_LINE_START = 0x12, YX_PI_LINE_END = 0x13,
+    YX_PI_MATCH = 0x00,
+    YX_PI_SPLIT_A = 0x01,
+    YX_PI_SPLIT_B = 0x02,
+    YX_PI_SPLIT_N = 0x03,
+    YX_PI_JUMP = 0x04,
+    YX_PI_ANY_BYTE = 0x05,
+    YX_PI_MASKED_BYTE = 0x06,
+    YX_PI_NOCASE = 0x07,
+    YX_PI_BITMAP = 0x08,
+    YX_PI_RANGES = 0x09,
+    YX_PI_START = 0x0A,
+    YX_PI_END = 0x0B,
+    YX_PI_WORD_BOUNDARY = 0x0C,
+    YX_PI_WORD_BOUNDARY_NEG = 0x0D,
+    YX_PI_WORD_START = 0x0E,
+    YX_PI_WORD_END = 0x0F,
+    YX_PI_REPEAT_GREEDY = 0x10,
+    YX_PI_REPEAT_NON_GREEDY = 0x11,
+    YX_PI_LINE_START = 0x12,
+    YX_PI_LINE_END = 0x13,
     /* Boolean-search assertions use regex-automata's condition semantics. */
-    YX_PI_SEARCH_START_LF = 0x14, YX_PI_SEARCH_END_LF = 0x15,
-    YX_PI_SEARCH_START_CRLF = 0x16, YX_PI_SEARCH_END_CRLF = 0x17,
-    YX_PI_SEARCH_WORD_START = 0x18, YX_PI_SEARCH_WORD_END = 0x19,
-    YX_PI_SEARCH_WORD_START_HALF = 0x1A, YX_PI_SEARCH_WORD_END_HALF = 0x1B,
+    YX_PI_SEARCH_START_LF = 0x14,
+    YX_PI_SEARCH_END_LF = 0x15,
+    YX_PI_SEARCH_START_CRLF = 0x16,
+    YX_PI_SEARCH_END_CRLF = 0x17,
+    YX_PI_SEARCH_WORD_START = 0x18,
+    YX_PI_SEARCH_WORD_END = 0x19,
+    YX_PI_SEARCH_WORD_START_HALF = 0x1A,
+    YX_PI_SEARCH_WORD_END_HALF = 0x1B,
     /* Not opcodes: decoder results that fit the one-byte op table. */
-    YX_PI_BYTE = 0x1C, YX_PI_BYTES = 0x1D, YX_PI_INVALID = 0xFF
+    YX_PI_BYTE = 0x1C,
+    YX_PI_BYTES = 0x1D,
+    YX_PI_INVALID = 0xFF
 };
 
-typedef struct { int op; size_t size; } yx_pi_instr;
+typedef struct {
+    int op;
+    size_t size;
+} yx_pi_instr;
 
 static int32_t yx_rx_i32(const uint8_t *p)
 {
-    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
 }
-static uint32_t yx_rx_u32(const uint8_t *p) { return (uint32_t)yx_rx_i32(p); }
-static uint16_t yx_rx_u16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t yx_rx_u32(const uint8_t *p)
+{
+    return (uint32_t)yx_rx_i32(p);
+}
+static uint16_t yx_rx_u16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
 
 static bool yx_pi_is_bytes_run(const uint8_t *c, size_t n)
 {
-    if (n >= 4 && c[0] == YX_RX_PREFIX && c[1] == YX_RX_PREFIX &&
-        c[2] == YX_RX_PREFIX && c[3] == YX_RX_PREFIX) return true;
+    if (n >= 4 && c[0] == YX_RX_PREFIX && c[1] == YX_RX_PREFIX && c[2] == YX_RX_PREFIX && c[3] == YX_RX_PREFIX) return true;
     if (n >= 3 && c[0] == YX_RX_PREFIX && c[1] == YX_RX_PREFIX && c[2] != YX_RX_PREFIX) return true;
     if (n >= 3 && c[0] != YX_RX_PREFIX && c[1] == YX_RX_PREFIX && c[2] == YX_RX_PREFIX) return true;
     if (n >= 2 && c[0] != YX_RX_PREFIX && c[1] != YX_RX_PREFIX) return true;
@@ -180,43 +214,76 @@ static bool yx_pi_is_bytes_run(const uint8_t *c, size_t n)
 }
 
 /* InstrParser::decode_instr. Returns false for code that is out of bounds. */
-static bool yx_pi_decode(const uint8_t *code, size_t length, size_t ip,
-                         bool literal_runs, yx_pi_instr *out)
+static bool yx_pi_decode(const uint8_t *code, size_t length, size_t ip, bool literal_runs, yx_pi_instr *out)
 {
     const uint8_t *c = code + ip;
     size_t n = length - ip;
     if (ip >= length) return false;
     if (c[0] == YX_RX_PREFIX && n >= 2 && c[1] != YX_RX_PREFIX) {
         switch (c[1]) {
-        case YX_PI_ANY_BYTE: case YX_PI_START: case YX_PI_END: case YX_PI_LINE_START:
-        case YX_PI_LINE_END: case YX_PI_WORD_BOUNDARY: case YX_PI_WORD_BOUNDARY_NEG:
-        case YX_PI_WORD_START: case YX_PI_WORD_END: case YX_PI_MATCH:
-        case YX_PI_SEARCH_START_LF: case YX_PI_SEARCH_END_LF:
-        case YX_PI_SEARCH_START_CRLF: case YX_PI_SEARCH_END_CRLF:
-        case YX_PI_SEARCH_WORD_START: case YX_PI_SEARCH_WORD_END:
-        case YX_PI_SEARCH_WORD_START_HALF: case YX_PI_SEARCH_WORD_END_HALF:
-            *out = (yx_pi_instr){c[1], 2}; return true;
-        case YX_PI_MASKED_BYTE: if (n < 4) return false; *out = (yx_pi_instr){c[1], 4}; return true;
-        case YX_PI_NOCASE: if (n < 3) return false; *out = (yx_pi_instr){c[1], 3}; return true;
-        case YX_PI_JUMP: if (n < 6) return false; *out = (yx_pi_instr){c[1], 6}; return true;
-        case YX_PI_SPLIT_A: case YX_PI_SPLIT_B: if (n < 8) return false; *out = (yx_pi_instr){c[1], 8}; return true;
-        case YX_PI_SPLIT_N:
-            if (n < 5 || n - 5 < (size_t)c[4] * 4) return false;
-            *out = (yx_pi_instr){c[1], 5 + (size_t)c[4] * 4}; return true;
-        case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY:
-            if (n < 14) return false;
-            *out = (yx_pi_instr){c[1], 14}; return true;
-        case YX_PI_RANGES:
-            if (n < 3 || n - 3 < (size_t)c[2] * 2) return false;
-            *out = (yx_pi_instr){c[1], 3 + (size_t)c[2] * 2}; return true;
-        case YX_PI_BITMAP: if (n < 34) return false; *out = (yx_pi_instr){c[1], 34}; return true;
-        default: return false;
+            case YX_PI_ANY_BYTE:
+            case YX_PI_START:
+            case YX_PI_END:
+            case YX_PI_LINE_START:
+            case YX_PI_LINE_END:
+            case YX_PI_WORD_BOUNDARY:
+            case YX_PI_WORD_BOUNDARY_NEG:
+            case YX_PI_WORD_START:
+            case YX_PI_WORD_END:
+            case YX_PI_MATCH:
+            case YX_PI_SEARCH_START_LF:
+            case YX_PI_SEARCH_END_LF:
+            case YX_PI_SEARCH_START_CRLF:
+            case YX_PI_SEARCH_END_CRLF:
+            case YX_PI_SEARCH_WORD_START:
+            case YX_PI_SEARCH_WORD_END:
+            case YX_PI_SEARCH_WORD_START_HALF:
+            case YX_PI_SEARCH_WORD_END_HALF: *out = (yx_pi_instr){c[1], 2}; return true;
+            case YX_PI_MASKED_BYTE:
+                if (n < 4) return false;
+                *out = (yx_pi_instr){c[1], 4};
+                return true;
+            case YX_PI_NOCASE:
+                if (n < 3) return false;
+                *out = (yx_pi_instr){c[1], 3};
+                return true;
+            case YX_PI_JUMP:
+                if (n < 6) return false;
+                *out = (yx_pi_instr){c[1], 6};
+                return true;
+            case YX_PI_SPLIT_A:
+            case YX_PI_SPLIT_B:
+                if (n < 8) return false;
+                *out = (yx_pi_instr){c[1], 8};
+                return true;
+            case YX_PI_SPLIT_N:
+                if (n < 5 || n - 5 < (size_t)c[4] * 4) return false;
+                *out = (yx_pi_instr){c[1], 5 + (size_t)c[4] * 4};
+                return true;
+            case YX_PI_REPEAT_GREEDY:
+            case YX_PI_REPEAT_NON_GREEDY:
+                if (n < 14) return false;
+                *out = (yx_pi_instr){c[1], 14};
+                return true;
+            case YX_PI_RANGES:
+                if (n < 3 || n - 3 < (size_t)c[2] * 2) return false;
+                *out = (yx_pi_instr){c[1], 3 + (size_t)c[2] * 2};
+                return true;
+            case YX_PI_BITMAP:
+                if (n < 34) return false;
+                *out = (yx_pi_instr){c[1], 34};
+                return true;
+            default: return false;
         }
     }
-    if (literal_runs && yx_pi_is_bytes_run(c, n)) { *out = (yx_pi_instr){YX_PI_BYTES, 0}; return true; }
+    if (literal_runs && yx_pi_is_bytes_run(c, n)) {
+        *out = (yx_pi_instr){YX_PI_BYTES, 0};
+        return true;
+    }
     if (c[0] == YX_RX_PREFIX) {
         if (n < 2) return false;
-        *out = (yx_pi_instr){YX_PI_BYTE, 2}; return true;
+        *out = (yx_pi_instr){YX_PI_BYTE, 2};
+        return true;
     }
     *out = (yx_pi_instr){YX_PI_BYTE, 1};
     return true;
@@ -224,16 +291,22 @@ static bool yx_pi_decode(const uint8_t *code, size_t length, size_t ip,
 
 /* One decoded instruction per code offset, filled on first use by a VM
  * run. Any offset may be a jump target, so the table covers every byte. */
-enum { YX_PF_DECODED = 1, YX_PF_RUN = 2, YX_PF_CONSUMING = 4 };
+enum {
+    YX_PF_DECODED = 1,
+    YX_PF_RUN = 2,
+    YX_PF_CONSUMING = 4
+};
 typedef struct {
-    uint8_t op;       /* yx_pi_decode without literal runs; YX_PI_INVALID */
-    uint8_t flags;    /* YX_PF_RUN: yx_pi_decode with literal runs is BYTES */
+    uint8_t op;    /* yx_pi_decode without literal runs; YX_PI_INVALID */
+    uint8_t flags; /* YX_PF_RUN: yx_pi_decode with literal runs is BYTES */
     uint16_t size;
 } yx_pi_op;
 
 #define YX_PI_LOCAL_THREADS 32
 
-typedef struct { uint32_t ip, count; } yx_pi_thread;
+typedef struct {
+    uint32_t ip, count;
+} yx_pi_thread;
 /* The first YX_PI_LOCAL_THREADS entries live in the vector itself. */
 typedef struct {
     yx_pi_thread *items;
@@ -280,8 +353,7 @@ typedef struct yx_pikevm {
 
 YX_RX_INLINE bool yx_pi_poll(yx_pikevm *vm)
 {
-    if (vm->deadline && !(++vm->steps & 1023u) &&
-        yx_scan_deadline_reached(vm->deadline)) {
+    if (vm->deadline && !(++vm->steps & 1023u) && yx_scan_deadline_reached(vm->deadline)) {
         vm->failed = true;
         return true;
     }
@@ -354,16 +426,17 @@ YX_RX_NOINLINE yx_pi_op yx_pi_fill(yx_pikevm *vm, uint32_t ip)
         op.op = (uint8_t)instr.op;
         op.size = (uint16_t)instr.size;
         switch (instr.op) {
-        case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE: case YX_PI_NOCASE:
-        case YX_PI_BITMAP: case YX_PI_RANGES: case YX_PI_MATCH:
-            op.flags |= YX_PF_CONSUMING;
-            break;
-        default:
-            break;
+            case YX_PI_ANY_BYTE:
+            case YX_PI_BYTE:
+            case YX_PI_MASKED_BYTE:
+            case YX_PI_NOCASE:
+            case YX_PI_BITMAP:
+            case YX_PI_RANGES:
+            case YX_PI_MATCH: op.flags |= YX_PF_CONSUMING; break;
+            default: break;
         }
         /* With literal runs only BYTE offsets decode differently. */
-        if (yx_pi_decode(vm->code, vm->code_length, ip, true, &instr) && instr.op == YX_PI_BYTES)
-            op.flags |= YX_PF_RUN;
+        if (yx_pi_decode(vm->code, vm->code_length, ip, true, &instr) && instr.op == YX_PI_BYTES) op.flags |= YX_PF_RUN;
     }
     vm->ops[ip] = op;
     return op;
@@ -411,16 +484,17 @@ static uint32_t yx_pi_offset(uint32_t ip, int32_t offset)
 }
 
 /* epsilon_closure. Bytes are -1 when absent. */
-YX_RX_NOINLINE void yx_pi_closure(yx_pikevm *vm, uint32_t start, uint32_t rep_count,
-                                  int curr, int prev, bool backwards, yx_pi_threads *closure)
+YX_RX_NOINLINE void yx_pi_closure(yx_pikevm *vm, uint32_t start, uint32_t rep_count, int curr, int prev, bool backwards, yx_pi_threads *closure)
 {
     if (!vm->unlimited) {
-        for (unsigned i = 0; i < vm->executed_used; ++i)
-            vm->executed[vm->executed_words_used[i]] = 0;
+        for (unsigned i = 0; i < vm->executed_used; ++i) vm->executed[vm->executed_words_used[i]] = 0;
         vm->executed_used = 0;
     }
     vm->stack.used = 0;
-    if (!yx_pi_push(&vm->stack, start, rep_count)) { vm->failed = true; return; }
+    if (!yx_pi_push(&vm->stack, start, rep_count)) {
+        vm->failed = true;
+        return;
+    }
     while (vm->stack.used) {
         if (yx_pi_poll(vm)) return;
         yx_pi_thread t = vm->stack.items[--vm->stack.used];
@@ -430,154 +504,179 @@ YX_RX_NOINLINE void yx_pi_closure(yx_pikevm *vm, uint32_t start, uint32_t rep_co
         if (vm->unlimited) {
             size_t id = t.ip;
             uint64_t mask = (uint64_t)1 << (id & 63);
-            if (id >= vm->code_length) { vm->failed = true; return; }
+            if (id >= vm->code_length) {
+                vm->failed = true;
+                return;
+            }
             if (vm->search_executed[id >> 6] & mask) continue;
-            if (!vm->search_executed[id >> 6] &&
-                !yx_pi_push(&vm->executed_words, (uint32_t)(id >> 6), 0)) {
+            if (!vm->search_executed[id >> 6] && !yx_pi_push(&vm->executed_words, (uint32_t)(id >> 6), 0)) {
                 vm->failed = true;
                 return;
             }
             vm->search_executed[id >> 6] |= mask;
         }
-        if (t.ip >= vm->code_length) { vm->failed = true; return; }
-        instr = yx_pi_fetch(vm, t.ip);
-        c = vm->code + t.ip;
-        switch (instr.op) {
-        case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE:
-        case YX_PI_NOCASE: case YX_PI_BITMAP: case YX_PI_RANGES: case YX_PI_MATCH:
-            /* First insertion of an ip wins, as with a linear search. */
-            if (!vm->unlimited) {
-                if (vm->marks[t.ip] == vm->mark_gen) continue;
-                vm->marks[t.ip] = vm->mark_gen;
-            }
-            if (!yx_pi_push(closure, t.ip, t.count)) { vm->failed = true; return; }
-            continue;
-        case YX_PI_SPLIT_A: case YX_PI_SPLIT_B: case YX_PI_SPLIT_N: {
-            if (!vm->unlimited) {
-                unsigned id = (unsigned)yx_rx_u16(c + 2) & 8191u;
-                uint64_t mask = (uint64_t)1 << (id & 63);
-                if (vm->executed[id >> 6] & mask) continue;
-                if (!vm->executed[id >> 6]) vm->executed_words_used[vm->executed_used++] = (uint8_t)(id >> 6);
-                vm->executed[id >> 6] |= mask;
-            }
-            if (instr.op == YX_PI_SPLIT_A) {
-                if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count) ||
-                    !yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count)) { vm->failed = true; return; }
-            } else if (instr.op == YX_PI_SPLIT_B) {
-                if (!yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count) ||
-                    !yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count)) { vm->failed = true; return; }
-            } else {
-                for (size_t k = c[4]; k-- > 0;)
-                    if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 5 + 4 * k)), t.count)) {
-                        vm->failed = true; return;
-                    }
-            }
-            continue;
-        }
-        case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY: {
-            uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), count = t.count + 1;
-            uint32_t loop = yx_pi_offset(t.ip, yx_rx_i32(c + 2)), next = t.ip + (uint32_t)instr.size;
-            bool ok = true;
-            if (instr.op == YX_PI_REPEAT_GREEDY) {
-                if (count >= min) ok = yx_pi_push(&vm->stack, next, 0);
-                if (ok && count < max) ok = yx_pi_push(&vm->stack, loop, count);
-            } else {
-                if (count < max) ok = yx_pi_push(&vm->stack, loop, count);
-                if (ok && count >= min) ok = yx_pi_push(&vm->stack, next, 0);
-            }
-            if (!ok) { vm->failed = true; return; }
-            continue;
-        }
-        case YX_PI_JUMP:
-            if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 2)), t.count)) { vm->failed = true; return; }
-            continue;
-        case YX_PI_START:
-            accept = (!backwards && prev < 0) || (backwards && curr < 0);
-            break;
-        case YX_PI_END:
-            accept = (!backwards && curr < 0) || (backwards && prev < 0);
-            break;
-        case YX_PI_LINE_START:
-            if (!backwards) {
-                if (prev < 0) accept = true;
-                else if ((prev == '\n' || prev == '\r') && curr < 0) accept = true;
-                else if (prev == '\n') accept = curr != '\r';
-                else if (prev == '\r') accept = curr != '\n';
-            } else {
-                if (curr < 0) accept = true;
-                else if (prev < 0 && (curr == '\n' || curr == '\r')) accept = true;
-                else if (prev >= 0 && curr == '\n') accept = prev != '\r';
-                else if (prev >= 0 && curr == '\r') accept = prev != '\n';
-            }
-            break;
-        case YX_PI_LINE_END:
-            if (!backwards) {
-                if (curr < 0) accept = true;
-                /* Upstream tests a tab here, not a carriage return. */
-                else if (prev < 0 && (curr == '\n' || curr == '\t')) accept = true;
-                else if (prev >= 0 && curr == '\n') accept = prev != '\r';
-                else if (prev >= 0 && curr == '\r') accept = prev != '\n';
-            } else {
-                if (prev < 0) accept = true;
-                else if (prev == '\n' && curr >= 0) accept = curr != '\r';
-                else if (prev == '\r' && curr >= 0) accept = curr != '\n';
-            }
-            break;
-        case YX_PI_SEARCH_START_LF: case YX_PI_SEARCH_END_LF:
-        case YX_PI_SEARCH_START_CRLF: case YX_PI_SEARCH_END_CRLF:
-        case YX_PI_SEARCH_WORD_START: case YX_PI_SEARCH_WORD_END:
-        case YX_PI_SEARCH_WORD_START_HALF: case YX_PI_SEARCH_WORD_END_HALF: {
-            int p = backwards ? curr : prev, n = backwards ? prev : curr;
-            switch (instr.op) {
-            case YX_PI_SEARCH_START_LF: accept = p < 0 || p == '\n'; break;
-            case YX_PI_SEARCH_END_LF: accept = n < 0 || n == '\n'; break;
-            case YX_PI_SEARCH_START_CRLF:
-                accept = p < 0 || p == '\n' || (p == '\r' && n != '\n'); break;
-            case YX_PI_SEARCH_END_CRLF:
-                accept = n < 0 || n == '\r' || (n == '\n' && p != '\r'); break;
-            case YX_PI_SEARCH_WORD_START: accept = !yx_pi_word(p) && yx_pi_word(n); break;
-            case YX_PI_SEARCH_WORD_END: accept = yx_pi_word(p) && !yx_pi_word(n); break;
-            case YX_PI_SEARCH_WORD_START_HALF: accept = !yx_pi_word(p); break;
-            default: accept = !yx_pi_word(n); break;
-            }
-            break;
-        }
-        case YX_PI_WORD_START: {
-            int p = backwards ? curr : prev, n = backwards ? prev : curr;
-            if (p >= 0 && n >= 0) accept = !yx_pi_word(p) && yx_pi_word(n);
-            else if (p < 0 && n >= 0) accept = yx_pi_word(n);
-            break;
-        }
-        case YX_PI_WORD_END: {
-            if (!backwards) {
-                if (prev >= 0 && curr >= 0) accept = yx_pi_word(prev) && !yx_pi_word(curr);
-                else if (prev >= 0 && curr < 0) accept = yx_pi_word(prev);
-            } else {
-                /* (true, Some(c), Some(p)) and (true, Some(p), None). */
-                if (prev >= 0 && curr >= 0) accept = yx_pi_word(curr) && !yx_pi_word(prev);
-                else if (prev >= 0 && curr < 0) accept = yx_pi_word(prev);
-            }
-            break;
-        }
-        case YX_PI_WORD_BOUNDARY: case YX_PI_WORD_BOUNDARY_NEG:
-            if (prev >= 0 && curr >= 0) accept = yx_pi_word(prev) != yx_pi_word(curr);
-            else if (prev >= 0) accept = yx_pi_word(prev);
-            else if (curr >= 0) accept = yx_pi_word(curr);
-            if (instr.op == YX_PI_WORD_BOUNDARY_NEG) accept = !accept;
-            break;
-        default:
+        if (t.ip >= vm->code_length) {
             vm->failed = true;
             return;
         }
+        instr = yx_pi_fetch(vm, t.ip);
+        c = vm->code + t.ip;
+        switch (instr.op) {
+            case YX_PI_ANY_BYTE:
+            case YX_PI_BYTE:
+            case YX_PI_MASKED_BYTE:
+            case YX_PI_NOCASE:
+            case YX_PI_BITMAP:
+            case YX_PI_RANGES:
+            case YX_PI_MATCH:
+                /* First insertion of an ip wins, as with a linear search. */
+                if (!vm->unlimited) {
+                    if (vm->marks[t.ip] == vm->mark_gen) continue;
+                    vm->marks[t.ip] = vm->mark_gen;
+                }
+                if (!yx_pi_push(closure, t.ip, t.count)) {
+                    vm->failed = true;
+                    return;
+                }
+                continue;
+            case YX_PI_SPLIT_A:
+            case YX_PI_SPLIT_B:
+            case YX_PI_SPLIT_N: {
+                if (!vm->unlimited) {
+                    unsigned id = (unsigned)yx_rx_u16(c + 2) & 8191u;
+                    uint64_t mask = (uint64_t)1 << (id & 63);
+                    if (vm->executed[id >> 6] & mask) continue;
+                    if (!vm->executed[id >> 6]) vm->executed_words_used[vm->executed_used++] = (uint8_t)(id >> 6);
+                    vm->executed[id >> 6] |= mask;
+                }
+                if (instr.op == YX_PI_SPLIT_A) {
+                    if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count) || !yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count)) {
+                        vm->failed = true;
+                        return;
+                    }
+                } else if (instr.op == YX_PI_SPLIT_B) {
+                    if (!yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count) || !yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count)) {
+                        vm->failed = true;
+                        return;
+                    }
+                } else {
+                    for (size_t k = c[4]; k-- > 0;)
+                        if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 5 + 4 * k)), t.count)) {
+                            vm->failed = true;
+                            return;
+                        }
+                }
+                continue;
+            }
+            case YX_PI_REPEAT_GREEDY:
+            case YX_PI_REPEAT_NON_GREEDY: {
+                uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), count = t.count + 1;
+                uint32_t loop = yx_pi_offset(t.ip, yx_rx_i32(c + 2)), next = t.ip + (uint32_t)instr.size;
+                bool ok = true;
+                if (instr.op == YX_PI_REPEAT_GREEDY) {
+                    if (count >= min) ok = yx_pi_push(&vm->stack, next, 0);
+                    if (ok && count < max) ok = yx_pi_push(&vm->stack, loop, count);
+                } else {
+                    if (count < max) ok = yx_pi_push(&vm->stack, loop, count);
+                    if (ok && count >= min) ok = yx_pi_push(&vm->stack, next, 0);
+                }
+                if (!ok) {
+                    vm->failed = true;
+                    return;
+                }
+                continue;
+            }
+            case YX_PI_JUMP:
+                if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 2)), t.count)) {
+                    vm->failed = true;
+                    return;
+                }
+                continue;
+            case YX_PI_START: accept = (!backwards && prev < 0) || (backwards && curr < 0); break;
+            case YX_PI_END: accept = (!backwards && curr < 0) || (backwards && prev < 0); break;
+            case YX_PI_LINE_START:
+                if (!backwards) {
+                    if (prev < 0) accept = true;
+                    else if ((prev == '\n' || prev == '\r') && curr < 0) accept = true;
+                    else if (prev == '\n') accept = curr != '\r';
+                    else if (prev == '\r') accept = curr != '\n';
+                } else {
+                    if (curr < 0) accept = true;
+                    else if (prev < 0 && (curr == '\n' || curr == '\r')) accept = true;
+                    else if (prev >= 0 && curr == '\n') accept = prev != '\r';
+                    else if (prev >= 0 && curr == '\r') accept = prev != '\n';
+                }
+                break;
+            case YX_PI_LINE_END:
+                if (!backwards) {
+                    if (curr < 0) accept = true;
+                    /* Upstream tests a tab here, not a carriage return. */
+                    else if (prev < 0 && (curr == '\n' || curr == '\t')) accept = true;
+                    else if (prev >= 0 && curr == '\n') accept = prev != '\r';
+                    else if (prev >= 0 && curr == '\r') accept = prev != '\n';
+                } else {
+                    if (prev < 0) accept = true;
+                    else if (prev == '\n' && curr >= 0) accept = curr != '\r';
+                    else if (prev == '\r' && curr >= 0) accept = curr != '\n';
+                }
+                break;
+            case YX_PI_SEARCH_START_LF:
+            case YX_PI_SEARCH_END_LF:
+            case YX_PI_SEARCH_START_CRLF:
+            case YX_PI_SEARCH_END_CRLF:
+            case YX_PI_SEARCH_WORD_START:
+            case YX_PI_SEARCH_WORD_END:
+            case YX_PI_SEARCH_WORD_START_HALF:
+            case YX_PI_SEARCH_WORD_END_HALF: {
+                int p = backwards ? curr : prev, n = backwards ? prev : curr;
+                switch (instr.op) {
+                    case YX_PI_SEARCH_START_LF: accept = p < 0 || p == '\n'; break;
+                    case YX_PI_SEARCH_END_LF: accept = n < 0 || n == '\n'; break;
+                    case YX_PI_SEARCH_START_CRLF: accept = p < 0 || p == '\n' || (p == '\r' && n != '\n'); break;
+                    case YX_PI_SEARCH_END_CRLF: accept = n < 0 || n == '\r' || (n == '\n' && p != '\r'); break;
+                    case YX_PI_SEARCH_WORD_START: accept = !yx_pi_word(p) && yx_pi_word(n); break;
+                    case YX_PI_SEARCH_WORD_END: accept = yx_pi_word(p) && !yx_pi_word(n); break;
+                    case YX_PI_SEARCH_WORD_START_HALF: accept = !yx_pi_word(p); break;
+                    default: accept = !yx_pi_word(n); break;
+                }
+                break;
+            }
+            case YX_PI_WORD_START: {
+                int p = backwards ? curr : prev, n = backwards ? prev : curr;
+                if (p >= 0 && n >= 0) accept = !yx_pi_word(p) && yx_pi_word(n);
+                else if (p < 0 && n >= 0) accept = yx_pi_word(n);
+                break;
+            }
+            case YX_PI_WORD_END: {
+                if (!backwards) {
+                    if (prev >= 0 && curr >= 0) accept = yx_pi_word(prev) && !yx_pi_word(curr);
+                    else if (prev >= 0 && curr < 0) accept = yx_pi_word(prev);
+                } else {
+                    /* (true, Some(c), Some(p)) and (true, Some(p), None). */
+                    if (prev >= 0 && curr >= 0) accept = yx_pi_word(curr) && !yx_pi_word(prev);
+                    else if (prev >= 0 && curr < 0) accept = yx_pi_word(prev);
+                }
+                break;
+            }
+            case YX_PI_WORD_BOUNDARY:
+            case YX_PI_WORD_BOUNDARY_NEG:
+                if (prev >= 0 && curr >= 0) accept = yx_pi_word(prev) != yx_pi_word(curr);
+                else if (prev >= 0) accept = yx_pi_word(prev);
+                else if (curr >= 0) accept = yx_pi_word(curr);
+                if (instr.op == YX_PI_WORD_BOUNDARY_NEG) accept = !accept;
+                break;
+            default: vm->failed = true; return;
+        }
         if (accept && !yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count)) {
-            vm->failed = true; return;
+            vm->failed = true;
+            return;
         }
     }
 }
 
 #define YX_PI_MEMO_IPS 64u
-#define YX_PI_MEMO_LIMIT ((size_t)1 << 20)     /* memo_items entries */
-#define YX_PI_MEMO_SLOTS ((size_t)1 << 18)     /* hash table slots */
+#define YX_PI_MEMO_LIMIT ((size_t)1 << 20) /* memo_items entries */
+#define YX_PI_MEMO_SLOTS ((size_t)1 << 18) /* hash table slots */
 /* memo_index values from YX_PI_MEMO_KEYED up: the closure depends on the
  * repeat count. KEYED | block: counts below YX_PI_MEMO_COUNTS have their memo
  * value in memo_direct[block * YX_PI_MEMO_COUNTS + count], others are in the
@@ -586,7 +685,7 @@ YX_RX_NOINLINE void yx_pi_closure(yx_pikevm *vm, uint32_t start, uint32_t rep_co
 #define YX_PI_MEMO_HASHED 0xFFFFFFFFu
 #define YX_PI_MEMO_COUNTS 64u
 #define YX_PI_MEMO_BLOCKS 1024u
-#define YX_PI_MEMO_PAIRS 0x80000000u   /* entry count flag: (ip, count) pairs */
+#define YX_PI_MEMO_PAIRS 0x80000000u /* entry count flag: (ip, count) pairs */
 
 /* memo_keys/memo_values: open addressing, (ip << 32 | count) -> memo value. */
 static uint32_t yx_pi_memo_find(const yx_pikevm *vm, uint32_t ip, uint32_t count)
@@ -612,13 +711,17 @@ static bool yx_pi_memo_insert(yx_pikevm *vm, uint32_t ip, uint32_t count, uint32
         if (slots > YX_PI_MEMO_SLOTS) return false;
         keys = malloc(slots * sizeof(*keys));
         values = malloc(slots * sizeof(*values));
-        if (!keys || !values) { free(keys); free(values); return false; }
+        if (!keys || !values) {
+            free(keys);
+            free(values);
+            return false;
+        }
         memset(keys, 0xFF, slots * sizeof(*keys));
         for (size_t j = 0; j < vm->memo_slots; ++j) {
             uint64_t old = vm->memo_keys[j];
             if (old == UINT64_MAX) continue;
-            for (i = (size_t)((old * 0x9E3779B97F4A7C15ull) >> 40) & (slots - 1); keys[i] != UINT64_MAX;
-                 i = (i + 1) & (slots - 1)) {}
+            for (i = (size_t)((old * 0x9E3779B97F4A7C15ull) >> 40) & (slots - 1); keys[i] != UINT64_MAX; i = (i + 1) & (slots - 1)) {
+            }
             keys[i] = old;
             values[i] = vm->memo_values[j];
         }
@@ -629,7 +732,8 @@ static bool yx_pi_memo_insert(yx_pikevm *vm, uint32_t ip, uint32_t count, uint32
         vm->memo_slots = slots;
     }
     mask = vm->memo_slots - 1;
-    for (i = (size_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & mask; vm->memo_keys[i] != UINT64_MAX; i = (i + 1) & mask) {}
+    for (i = (size_t)((key * 0x9E3779B97F4A7C15ull) >> 40) & mask; vm->memo_keys[i] != UINT64_MAX; i = (i + 1) & mask) {
+    }
     vm->memo_keys[i] = key;
     vm->memo_values[i] = value;
     ++vm->memo_keyed;
@@ -643,8 +747,7 @@ static bool yx_pi_memo_store(yx_pikevm *vm, uint32_t start, uint32_t count, uint
     if (index < YX_PI_MEMO_KEYED) {
         index = YX_PI_MEMO_HASHED;
         if (vm->memo_blocks < YX_PI_MEMO_BLOCKS) {
-            uint32_t *grown = realloc(vm->memo_direct,
-                                      (vm->memo_blocks + 1) * YX_PI_MEMO_COUNTS * sizeof(*grown));
+            uint32_t *grown = realloc(vm->memo_direct, (vm->memo_blocks + 1) * YX_PI_MEMO_COUNTS * sizeof(*grown));
             if (grown) {
                 memset(grown + vm->memo_blocks * YX_PI_MEMO_COUNTS, 0, YX_PI_MEMO_COUNTS * sizeof(*grown));
                 vm->memo_direct = grown;
@@ -663,8 +766,7 @@ static bool yx_pi_memo_store(yx_pikevm *vm, uint32_t start, uint32_t count, uint
 /* Looks up the memo value of a count-dependent closure; 0 when unknown. */
 YX_RX_INLINE uint32_t yx_pi_memo_lookup(const yx_pikevm *vm, uint32_t index, uint32_t ip, uint32_t count)
 {
-    if (index != YX_PI_MEMO_HASHED && count < YX_PI_MEMO_COUNTS)
-        return vm->memo_direct[(index & ~YX_PI_MEMO_KEYED) * YX_PI_MEMO_COUNTS + count];
+    if (index != YX_PI_MEMO_HASHED && count < YX_PI_MEMO_COUNTS) return vm->memo_direct[(index & ~YX_PI_MEMO_KEYED) * YX_PI_MEMO_COUNTS + count];
     return yx_pi_memo_find(vm, ip, count);
 }
 
@@ -698,8 +800,7 @@ YX_RX_NOINLINE uint32_t yx_pi_memo_build(yx_pikevm *vm, uint32_t start, uint32_t
         vm->memo_capacity = capacity;
     }
     items = vm->memo_items + base + 2;
-    for (unsigned i = 0; i < vm->executed_used; ++i)
-        vm->executed[vm->executed_words_used[i]] = 0;
+    for (unsigned i = 0; i < vm->executed_used; ++i) vm->executed[vm->executed_words_used[i]] = 0;
     vm->executed_used = 0;
     vm->stack.used = 0;
     if (!yx_pi_push(&vm->stack, start, count)) return 1;
@@ -712,55 +813,62 @@ YX_RX_NOINLINE uint32_t yx_pi_memo_build(yx_pikevm *vm, uint32_t start, uint32_t
         instr = yx_pi_fetch(vm, t.ip);
         c = vm->code + t.ip;
         switch (instr.op) {
-        case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE:
-        case YX_PI_NOCASE: case YX_PI_BITMAP: case YX_PI_RANGES: case YX_PI_MATCH: {
-            size_t k = 0;
-            while (k < n && items[2 * k] != t.ip) ++k;
-            if (k < n) continue;
-            if (n == YX_PI_MEMO_IPS) goto plain;
-            items[2 * n] = t.ip;
-            items[2 * n + 1] = t.count;
-            ++n;
-            continue;
-        }
-        case YX_PI_SPLIT_A: case YX_PI_SPLIT_B: case YX_PI_SPLIT_N: {
-            unsigned id = (unsigned)yx_rx_u16(c + 2) & 8191u;
-            uint64_t mask = (uint64_t)1 << (id & 63);
-            if (vm->executed[id >> 6] & mask) continue;
-            if (!vm->executed[id >> 6]) vm->executed_words_used[vm->executed_used++] = (uint8_t)(id >> 6);
-            vm->executed[id >> 6] |= mask;
-            if (instr.op == YX_PI_SPLIT_A) {
-                if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count) ||
-                    !yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count)) goto plain;
-            } else if (instr.op == YX_PI_SPLIT_B) {
-                if (!yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count) ||
-                    !yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count)) goto plain;
-            } else {
-                for (size_t k = c[4]; k-- > 0;)
-                    if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 5 + 4 * k)), t.count)) goto plain;
+            case YX_PI_ANY_BYTE:
+            case YX_PI_BYTE:
+            case YX_PI_MASKED_BYTE:
+            case YX_PI_NOCASE:
+            case YX_PI_BITMAP:
+            case YX_PI_RANGES:
+            case YX_PI_MATCH: {
+                size_t k = 0;
+                while (k < n && items[2 * k] != t.ip) ++k;
+                if (k < n) continue;
+                if (n == YX_PI_MEMO_IPS) goto plain;
+                items[2 * n] = t.ip;
+                items[2 * n + 1] = t.count;
+                ++n;
+                continue;
             }
-            continue;
-        }
-        case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY: {
-            uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), next_count = t.count + 1;
-            uint32_t loop = yx_pi_offset(t.ip, yx_rx_i32(c + 2)), next = t.ip + (uint32_t)instr.size;
-            bool ok = true;
-            keyed = true;
-            if (instr.op == YX_PI_REPEAT_GREEDY) {
-                if (next_count >= min) ok = yx_pi_push(&vm->stack, next, 0);
-                if (ok && next_count < max) ok = yx_pi_push(&vm->stack, loop, next_count);
-            } else {
-                if (next_count < max) ok = yx_pi_push(&vm->stack, loop, next_count);
-                if (ok && next_count >= min) ok = yx_pi_push(&vm->stack, next, 0);
+            case YX_PI_SPLIT_A:
+            case YX_PI_SPLIT_B:
+            case YX_PI_SPLIT_N: {
+                unsigned id = (unsigned)yx_rx_u16(c + 2) & 8191u;
+                uint64_t mask = (uint64_t)1 << (id & 63);
+                if (vm->executed[id >> 6] & mask) continue;
+                if (!vm->executed[id >> 6]) vm->executed_words_used[vm->executed_used++] = (uint8_t)(id >> 6);
+                vm->executed[id >> 6] |= mask;
+                if (instr.op == YX_PI_SPLIT_A) {
+                    if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count) || !yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count))
+                        goto plain;
+                } else if (instr.op == YX_PI_SPLIT_B) {
+                    if (!yx_pi_push(&vm->stack, t.ip + (uint32_t)instr.size, t.count) || !yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 4)), t.count))
+                        goto plain;
+                } else {
+                    for (size_t k = c[4]; k-- > 0;)
+                        if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 5 + 4 * k)), t.count)) goto plain;
+                }
+                continue;
             }
-            if (!ok) goto plain;
-            continue;
-        }
-        case YX_PI_JUMP:
-            if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 2)), t.count)) goto plain;
-            continue;
-        default:
-            goto plain;
+            case YX_PI_REPEAT_GREEDY:
+            case YX_PI_REPEAT_NON_GREEDY: {
+                uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), next_count = t.count + 1;
+                uint32_t loop = yx_pi_offset(t.ip, yx_rx_i32(c + 2)), next = t.ip + (uint32_t)instr.size;
+                bool ok = true;
+                keyed = true;
+                if (instr.op == YX_PI_REPEAT_GREEDY) {
+                    if (next_count >= min) ok = yx_pi_push(&vm->stack, next, 0);
+                    if (ok && next_count < max) ok = yx_pi_push(&vm->stack, loop, next_count);
+                } else {
+                    if (next_count < max) ok = yx_pi_push(&vm->stack, loop, next_count);
+                    if (ok && next_count >= min) ok = yx_pi_push(&vm->stack, next, 0);
+                }
+                if (!ok) goto plain;
+                continue;
+            }
+            case YX_PI_JUMP:
+                if (!yx_pi_push(&vm->stack, yx_pi_offset(t.ip, yx_rx_i32(c + 2)), t.count)) goto plain;
+                continue;
+            default: goto plain;
         }
     }
     items[-1] = pops;
@@ -786,8 +894,7 @@ typedef bool (*yx_rx_length_callback)(size_t length, void *context); /* true: co
 /* yx_pi_closure for one matched thread. A consuming instruction is its own
  * closure; the scan VM adds it directly, with the closure's single poll.
  * Memoised closures are added with the polls of their stack pops. */
-YX_RX_INLINE void yx_pi_follow(yx_pikevm *vm, uint32_t ip, uint32_t count,
-                               int curr, int prev, bool backwards, yx_pi_threads *list)
+YX_RX_INLINE void yx_pi_follow(yx_pikevm *vm, uint32_t ip, uint32_t count, int curr, int prev, bool backwards, yx_pi_threads *list)
 {
     if (!vm->unlimited && ip < vm->code_length) {
         yx_pi_op op = yx_pi_fetch(vm, ip);
@@ -818,7 +925,10 @@ YX_RX_INLINE void yx_pi_follow(yx_pikevm *vm, uint32_t ip, uint32_t count,
                     uint32_t at = items[k];
                     if (vm->marks[at] == vm->mark_gen) continue;
                     vm->marks[at] = vm->mark_gen;
-                    if (!yx_pi_push(list, at, count)) { vm->failed = true; return; }
+                    if (!yx_pi_push(list, at, count)) {
+                        vm->failed = true;
+                        return;
+                    }
                 }
                 return;
             }
@@ -827,7 +937,10 @@ YX_RX_INLINE void yx_pi_follow(yx_pikevm *vm, uint32_t ip, uint32_t count,
                 uint32_t at = items[2 * k];
                 if (vm->marks[at] == vm->mark_gen) continue;
                 vm->marks[at] = vm->mark_gen;
-                if (!yx_pi_push(list, at, items[2 * k + 1])) { vm->failed = true; return; }
+                if (!yx_pi_push(list, at, items[2 * k + 1])) {
+                    vm->failed = true;
+                    return;
+                }
             }
             return;
         }
@@ -838,9 +951,8 @@ YX_RX_INLINE void yx_pi_follow(yx_pikevm *vm, uint32_t ip, uint32_t count,
 /* PikeVM::try_match_impl. The callback returns false for Break. fwd reads
  * in the direction of the program (backwards), bck in the other one; both
  * have width `wide`. */
-YX_RX_INLINE void yx_pi_run_impl(yx_pikevm *vm, uint32_t start, const bool backwards, const bool wide,
-                                 yx_rx_iter *fwd, yx_rx_iter *bck,
-                                 bool (*f)(size_t, void *), void *context)
+YX_RX_INLINE void yx_pi_run_impl(yx_pikevm *vm, uint32_t start, const bool backwards, const bool wide, yx_rx_iter *fwd, yx_rx_iter *bck, bool (*f)(size_t, void *),
+                                 void *context)
 {
     size_t current_pos = 0;
     int curr = yx_rx_iter_next(fwd, backwards, wide);
@@ -862,67 +974,85 @@ YX_RX_INLINE void yx_pi_run_impl(yx_pikevm *vm, uint32_t start, const bool backw
             size_t size;
             const uint8_t *c;
             bool is_match = false, stop = false;
-            if (t.ip >= vm->code_length) { vm->failed = true; return; }
+            if (t.ip >= vm->code_length) {
+                vm->failed = true;
+                return;
+            }
             instr = yx_pi_fetch(vm, t.ip);
             op = runs && (instr.flags & YX_PF_RUN) ? YX_PI_BYTES : instr.op;
             size = instr.size;
             c = vm->code + t.ip;
             switch (op) {
-            case YX_PI_ANY_BYTE: is_match = curr >= 0; break;
-            case YX_PI_BYTE: is_match = curr >= 0 && curr == c[0]; break;
-            case YX_PI_BYTES: {
-                /* LiteralBytesIter over the code at ip. */
-                size_t offset = 0;
-                int bytes[2];
-                for (int k = 0; k < 2; ++k) {
-                    if (t.ip + offset + 1 < vm->code_length && c[offset] == YX_RX_PREFIX && c[offset + 1] == YX_RX_PREFIX) {
-                        bytes[k] = YX_RX_PREFIX; offset += 2;
-                    } else if (c[offset] == YX_RX_PREFIX) bytes[k] = -1;
-                    else { bytes[k] = c[offset]; offset += 1; }
-                }
-                is_match = false;
-                if (bytes[0] >= 0 && curr == bytes[0]) {
-                    if (bytes[1] < 0) is_match = true;
-                    else if (next == bytes[1]) {
-                        curr = next;
-                        ++current_pos;
-                        is_match = true;
-                        for (;;) {
-                            if (yx_pi_poll(vm)) return;
-                            int expected;
-                            if (t.ip + offset >= vm->code_length) break;
-                            if (t.ip + offset + 1 < vm->code_length && c[offset] == YX_RX_PREFIX &&
-                                c[offset + 1] == YX_RX_PREFIX) { expected = YX_RX_PREFIX; offset += 2; }
-                            else if (c[offset] == YX_RX_PREFIX) break;
-                            else { expected = c[offset]; offset += 1; }
-                            curr = yx_rx_iter_next(fwd, backwards, wide);
-                            if (curr < 0) { is_match = false; break; }
-                            ++current_pos;
-                            if (curr != expected) { is_match = false; break; }
+                case YX_PI_ANY_BYTE: is_match = curr >= 0; break;
+                case YX_PI_BYTE: is_match = curr >= 0 && curr == c[0]; break;
+                case YX_PI_BYTES: {
+                    /* LiteralBytesIter over the code at ip. */
+                    size_t offset = 0;
+                    int bytes[2];
+                    for (int k = 0; k < 2; ++k) {
+                        if (t.ip + offset + 1 < vm->code_length && c[offset] == YX_RX_PREFIX && c[offset + 1] == YX_RX_PREFIX) {
+                            bytes[k] = YX_RX_PREFIX;
+                            offset += 2;
+                        } else if (c[offset] == YX_RX_PREFIX) bytes[k] = -1;
+                        else {
+                            bytes[k] = c[offset];
+                            offset += 1;
                         }
-                        if (is_match) next = yx_rx_iter_next(fwd, backwards, wide);
                     }
+                    is_match = false;
+                    if (bytes[0] >= 0 && curr == bytes[0]) {
+                        if (bytes[1] < 0) is_match = true;
+                        else if (next == bytes[1]) {
+                            curr = next;
+                            ++current_pos;
+                            is_match = true;
+                            for (;;) {
+                                if (yx_pi_poll(vm)) return;
+                                int expected;
+                                if (t.ip + offset >= vm->code_length) break;
+                                if (t.ip + offset + 1 < vm->code_length && c[offset] == YX_RX_PREFIX && c[offset + 1] == YX_RX_PREFIX) {
+                                    expected = YX_RX_PREFIX;
+                                    offset += 2;
+                                } else if (c[offset] == YX_RX_PREFIX) break;
+                                else {
+                                    expected = c[offset];
+                                    offset += 1;
+                                }
+                                curr = yx_rx_iter_next(fwd, backwards, wide);
+                                if (curr < 0) {
+                                    is_match = false;
+                                    break;
+                                }
+                                ++current_pos;
+                                if (curr != expected) {
+                                    is_match = false;
+                                    break;
+                                }
+                            }
+                            if (is_match) next = yx_rx_iter_next(fwd, backwards, wide);
+                        }
+                    }
+                    size = offset;
+                    break;
                 }
-                size = offset;
-                break;
-            }
-            case YX_PI_MASKED_BYTE: is_match = curr >= 0 && ((unsigned)curr & c[3]) == c[2]; break;
-            case YX_PI_NOCASE: {
-                int lower = curr >= 'A' && curr <= 'Z' ? curr + 32 : curr;
-                is_match = curr >= 0 && lower == c[2];
-                break;
-            }
-            case YX_PI_BITMAP: is_match = curr >= 0 && (c[2 + (curr >> 3)] >> (curr & 7)) & 1; break;
-            case YX_PI_RANGES:
-                for (size_t k = 0; curr >= 0 && k < c[2]; ++k)
-                    if (curr >= c[3 + 2 * k] && curr <= c[4 + 2 * k]) { is_match = true; break; }
-                break;
-            case YX_PI_MATCH:
-                if (!f(current_pos, context)) stop = true;
-                break;
-            default:
-                vm->failed = true;
-                return;
+                case YX_PI_MASKED_BYTE: is_match = curr >= 0 && ((unsigned)curr & c[3]) == c[2]; break;
+                case YX_PI_NOCASE: {
+                    int lower = curr >= 'A' && curr <= 'Z' ? curr + 32 : curr;
+                    is_match = curr >= 0 && lower == c[2];
+                    break;
+                }
+                case YX_PI_BITMAP: is_match = curr >= 0 && (c[2 + (curr >> 3)] >> (curr & 7)) & 1; break;
+                case YX_PI_RANGES:
+                    for (size_t k = 0; curr >= 0 && k < c[2]; ++k)
+                        if (curr >= c[3 + 2 * k] && curr <= c[4 + 2 * k]) {
+                            is_match = true;
+                            break;
+                        }
+                    break;
+                case YX_PI_MATCH:
+                    if (!f(current_pos, context)) stop = true;
+                    break;
+                default: vm->failed = true; return;
             }
             if (stop) {
                 if (vm->unlimited) {
@@ -939,7 +1069,9 @@ YX_RX_INLINE void yx_pi_run_impl(yx_pikevm *vm, uint32_t start, const bool backw
         curr = next;
         ++current_pos;
         {
-            yx_pi_threads *swap = threads; threads = next_threads; next_threads = swap;
+            yx_pi_threads *swap = threads;
+            threads = next_threads;
+            next_threads = swap;
         }
         next_threads->used = 0;
         if (current_pos >= YX_RX_SCAN_LIMIT && !vm->unlimited) {
@@ -950,20 +1082,17 @@ YX_RX_INLINE void yx_pi_run_impl(yx_pikevm *vm, uint32_t start, const bool backw
     threads->used = next_threads->used = 0;
 }
 
-YX_RX_NOINLINE void yx_pi_run_fwd(yx_pikevm *vm, uint32_t start, yx_rx_iter *fwd, yx_rx_iter *bck,
-                                  bool (*f)(size_t, void *), void *context)
+YX_RX_NOINLINE void yx_pi_run_fwd(yx_pikevm *vm, uint32_t start, yx_rx_iter *fwd, yx_rx_iter *bck, bool (*f)(size_t, void *), void *context)
 {
     yx_pi_run_impl(vm, start, false, false, fwd, bck, f, context);
 }
 
-YX_RX_NOINLINE void yx_pi_run_bck(yx_pikevm *vm, uint32_t start, yx_rx_iter *fwd, yx_rx_iter *bck,
-                                  bool (*f)(size_t, void *), void *context)
+YX_RX_NOINLINE void yx_pi_run_bck(yx_pikevm *vm, uint32_t start, yx_rx_iter *fwd, yx_rx_iter *bck, bool (*f)(size_t, void *), void *context)
 {
     yx_pi_run_impl(vm, start, true, false, fwd, bck, f, context);
 }
 
-YX_RX_NOINLINE void yx_pi_run_wide(yx_pikevm *vm, uint32_t start, bool backwards, yx_rx_iter *fwd,
-                                   yx_rx_iter *bck, bool (*f)(size_t, void *), void *context)
+YX_RX_NOINLINE void yx_pi_run_wide(yx_pikevm *vm, uint32_t start, bool backwards, yx_rx_iter *fwd, yx_rx_iter *bck, bool (*f)(size_t, void *), void *context)
 {
     if (backwards) yx_pi_run_impl(vm, start, true, true, fwd, bck, f, context);
     else yx_pi_run_impl(vm, start, false, true, fwd, bck, f, context);
@@ -997,12 +1126,14 @@ static bool yx_pi_tables(yx_pikevm *vm)
 }
 
 /* PikeVM::try_match: right is data[at..size], left is data[0..at]. */
-static void yx_pikevm_try_match(yx_pikevm *vm, uint32_t start, bool backwards,
-                                const uint8_t *data, size_t size, size_t at,
-                                bool wide, bool (*f)(size_t, void *), void *context)
+static void yx_pikevm_try_match(yx_pikevm *vm, uint32_t start, bool backwards, const uint8_t *data, size_t size, size_t at, bool wide, bool (*f)(size_t, void *),
+                                void *context)
 {
     yx_rx_iter fwd, bck;
-    if (!vm->tables && !yx_pi_tables(vm)) { vm->failed = true; return; }
+    if (!vm->tables && !yx_pi_tables(vm)) {
+        vm->failed = true;
+        return;
+    }
     if (!backwards) {
         yx_rx_iter_init(&fwd, data, at, size, false, wide, false);
         yx_rx_iter_init(&bck, data, 0, at, true, wide, true);
@@ -1026,19 +1157,16 @@ static bool yx_pi_search_found(size_t length, void *context)
     return false;
 }
 
-int yx_rx_pike_search(const uint8_t *code, size_t code_length,
-                      const uint8_t *data, size_t size, yx_scan_deadline *deadline)
+int yx_rx_pike_search(const uint8_t *code, size_t code_length, const uint8_t *data, size_t size, yx_scan_deadline *deadline)
 {
     yx_pikevm vm;
     bool found = false;
     size_t words;
-    if (!code || !code_length || code_length > UINT32_MAX || (!data && size) ||
-        yx_scan_deadline_reached(deadline)) return -1;
+    if (!code || !code_length || code_length > UINT32_MAX || (!data && size) || yx_scan_deadline_reached(deadline)) return -1;
     memset(&vm, 0, sizeof(vm));
     words = (code_length - 1) / 64 + 1;
     /* search_executed, then the op table; the sum must not wrap (32-bit). */
-    if (code_length > SIZE_MAX / sizeof(yx_pi_op) ||
-        words > (SIZE_MAX - code_length * sizeof(yx_pi_op)) / sizeof(*vm.search_executed)) return -1;
+    if (code_length > SIZE_MAX / sizeof(yx_pi_op) || words > (SIZE_MAX - code_length * sizeof(yx_pi_op)) / sizeof(*vm.search_executed)) return -1;
     vm.tables = calloc(1, words * sizeof(*vm.search_executed) + code_length * sizeof(yx_pi_op));
     if (!vm.tables) return -1;
     vm.search_executed = vm.tables;
@@ -1047,8 +1175,7 @@ int yx_rx_pike_search(const uint8_t *code, size_t code_length,
     vm.code_length = code_length;
     vm.unlimited = true;
     vm.deadline = deadline;
-    yx_pikevm_try_match(&vm, 0, false, data ? data : (const uint8_t *)"", size,
-                        0, false, yx_pi_search_found, &found);
+    yx_pikevm_try_match(&vm, 0, false, data ? data : (const uint8_t *)"", size, 0, false, yx_pi_search_found, &found);
     yx_pikevm_free(&vm);
     if (vm.failed || yx_scan_deadline_reached(deadline)) return -1;
     return found ? 1 : 0;
@@ -1108,14 +1235,22 @@ static bool yx_fv_insert(yx_fv_set *s, size_t value)
     return true;
 }
 
-enum { YX_FI_MATCH = 0, YX_FI_LITERAL = 1, YX_FI_MASKED = 2, YX_FI_JUMP_EXACT = 3, YX_FI_JUMP = 4,
-       YX_FI_JUMP_EXACT_NO_NEWLINE = 5, YX_FI_JUMP_NO_NEWLINE = 6, YX_FI_ALTERNATION = 7 };
+enum {
+    YX_FI_MATCH = 0,
+    YX_FI_LITERAL = 1,
+    YX_FI_MASKED = 2,
+    YX_FI_JUMP_EXACT = 3,
+    YX_FI_JUMP = 4,
+    YX_FI_JUMP_EXACT_NO_NEWLINE = 5,
+    YX_FI_JUMP_NO_NEWLINE = 6,
+    YX_FI_ALTERNATION = 7
+};
 
 typedef struct {
     int op;
     size_t size;
     const uint8_t *literal, *mask;
-    size_t length;          /* literal length, or alternation byte length */
+    size_t length; /* literal length, or alternation byte length */
     uint32_t min, max;
     bool unbounded;
 } yx_fi_instr;
@@ -1128,47 +1263,47 @@ static bool yx_fi_decode(const uint8_t *code, size_t length, size_t ip, yx_fi_in
     if (ip >= length) return false;
     out->op = c[0];
     switch (c[0]) {
-    case YX_FI_LITERAL: case YX_FI_MASKED: {
-        size_t literal;
-        if (n < 3) return false;
-        literal = yx_rx_u16(c + 1);
-        if (n - 3 < literal * (c[0] == YX_FI_MASKED ? 2 : 1)) return false;
-        out->literal = c + 3;
-        out->mask = c[0] == YX_FI_MASKED ? c + 3 + literal : NULL;
-        out->length = literal;
-        out->size = 3 + literal * (c[0] == YX_FI_MASKED ? 2 : 1);
-        return true;
-    }
-    case YX_FI_ALTERNATION:
-        if (n < 3 || n - 3 < yx_rx_u16(c + 1)) return false;
-        out->length = yx_rx_u16(c + 1);
-        out->literal = c + 3;
-        out->size = 3 + out->length;
-        return true;
-    case YX_FI_JUMP_EXACT: case YX_FI_JUMP_EXACT_NO_NEWLINE:
-        if (n < 5) return false;
-        out->min = out->max = yx_rx_u32(c + 1);
-        out->size = 5;
-        return true;
-    case YX_FI_JUMP: case YX_FI_JUMP_NO_NEWLINE:
-        if (n < 9) return false;
-        out->min = yx_rx_u32(c + 1);
-        out->max = yx_rx_u32(c + 5);
-        out->unbounded = out->max == 0;
-        out->size = 9;
-        return true;
-    case YX_FI_MATCH:
-        out->size = 1;
-        return true;
-    default:
-        return false;
+        case YX_FI_LITERAL:
+        case YX_FI_MASKED: {
+            size_t literal;
+            if (n < 3) return false;
+            literal = yx_rx_u16(c + 1);
+            if (n - 3 < literal * (c[0] == YX_FI_MASKED ? 2 : 1)) return false;
+            out->literal = c + 3;
+            out->mask = c[0] == YX_FI_MASKED ? c + 3 + literal : NULL;
+            out->length = literal;
+            out->size = 3 + literal * (c[0] == YX_FI_MASKED ? 2 : 1);
+            return true;
+        }
+        case YX_FI_ALTERNATION:
+            if (n < 3 || n - 3 < yx_rx_u16(c + 1)) return false;
+            out->length = yx_rx_u16(c + 1);
+            out->literal = c + 3;
+            out->size = 3 + out->length;
+            return true;
+        case YX_FI_JUMP_EXACT:
+        case YX_FI_JUMP_EXACT_NO_NEWLINE:
+            if (n < 5) return false;
+            out->min = out->max = yx_rx_u32(c + 1);
+            out->size = 5;
+            return true;
+        case YX_FI_JUMP:
+        case YX_FI_JUMP_NO_NEWLINE:
+            if (n < 9) return false;
+            out->min = yx_rx_u32(c + 1);
+            out->max = yx_rx_u32(c + 5);
+            out->unbounded = out->max == 0;
+            out->size = 9;
+            return true;
+        case YX_FI_MATCH: out->size = 1; return true;
+        default: return false;
     }
 }
 
 /* input is the forward slice (data[0..length]), or for backward code the
  * slice that ends at the atom (data[0..length]) read from the end. */
-static bool yx_fv_literal(const uint8_t *input, size_t length, size_t position, bool backwards,
-                          const uint8_t *literal, const uint8_t *mask, size_t literal_length, bool wide)
+static bool yx_fv_literal(const uint8_t *input, size_t length, size_t position, bool backwards, const uint8_t *literal, const uint8_t *mask, size_t literal_length,
+                          bool wide)
 {
     if (!backwards) {
         const uint8_t *in = input + position;
@@ -1183,7 +1318,10 @@ static bool yx_fv_literal(const uint8_t *input, size_t length, size_t position, 
             bool error = false;
             size_t error_pos = 0;
             for (size_t i = 0; i < literal_length; ++i) {
-                if (in[2 * i + 1] && !error) { error = true; error_pos = i; }
+                if (in[2 * i + 1] && !error) {
+                    error = true;
+                    error_pos = i;
+                }
                 if ((in[2 * i] & mask[i]) != (literal[i] & mask[i])) return false;
             }
             return !(error && error_pos < literal_length);
@@ -1195,8 +1333,8 @@ static bool yx_fv_literal(const uint8_t *input, size_t length, size_t position, 
         return true;
     }
     {
-        size_t available = length - position;     /* input[..len - position] */
-        const uint8_t *end = input + available;   /* exclusive */
+        size_t available = length - position;   /* input[..len - position] */
+        const uint8_t *end = input + available; /* exclusive */
         if (wide) {
             if (available < literal_length * 2) return false;
             if (!mask) {
@@ -1212,30 +1350,31 @@ static bool yx_fv_literal(const uint8_t *input, size_t length, size_t position, 
             /* WideIter::zero_first over the reversed slice. */
             for (size_t i = 0; i < literal_length; ++i) {
                 uint8_t first = end[-1 - 2 * (long)i], second = end[-2 - 2 * (long)i];
-                if (first && !error) { error = true; error_pos = i; }
-                if ((second & mask[literal_length - 1 - i]) !=
-                    (literal[literal_length - 1 - i] & mask[literal_length - 1 - i])) return false;
+                if (first && !error) {
+                    error = true;
+                    error_pos = i;
+                }
+                if ((second & mask[literal_length - 1 - i]) != (literal[literal_length - 1 - i] & mask[literal_length - 1 - i])) return false;
             }
             return !(error && error_pos < literal_length);
         }
         if (available < literal_length) return false;
         if (!mask) return !memcmp(end - literal_length, literal, literal_length);
         for (size_t i = 0; i < literal_length; ++i)
-            if ((end[-1 - (long)i] & mask[literal_length - 1 - i]) !=
-                (literal[literal_length - 1 - i] & mask[literal_length - 1 - i])) return false;
+            if ((end[-1 - (long)i] & mask[literal_length - 1 - i]) != (literal[literal_length - 1 - i] & mask[literal_length - 1 - i])) return false;
         return true;
     }
 }
 
 static const uint8_t *yx_fv_memchr2_or(const uint8_t *p, size_t n, int a, int b)
 {
-    for (size_t i = 0; i < n; ++i) if (p[i] == a || p[i] == b) return p + i;
+    for (size_t i = 0; i < n; ++i)
+        if (p[i] == a || p[i] == b) return p + i;
     return NULL;
 }
 
-static bool yx_fv_jump_fwd(yx_fv_set *next, const uint8_t *input, size_t input_length,
-                           int byte_after, bool accept_newlines, bool wide,
-                           size_t min, size_t max, size_t position)
+static bool yx_fv_jump_fwd(yx_fv_set *next, const uint8_t *input, size_t input_length, int byte_after, bool accept_newlines, bool wide, size_t min, size_t max,
+                           size_t position)
 {
     size_t step = wide ? 2 : 1, n = min * step, m = max * step;
     size_t range_min = n, range_max = input_length < m + step ? input_length : m + step;
@@ -1270,9 +1409,8 @@ static bool yx_fv_jump_fwd(yx_fv_set *next, const uint8_t *input, size_t input_l
 }
 
 /* input is data[0..input_length] that ends where the atom starts. */
-static bool yx_fv_jump_bck(yx_fv_set *next, const uint8_t *input, size_t input_length,
-                           int expected, bool accept_newlines, bool wide,
-                           size_t min, size_t max, size_t position)
+static bool yx_fv_jump_bck(yx_fv_set *next, const uint8_t *input, size_t input_length, int expected, bool accept_newlines, bool wide, size_t min, size_t max,
+                           size_t position)
 {
     size_t step = wide ? 2 : 1, n = min * step, m = max * step;
     size_t range_min = input_length > m + step ? input_length - (m + step) : 0;
@@ -1283,8 +1421,7 @@ static bool yx_fv_jump_bck(yx_fv_set *next, const uint8_t *input, size_t input_l
     size_t jmp_length = range_max - range_min;
 /* on_match_found: jmp_range.len().checked_sub(offset + step); an offset in
  * the last byte of a wide jump range (odd alignment) is no position. */
-#define YX_FV_BCK_FOUND(offset) \
-    ((offset) + step > jmp_length || yx_fv_insert(next, position + n + jmp_length - (offset) - step))
+#define YX_FV_BCK_FOUND(offset) ((offset) + step > jmp_length || yx_fv_insert(next, position + n + jmp_length - (offset) - step))
     if (expected >= 0 && !accept_newlines) {
         for (size_t offset = jmp_length; offset-- > 0;) {
             if (jmp[offset] != expected && jmp[offset] != 0x0A) continue;
@@ -1308,9 +1445,8 @@ static bool yx_fv_jump_bck(yx_fv_set *next, const uint8_t *input, size_t input_l
 
 /* FastVM::try_match. Forward input is data[at..size]; backward input is
  * data[0..at]. Both are limited to the scan limit. */
-static void yx_fastvm_try_match(yx_fastvm *vm, size_t ip, bool backwards,
-                                const uint8_t *data, size_t size, size_t at, bool wide,
-                                bool (*f)(size_t, void *), void *context)
+static void yx_fastvm_try_match(yx_fastvm *vm, size_t ip, bool backwards, const uint8_t *data, size_t size, size_t at, bool wide, bool (*f)(size_t, void *),
+                                void *context)
 {
     const uint8_t *input;
     size_t input_length, step = wide ? 2 : 1;
@@ -1323,103 +1459,128 @@ static void yx_fastvm_try_match(yx_fastvm *vm, size_t ip, bool backwards,
     }
     yx_fv_set_clear(&vm->positions);
     yx_fv_set_clear(&vm->next);
-    if (!yx_fv_insert(&vm->positions, 0)) { vm->failed = true; return; }
+    if (!yx_fv_insert(&vm->positions, 0)) {
+        vm->failed = true;
+        return;
+    }
     while (vm->positions.used) {
         yx_fi_instr instr;
-        if (!yx_fi_decode(vm->code, vm->code_length, ip, &instr)) { vm->failed = true; return; }
-        ip += instr.size;
-        switch (instr.op) {
-        case YX_FI_MATCH:
-            for (size_t i = 0; i < vm->positions.used; ++i) {
-                size_t position = vm->positions.items[i];
-                if (wide) {
-                    bool zeroes = true;
-                    if (backwards) {
-                        for (size_t k = 0; k < position && k < input_length; k += 2)
-                            if (input[input_length - 1 - k]) { zeroes = false; break; }
-                    } else {
-                        for (size_t k = 1; k < position && k < input_length; k += 2)
-                            if (input[k]) { zeroes = false; break; }
-                    }
-                    if (!zeroes) continue;
-                }
-                if (!f(position, context)) { vm->positions.used = 0; return; }
-            }
-            break;
-        case YX_FI_LITERAL: case YX_FI_MASKED:
-            for (size_t i = 0; i < vm->positions.used; ++i) {
-                size_t position = vm->positions.items[i];
-                if (position >= input_length) continue;
-                if (yx_fv_literal(input, input_length, position, backwards, instr.literal, instr.mask,
-                                  instr.length, wide) &&
-                    !yx_fv_insert(&vm->next, position + step * instr.length)) { vm->failed = true; return; }
-            }
-            break;
-        case YX_FI_ALTERNATION: {
-            size_t alt = 0;
-            while (alt < instr.length) {
-                yx_fi_instr a;
-                if (!yx_fi_decode(instr.literal, instr.length, alt, &a) ||
-                    (a.op != YX_FI_LITERAL && a.op != YX_FI_MASKED)) { vm->failed = true; return; }
-                alt += a.size;
-                for (size_t i = 0; i < vm->positions.used; ++i) {
-                    size_t position = vm->positions.items[i];
-                    if (position >= input_length) continue;
-                    if (yx_fv_literal(input, input_length, position, backwards, a.literal, a.mask,
-                                      a.length, wide) &&
-                        !yx_fv_insert(&vm->next, position + step * a.length)) { vm->failed = true; return; }
-                }
-            }
-            break;
-        }
-        case YX_FI_JUMP_EXACT:
-            for (size_t i = 0; i < vm->positions.used; ++i)
-                if (!yx_fv_insert(&vm->next, vm->positions.items[i] + step * instr.min)) { vm->failed = true; return; }
-            break;
-        case YX_FI_JUMP_EXACT_NO_NEWLINE:
-            for (size_t i = 0; i < vm->positions.used; ++i) {
-                size_t position = vm->positions.items[i], width = step * instr.min;
-                /* input.get(position..position + width) */
-                if (position > input_length || width > input_length - position) continue;
-                if (memchr(input + position, 0x0A, width)) continue;
-                if (!yx_fv_insert(&vm->next, position + width)) { vm->failed = true; return; }
-            }
-            break;
-        case YX_FI_JUMP: case YX_FI_JUMP_NO_NEWLINE: {
-            bool accept_newlines = instr.op == YX_FI_JUMP;
-            size_t min = instr.min, max = instr.unbounded ? YX_RX_SCAN_LIMIT : instr.max;
-            yx_fi_instr following;
-            int byte = -1;
-            if (yx_fi_decode(vm->code, vm->code_length, ip, &following)) {
-                if (following.op == YX_FI_LITERAL && following.length)
-                    byte = backwards ? following.literal[following.length - 1] : following.literal[0];
-                else if (following.op == YX_FI_MASKED && following.length) {
-                    if (backwards && following.mask[following.length - 1] == 0xff)
-                        byte = following.literal[following.length - 1];
-                    else if (!backwards && following.mask[0] == 0xff)
-                        byte = following.literal[0];
-                }
-            }
-            for (size_t i = 0; i < vm->positions.used; ++i) {
-                size_t position = vm->positions.items[i];
-                bool ok;
-                if (position >= input_length) continue;
-                if (backwards)
-                    ok = yx_fv_jump_bck(&vm->next, input, input_length - position, byte,
-                                        accept_newlines, wide, min, max, position);
-                else
-                    ok = yx_fv_jump_fwd(&vm->next, input + position, input_length - position, byte,
-                                        accept_newlines, wide, min, max, position);
-                if (!ok) { vm->failed = true; return; }
-            }
-            break;
-        }
-        default:
+        if (!yx_fi_decode(vm->code, vm->code_length, ip, &instr)) {
             vm->failed = true;
             return;
         }
+        ip += instr.size;
+        switch (instr.op) {
+            case YX_FI_MATCH:
+                for (size_t i = 0; i < vm->positions.used; ++i) {
+                    size_t position = vm->positions.items[i];
+                    if (wide) {
+                        bool zeroes = true;
+                        if (backwards) {
+                            for (size_t k = 0; k < position && k < input_length; k += 2)
+                                if (input[input_length - 1 - k]) {
+                                    zeroes = false;
+                                    break;
+                                }
+                        } else {
+                            for (size_t k = 1; k < position && k < input_length; k += 2)
+                                if (input[k]) {
+                                    zeroes = false;
+                                    break;
+                                }
+                        }
+                        if (!zeroes) continue;
+                    }
+                    if (!f(position, context)) {
+                        vm->positions.used = 0;
+                        return;
+                    }
+                }
+                break;
+            case YX_FI_LITERAL:
+            case YX_FI_MASKED:
+                for (size_t i = 0; i < vm->positions.used; ++i) {
+                    size_t position = vm->positions.items[i];
+                    if (position >= input_length) continue;
+                    if (yx_fv_literal(input, input_length, position, backwards, instr.literal, instr.mask, instr.length, wide) &&
+                        !yx_fv_insert(&vm->next, position + step * instr.length)) {
+                        vm->failed = true;
+                        return;
+                    }
+                }
+                break;
+            case YX_FI_ALTERNATION: {
+                size_t alt = 0;
+                while (alt < instr.length) {
+                    yx_fi_instr a;
+                    if (!yx_fi_decode(instr.literal, instr.length, alt, &a) || (a.op != YX_FI_LITERAL && a.op != YX_FI_MASKED)) {
+                        vm->failed = true;
+                        return;
+                    }
+                    alt += a.size;
+                    for (size_t i = 0; i < vm->positions.used; ++i) {
+                        size_t position = vm->positions.items[i];
+                        if (position >= input_length) continue;
+                        if (yx_fv_literal(input, input_length, position, backwards, a.literal, a.mask, a.length, wide) &&
+                            !yx_fv_insert(&vm->next, position + step * a.length)) {
+                            vm->failed = true;
+                            return;
+                        }
+                    }
+                }
+                break;
+            }
+            case YX_FI_JUMP_EXACT:
+                for (size_t i = 0; i < vm->positions.used; ++i)
+                    if (!yx_fv_insert(&vm->next, vm->positions.items[i] + step * instr.min)) {
+                        vm->failed = true;
+                        return;
+                    }
+                break;
+            case YX_FI_JUMP_EXACT_NO_NEWLINE:
+                for (size_t i = 0; i < vm->positions.used; ++i) {
+                    size_t position = vm->positions.items[i], width = step * instr.min;
+                    /* input.get(position..position + width) */
+                    if (position > input_length || width > input_length - position) continue;
+                    if (memchr(input + position, 0x0A, width)) continue;
+                    if (!yx_fv_insert(&vm->next, position + width)) {
+                        vm->failed = true;
+                        return;
+                    }
+                }
+                break;
+            case YX_FI_JUMP:
+            case YX_FI_JUMP_NO_NEWLINE: {
+                bool accept_newlines = instr.op == YX_FI_JUMP;
+                size_t min = instr.min, max = instr.unbounded ? YX_RX_SCAN_LIMIT : instr.max;
+                yx_fi_instr following;
+                int byte = -1;
+                if (yx_fi_decode(vm->code, vm->code_length, ip, &following)) {
+                    if (following.op == YX_FI_LITERAL && following.length) byte = backwards ? following.literal[following.length - 1] : following.literal[0];
+                    else if (following.op == YX_FI_MASKED && following.length) {
+                        if (backwards && following.mask[following.length - 1] == 0xff) byte = following.literal[following.length - 1];
+                        else if (!backwards && following.mask[0] == 0xff) byte = following.literal[0];
+                    }
+                }
+                for (size_t i = 0; i < vm->positions.used; ++i) {
+                    size_t position = vm->positions.items[i];
+                    bool ok;
+                    if (position >= input_length) continue;
+                    if (backwards) ok = yx_fv_jump_bck(&vm->next, input, input_length - position, byte, accept_newlines, wide, min, max, position);
+                    else ok = yx_fv_jump_fwd(&vm->next, input + position, input_length - position, byte, accept_newlines, wide, min, max, position);
+                    if (!ok) {
+                        vm->failed = true;
+                        return;
+                    }
+                }
+                break;
+            }
+            default: vm->failed = true; return;
+        }
         {
-            yx_fv_set swap = vm->positions; vm->positions = vm->next; vm->next = swap;
+            yx_fv_set swap = vm->positions;
+            vm->positions = vm->next;
+            vm->next = swap;
         }
         yx_fv_set_clear(&vm->next);
     }
@@ -1437,10 +1598,8 @@ static bool yx_rx_alnum(uint8_t c)
 static bool yx_rx_full_word(const uint8_t *data, size_t size, size_t start, size_t end, unsigned flags)
 {
     if (flags & YX_RX_WIDE) {
-        if ((flags & YX_RX_FULLWORD_LEFT) && start >= 2 && data[start - 1] == 0 &&
-            yx_rx_alnum(data[start - 2])) return false;
-        if ((flags & YX_RX_FULLWORD_RIGHT) && end + 1 < size && data[end + 1] == 0 &&
-            yx_rx_alnum(data[end])) return false;
+        if ((flags & YX_RX_FULLWORD_LEFT) && start >= 2 && data[start - 1] == 0 && yx_rx_alnum(data[start - 2])) return false;
+        if ((flags & YX_RX_FULLWORD_RIGHT) && end + 1 < size && data[end + 1] == 0 && yx_rx_alnum(data[end])) return false;
     } else {
         if ((flags & YX_RX_FULLWORD_LEFT) && start >= 1 && yx_rx_alnum(data[start - 1])) return false;
         if ((flags & YX_RX_FULLWORD_RIGHT) && end < size && yx_rx_alnum(data[end])) return false;
@@ -1451,7 +1610,10 @@ static bool yx_rx_full_word(const uint8_t *data, size_t size, size_t start, size
 /* MatchList::add. */
 static bool yx_rx_add(yx_rx_match_list *list, size_t start, size_t end, bool replace_if_longer)
 {
-    if (list->limit && list->count >= list->limit) { list->limit_reached = true; return true; }
+    if (list->limit && list->count >= list->limit) {
+        list->limit_reached = true;
+        return true;
+    }
     if (list->count && start > list->items[list->count - 1].start) {
         /* push */
     } else if (list->count && start == list->items[list->count - 1].start) {
@@ -1513,13 +1675,15 @@ static bool yx_rx_bck_found(size_t length, void *context)
     yx_rx_verify *v = context;
     size_t start = v->match_start - length, end = v->match_start + v->fwd_length;
     if (yx_rx_full_word(v->data, v->size, start, end, v->sub->flags) &&
-        !(v->list->each ? v->list->each(v->list->each_context, v->sub->flags, start, end) :
-          yx_rx_add(v->list, start, end, (v->sub->flags & YX_RX_GREEDY) != 0))) v->failed = true;
+        !(v->list->each ? v->list->each(v->list->each_context, v->sub->flags, start, end) : yx_rx_add(v->list, start, end, (v->sub->flags & YX_RX_GREEDY) != 0)))
+        v->failed = true;
     return true;
 }
 
 /* Input known to consist of a guard's run bytes: [from, end). */
-typedef struct { size_t from, end; } yx_rx_run_span;
+typedef struct {
+    size_t from, end;
+} yx_rx_run_span;
 
 typedef struct {
     yx_pikevm pike;
@@ -1530,16 +1694,14 @@ typedef struct {
 } yx_rx_vms;
 
 /* verify_regexp. */
-static bool yx_rx_verify_regexp(yx_rx_vms *vms, const yx_rx_program *program, const yx_rx_sub *sub,
-                                const yx_rx_atom *atom, const uint8_t *data, size_t size,
+static bool yx_rx_verify_regexp(yx_rx_vms *vms, const yx_rx_program *program, const yx_rx_sub *sub, const yx_rx_atom *atom, const uint8_t *data, size_t size,
                                 size_t match_start, yx_rx_match_list *list)
 {
     yx_rx_verify v = {sub, data, size, match_start, 0, false, list, false};
     bool wide = (sub->flags & YX_RX_WIDE) != 0, fast = (sub->flags & YX_RX_FAST) != 0;
     if (atom->has_fwd) {
         if (fast) yx_fastvm_try_match(&vms->fast, atom->fwd, false, data, size, match_start, wide, yx_rx_fwd_found, &v);
-        else yx_pikevm_try_match(&vms->pike, (uint32_t)atom->fwd, false, data, size, match_start, wide,
-                                 yx_rx_fwd_found, &v);
+        else yx_pikevm_try_match(&vms->pike, (uint32_t)atom->fwd, false, data, size, match_start, wide, yx_rx_fwd_found, &v);
         if (vms->fast.failed || vms->pike.failed) return false;
     } else {
         v.fwd_length = atom->length;
@@ -1548,8 +1710,7 @@ static bool yx_rx_verify_regexp(yx_rx_vms *vms, const yx_rx_program *program, co
     if (!v.have_fwd) return true;
     if (atom->has_bck) {
         if (fast) yx_fastvm_try_match(&vms->fast, atom->bck, true, data, size, match_start, wide, yx_rx_bck_found, &v);
-        else yx_pikevm_try_match(&vms->pike, (uint32_t)atom->bck, true, data, size, match_start, wide,
-                                 yx_rx_bck_found, &v);
+        else yx_pikevm_try_match(&vms->pike, (uint32_t)atom->bck, true, data, size, match_start, wide, yx_rx_bck_found, &v);
         if (vms->fast.failed || vms->pike.failed) return false;
     } else {
         yx_rx_bck_found(0, &v);
@@ -1562,15 +1723,18 @@ static bool yx_rx_verify_regexp(yx_rx_vms *vms, const yx_rx_program *program, co
 /* Atom search in Aho-Corasick order.                                  */
 
 typedef struct {
-    size_t end, length, index;  /* index orders atoms by insertion */
-    size_t position;            /* start offset of this occurrence */
-    size_t bucket;              /* Teddy bucket; unused for Aho-Corasick */
+    size_t end, length, index; /* index orders atoms by insertion */
+    size_t position;           /* start offset of this occurrence */
+    size_t bucket;             /* Teddy bucket; unused for Aho-Corasick */
     bool teddy;
     const yx_rx_sub *sub;
     const yx_rx_atom *atom;
 } yx_rx_hit;
 
-typedef struct { yx_rx_hit *items; size_t used, capacity; } yx_rx_heap;
+typedef struct {
+    yx_rx_hit *items;
+    size_t used, capacity;
+} yx_rx_heap;
 
 /* Aho-Corasick (daachorse) reports by end offset, longest first; Teddy
  * reports by start offset, then bucket, then pattern order in the bucket. */
@@ -1600,7 +1764,9 @@ static bool yx_rx_heap_push(yx_rx_heap *h, yx_rx_hit hit)
     while (i) {
         size_t parent = (i - 1) / 2;
         if (!yx_rx_hit_before(&h->items[i], &h->items[parent])) break;
-        yx_rx_hit swap = h->items[i]; h->items[i] = h->items[parent]; h->items[parent] = swap;
+        yx_rx_hit swap = h->items[i];
+        h->items[i] = h->items[parent];
+        h->items[parent] = swap;
         i = parent;
     }
     return true;
@@ -1615,7 +1781,9 @@ static yx_rx_hit yx_rx_heap_pop(yx_rx_heap *h)
         if (left < h->used && yx_rx_hit_before(&h->items[left], &h->items[best])) best = left;
         if (right < h->used && yx_rx_hit_before(&h->items[right], &h->items[best])) best = right;
         if (best == i) break;
-        yx_rx_hit swap = h->items[i]; h->items[i] = h->items[best]; h->items[best] = swap;
+        yx_rx_hit swap = h->items[i];
+        h->items[i] = h->items[best];
+        h->items[best] = swap;
         i = best;
     }
     return top;
@@ -1635,7 +1803,10 @@ static bool yx_rx_find(const uint8_t *data, size_t size, const yx_rx_atom *atom,
     while (remaining >= atom->length) {
         const uint8_t *first = memchr(hit, atom->bytes[0], remaining - atom->length + 1);
         if (!first) return false;
-        if (!memcmp(first, atom->bytes, atom->length)) { *position = (size_t)(first - data); return true; }
+        if (!memcmp(first, atom->bytes, atom->length)) {
+            *position = (size_t)(first - data);
+            return true;
+        }
         remaining -= (size_t)(first - hit) + 1;
         hit = first + 1;
     }
@@ -1649,50 +1820,54 @@ static void yx_rx_index_free(struct yx_rx_index *index);
  * which the first *unmarked are followed by the epsilon closure without a
  * visited mark (jump, repeat, zero-width assertion). False when a target
  * or the fall-through is outside the code. A split has at most 255 targets. */
-static bool yx_pv_successors(const uint8_t *code, size_t length, size_t ip, const yx_pi_instr *instr,
-                             size_t targets[256], size_t *count, size_t *unmarked)
+static bool yx_pv_successors(const uint8_t *code, size_t length, size_t ip, const yx_pi_instr *instr, size_t targets[256], size_t *count, size_t *unmarked)
 {
     const uint8_t *c = code + ip;
     size_t next = ip + instr->size, n = 0;
     int64_t target;
     *unmarked = 0;
-#define YX_PV_TARGET(relative) \
-    do { \
-        target = (int64_t)ip + (relative); \
+#define YX_PV_TARGET(relative)                                      \
+    do {                                                            \
+        target = (int64_t)ip + (relative);                          \
         if (target < 0 || (uint64_t)target >= length) return false; \
-        targets[n++] = (size_t)target; \
+        targets[n++] = (size_t)target;                              \
     } while (0)
     switch (instr->op) {
-    case YX_PI_MATCH:
-        break;
-    case YX_PI_JUMP:
-        YX_PV_TARGET(yx_rx_i32(c + 2));
-        *unmarked = n;
-        break;
-    case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY:
-        YX_PV_TARGET(yx_rx_i32(c + 2));
-        if (next >= length) return false;
-        targets[n++] = next;
-        *unmarked = n;
-        break;
-    case YX_PI_SPLIT_A: case YX_PI_SPLIT_B:
-        YX_PV_TARGET(yx_rx_i32(c + 4));
-        if (next >= length) return false;
-        targets[n++] = next;
-        break;
-    case YX_PI_SPLIT_N:
-        for (size_t k = 0; k < c[4]; ++k) YX_PV_TARGET(yx_rx_i32(c + 5 + 4 * k));
-        break;
-    case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE: case YX_PI_NOCASE:
-    case YX_PI_BITMAP: case YX_PI_RANGES:
-        if (next >= length) return false;
-        targets[n++] = next;
-        break;
-    default: /* the zero-width assertions */
-        if (next >= length) return false;
-        targets[n++] = next;
-        *unmarked = n;
-        break;
+        case YX_PI_MATCH: break;
+        case YX_PI_JUMP:
+            YX_PV_TARGET(yx_rx_i32(c + 2));
+            *unmarked = n;
+            break;
+        case YX_PI_REPEAT_GREEDY:
+        case YX_PI_REPEAT_NON_GREEDY:
+            YX_PV_TARGET(yx_rx_i32(c + 2));
+            if (next >= length) return false;
+            targets[n++] = next;
+            *unmarked = n;
+            break;
+        case YX_PI_SPLIT_A:
+        case YX_PI_SPLIT_B:
+            YX_PV_TARGET(yx_rx_i32(c + 4));
+            if (next >= length) return false;
+            targets[n++] = next;
+            break;
+        case YX_PI_SPLIT_N:
+            for (size_t k = 0; k < c[4]; ++k) YX_PV_TARGET(yx_rx_i32(c + 5 + 4 * k));
+            break;
+        case YX_PI_ANY_BYTE:
+        case YX_PI_BYTE:
+        case YX_PI_MASKED_BYTE:
+        case YX_PI_NOCASE:
+        case YX_PI_BITMAP:
+        case YX_PI_RANGES:
+            if (next >= length) return false;
+            targets[n++] = next;
+            break;
+        default: /* the zero-width assertions */
+            if (next >= length) return false;
+            targets[n++] = next;
+            *unmarked = n;
+            break;
     }
 #undef YX_PV_TARGET
     *count = n;
@@ -1715,7 +1890,10 @@ static bool yx_pv_code_valid(const uint8_t *code, size_t length, const size_t *e
      * once, when it becomes a start. */
     for (size_t i = 0; i < entry_count; ++i) {
         if (entries[i] >= length || state[entries[i]] == 2) goto done;
-        if (!state[entries[i]]) { state[entries[i]] = 1; stack[used++] = (uint32_t)entries[i]; }
+        if (!state[entries[i]]) {
+            state[entries[i]] = 1;
+            stack[used++] = (uint32_t)entries[i];
+        }
     }
     while (used) {
         size_t ip = stack[--used];
@@ -1727,7 +1905,10 @@ static bool yx_pv_code_valid(const uint8_t *code, size_t length, const size_t *e
         if (!yx_pv_successors(code, length, ip, &instr, targets, &count, &unmarked)) goto done;
         for (size_t k = 0; k < count; ++k) {
             if (state[targets[k]] == 2) goto done;
-            if (!state[targets[k]]) { state[targets[k]] = 1; stack[used++] = (uint32_t)targets[k]; }
+            if (!state[targets[k]]) {
+                state[targets[k]] = 1;
+                stack[used++] = (uint32_t)targets[k];
+            }
         }
     }
     /* No cycle of unmarked edges: a depth-first search from every reached
@@ -1735,15 +1916,20 @@ static bool yx_pv_code_valid(const uint8_t *code, size_t length, const size_t *e
     for (size_t root = 0; root < length; ++root) {
         if (state[root] != 1 || colour[root]) continue;
         used = 0;
-        stack[used] = (uint32_t)root; edge[used++] = 0; colour[root] = 1;
+        stack[used] = (uint32_t)root;
+        edge[used++] = 0;
+        colour[root] = 1;
         while (used) {
             size_t ip = stack[used - 1];
-            if (!yx_pi_decode(code, length, ip, false, &instr) ||
-                !yx_pv_successors(code, length, ip, &instr, targets, &count, &unmarked)) goto done;
+            if (!yx_pi_decode(code, length, ip, false, &instr) || !yx_pv_successors(code, length, ip, &instr, targets, &count, &unmarked)) goto done;
             if (edge[used - 1] < unmarked) {
                 size_t to = targets[edge[used - 1]++];
                 if (colour[to] == 1) goto done;
-                if (!colour[to]) { colour[to] = 1; stack[used] = (uint32_t)to; edge[used++] = 0; }
+                if (!colour[to]) {
+                    colour[to] = 1;
+                    stack[used] = (uint32_t)to;
+                    edge[used++] = 0;
+                }
             } else {
                 colour[ip] = 2;
                 --used;
@@ -1752,7 +1938,10 @@ static bool yx_pv_code_valid(const uint8_t *code, size_t length, const size_t *e
     }
     valid = true;
 done:
-    free(state); free(colour); free(stack); free(edge);
+    free(state);
+    free(colour);
+    free(stack);
+    free(edge);
     return valid;
 }
 
@@ -1769,8 +1958,7 @@ static bool yx_fv_code_valid(const uint8_t *code, size_t length, const size_t *e
                 size_t alt = 0;
                 while (alt < instr.length) {
                     yx_fi_instr a;
-                    if (!yx_fi_decode(instr.literal, instr.length, alt, &a) || !a.size ||
-                        (a.op != YX_FI_LITERAL && a.op != YX_FI_MASKED)) return false;
+                    if (!yx_fi_decode(instr.literal, instr.length, alt, &a) || !a.size || (a.op != YX_FI_LITERAL && a.op != YX_FI_MASKED)) return false;
                     alt += a.size;
                 }
             } else if (instr.op == YX_FI_JUMP_EXACT || instr.op == YX_FI_JUMP_EXACT_NO_NEWLINE) {
@@ -1783,13 +1971,11 @@ static bool yx_fv_code_valid(const uint8_t *code, size_t length, const size_t *e
     return true;
 }
 
-bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries,
-                               size_t entry_count, bool fast)
+bool yx_rx_archived_code_valid(const uint8_t *code, size_t code_length, const size_t *entries, size_t entry_count, bool fast)
 {
     if (!entry_count) return true;
     if (!code || !entries) return false;
-    return fast ? yx_fv_code_valid(code, code_length, entries, entry_count)
-                : yx_pv_code_valid(code, code_length, entries, entry_count);
+    return fast ? yx_fv_code_valid(code, code_length, entries, entry_count) : yx_pv_code_valid(code, code_length, entries, entry_count);
 }
 
 void yx_rx_program_free(yx_rx_program *program)
@@ -1812,11 +1998,11 @@ void yx_rx_match_list_free(yx_rx_match_list *list)
 /* Teddy bucket assignment (Teddy::new): atoms with the same low nybbles in
  * their first mask_len bytes share a bucket; a new group takes bucket
  * BUCKETS - 1 - id % BUCKETS. */
-void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *buckets,
-                         size_t *minimum_len)
+void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *buckets, size_t *minimum_len)
 {
     size_t shortest = SIZE_MAX, mask_len, bucket_count = count > 32 ? 16 : 8;
-    for (size_t i = 0; i < count; ++i) if (atoms[i]->length < shortest) shortest = atoms[i]->length;
+    for (size_t i = 0; i < count; ++i)
+        if (atoms[i]->length < shortest) shortest = atoms[i]->length;
     mask_len = shortest < 4 ? shortest : 4;
     for (size_t i = 0; i < count; ++i) {
         size_t j = 0;
@@ -1854,7 +2040,9 @@ void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *b
 #define YX_RX_SKIP_SHORT_RUN 8
 #define YX_RX_SKIP_BLOCK ((size_t)4096)
 
-typedef struct { uint32_t key, atom; } yx_rx_key;
+typedef struct {
+    uint32_t key, atom;
+} yx_rx_key;
 
 struct yx_rx_index {
     uint64_t present2[65536 / 64], present1[256 / 64];
@@ -1881,8 +2069,12 @@ static int yx_rx_key_cmp(const void *x, const void *y)
 static void yx_rx_index_free(struct yx_rx_index *index)
 {
     if (!index) return;
-    free(index->keys2); free(index->keys1); free(index->empty);
-    free(index->subs); free(index->atoms); free(index);
+    free(index->keys2);
+    free(index->keys1);
+    free(index->empty);
+    free(index->subs);
+    free(index->atoms);
+    free(index);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1899,8 +2091,14 @@ static void yx_rx_index_free(struct yx_rx_index *index)
  * consuming instruction X, the byte X reads lies at an offset between the
  * fewest and the most bytes that paths read before reaching X: an occurrence
  * whose input holds no byte of X's set at those offsets cannot match. */
-enum { YX_RW_NODES = 2048, YX_RW_STARTS = 16, YX_RW_CANDIDATES = 8, YX_RW_KEPT = 4, YX_RW_WIDTH = 256,
-       YX_RW_POPCOUNT = 128 };
+enum {
+    YX_RW_NODES = 2048,
+    YX_RW_STARTS = 16,
+    YX_RW_CANDIDATES = 8,
+    YX_RW_KEPT = 4,
+    YX_RW_WIDTH = 256,
+    YX_RW_POPCOUNT = 128
+};
 #define YX_RW_FAR UINT32_MAX
 
 typedef struct {
@@ -1936,64 +2134,77 @@ typedef struct {
 
 /* The kind and successors of thread state (ip, count), as the VM follows
  * them; -1 for code the VM fails on. */
-static int yx_rw_step(const uint8_t *code, size_t length, uint32_t ip, uint32_t count,
-                      uint32_t *next_ip, uint32_t *next_count, size_t *n)
+static int yx_rw_step(const uint8_t *code, size_t length, uint32_t ip, uint32_t count, uint32_t *next_ip, uint32_t *next_count, size_t *n)
 {
     yx_pi_instr instr;
     const uint8_t *c = code + ip;
     *n = 0;
     if (ip >= length || !yx_pi_decode(code, length, ip, false, &instr)) return -1;
     switch (instr.op) {
-    case YX_PI_MATCH:
-        return 2;
-    case YX_PI_ANY_BYTE: case YX_PI_BYTE: case YX_PI_MASKED_BYTE: case YX_PI_NOCASE:
-    case YX_PI_BITMAP: case YX_PI_RANGES:
-        next_ip[0] = ip + (uint32_t)instr.size;
-        next_count[0] = count;
-        *n = 1;
-        return 0;
-    case YX_PI_SPLIT_A: case YX_PI_SPLIT_B:
-        next_ip[0] = yx_pi_offset(ip, yx_rx_i32(c + 4));
-        next_ip[1] = ip + (uint32_t)instr.size;
-        next_count[0] = next_count[1] = count;
-        *n = 2;
-        return 1;
-    case YX_PI_SPLIT_N:
-        for (size_t k = 0; k < c[4]; ++k) {
-            next_ip[k] = yx_pi_offset(ip, yx_rx_i32(c + 5 + 4 * k));
-            next_count[k] = count;
+        case YX_PI_MATCH: return 2;
+        case YX_PI_ANY_BYTE:
+        case YX_PI_BYTE:
+        case YX_PI_MASKED_BYTE:
+        case YX_PI_NOCASE:
+        case YX_PI_BITMAP:
+        case YX_PI_RANGES:
+            next_ip[0] = ip + (uint32_t)instr.size;
+            next_count[0] = count;
+            *n = 1;
+            return 0;
+        case YX_PI_SPLIT_A:
+        case YX_PI_SPLIT_B:
+            next_ip[0] = yx_pi_offset(ip, yx_rx_i32(c + 4));
+            next_ip[1] = ip + (uint32_t)instr.size;
+            next_count[0] = next_count[1] = count;
+            *n = 2;
+            return 1;
+        case YX_PI_SPLIT_N:
+            for (size_t k = 0; k < c[4]; ++k) {
+                next_ip[k] = yx_pi_offset(ip, yx_rx_i32(c + 5 + 4 * k));
+                next_count[k] = count;
+            }
+            *n = c[4];
+            return 1;
+        case YX_PI_JUMP:
+            next_ip[0] = yx_pi_offset(ip, yx_rx_i32(c + 2));
+            next_count[0] = count;
+            *n = 1;
+            return 1;
+        case YX_PI_REPEAT_GREEDY:
+        case YX_PI_REPEAT_NON_GREEDY: {
+            uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), counted = count + 1;
+            if (counted >= min) {
+                next_ip[*n] = ip + (uint32_t)instr.size;
+                next_count[(*n)++] = 0;
+            }
+            if (counted < max) {
+                next_ip[*n] = yx_pi_offset(ip, yx_rx_i32(c + 2));
+                next_count[(*n)++] = counted;
+            }
+            return 1;
         }
-        *n = c[4];
-        return 1;
-    case YX_PI_JUMP:
-        next_ip[0] = yx_pi_offset(ip, yx_rx_i32(c + 2));
-        next_count[0] = count;
-        *n = 1;
-        return 1;
-    case YX_PI_REPEAT_GREEDY: case YX_PI_REPEAT_NON_GREEDY: {
-        uint32_t min = yx_rx_u32(c + 6), max = yx_rx_u32(c + 10), counted = count + 1;
-        if (counted >= min) {
-            next_ip[*n] = ip + (uint32_t)instr.size;
-            next_count[(*n)++] = 0;
-        }
-        if (counted < max) {
-            next_ip[*n] = yx_pi_offset(ip, yx_rx_i32(c + 2));
-            next_count[(*n)++] = counted;
-        }
-        return 1;
-    }
-    case YX_PI_START: case YX_PI_END: case YX_PI_WORD_BOUNDARY: case YX_PI_WORD_BOUNDARY_NEG:
-    case YX_PI_WORD_START: case YX_PI_WORD_END: case YX_PI_LINE_START: case YX_PI_LINE_END:
-    case YX_PI_SEARCH_START_LF: case YX_PI_SEARCH_END_LF:
-    case YX_PI_SEARCH_START_CRLF: case YX_PI_SEARCH_END_CRLF:
-    case YX_PI_SEARCH_WORD_START: case YX_PI_SEARCH_WORD_END:
-    case YX_PI_SEARCH_WORD_START_HALF: case YX_PI_SEARCH_WORD_END_HALF:
-        next_ip[0] = ip + (uint32_t)instr.size;
-        next_count[0] = count;
-        *n = 1;
-        return 1;
-    default:
-        return -1;
+        case YX_PI_START:
+        case YX_PI_END:
+        case YX_PI_WORD_BOUNDARY:
+        case YX_PI_WORD_BOUNDARY_NEG:
+        case YX_PI_WORD_START:
+        case YX_PI_WORD_END:
+        case YX_PI_LINE_START:
+        case YX_PI_LINE_END:
+        case YX_PI_SEARCH_START_LF:
+        case YX_PI_SEARCH_END_LF:
+        case YX_PI_SEARCH_START_CRLF:
+        case YX_PI_SEARCH_END_CRLF:
+        case YX_PI_SEARCH_WORD_START:
+        case YX_PI_SEARCH_WORD_END:
+        case YX_PI_SEARCH_WORD_START_HALF:
+        case YX_PI_SEARCH_WORD_END_HALF:
+            next_ip[0] = ip + (uint32_t)instr.size;
+            next_count[0] = count;
+            *n = 1;
+            return 1;
+        default: return -1;
     }
 }
 
@@ -2005,22 +2216,22 @@ static void yx_rw_set(const uint8_t *code, size_t length, uint32_t ip, uint8_t s
     memset(set, 0, 32);
     if (!yx_pi_decode(code, length, ip, false, &instr)) return;
     switch (instr.op) {
-    case YX_PI_ANY_BYTE: memset(set, 255, 32); break;
-    case YX_PI_BYTE: set[c[0] >> 3] |= (uint8_t)(1u << (c[0] & 7)); break;
-    case YX_PI_MASKED_BYTE:
-        for (unsigned b = 0; b < 256; ++b)
-            if ((b & c[3]) == c[2]) set[b >> 3] |= (uint8_t)(1u << (b & 7));
-        break;
-    case YX_PI_NOCASE:
-        for (unsigned b = 0; b < 256; ++b)
-            if ((b >= 'A' && b <= 'Z' ? b + 32 : b) == c[2]) set[b >> 3] |= (uint8_t)(1u << (b & 7));
-        break;
-    case YX_PI_BITMAP: memcpy(set, c + 2, 32); break;
-    case YX_PI_RANGES:
-        for (size_t k = 0; k < c[2]; ++k)
-            for (unsigned b = c[3 + 2 * k]; b <= c[4 + 2 * k]; ++b) set[b >> 3] |= (uint8_t)(1u << (b & 7));
-        break;
-    default: break;
+        case YX_PI_ANY_BYTE: memset(set, 255, 32); break;
+        case YX_PI_BYTE: set[c[0] >> 3] |= (uint8_t)(1u << (c[0] & 7)); break;
+        case YX_PI_MASKED_BYTE:
+            for (unsigned b = 0; b < 256; ++b)
+                if ((b & c[3]) == c[2]) set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        case YX_PI_NOCASE:
+            for (unsigned b = 0; b < 256; ++b)
+                if ((b >= 'A' && b <= 'Z' ? b + 32 : b) == c[2]) set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        case YX_PI_BITMAP: memcpy(set, c + 2, 32); break;
+        case YX_PI_RANGES:
+            for (size_t k = 0; k < c[2]; ++k)
+                for (unsigned b = c[3 + 2 * k]; b <= c[4 + 2 * k]; ++b) set[b >> 3] |= (uint8_t)(1u << (b & 7));
+            break;
+        default: break;
     }
 }
 
@@ -2089,8 +2300,7 @@ static bool yx_rw_build(yx_rw_graph *g, uint32_t start)
         for (size_t k = 0; k < n; ++k) {
             size_t slot = yx_rw_hash(g, next_ip[k], next_count[k]);
             if (next_ip[k] >= g->length) return false;
-            while (g->slots[slot] && (g->nodes[g->slots[slot] - 1].ip != next_ip[k] ||
-                                      g->nodes[g->slots[slot] - 1].count != next_count[k]))
+            while (g->slots[slot] && (g->nodes[g->slots[slot] - 1].ip != next_ip[k] || g->nodes[g->slots[slot] - 1].count != next_count[k]))
                 slot = (slot + 1) & (g->slot_count - 1);
             if (!g->slots[slot]) {
                 if (!yx_rw_reserve(g)) return false;
@@ -2137,7 +2347,10 @@ static bool yx_rw_distances(yx_rw_graph *g)
             uint32_t v = g->edges[g->nodes[u].first + k];
             if (done[v] || g->nodes[v].low <= distance) continue;
             g->nodes[v].low = distance;
-            if (used == capacity) { ok = false; break; }
+            if (used == capacity) {
+                ok = false;
+                break;
+            }
             if (weight) queue[(head + used) % capacity] = v;
             else {
                 head = (head + capacity - 1) % capacity;
@@ -2161,9 +2374,13 @@ static bool yx_rw_distances(yx_rw_graph *g)
     if (ok) {
         memset(done, 0, n);
         for (size_t at = 0; at < done_count; ++at) done[order[at]] = 1;
-        for (size_t i = 0; i < n; ++i) if (!done[i]) g->nodes[i].high = YX_RW_FAR;
+        for (size_t i = 0; i < n; ++i)
+            if (!done[i]) g->nodes[i].high = YX_RW_FAR;
     }
-    free(queue); free(order); free(degree); free(done);
+    free(queue);
+    free(order);
+    free(degree);
+    free(done);
     return ok;
 }
 
@@ -2200,8 +2417,7 @@ static unsigned yx_rw_popcount(const uint8_t set[32])
 /* The windows of the program at start, most selective first: consuming
  * instructions whose states all have bounded offsets, that dominate Match.
  * Returns their number (0 when the graph cannot be built). */
-static size_t yx_rw_windows_at(const uint8_t *code, size_t length, uint32_t start, bool backward,
-                               yx_rw_found *found)
+static size_t yx_rw_windows_at(const uint8_t *code, size_t length, uint32_t start, bool backward, yx_rw_found *found)
 {
     yx_rw_graph g;
     yx_rw_found candidates[YX_RW_CANDIDATES];
@@ -2224,8 +2440,7 @@ static size_t yx_rw_windows_at(const uint8_t *code, size_t length, uint32_t star
         size_t slot;
         if (node->kind != 0) continue;
         slot = (size_t)(((uint64_t)node->ip * 2654435761u) & (span_slots - 1));
-        while (spans[slot].ip_plus_one && spans[slot].ip_plus_one != node->ip + 1)
-            slot = (slot + 1) & (span_slots - 1);
+        while (spans[slot].ip_plus_one && spans[slot].ip_plus_one != node->ip + 1) slot = (slot + 1) & (span_slots - 1);
         if (!spans[slot].ip_plus_one) {
             spans[slot].ip_plus_one = node->ip + 1;
             spans[slot].low = node->low;
@@ -2266,14 +2481,22 @@ static size_t yx_rw_windows_at(const uint8_t *code, size_t length, uint32_t star
     for (size_t c = 0; c < candidate_count && kept < YX_RW_KEPT; ++c)
         if (yx_rw_dominates(&g, candidates[c].ip, stack, seen)) found[kept++] = candidates[c];
 done:
-    free(g.nodes); free(g.slots); free(g.edges); free(stack); free(seen); free(spans);
+    free(g.nodes);
+    free(g.slots);
+    free(g.edges);
+    free(stack);
+    free(seen);
+    free(spans);
     return kept;
 }
 
 /* Rule sets repeat patterns, and every copy of a program gets the first
  * copy's code (yx_ser_regexp_program_copy), so yx_rw_windows_at, a function
  * of (code, start, direction), is memoised per thread for small programs. */
-enum { YX_RW_MEMO_SLOTS = 64, YX_RW_MEMO_CODE = 4096 };
+enum {
+    YX_RW_MEMO_SLOTS = 64,
+    YX_RW_MEMO_CODE = 4096
+};
 typedef struct {
     uint8_t *code;
     size_t length, count;
@@ -2301,19 +2524,14 @@ static uint64_t yx_rw_code_hash(const uint8_t *code, size_t length)
     return hash;
 }
 
-static size_t yx_rw_windows_memo(const uint8_t *code, size_t length, uint64_t hash, uint32_t start,
-                                 bool backward, yx_rw_found *found)
+static size_t yx_rw_windows_memo(const uint8_t *code, size_t length, uint64_t hash, uint32_t start, bool backward, yx_rw_found *found)
 {
     yx_rw_memo_entry *entry = NULL;
     size_t count;
-    if (length <= YX_RW_MEMO_CODE && !yx_rw_memo_thread)
-        yx_rw_memo_thread = yx_thread_storage_get(&yx_rw_memo_storage, sizeof(*yx_rw_memo_thread),
-                                                  yx_rw_memo_destroy);
+    if (length <= YX_RW_MEMO_CODE && !yx_rw_memo_thread) yx_rw_memo_thread = yx_thread_storage_get(&yx_rw_memo_storage, sizeof(*yx_rw_memo_thread), yx_rw_memo_destroy);
     if (length <= YX_RW_MEMO_CODE && yx_rw_memo_thread) {
-        entry = &yx_rw_memo_thread->slots[(hash ^ ((uint64_t)start * 0x9E3779B97F4A7C15ull) ^ backward) %
-                                          YX_RW_MEMO_SLOTS];
-        if (entry->code && entry->hash == hash && entry->length == length && entry->start == start &&
-            entry->backward == backward && !memcmp(entry->code, code, length)) {
+        entry = &yx_rw_memo_thread->slots[(hash ^ ((uint64_t)start * 0x9E3779B97F4A7C15ull) ^ backward) % YX_RW_MEMO_SLOTS];
+        if (entry->code && entry->hash == hash && entry->length == length && entry->start == start && entry->backward == backward && !memcmp(entry->code, code, length)) {
             memcpy(found, entry->found, entry->count * sizeof(*found));
             return entry->count;
         }
@@ -2355,8 +2573,7 @@ static bool yx_rw_useful(const yx_rx_window *window, const yx_rx_atom *atom)
 static uint16_t yx_rw_add(yx_rx_window *windows, size_t *count, const yx_rx_window *window)
 {
     for (size_t i = 0; i < *count; ++i)
-        if (windows[i].low == window->low && windows[i].high == window->high &&
-            windows[i].backward == window->backward && !memcmp(windows[i].set, window->set, 32))
+        if (windows[i].low == window->low && windows[i].high == window->high && windows[i].backward == window->backward && !memcmp(windows[i].set, window->set, 32))
             return (uint16_t)(i + 1);
     if (*count >= UINT16_MAX) return 0;
     windows[*count] = *window;
@@ -2403,8 +2620,7 @@ static void yx_rx_windows_build(yx_rx_program *program)
     }
     if (!used) return;
     hash = yx_rw_code_hash(program->code, program->code_length);
-    for (size_t k = 0; k < used; ++k)
-        counts[k] = yx_rw_windows_memo(program->code, program->code_length, hash, starts[k], backward[k], found[k]);
+    for (size_t k = 0; k < used; ++k) counts[k] = yx_rw_windows_memo(program->code, program->code_length, hash, starts[k], backward[k], found[k]);
     for (size_t s = 0; s < program->sub_count; ++s) {
         if (program->subs[s].flags & (YX_RX_FAST | YX_RX_WIDE)) continue;
         for (size_t a = 0; a < program->subs[s].atom_count; ++a) {
@@ -2415,8 +2631,7 @@ static void yx_rx_windows_build(yx_rx_program *program)
                 if (!(direction ? atom->has_bck : atom->has_fwd)) continue;
                 while (k < used && (starts[k] != ip || backward[k] != (direction != 0))) ++k;
                 for (size_t i = 0; k < used && i < counts[k] && !chosen; ++i)
-                    if (yx_rw_useful(&found[k][i].window, atom))
-                        chosen = yx_rw_add(windows, &window_count, &found[k][i].window);
+                    if (yx_rw_useful(&found[k][i].window, atom)) chosen = yx_rw_add(windows, &window_count, &found[k][i].window);
                 if (direction) atom->bck_window = chosen;
                 else atom->fwd_window = chosen;
             }
@@ -2430,8 +2645,7 @@ static void yx_rx_windows_build(yx_rx_program *program)
         return;
     }
     for (size_t s = 0; s < program->sub_count; ++s)
-        for (size_t a = 0; a < program->subs[s].atom_count; ++a)
-            program->subs[s].atoms[a].fwd_window = program->subs[s].atoms[a].bck_window = 0;
+        for (size_t a = 0; a < program->subs[s].atom_count; ++a) program->subs[s].atoms[a].fwd_window = program->subs[s].atoms[a].bck_window = 0;
 }
 
 bool yx_rx_program_prepare(yx_rx_program *program)
@@ -2449,7 +2663,8 @@ bool yx_rx_program_prepare(yx_rx_program *program)
     index->keys1 = calloc(total, sizeof(*index->keys1));
     index->empty = calloc(total, sizeof(*index->empty));
     if (!index->subs || !index->atoms || !index->keys2 || !index->keys1 || !index->empty) {
-        yx_rx_index_free(index); return false;
+        yx_rx_index_free(index);
+        return false;
     }
     for (size_t s = 0; s < program->sub_count; ++s)
         for (size_t a = 0; a < program->subs[s].atom_count; ++a) {
@@ -2494,7 +2709,8 @@ static size_t yx_rx_lower_bound(const yx_rx_key *keys, size_t count, uint32_t ke
     size_t low = 0, high = count;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
-        if (keys[middle].key < key) low = middle + 1; else high = middle;
+        if (keys[middle].key < key) low = middle + 1;
+        else high = middle;
     }
     return low;
 }
@@ -2507,8 +2723,7 @@ static size_t yx_rx_lower_bound(const yx_rx_key *keys, size_t count, uint32_t ke
  * [span->from, span->end) are run bytes, so a start inside the span follows
  * the run on from span->end instead of from the start: occurrences inside one
  * long run (path segments, say) then cost the run once, not once each. */
-static bool yx_rx_guard_pass(const yx_rx_guard *guard, const uint8_t *data, size_t size, size_t at,
-                             yx_rx_run_span *span)
+static bool yx_rx_guard_pass(const yx_rx_guard *guard, const uint8_t *data, size_t size, size_t at, yx_rx_run_span *span)
 {
     size_t limit = size - at < YX_RX_SCAN_LIMIT - 1 ? size : at + YX_RX_SCAN_LIMIT - 1, end = at;
     bool inside = span && span->from <= at && at <= span->end;
@@ -2528,14 +2743,19 @@ static bool yx_rx_guard_pass(const yx_rx_guard *guard, const uint8_t *data, size
             size_t start = (size_t)(p - data);
             while (end < start && (guard->run[data[end] >> 3] >> (data[end] & 7) & 1)) ++end;
             if (end < start) break;
-            if (!memcmp(p + 1, guard->literal + 1, n - 1)) { pass = true; break; }
+            if (!memcmp(p + 1, guard->literal + 1, n - 1)) {
+                pass = true;
+                break;
+            }
             ++p;
         }
     }
     /* [at, end) holds run bytes only; it extends a span that contains at. */
     if (span) {
-        if (!inside) { span->from = at; span->end = end; }
-        else if (end > span->end) span->end = end;
+        if (!inside) {
+            span->from = at;
+            span->end = end;
+        } else if (end > span->end) span->end = end;
     }
     return pass;
 }
@@ -2561,19 +2781,15 @@ static bool yx_rx_window_pass(const yx_rx_window *w, const uint8_t *data, size_t
 }
 
 /* False when an atom window rules out a match from atom position at. */
-static bool yx_rx_windows_pass(const yx_rx_program *program, const yx_rx_atom *atom,
-                               const uint8_t *data, size_t size, size_t at)
+static bool yx_rx_windows_pass(const yx_rx_program *program, const yx_rx_atom *atom, const uint8_t *data, size_t size, size_t at)
 {
-    if (atom->bck_window && atom->bck_window <= program->window_count &&
-        !yx_rx_window_pass(&program->windows[atom->bck_window - 1], data, size, at)) return false;
-    if (atom->fwd_window && atom->fwd_window <= program->window_count &&
-        !yx_rx_window_pass(&program->windows[atom->fwd_window - 1], data, size, at)) return false;
+    if (atom->bck_window && atom->bck_window <= program->window_count && !yx_rx_window_pass(&program->windows[atom->bck_window - 1], data, size, at)) return false;
+    if (atom->fwd_window && atom->fwd_window <= program->window_count && !yx_rx_window_pass(&program->windows[atom->fwd_window - 1], data, size, at)) return false;
     return true;
 }
 
 /* Verifies one atom occurrence. */
-static bool yx_rx_process(yx_rx_vms *vms, const yx_rx_program *program, const yx_rx_hit *hit,
-                          const uint8_t *data, size_t size, yx_rx_match_list *list)
+static bool yx_rx_process(yx_rx_vms *vms, const yx_rx_program *program, const yx_rx_hit *hit, const uint8_t *data, size_t size, yx_rx_match_list *list)
 {
     if (hit->position < hit->atom->backtrack) return true;
     size_t atom_pos = hit->position - hit->atom->backtrack;
@@ -2590,39 +2806,32 @@ static bool yx_rx_process(yx_rx_vms *vms, const yx_rx_program *program, const yx
             vms->spans = calloc(program->guard_count, sizeof(*vms->spans));
             vms->spans_failed = !vms->spans;
         }
-        if (vms->spans && guard >= program->guards && guard < program->guards + program->guard_count)
-            span = &vms->spans[guard - program->guards];
+        if (vms->spans && guard >= program->guards && guard < program->guards + program->guard_count) span = &vms->spans[guard - program->guards];
         if (!yx_rx_guard_pass(guard, data, size, atom_pos, span)) return true;
     }
-    if ((hit->atom->fwd_window || hit->atom->bck_window) &&
-        !yx_rx_windows_pass(program, hit->atom, data, size, atom_pos)) return true;
+    if ((hit->atom->fwd_window || hit->atom->bck_window) && !yx_rx_windows_pass(program, hit->atom, data, size, atom_pos)) return true;
     return yx_rx_verify_regexp(vms, program, hit->sub, hit->atom, data, size, atom_pos, list);
 }
 
-static yx_rx_hit yx_rx_make_hit(const yx_rx_sub *sub, const yx_rx_atom *atom, size_t index, size_t position,
-                                const yx_rx_order *order, bool teddy)
+static yx_rx_hit yx_rx_make_hit(const yx_rx_sub *sub, const yx_rx_atom *atom, size_t index, size_t position, const yx_rx_order *order, bool teddy)
 {
-    return (yx_rx_hit){position + atom->length, atom->length, teddy ? order->ids[index] : index, position,
-                       teddy ? order->buckets[index] : 0, teddy, sub, atom};
+    return (yx_rx_hit){position + atom->length, atom->length, teddy ? order->ids[index] : index, position, teddy ? order->buckets[index] : 0, teddy, sub, atom};
 }
 
 /* Pushes the hits of the 1- and 2-byte keys at position p < size, as the
  * per-position loop of yx_rx_scan_indexed does. */
-YX_RX_INLINE bool yx_rx_index_push(const struct yx_rx_index *index, yx_rx_heap *heap, const uint8_t *data, size_t size,
-                                   size_t p, const yx_rx_order *order, bool teddy)
+YX_RX_INLINE bool yx_rx_index_push(const struct yx_rx_index *index, yx_rx_heap *heap, const uint8_t *data, size_t size, size_t p, const yx_rx_order *order, bool teddy)
 {
     bool ok = true;
     if (index->present1[data[p] / 64] >> (data[p] % 64) & 1)
-        for (size_t k = yx_rx_lower_bound(index->keys1, index->count1, data[p]);
-             ok && k < index->count1 && index->keys1[k].key == data[p]; ++k) {
+        for (size_t k = yx_rx_lower_bound(index->keys1, index->count1, data[p]); ok && k < index->count1 && index->keys1[k].key == data[p]; ++k) {
             uint32_t id = index->keys1[k].atom;
             ok = yx_rx_heap_push(heap, yx_rx_make_hit(index->subs[id], index->atoms[id], id, p, order, teddy));
         }
     if (p + 1 < size) {
         uint32_t key = data[p] | (uint32_t)data[p + 1] << 8;
         if (index->present2[key / 64] >> (key % 64) & 1)
-            for (size_t k = yx_rx_lower_bound(index->keys2, index->count2, key);
-                 ok && k < index->count2 && index->keys2[k].key == key; ++k) {
+            for (size_t k = yx_rx_lower_bound(index->keys2, index->count2, key); ok && k < index->count2 && index->keys2[k].key == key; ++k) {
                 uint32_t id = index->keys2[k].atom;
                 const yx_rx_atom *atom = index->atoms[id];
                 if (size - p < atom->length || memcmp(data + p + 2, atom->bytes + 2, atom->length - 2u)) continue;
@@ -2657,8 +2866,7 @@ YX_RX_INLINE bool yx_rx_index_push(const struct yx_rx_index *index, yx_rx_heap *
  * than YX_RX_SKIP_SHORT bytes, the bytes up to the next YX_RX_SKIP_BLOCK
  * boundary are tested one by one against the set's bitmap, which costs less
  * there than a call per member. */
-static bool yx_rx_scan_indexed_skip(const yx_rx_program *program, yx_rx_vms *vms, const uint8_t *data,
-                                    size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list,
+static bool yx_rx_scan_indexed_skip(const yx_rx_program *program, yx_rx_vms *vms, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list,
                                     const yx_rx_order *order, bool teddy)
 {
     const struct yx_rx_index *index = program->index;
@@ -2687,8 +2895,7 @@ static bool yx_rx_scan_indexed_skip(const yx_rx_program *program, yx_rx_vms *vms
         if (heap.used || next_poll <= q) {
             for (;;) {
                 size_t until = next_poll < q ? next_poll : q;
-                while (ok && heap.used && !list->limit_reached &&
-                       (teddy ? heap.items[0].position < until : heap.items[0].end < until)) {
+                while (ok && heap.used && !list->limit_reached && (teddy ? heap.items[0].position < until : heap.items[0].end < until)) {
                     yx_rx_hit hit = yx_rx_heap_pop(&heap);
                     ok = yx_rx_process(vms, program, &hit, data, size, list);
                 }
@@ -2701,8 +2908,7 @@ static bool yx_rx_scan_indexed_skip(const yx_rx_program *program, yx_rx_vms *vms
         if (q >= size) break;
         ok = yx_rx_index_push(index, &heap, data, size, q, order, teddy);
         /* Later hits start after q, so they end after q as well. */
-        while (ok && heap.used && !list->limit_reached &&
-               (teddy ? heap.items[0].position <= q : heap.items[0].end <= q)) {
+        while (ok && heap.used && !list->limit_reached && (teddy ? heap.items[0].position <= q : heap.items[0].end <= q)) {
             yx_rx_hit hit = yx_rx_heap_pop(&heap);
             ok = yx_rx_process(vms, program, &hit, data, size, list);
         }
@@ -2718,31 +2924,31 @@ static bool yx_rx_scan_indexed_skip(const yx_rx_program *program, yx_rx_vms *vms
 
 /* One pass over the input with the atom index. A hit is verified once no
  * later start offset can produce a hit ordered before it. */
-static bool yx_rx_scan_indexed(const yx_rx_program *program, yx_rx_vms *vms, const uint8_t *data, size_t size,
-                               yx_scan_deadline *deadline, yx_rx_match_list *list, const yx_rx_order *order,
-                               bool teddy)
+static bool yx_rx_scan_indexed(const yx_rx_program *program, yx_rx_vms *vms, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list,
+                               const yx_rx_order *order, bool teddy)
 {
     const struct yx_rx_index *index = program->index;
     yx_rx_heap heap = {0};
     bool ok = true;
     if (index->skip) return yx_rx_scan_indexed_skip(program, vms, data, size, deadline, list, order, teddy);
     for (size_t p = 0; ok && p <= size && !list->limit_reached; ++p) {
-        if (!(p & 4095) && p && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        if (!(p & 4095) && p && yx_scan_deadline_poll(deadline)) {
+            ok = false;
+            break;
+        }
         for (size_t i = 0; ok && i < index->empty_count; ++i) {
             uint32_t id = index->empty[i];
             ok = yx_rx_heap_push(&heap, yx_rx_make_hit(index->subs[id], index->atoms[id], id, p, order, teddy));
         }
         if (p < size && (index->present1[data[p] / 64] >> (data[p] % 64) & 1))
-            for (size_t k = yx_rx_lower_bound(index->keys1, index->count1, data[p]);
-                 ok && k < index->count1 && index->keys1[k].key == data[p]; ++k) {
+            for (size_t k = yx_rx_lower_bound(index->keys1, index->count1, data[p]); ok && k < index->count1 && index->keys1[k].key == data[p]; ++k) {
                 uint32_t id = index->keys1[k].atom;
                 ok = yx_rx_heap_push(&heap, yx_rx_make_hit(index->subs[id], index->atoms[id], id, p, order, teddy));
             }
         if (p + 1 < size) {
             uint32_t key = data[p] | (uint32_t)data[p + 1] << 8;
             if (index->present2[key / 64] >> (key % 64) & 1)
-                for (size_t k = yx_rx_lower_bound(index->keys2, index->count2, key);
-                     ok && k < index->count2 && index->keys2[k].key == key; ++k) {
+                for (size_t k = yx_rx_lower_bound(index->keys2, index->count2, key); ok && k < index->count2 && index->keys2[k].key == key; ++k) {
                     uint32_t id = index->keys2[k].atom;
                     const yx_rx_atom *atom = index->atoms[id];
                     if (size - p < atom->length || memcmp(data + p + 2, atom->bytes + 2, atom->length - 2u)) continue;
@@ -2750,8 +2956,7 @@ static bool yx_rx_scan_indexed(const yx_rx_program *program, yx_rx_vms *vms, con
                 }
         }
         /* Later hits start after p, so they end after p as well. */
-        while (ok && heap.used && !list->limit_reached &&
-               (teddy ? heap.items[0].position <= p : heap.items[0].end <= p)) {
+        while (ok && heap.used && !list->limit_reached && (teddy ? heap.items[0].position <= p : heap.items[0].end <= p)) {
             yx_rx_hit hit = yx_rx_heap_pop(&heap);
             ok = yx_rx_process(vms, program, &hit, data, size, list);
         }
@@ -2764,9 +2969,7 @@ static bool yx_rx_scan_indexed(const yx_rx_program *program, yx_rx_vms *vms, con
     return ok;
 }
 
-bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_t size,
-                        yx_scan_deadline *deadline, yx_rx_match_list *list,
-                        const yx_rx_order *order)
+bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list, const yx_rx_order *order)
 {
     yx_rx_vms vms;
     yx_rx_heap heap = {0};
@@ -2784,14 +2987,16 @@ bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_
         for (size_t a = 0; ok && a < sub->atom_count; ++a, ++index) {
             const yx_rx_atom *atom = &sub->atoms[a];
             size_t position;
-            if (yx_rx_find(data, size, atom, 0, &position))
-                ok = yx_rx_heap_push(&heap, yx_rx_make_hit(sub, atom, index, position, order, teddy));
+            if (yx_rx_find(data, size, atom, 0, &position)) ok = yx_rx_heap_push(&heap, yx_rx_make_hit(sub, atom, index, position, order, teddy));
         }
     }
     while (ok && heap.used && !list->limit_reached) {
         yx_rx_hit hit = yx_rx_heap_pop(&heap);
         size_t position;
-        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) {
+            ok = false;
+            break;
+        }
         ok = yx_rx_process(&vms, program, &hit, data, size, list);
         if (ok && yx_rx_find(data, size, hit.atom, hit.position + 1, &position)) {
             hit.position = position;
@@ -2802,14 +3007,15 @@ bool yx_rx_scan_ordered(const yx_rx_program *program, const uint8_t *data, size_
 done:
     free(heap.items);
     yx_pikevm_free(&vms.pike);
-    free(vms.fast.positions.items); free(vms.fast.positions.seen);
-    free(vms.fast.next.items); free(vms.fast.next.seen);
+    free(vms.fast.positions.items);
+    free(vms.fast.positions.seen);
+    free(vms.fast.next.items);
+    free(vms.fast.next.seen);
     free(vms.spans);
     return ok;
 }
 
-bool yx_rx_scan(const yx_rx_program *program, const uint8_t *data, size_t size,
-                yx_scan_deadline *deadline, yx_rx_match_list *list)
+bool yx_rx_scan(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list)
 {
     return yx_rx_scan_ordered(program, data, size, deadline, list, NULL);
 }
@@ -2829,8 +3035,7 @@ void yx_rx_literals_free(yx_rx_literals *set)
 }
 
 /* verify_literal at start; *end is the end of the match. */
-static bool yx_rx_literal_at(const yx_rx_literal *literal, const uint8_t *data, size_t size,
-                             size_t start, size_t *end)
+static bool yx_rx_literal_at(const yx_rx_literal *literal, const uint8_t *data, size_t size, size_t start, size_t *end)
 {
     if (start > size || literal->length > size - start) return false;
     *end = start + literal->length;
@@ -2847,8 +3052,7 @@ static bool yx_rx_literal_at(const yx_rx_literal *literal, const uint8_t *data, 
 
 /* handle_atom_match for a Literal sub-pattern: an exact atom's occurrence
  * is the match; another atom's is verified against the whole literal. */
-static bool yx_rx_literal_process(const yx_rx_hit *hit, const uint8_t *data, size_t size,
-                                  yx_rx_match_list *list)
+static bool yx_rx_literal_process(const yx_rx_hit *hit, const uint8_t *data, size_t size, yx_rx_match_list *list)
 {
     const yx_rx_literal *literal = (const yx_rx_literal *)hit->sub;
     size_t start, end;
@@ -2865,20 +3069,15 @@ static bool yx_rx_literal_process(const yx_rx_hit *hit, const uint8_t *data, siz
  * and two of them found at one offset share a Teddy bucket (the same first
  * bytes): the atom's index orders them as its id does. The anchored order
  * (the match's start, then the sub-pattern) uses the automaton's keys. */
-static yx_rx_hit yx_rx_literal_hit(const yx_rx_sub *sub, const yx_rx_atom *atom, size_t index,
-                                   size_t position, int order)
+static yx_rx_hit yx_rx_literal_hit(const yx_rx_sub *sub, const yx_rx_atom *atom, size_t index, size_t position, int order)
 {
-    if (order == YX_RX_LITERALS_ANCHORED)
-        return (yx_rx_hit){position >= atom->backtrack ? position - atom->backtrack : 0, 0, index,
-                           position, 0, false, sub, atom};
-    return (yx_rx_hit){position + atom->length, atom->length, index, position, 0,
-                       order == YX_RX_LITERALS_TEDDY, sub, atom};
+    if (order == YX_RX_LITERALS_ANCHORED) return (yx_rx_hit){position >= atom->backtrack ? position - atom->backtrack : 0, 0, index, position, 0, false, sub, atom};
+    return (yx_rx_hit){position + atom->length, atom->length, index, position, 0, order == YX_RX_LITERALS_TEDDY, sub, atom};
 }
 
 /* The next of the listed offsets, from *cursor on, where the literal
  * matches (verify_literal); *cursor is left after it. */
-static bool yx_rx_literal_next(const yx_rx_literal *literal, const uint8_t *data, size_t size,
-                               const yx_rx_candidate *starts, size_t start_count, size_t *cursor,
+static bool yx_rx_literal_next(const yx_rx_literal *literal, const uint8_t *data, size_t size, const yx_rx_candidate *starts, size_t start_count, size_t *cursor,
                                size_t *start)
 {
     while (*cursor < start_count) {
@@ -2893,8 +3092,7 @@ static bool yx_rx_literal_next(const yx_rx_literal *literal, const uint8_t *data
  * offset has one occurrence of its atom there, backtrack bytes on, and
  * without nocase one atom: the hits and their order are those of the atom
  * search. */
-static bool yx_rx_scan_literal_starts(const yx_rx_literals *set, const uint8_t *data, size_t size,
-                                      yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
+static bool yx_rx_scan_literal_starts(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
                                       const yx_rx_candidate *starts, size_t start_count)
 {
     yx_rx_heap heap = {0};
@@ -2903,30 +3101,28 @@ static bool yx_rx_scan_literal_starts(const yx_rx_literals *set, const uint8_t *
     size_t index = 0, steps = 0, start;
     for (size_t s = 0; ok && s < set->count; ++s) {
         const yx_rx_literal *literal = &set->items[s];
-        if (literal->sub.atom_count &&
-            yx_rx_literal_next(literal, data, size, starts, start_count, &cursors[s], &start))
-            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(&literal->sub, literal->sub.atoms, index,
-                                                          start + literal->sub.atoms->backtrack, order));
+        if (literal->sub.atom_count && yx_rx_literal_next(literal, data, size, starts, start_count, &cursors[s], &start))
+            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(&literal->sub, literal->sub.atoms, index, start + literal->sub.atoms->backtrack, order));
         index += literal->sub.atom_count;
     }
     while (ok && heap.used && !list->limit_reached) {
         yx_rx_hit hit = yx_rx_heap_pop(&heap);
         const yx_rx_literal *literal = (const yx_rx_literal *)hit.sub;
-        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) {
+            ok = false;
+            break;
+        }
         start = hit.position - hit.atom->backtrack;
         ok = yx_rx_add(list, start, start + literal->length, false);
-        if (ok && yx_rx_literal_next(literal, data, size, starts, start_count,
-                                     &cursors[literal - set->items], &start))
-            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index,
-                                                          start + hit.atom->backtrack, order));
+        if (ok && yx_rx_literal_next(literal, data, size, starts, start_count, &cursors[literal - set->items], &start))
+            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index, start + hit.atom->backtrack, order));
     }
     free(heap.items);
     free(cursors);
     return ok;
 }
 
-bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size,
-                         yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
+bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
                          const yx_rx_candidate *starts, size_t start_count)
 {
     yx_rx_heap heap = {0};
@@ -2938,14 +3134,16 @@ bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t 
         for (size_t a = 0; ok && a < sub->atom_count; ++a, ++index) {
             const yx_rx_atom *atom = &sub->atoms[a];
             size_t position;
-            if (atom->length && yx_rx_find(data, size, atom, 0, &position))
-                ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(sub, atom, index, position, order));
+            if (atom->length && yx_rx_find(data, size, atom, 0, &position)) ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(sub, atom, index, position, order));
         }
     }
     while (ok && heap.used && !list->limit_reached) {
         yx_rx_hit hit = yx_rx_heap_pop(&heap);
         size_t position;
-        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) {
+            ok = false;
+            break;
+        }
         ok = yx_rx_literal_process(&hit, data, size, list);
         if (ok && yx_rx_find(data, size, hit.atom, hit.position + 1, &position))
             ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index, position, order));
@@ -2958,12 +3156,10 @@ bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t 
  * identical to the per-program scan, including cap-dependent tie semantics. */
 
 /* The sub-pattern and atom of a flattened atom index, or NULL. */
-static const yx_rx_atom *yx_rx_flat_atom(const yx_rx_program *program, size_t index,
-                                         const yx_rx_sub **sub)
+static const yx_rx_atom *yx_rx_flat_atom(const yx_rx_program *program, size_t index, const yx_rx_sub **sub)
 {
     size_t sub_index = 0;
-    while (sub_index < program->sub_count && index >= program->subs[sub_index].atom_count)
-        index -= program->subs[sub_index++].atom_count;
+    while (sub_index < program->sub_count && index >= program->subs[sub_index].atom_count) index -= program->subs[sub_index++].atom_count;
     if (sub_index >= program->sub_count) return NULL;
     *sub = &program->subs[sub_index];
     return &program->subs[sub_index].atoms[index];
@@ -2971,15 +3167,13 @@ static const yx_rx_atom *yx_rx_flat_atom(const yx_rx_program *program, size_t in
 
 /* yx_rx_process's window test, ahead of the candidate list: an occurrence it
  * would skip there cannot add a match, so it need not be retained. */
-bool yx_rx_atom_possible(const yx_rx_program *program, size_t index, const uint8_t *data,
-                         size_t size, size_t position)
+bool yx_rx_atom_possible(const yx_rx_program *program, size_t index, const uint8_t *data, size_t size, size_t position)
 {
     const yx_rx_sub *sub;
     const yx_rx_atom *atom;
     if (!program || !program->window_count) return true;
     atom = yx_rx_flat_atom(program, index, &sub);
-    if (!atom || atom->exact || (!atom->fwd_window && !atom->bck_window) ||
-        position < atom->backtrack || position > size) return true;
+    if (!atom || atom->exact || (!atom->fwd_window && !atom->bck_window) || position < atom->backtrack || position > size) return true;
     return yx_rx_windows_pass(program, atom, data, size, position - atom->backtrack);
 }
 
@@ -2993,13 +3187,11 @@ typedef struct {
  * candidates. Atom ids are unique per atom, so two candidates compare equal
  * only when they are the same occurrence; every sorting algorithm therefore
  * yields the one order in which hits are verified. */
-static bool yx_rx_candidate_before(const yx_rx_candidate_order *o, const yx_rx_candidate *a,
-                                   const yx_rx_candidate *b)
+static bool yx_rx_candidate_before(const yx_rx_candidate_order *o, const yx_rx_candidate *a, const yx_rx_candidate *b)
 {
     if (o->teddy) {
         if (a->position != b->position) return a->position < b->position;
-        if (o->order->buckets[a->index] != o->order->buckets[b->index])
-            return o->order->buckets[a->index] < o->order->buckets[b->index];
+        if (o->order->buckets[a->index] != o->order->buckets[b->index]) return o->order->buckets[a->index] < o->order->buckets[b->index];
         return o->order->ids[a->index] < o->order->ids[b->index];
     }
     const yx_rx_sub *sub;
@@ -3017,18 +3209,19 @@ static bool yx_rx_merge_candidates(const yx_rx_candidate_order *o, yx_rx_candida
     if (count > SIZE_MAX / sizeof(*items)) return false;
     yx_rx_candidate *buffer = malloc(count * sizeof(*items)), *from = items, *to = buffer;
     if (!buffer) return false;
-    for (size_t width = 1; width < count; width = width > SIZE_MAX / 2 ? count : width * 2) {
+    for (size_t width = 1; width<count; width = width> SIZE_MAX / 2 ? count : width * 2) {
         for (size_t low = 0; low < count; low += 2 * width) {
             size_t middle = count - low > width ? low + width : count;
             size_t high = count - middle > width ? middle + width : count;
             size_t i = low, j = middle, k = low;
-            while (i < middle && j < high)
-                to[k++] = yx_rx_candidate_before(o, &from[j], &from[i]) ? from[j++] : from[i++];
+            while (i < middle && j < high) to[k++] = yx_rx_candidate_before(o, &from[j], &from[i]) ? from[j++] : from[i++];
             while (i < middle) to[k++] = from[i++];
             while (j < high) to[k++] = from[j++];
             if (high == count) break;
         }
-        yx_rx_candidate *swap = from; from = to; to = swap;
+        yx_rx_candidate *swap = from;
+        from = to;
+        to = swap;
     }
     if (from != items) memcpy(items, from, count * sizeof(*items));
     free(buffer);
@@ -3057,9 +3250,8 @@ static bool yx_rx_sort_candidates(const yx_rx_candidate_order *o, yx_rx_candidat
     return true;
 }
 
-bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *data, size_t size,
-    yx_scan_deadline *deadline, yx_rx_match_list *list, const yx_rx_order *order,
-    yx_rx_candidate *candidates, size_t count)
+bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list,
+                                const yx_rx_order *order, yx_rx_candidate *candidates, size_t count)
 {
     yx_rx_vms vms;
     bool ok = true, teddy = order && order->teddy && size >= order->minimum_len;
@@ -3073,12 +3265,19 @@ bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *dat
         const yx_rx_sub *sub;
         const yx_rx_atom *atom = yx_rx_flat_atom(program, candidates[i].index, &sub);
         if (!atom || candidates[i].position > size || atom->length > size - candidates[i].position) {
-            ok = false; goto done;
+            ok = false;
+            goto done;
         }
     }
-    if (count > 1 && !yx_rx_sort_candidates(&sort_order, candidates, count)) { ok = false; goto done; }
+    if (count > 1 && !yx_rx_sort_candidates(&sort_order, candidates, count)) {
+        ok = false;
+        goto done;
+    }
     for (size_t i = 0; ok && i < count && !list->limit_reached; ++i) {
-        if (!(i & 1023) && yx_scan_deadline_reached(deadline)) { ok = false; break; }
+        if (!(i & 1023) && yx_scan_deadline_reached(deadline)) {
+            ok = false;
+            break;
+        }
         const yx_rx_sub *sub;
         const yx_rx_atom *atom = yx_rx_flat_atom(program, candidates[i].index, &sub);
         yx_rx_hit hit = yx_rx_make_hit(sub, atom, candidates[i].index, candidates[i].position, order, teddy);
@@ -3086,8 +3285,10 @@ bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *dat
     }
 done:
     yx_pikevm_free(&vms.pike);
-    free(vms.fast.positions.items); free(vms.fast.positions.seen);
-    free(vms.fast.next.items); free(vms.fast.next.seen);
+    free(vms.fast.positions.items);
+    free(vms.fast.positions.seen);
+    free(vms.fast.next.items);
+    free(vms.fast.next.seen);
     free(vms.spans);
     return ok && !yx_scan_deadline_reached(deadline);
 }
@@ -3095,7 +3296,10 @@ done:
 /* ------------------------------------------------------------------ */
 /* Owner prefilter over short atoms.                                   */
 
-typedef struct { size_t owner; uint32_t tag; } yx_atom_entry;
+typedef struct {
+    size_t owner;
+    uint32_t tag;
+} yx_atom_entry;
 
 struct yx_atom_set {
     xx_literal_set *finder;
@@ -3108,7 +3312,10 @@ yx_atom_set *yx_atom_set_new(void)
     yx_atom_set *set = calloc(1, sizeof(*set));
     if (!set) return NULL;
     set->finder = xx_literal_set_create();
-    if (!set->finder) { free(set); return NULL; }
+    if (!set->finder) {
+        free(set);
+        return NULL;
+    }
     return set;
 }
 
@@ -3120,10 +3327,12 @@ void yx_atom_set_free(yx_atom_set *set)
     free(set);
 }
 
-size_t yx_atom_set_owner_count(const yx_atom_set *set) { return set ? set->owners : 0; }
+size_t yx_atom_set_owner_count(const yx_atom_set *set)
+{
+    return set ? set->owners : 0;
+}
 
-bool yx_atom_set_add_tagged(yx_atom_set *set, const uint8_t *bytes, size_t length,
-                           size_t owner, uint32_t tag)
+bool yx_atom_set_add_tagged(yx_atom_set *set, const uint8_t *bytes, size_t length, size_t owner, uint32_t tag)
 {
     if (!set || !bytes || !length || length > 8 || owner == SIZE_MAX) return false;
     if (set->count == set->capacity) {
@@ -3131,7 +3340,8 @@ bool yx_atom_set_add_tagged(yx_atom_set *set, const uint8_t *bytes, size_t lengt
         if (next < set->capacity || next > SIZE_MAX / sizeof(*set->entries)) return false;
         yx_atom_entry *grown = realloc(set->entries, next * sizeof(*grown));
         if (!grown) return false;
-        set->entries = grown; set->capacity = next;
+        set->entries = grown;
+        set->capacity = next;
     }
     if (!xx_literal_set_add(set->finder, bytes, length)) return false;
     set->entries[set->count++] = (yx_atom_entry){owner, tag};
@@ -3165,12 +3375,14 @@ static bool yx_atom_report(void *context, size_t index, size_t position)
     /* Also poll in dense-hit inputs, where advancing 256 KiB can take a
      * long time. A clock read every 1024 callbacks bounds that latency. */
     if (!(++scan->occurrences & 1023) && yx_scan_deadline_reached(scan->deadline)) return false;
-    if (scan->hit) { scan->hit[entry->owner] = true; return true; }
+    if (scan->hit) {
+        scan->hit[entry->owner] = true;
+        return true;
+    }
     return scan->fn(scan->ctx, entry->owner, entry->tag, position);
 }
 
-static bool yx_atom_scan_ranges(const yx_atom_set *set, const uint8_t *data, size_t size,
-                                yx_atom_scan_context *scan)
+static bool yx_atom_scan_ranges(const yx_atom_set *set, const uint8_t *data, size_t size, yx_atom_scan_context *scan)
 {
     if ((!data && size) || yx_scan_deadline_reached(scan->deadline)) return false;
     /* Starts are partitioned, but each range can read the whole buffer.
@@ -3178,23 +3390,20 @@ static bool yx_atom_scan_ranges(const yx_atom_set *set, const uint8_t *data, siz
     for (size_t begin = 0; begin < size;) {
         size_t count = size - begin < 0x40000u ? size - begin : 0x40000u;
         if (yx_scan_deadline_reached(scan->deadline)) return false;
-        if (!xx_literal_set_scan(set->finder, data, size, begin, begin + count,
-                                  yx_atom_report, scan)) return false;
+        if (!xx_literal_set_scan(set->finder, data, size, begin, begin + count, yx_atom_report, scan)) return false;
         begin += count;
     }
     return !yx_scan_deadline_reached(scan->deadline);
 }
 
-bool yx_atom_set_scan_candidates(const yx_atom_set *set, const uint8_t *data, size_t size,
-                                 yx_scan_deadline *deadline, yx_atom_candidate_fn fn, void *ctx)
+bool yx_atom_set_scan_candidates(const yx_atom_set *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_atom_candidate_fn fn, void *ctx)
 {
     if (!set || !fn) return false;
     yx_atom_scan_context scan = {set, deadline, fn, ctx, NULL, 0};
     return yx_atom_scan_ranges(set, data, size, &scan);
 }
 
-bool yx_atom_set_scan(const yx_atom_set *set, const uint8_t *data, size_t size,
-                      yx_scan_deadline *deadline, bool *hit)
+bool yx_atom_set_scan(const yx_atom_set *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, bool *hit)
 {
     if (!set || (!hit && set->owners)) return false;
     if (set->owners) memset(hit, 0, set->owners * sizeof(*hit));

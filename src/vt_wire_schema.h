@@ -19,7 +19,6 @@
  * SOFTWARE.
  */
 
-
 /* Wire descriptors from the pinned VT protobuf declarations. */
 static const yx_vt_wire_field yx_vt_wire_google_protobuf_Timestamp[] = {
     {"seconds", 1, YX_VTW_INT64, 0, 0},
@@ -30,12 +29,8 @@ static const yx_vt_wire_field yx_vt_wire_vt_MapEntry[] = {
     {"value", 2, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_analysis_AnalysisStats[] = {
-    {"malicious", 1, YX_VTW_INT32, 0, 0},
-    {"suspicious", 2, YX_VTW_INT32, 0, 0},
-    {"undetected", 3, YX_VTW_INT32, 0, 0},
-    {"harmless", 4, YX_VTW_INT32, 0, 0},
-    {"failure", 5, YX_VTW_INT32, 0, 0},
-    {"type_unsupported", 6, YX_VTW_INT32, 0, 0},
+    {"malicious", 1, YX_VTW_INT32, 0, 0}, {"suspicious", 2, YX_VTW_INT32, 0, 0}, {"undetected", 3, YX_VTW_INT32, 0, 0},
+    {"harmless", 4, YX_VTW_INT32, 0, 0},  {"failure", 5, YX_VTW_INT32, 0, 0},    {"type_unsupported", 6, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_BehaviourSummary[] = {
     {"files_opened", 1, YX_VTW_STRING, 0, 1},
@@ -113,20 +108,12 @@ static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_DnsLookup[] = {
     {"txt_records", 3, YX_VTW_STRING, 0, 1},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_DroppedFile[] = {
-    {"path", 1, YX_VTW_STRING, 0, 0},
-    {"sha256", 2, YX_VTW_STRING, 0, 0},
-    {"type", 3, YX_VTW_INT32, 0, 0},
-    {"download_url", 5, YX_VTW_STRING, 0, 0},
-    {"process_name", 6, YX_VTW_STRING, 0, 0},
-    {"process_id", 7, YX_VTW_STRING, 0, 0},
+    {"path", 1, YX_VTW_STRING, 0, 0},         {"sha256", 2, YX_VTW_STRING, 0, 0},       {"type", 3, YX_VTW_INT32, 0, 0},
+    {"download_url", 5, YX_VTW_STRING, 0, 0}, {"process_name", 6, YX_VTW_STRING, 0, 0}, {"process_id", 7, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_ExtractedPayload[] = {
-    {"sha256", 1, YX_VTW_STRING, 0, 0},
-    {"type", 2, YX_VTW_INT32, 0, 0},
-    {"size", 3, YX_VTW_UINT64, 0, 0},
-    {"payload_type", 4, YX_VTW_STRING, 0, 0},
-    {"process_name", 5, YX_VTW_STRING, 0, 0},
-    {"timestamp", 6, YX_VTW_MESSAGE, 0, 0},
+    {"sha256", 1, YX_VTW_STRING, 0, 0},       {"type", 2, YX_VTW_INT32, 0, 0},          {"size", 3, YX_VTW_UINT64, 0, 0},
+    {"payload_type", 4, YX_VTW_STRING, 0, 0}, {"process_name", 5, YX_VTW_STRING, 0, 0}, {"timestamp", 6, YX_VTW_MESSAGE, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_FileCopy[] = {
     {"source", 1, YX_VTW_STRING, 0, 0},
@@ -142,11 +129,8 @@ static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_HttpConversation[] = {
     {"response_body_first_ten_bytes", 7, YX_VTW_STRING, 0, 4},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_IpTraffic[] = {
-    {"destination_ip", 1, YX_VTW_STRING, 0, 0},
-    {"destination_port", 2, YX_VTW_INT32, 0, 0},
-    {"transport_layer_protocol", 3, YX_VTW_INT32, 0, 0},
-    {"destination_ip_asn", 4, YX_VTW_INT64, 0, 0},
-    {"destination_ip_as_int", 5, YX_VTW_INT64, 0, 0},
+    {"destination_ip", 1, YX_VTW_STRING, 0, 0},    {"destination_port", 2, YX_VTW_INT32, 0, 0},      {"transport_layer_protocol", 3, YX_VTW_INT32, 0, 0},
+    {"destination_ip_asn", 4, YX_VTW_INT64, 0, 0}, {"destination_ip_as_int", 5, YX_VTW_INT64, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_KeyValue[] = {
     {"key", 1, YX_VTW_STRING, 0, 0},
@@ -168,62 +152,32 @@ static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_PermissionCheck[] = {
     {"owner", 2, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_ProcessItem[] = {
-    {"process_id", 1, YX_VTW_STRING, 0, 0},
-    {"parent_process_id", 2, YX_VTW_STRING, 0, 0},
-    {"name", 3, YX_VTW_STRING, 0, 0},
-    {"parent_name", 10, YX_VTW_STRING, 0, 0},
-    {"start_time", 4, YX_VTW_UINT64, 0, 0},
-    {"termination_time", 5, YX_VTW_UINT64, 0, 0},
-    {"files_opened", 6, YX_VTW_STRING, 0, 1},
-    {"files_written", 7, YX_VTW_STRING, 0, 1},
-    {"files_deleted", 8, YX_VTW_STRING, 0, 1},
+    {"process_id", 1, YX_VTW_STRING, 0, 0},    {"parent_process_id", 2, YX_VTW_STRING, 0, 0}, {"name", 3, YX_VTW_STRING, 0, 0},
+    {"parent_name", 10, YX_VTW_STRING, 0, 0},  {"start_time", 4, YX_VTW_UINT64, 0, 0},        {"termination_time", 5, YX_VTW_UINT64, 0, 0},
+    {"files_opened", 6, YX_VTW_STRING, 0, 1},  {"files_written", 7, YX_VTW_STRING, 0, 1},     {"files_deleted", 8, YX_VTW_STRING, 0, 1},
     {"files_copied", 9, YX_VTW_MESSAGE, 7, 1},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_SignatureMatch[] = {
-    {"id", 1, YX_VTW_STRING, 0, 0},
-    {"format", 2, YX_VTW_INT32, 0, 0},
-    {"name", 3, YX_VTW_STRING, 0, 0},
-    {"description", 4, YX_VTW_STRING, 0, 0},
-    {"authors", 5, YX_VTW_STRING, 0, 1},
-    {"events", 6, YX_VTW_STRING, 0, 1},
-    {"match_data", 7, YX_VTW_STRING, 0, 1},
-    {"rule_src", 8, YX_VTW_STRING, 0, 0},
-    {"severity", 9, YX_VTW_INT32, 0, 0},
+    {"id", 1, YX_VTW_STRING, 0, 0},          {"format", 2, YX_VTW_INT32, 0, 0},    {"name", 3, YX_VTW_STRING, 0, 0},
+    {"description", 4, YX_VTW_STRING, 0, 0}, {"authors", 5, YX_VTW_STRING, 0, 1},  {"events", 6, YX_VTW_STRING, 0, 1},
+    {"match_data", 7, YX_VTW_STRING, 0, 1},  {"rule_src", 8, YX_VTW_STRING, 0, 0}, {"severity", 9, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_Sms[] = {
     {"destination", 1, YX_VTW_STRING, 0, 0},
     {"body", 2, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_SmtpConversation[] = {
-    {"hostname", 1, YX_VTW_STRING, 0, 0},
-    {"destination_ip", 2, YX_VTW_STRING, 0, 0},
-    {"destination_port", 3, YX_VTW_UINT32, 0, 0},
-    {"smtp_from", 4, YX_VTW_STRING, 0, 0},
-    {"smtp_to", 5, YX_VTW_STRING, 0, 1},
-    {"message_from", 6, YX_VTW_STRING, 0, 1},
-    {"message_to", 7, YX_VTW_STRING, 0, 1},
-    {"message_cc", 8, YX_VTW_STRING, 0, 1},
-    {"message_bcc", 9, YX_VTW_STRING, 0, 1},
-    {"timestamp", 10, YX_VTW_STRING, 0, 0},
-    {"subject", 11, YX_VTW_STRING, 0, 0},
-    {"html_body", 12, YX_VTW_STRING, 0, 0},
-    {"txt_body", 13, YX_VTW_STRING, 0, 0},
-    {"auth_user", 14, YX_VTW_STRING, 0, 0},
-    {"auth_pass", 15, YX_VTW_STRING, 0, 0},
-    {"headers", 16, YX_VTW_MESSAGE, 10, 1},
-    {"attachments", 17, YX_VTW_MESSAGE, 5, 1},
-    {"x_mailer", 18, YX_VTW_STRING, 0, 0},
+    {"hostname", 1, YX_VTW_STRING, 0, 0},   {"destination_ip", 2, YX_VTW_STRING, 0, 0}, {"destination_port", 3, YX_VTW_UINT32, 0, 0},
+    {"smtp_from", 4, YX_VTW_STRING, 0, 0},  {"smtp_to", 5, YX_VTW_STRING, 0, 1},        {"message_from", 6, YX_VTW_STRING, 0, 1},
+    {"message_to", 7, YX_VTW_STRING, 0, 1}, {"message_cc", 8, YX_VTW_STRING, 0, 1},     {"message_bcc", 9, YX_VTW_STRING, 0, 1},
+    {"timestamp", 10, YX_VTW_STRING, 0, 0}, {"subject", 11, YX_VTW_STRING, 0, 0},       {"html_body", 12, YX_VTW_STRING, 0, 0},
+    {"txt_body", 13, YX_VTW_STRING, 0, 0},  {"auth_user", 14, YX_VTW_STRING, 0, 0},     {"auth_pass", 15, YX_VTW_STRING, 0, 0},
+    {"headers", 16, YX_VTW_MESSAGE, 10, 1}, {"attachments", 17, YX_VTW_MESSAGE, 5, 1},  {"x_mailer", 18, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_fileanalysis_TLS[] = {
-    {"subject", 1, YX_VTW_MESSAGE, 1, 3},
-    {"issuer", 2, YX_VTW_MESSAGE, 1, 3},
-    {"serial_number", 3, YX_VTW_STRING, 0, 0},
-    {"thumbprint", 4, YX_VTW_STRING, 0, 0},
-    {"version", 5, YX_VTW_STRING, 0, 0},
-    {"sni", 6, YX_VTW_STRING, 0, 0},
-    {"ja3", 7, YX_VTW_STRING, 0, 0},
-    {"ja3s", 8, YX_VTW_STRING, 0, 0},
-    {"ja4", 10, YX_VTW_STRING, 0, 0},
+    {"subject", 1, YX_VTW_MESSAGE, 1, 3},   {"issuer", 2, YX_VTW_MESSAGE, 1, 3}, {"serial_number", 3, YX_VTW_STRING, 0, 0},
+    {"thumbprint", 4, YX_VTW_STRING, 0, 0}, {"version", 5, YX_VTW_STRING, 0, 0}, {"sni", 6, YX_VTW_STRING, 0, 0},
+    {"ja3", 7, YX_VTW_STRING, 0, 0},        {"ja3s", 8, YX_VTW_STRING, 0, 0},    {"ja4", 10, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_hunting_gti_score_HuntingGtiScore[] = {
     {"verdict", 1, YX_VTW_MESSAGE, 22, 0},
@@ -245,18 +199,9 @@ static const yx_vt_wire_field yx_vt_wire_vt_net_ConsoleMessage[] = {
     {"level", 3, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_DNSRecord[] = {
-    {"type", 2, YX_VTW_STRING, 0, 0},
-    {"dns_class", 3, YX_VTW_STRING, 0, 0},
-    {"ttl", 4, YX_VTW_INT64, 0, 0},
-    {"mname", 5, YX_VTW_STRING, 0, 0},
-    {"rname", 6, YX_VTW_STRING, 0, 0},
-    {"priority", 7, YX_VTW_INT64, 0, 0},
-    {"serial", 8, YX_VTW_INT64, 0, 0},
-    {"retry", 9, YX_VTW_INT64, 0, 0},
-    {"refresh", 10, YX_VTW_INT64, 0, 0},
-    {"expire", 11, YX_VTW_INT64, 0, 0},
-    {"minimum", 12, YX_VTW_INT64, 0, 0},
-    {"value", 13, YX_VTW_STRING, 0, 0},
+    {"type", 2, YX_VTW_STRING, 0, 0},    {"dns_class", 3, YX_VTW_STRING, 0, 0}, {"ttl", 4, YX_VTW_INT64, 0, 0},      {"mname", 5, YX_VTW_STRING, 0, 0},
+    {"rname", 6, YX_VTW_STRING, 0, 0},   {"priority", 7, YX_VTW_INT64, 0, 0},   {"serial", 8, YX_VTW_INT64, 0, 0},   {"retry", 9, YX_VTW_INT64, 0, 0},
+    {"refresh", 10, YX_VTW_INT64, 0, 0}, {"expire", 11, YX_VTW_INT64, 0, 0},    {"minimum", 12, YX_VTW_INT64, 0, 0}, {"value", 13, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_EnrichedDomain[] = {
     {"raw", 18, YX_VTW_STRING, 0, 0},
@@ -347,29 +292,17 @@ static const yx_vt_wire_field yx_vt_wire_vt_net_EnrichedURL[] = {
     {"dom_sha256", 51, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_ExtendedCookie[] = {
-    {"name", 1, YX_VTW_STRING, 0, 0},
-    {"value", 2, YX_VTW_STRING, 0, 0},
-    {"domain", 3, YX_VTW_STRING, 0, 0},
-    {"expires", 4, YX_VTW_INT64, 0, 0},
-    {"secure", 5, YX_VTW_BOOL, 0, 0},
-    {"http_only", 6, YX_VTW_BOOL, 0, 0},
-    {"session", 7, YX_VTW_BOOL, 0, 0},
-    {"size", 8, YX_VTW_INT32, 0, 0},
-    {"priority", 9, YX_VTW_INT32, 0, 0},
+    {"name", 1, YX_VTW_STRING, 0, 0},   {"value", 2, YX_VTW_STRING, 0, 0}, {"domain", 3, YX_VTW_STRING, 0, 0},
+    {"expires", 4, YX_VTW_INT64, 0, 0}, {"secure", 5, YX_VTW_BOOL, 0, 0},  {"http_only", 6, YX_VTW_BOOL, 0, 0},
+    {"session", 7, YX_VTW_BOOL, 0, 0},  {"size", 8, YX_VTW_INT32, 0, 0},   {"priority", 9, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_Favicon[] = {
     {"raw_md5", 1, YX_VTW_STRING, 0, 0},
     {"dhash", 2, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_FileMetadata[] = {
-    {"sha256", 1, YX_VTW_STRING, 0, 0},
-    {"new_for_vt", 3, YX_VTW_BOOL, 0, 0},
-    {"analysis_stats", 5, YX_VTW_MESSAGE, 2, 0},
-    {"file_type", 6, YX_VTW_INT32, 0, 0},
-    {"new_for_url", 7, YX_VTW_BOOL, 0, 0},
-    {"new_for_ip", 8, YX_VTW_BOOL, 0, 0},
-    {"new_for_domain", 9, YX_VTW_BOOL, 0, 0},
-    {"signatures", 10, YX_VTW_MESSAGE, 1, 3},
+    {"sha256", 1, YX_VTW_STRING, 0, 0},    {"new_for_vt", 3, YX_VTW_BOOL, 0, 0}, {"analysis_stats", 5, YX_VTW_MESSAGE, 2, 0}, {"file_type", 6, YX_VTW_INT32, 0, 0},
+    {"new_for_url", 7, YX_VTW_BOOL, 0, 0}, {"new_for_ip", 8, YX_VTW_BOOL, 0, 0}, {"new_for_domain", 9, YX_VTW_BOOL, 0, 0},    {"signatures", 10, YX_VTW_MESSAGE, 1, 3},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_KeyValue[] = {
     {"key", 1, YX_VTW_STRING, 0, 0},
@@ -381,11 +314,8 @@ static const yx_vt_wire_field yx_vt_wire_vt_net_PopularityRank[] = {
     {"rank", 3, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_ResourceFileMetadata[] = {
-    {"sha256", 1, YX_VTW_STRING, 0, 0},
-    {"analysis_stats", 2, YX_VTW_MESSAGE, 2, 0},
-    {"file_type", 3, YX_VTW_INT32, 0, 0},
-    {"new_for_url", 4, YX_VTW_BOOL, 0, 0},
-    {"signatures", 5, YX_VTW_MESSAGE, 1, 3},
+    {"sha256", 1, YX_VTW_STRING, 0, 0},    {"analysis_stats", 2, YX_VTW_MESSAGE, 2, 0}, {"file_type", 3, YX_VTW_INT32, 0, 0},
+    {"new_for_url", 4, YX_VTW_BOOL, 0, 0}, {"signatures", 5, YX_VTW_MESSAGE, 1, 3},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_SSLCertificate[] = {
     {"thumbprint", 1, YX_VTW_STRING, 0, 0},
@@ -401,15 +331,9 @@ static const yx_vt_wire_field yx_vt_wire_vt_net_SSLCertificate[] = {
     {"signature_algorithm", 11, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_Subject[] = {
-    {"common_name", 1, YX_VTW_STRING, 0, 0},
-    {"country", 2, YX_VTW_STRING, 0, 0},
-    {"organization", 3, YX_VTW_STRING, 0, 0},
-    {"organizational_unit", 4, YX_VTW_STRING, 0, 0},
-    {"locality", 5, YX_VTW_STRING, 0, 0},
-    {"state", 6, YX_VTW_STRING, 0, 0},
-    {"alternative_names", 7, YX_VTW_STRING, 0, 1},
-    {"street_address", 8, YX_VTW_STRING, 0, 0},
-    {"postal_code", 9, YX_VTW_STRING, 0, 0},
+    {"common_name", 1, YX_VTW_STRING, 0, 0},         {"country", 2, YX_VTW_STRING, 0, 0},        {"organization", 3, YX_VTW_STRING, 0, 0},
+    {"organizational_unit", 4, YX_VTW_STRING, 0, 0}, {"locality", 5, YX_VTW_STRING, 0, 0},       {"state", 6, YX_VTW_STRING, 0, 0},
+    {"alternative_names", 7, YX_VTW_STRING, 0, 1},   {"street_address", 8, YX_VTW_STRING, 0, 0}, {"postal_code", 9, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_net_Tracker[] = {
     {"name", 1, YX_VTW_STRING, 0, 0},
@@ -449,32 +373,19 @@ static const yx_vt_wire_field yx_vt_wire_vt_sigma_LogSource[] = {
     {"definition", 4, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_sigma_SigmaMatch[] = {
-    {"match_context", 1, YX_VTW_MESSAGE, 44, 1},
-    {"rule_level", 2, YX_VTW_INT32, 0, 0},
-    {"rule_id", 3, YX_VTW_STRING, 0, 0},
-    {"rule_source", 4, YX_VTW_STRING, 0, 0},
-    {"rule_title", 5, YX_VTW_STRING, 0, 0},
-    {"rule_description", 6, YX_VTW_STRING, 0, 0},
+    {"match_context", 1, YX_VTW_MESSAGE, 44, 1}, {"rule_level", 2, YX_VTW_INT32, 0, 0},  {"rule_id", 3, YX_VTW_STRING, 0, 0},
+    {"rule_source", 4, YX_VTW_STRING, 0, 0},     {"rule_title", 5, YX_VTW_STRING, 0, 0}, {"rule_description", 6, YX_VTW_STRING, 0, 0},
     {"rule_author", 7, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_sigma_SigmaMatchContext[] = {
     {"values", 1, YX_VTW_MESSAGE, 1, 3},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_sigma_SigmaRule[] = {
-    {"rule", 1, YX_VTW_STRING, 0, 0},
-    {"title", 2, YX_VTW_STRING, 0, 0},
-    {"log_source", 3, YX_VTW_MESSAGE, 42, 0},
-    {"status", 4, YX_VTW_STRING, 0, 0},
-    {"description", 5, YX_VTW_STRING, 0, 0},
-    {"references", 6, YX_VTW_STRING, 0, 1},
-    {"fields", 7, YX_VTW_STRING, 0, 1},
-    {"false_positives", 8, YX_VTW_STRING, 0, 1},
-    {"level", 9, YX_VTW_INT32, 0, 0},
-    {"source", 10, YX_VTW_STRING, 0, 0},
-    {"tags", 11, YX_VTW_STRING, 0, 1},
-    {"detection", 12, YX_VTW_MESSAGE, 41, 0},
-    {"author", 13, YX_VTW_STRING, 0, 0},
-    {"source_url", 14, YX_VTW_STRING, 0, 0},
+    {"rule", 1, YX_VTW_STRING, 0, 0},    {"title", 2, YX_VTW_STRING, 0, 0},           {"log_source", 3, YX_VTW_MESSAGE, 42, 0},
+    {"status", 4, YX_VTW_STRING, 0, 0},  {"description", 5, YX_VTW_STRING, 0, 0},     {"references", 6, YX_VTW_STRING, 0, 1},
+    {"fields", 7, YX_VTW_STRING, 0, 1},  {"false_positives", 8, YX_VTW_STRING, 0, 1}, {"level", 9, YX_VTW_INT32, 0, 0},
+    {"source", 10, YX_VTW_STRING, 0, 0}, {"tags", 11, YX_VTW_STRING, 0, 1},           {"detection", 12, YX_VTW_MESSAGE, 41, 0},
+    {"author", 13, YX_VTW_STRING, 0, 0}, {"source_url", 14, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_submitter_Submitter[] = {
     {"city", 6, YX_VTW_STRING, 0, 0},
@@ -511,12 +422,8 @@ static const yx_vt_wire_field yx_vt_wire_vt_titan_FileMetadata[] = {
     {"gti_assessment", 36, YX_VTW_MESSAGE, 19, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_titan_GoReSym[] = {
-    {"version", 1, YX_VTW_STRING, 0, 0},
-    {"arch", 2, YX_VTW_STRING, 0, 0},
-    {"os", 3, YX_VTW_STRING, 0, 0},
-    {"build_id", 4, YX_VTW_STRING, 0, 0},
-    {"build_info", 5, YX_VTW_MESSAGE, 49, 0},
-    {"summary", 6, YX_VTW_MESSAGE, 50, 0},
+    {"version", 1, YX_VTW_STRING, 0, 0},  {"arch", 2, YX_VTW_STRING, 0, 0},         {"os", 3, YX_VTW_STRING, 0, 0},
+    {"build_id", 4, YX_VTW_STRING, 0, 0}, {"build_info", 5, YX_VTW_MESSAGE, 49, 0}, {"summary", 6, YX_VTW_MESSAGE, 50, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_titan_GoReSym_BuildInfo[] = {
     {"path", 1, YX_VTW_STRING, 0, 0},
@@ -524,11 +431,8 @@ static const yx_vt_wire_field yx_vt_wire_vt_titan_GoReSym_BuildInfo[] = {
     {"settings", 3, YX_VTW_MESSAGE, 1, 3},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_titan_GoReSym_Summary[] = {
-    {"num_user_functions", 1, YX_VTW_INT64, 0, 0},
-    {"num_std_functions", 2, YX_VTW_INT64, 0, 0},
-    {"num_interfaces", 3, YX_VTW_INT64, 0, 0},
-    {"num_types", 4, YX_VTW_INT64, 0, 0},
-    {"num_dependencies", 5, YX_VTW_INT64, 0, 0},
+    {"num_user_functions", 1, YX_VTW_INT64, 0, 0}, {"num_std_functions", 2, YX_VTW_INT64, 0, 0}, {"num_interfaces", 3, YX_VTW_INT64, 0, 0},
+    {"num_types", 4, YX_VTW_INT64, 0, 0},          {"num_dependencies", 5, YX_VTW_INT64, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_titan_LiveHuntData[] = {
     {"metadata", 1, YX_VTW_MESSAGE, 47, 0},
@@ -540,26 +444,14 @@ static const yx_vt_wire_field yx_vt_wire_vt_titan_MainIcon[] = {
     {"raw_md5", 2, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_tools_net_analysis_CrowdSourcedIdsAlertContext[] = {
-    {"protocol", 1, YX_VTW_INT32, 0, 0},
-    {"src_ip", 2, YX_VTW_STRING, 0, 0},
-    {"src_port", 3, YX_VTW_UINT32, 0, 0},
-    {"dest_ip", 4, YX_VTW_STRING, 0, 0},
-    {"dest_port", 5, YX_VTW_UINT32, 0, 0},
-    {"hostname", 6, YX_VTW_STRING, 0, 0},
-    {"url", 7, YX_VTW_STRING, 0, 0},
-    {"ja3", 8, YX_VTW_STRING, 0, 1},
-    {"ja3s", 9, YX_VTW_STRING, 0, 1},
+    {"protocol", 1, YX_VTW_INT32, 0, 0}, {"src_ip", 2, YX_VTW_STRING, 0, 0},    {"src_port", 3, YX_VTW_UINT32, 0, 0},
+    {"dest_ip", 4, YX_VTW_STRING, 0, 0}, {"dest_port", 5, YX_VTW_UINT32, 0, 0}, {"hostname", 6, YX_VTW_STRING, 0, 0},
+    {"url", 7, YX_VTW_STRING, 0, 0},     {"ja3", 8, YX_VTW_STRING, 0, 1},       {"ja3s", 9, YX_VTW_STRING, 0, 1},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_tools_net_analysis_CrowdSourcedIdsResults[] = {
-    {"rule_msg", 1, YX_VTW_STRING, 0, 0},
-    {"rule_category", 2, YX_VTW_STRING, 0, 0},
-    {"rule_id", 3, YX_VTW_STRING, 0, 0},
-    {"alert_severity", 4, YX_VTW_INT32, 0, 0},
-    {"rule_source", 5, YX_VTW_STRING, 0, 0},
-    {"alert_context", 6, YX_VTW_MESSAGE, 53, 0},
-    {"rule_url", 7, YX_VTW_STRING, 0, 0},
-    {"rule_references", 8, YX_VTW_STRING, 0, 1},
-    {"tags", 9, YX_VTW_STRING, 0, 1},
+    {"rule_msg", 1, YX_VTW_STRING, 0, 0},      {"rule_category", 2, YX_VTW_STRING, 0, 0},   {"rule_id", 3, YX_VTW_STRING, 0, 0},
+    {"alert_severity", 4, YX_VTW_INT32, 0, 0}, {"rule_source", 5, YX_VTW_STRING, 0, 0},     {"alert_context", 6, YX_VTW_MESSAGE, 53, 0},
+    {"rule_url", 7, YX_VTW_STRING, 0, 0},      {"rule_references", 8, YX_VTW_STRING, 0, 1}, {"tags", 9, YX_VTW_STRING, 0, 1},
     {"rule_raw", 10, YX_VTW_STRING, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_urlheadless_ConsoleMessage[] = {
@@ -568,15 +460,9 @@ static const yx_vt_wire_field yx_vt_wire_vt_urlheadless_ConsoleMessage[] = {
     {"level", 3, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_field yx_vt_wire_vt_urlheadless_Cookie[] = {
-    {"name", 1, YX_VTW_STRING, 0, 0},
-    {"value", 2, YX_VTW_STRING, 0, 0},
-    {"domain", 3, YX_VTW_STRING, 0, 0},
-    {"expires", 4, YX_VTW_INT32, 0, 0},
-    {"size", 5, YX_VTW_INT32, 0, 0},
-    {"http_only", 6, YX_VTW_BOOL, 0, 0},
-    {"secure", 7, YX_VTW_BOOL, 0, 0},
-    {"session", 8, YX_VTW_BOOL, 0, 0},
-    {"priority", 9, YX_VTW_INT32, 0, 0},
+    {"name", 1, YX_VTW_STRING, 0, 0},   {"value", 2, YX_VTW_STRING, 0, 0}, {"domain", 3, YX_VTW_STRING, 0, 0},
+    {"expires", 4, YX_VTW_INT32, 0, 0}, {"size", 5, YX_VTW_INT32, 0, 0},   {"http_only", 6, YX_VTW_BOOL, 0, 0},
+    {"secure", 7, YX_VTW_BOOL, 0, 0},   {"session", 8, YX_VTW_BOOL, 0, 0}, {"priority", 9, YX_VTW_INT32, 0, 0},
 };
 static const yx_vt_wire_message yx_vt_wire_messages[] = {
     {"google.protobuf.Timestamp", yx_vt_wire_google_protobuf_Timestamp, 2},

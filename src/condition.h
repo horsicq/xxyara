@@ -49,8 +49,7 @@ typedef struct yx_global_object yx_global_object;
 typedef struct yx_eval_string_arena yx_eval_string_arena;
 typedef struct yx_cuckoo_report yx_cuckoo_report;
 typedef struct yx_scan_deadline yx_scan_deadline;
-typedef bool (*yx_condition_identifier_resolver)(void *user_data,
-                                                  const char *identifier);
+typedef bool (*yx_condition_identifier_resolver)(void *user_data, const char *identifier);
 
 typedef struct yx_eval_match_list {
     const YRX_MATCH *matches;
@@ -155,91 +154,63 @@ typedef struct yx_eval_context {
  * CLI uses this to retain embedded NUL bytes in console output. */
 size_t yx_console_current_log_length(void);
 
-yx_condition *yx_condition_compile(const char *expression, char *error,
-                                   size_t error_capacity);
+yx_condition *yx_condition_compile(const char *expression, char *error, size_t error_capacity);
 /* Retains the partially folded tree for warnings preceding a fold error.
  * The caller owns *failed when non-NULL. Syntax failures leave it NULL. */
-yx_condition *yx_condition_compile_diagnostics(const char *expression, char *error,
-                                   size_t error_capacity, yx_condition **failed);
-typedef bool (*yx_condition_type_warning_callback)(const char *kind,
-    size_t start, size_t end, size_t other_start, size_t other_end,
-    const char *type, void *user);
+yx_condition *yx_condition_compile_diagnostics(const char *expression, char *error, size_t error_capacity, yx_condition **failed);
+typedef bool (*yx_condition_type_warning_callback)(const char *kind, size_t start, size_t end, size_t other_start, size_t other_end, const char *type, void *user);
 /* Earlier rule names of a namespace, cached across rules by the caller. */
 typedef struct yx_rule_name_cache yx_rule_name_cache;
 void yx_rule_name_cache_free(yx_rule_name_cache *cache);
 /* Whether rules has a rule called name in namespace_index. */
-bool yx_rule_name_cache_contains(yx_rule_name_cache **cache, const YRX_RULES *rules,
-                                 size_t namespace_index, const char *name, bool *found);
-bool yx_condition_visit_type_warnings(const yx_condition *condition,
-    const char *const *imports, size_t import_count,
-    const YRX_RULES *rules, size_t namespace_index, yx_rule_name_cache **cache,
-    yx_condition_type_warning_callback callback, void *user);
+bool yx_rule_name_cache_contains(yx_rule_name_cache **cache, const YRX_RULES *rules, size_t namespace_index, const char *name, bool *found);
+bool yx_condition_visit_type_warnings(const yx_condition *condition, const char *const *imports, size_t import_count, const YRX_RULES *rules, size_t namespace_index,
+                                      yx_rule_name_cache **cache, yx_condition_type_warning_callback callback, void *user);
 /* Every `of` expression (not `for ... of`) whose quantifier folds to 0, in
  * YARA-X's warning order: the quantifier's span (inside parentheses) and
  * the end of the expression (its last item or anchor). */
-typedef bool (*yx_condition_zero_quantifier_callback)(size_t quantifier_start,
-    size_t quantifier_end, size_t end, size_t raised, void *user);
-bool yx_condition_visit_zero_quantifiers(const yx_condition *condition,
-    yx_condition_zero_quantifier_callback callback, void *user);
+typedef bool (*yx_condition_zero_quantifier_callback)(size_t quantifier_start, size_t quantifier_end, size_t end, size_t raised, void *user);
+bool yx_condition_visit_zero_quantifiers(const yx_condition *condition, yx_condition_zero_quantifier_callback callback, void *user);
 /* Every `of` and `for ... of` expression whose quantifier folds to an
  * integer above the number of its items (YARA-X's invariant_expr "the
  * expression requires N matching patterns out of M"): the expression's
  * span, and `raised`, where its warnings are raised: after its items,
  * before its anchor. The zero-quantifier callback receives the same point. */
-typedef bool (*yx_condition_excess_quantifier_callback)(size_t start,
-    size_t end, size_t raised, int64_t required, size_t available, void *user);
+typedef bool (*yx_condition_excess_quantifier_callback)(size_t start, size_t end, size_t raised, int64_t required, size_t available, void *user);
 /* Both kinds in one walk, each expression's warnings after those of the
  * expressions inside it, as YARA-X raises them. Either callback may be NULL. */
-bool yx_condition_visit_of_quantifiers(const yx_condition *condition,
-    const char *const *pattern_names, size_t pattern_count,
-    yx_condition_zero_quantifier_callback zero,
-    yx_condition_excess_quantifier_callback excess, void *user);
+bool yx_condition_visit_of_quantifiers(const yx_condition *condition, const char *const *pattern_names, size_t pattern_count, yx_condition_zero_quantifier_callback zero,
+                                       yx_condition_excess_quantifier_callback excess, void *user);
 /* Every `for ... in` loop over a range with constant bounds or over a tuple
  * whose iterations, times those of the loops around it, exceed 1,000,000
  * (YARA-X's too_many_iterations): the loop's span, in source order. */
-typedef bool (*yx_condition_loop_iterations_callback)(size_t start, size_t end,
-    uint64_t iterations, void *user);
-bool yx_condition_visit_loop_iterations(const yx_condition *condition,
-    yx_condition_loop_iterations_callback callback, void *user);
+typedef bool (*yx_condition_loop_iterations_callback)(size_t start, size_t end, uint64_t iterations, void *user);
+bool yx_condition_visit_loop_iterations(const yx_condition *condition, yx_condition_loop_iterations_callback callback, void *user);
 /* Every `of` expression anchored with `at` whose quantifier asks for two or
  * more of its patterns (YARA-X's potentially unsatisfiable expression): the
  * quantifier's span and the anchor's, from `at` to the end of its
  * expression. */
-typedef bool (*yx_condition_anchored_quantifier_callback)(size_t quantifier_start,
-    size_t quantifier_end, size_t anchor_start, size_t anchor_end, void *user);
-bool yx_condition_visit_anchored_quantifiers(const yx_condition *condition,
-    const char *const *pattern_names, size_t pattern_count,
-    yx_condition_anchored_quantifier_callback callback, void *user);
+typedef bool (*yx_condition_anchored_quantifier_callback)(size_t quantifier_start, size_t quantifier_end, size_t anchor_start, size_t anchor_end, void *user);
+bool yx_condition_visit_anchored_quantifiers(const yx_condition *condition, const char *const *pattern_names, size_t pattern_count,
+                                             yx_condition_anchored_quantifier_callback callback, void *user);
 /* YARA-X's unintended_pattern_in_set: in each conjunctive branch of the
  * condition, a pattern a wildcard set item includes that the branch also
  * uses explicitly or through a more specific set. The set item, then both
  * uses in source order (a wildcard use is a set item ending with `*`). */
-typedef bool (*yx_condition_pattern_set_callback)(const char *pattern,
-    size_t set_start, size_t set_end,
-    size_t first_start, size_t first_end, bool first_wildcard,
-    size_t second_start, size_t second_end, bool second_wildcard, void *user);
-bool yx_condition_visit_pattern_sets(const yx_condition *condition,
-    const char *const *pattern_names, size_t pattern_count,
-    yx_condition_pattern_set_callback callback, void *user);
+typedef bool (*yx_condition_pattern_set_callback)(const char *pattern, size_t set_start, size_t set_end, size_t first_start, size_t first_end, bool first_wildcard,
+                                                  size_t second_start, size_t second_end, bool second_wildcard, void *user);
+bool yx_condition_visit_pattern_sets(const yx_condition *condition, const char *const *pattern_names, size_t pattern_count, yx_condition_pattern_set_callback callback,
+                                     void *user);
 /* On failure *converted_end (when not NULL) is the condition offset up to
  * which YARA-X has converted the expression when it reports the error, or
  * 0 when unknown. */
-bool yx_condition_validate(const yx_condition *condition,
-                           const char *const *pattern_names, size_t pattern_count,
-                           const char *const *imports, size_t import_count,
-                           const char *const *features, size_t feature_count,
-                           const yx_global *globals, size_t global_count,
-                           yx_condition_identifier_resolver identifier_exists,
-                           void *user_data, char *error, size_t error_capacity,
-                           size_t *converted_end);
+bool yx_condition_validate(const yx_condition *condition, const char *const *pattern_names, size_t pattern_count, const char *const *imports, size_t import_count,
+                           const char *const *features, size_t feature_count, const yx_global *globals, size_t global_count,
+                           yx_condition_identifier_resolver identifier_exists, void *user_data, char *error, size_t error_capacity, size_t *converted_end);
 /* Instructions YARA-X 1.23.0 emits for the rule's condition, including the
  * code that records the result; above 100,000 the rule fails with E048.
  * Pattern names are in declaration order. 0 when it cannot be computed. */
-uint64_t yx_condition_wasm_size(const yx_condition *condition,
-                                bool global_rule,
-                                const char *const *pattern_names,
-                                size_t pattern_count,
-                                const yx_global *globals,
+uint64_t yx_condition_wasm_size(const yx_condition *condition, bool global_rule, const char *const *pattern_names, size_t pattern_count, const yx_global *globals,
                                 size_t global_count);
 /* Runs call(data) on one thread whose stack holds a walk of the condition,
  * on which the queries below run in place; false (call not run) for a
@@ -251,12 +222,9 @@ bool yx_condition_run_deep(const yx_condition *condition, void (*call)(void *), 
 bool yx_deep_stack_ready(size_t depth);
 bool yx_run_deep_walk(size_t depth, void (*call)(void *), void *data);
 /* True when a condition can inspect more than a pattern's mere existence. */
-bool yx_condition_pattern_requires_all_matches(const yx_condition *condition,
-                                                const char *pattern_name);
+bool yx_condition_pattern_requires_all_matches(const yx_condition *condition, const char *pattern_name);
 /* Whether YARA-X's optimized condition marks this pattern non-anchorable. */
-bool yx_condition_pattern_nonanchorable(const yx_condition *condition,
-                                        const char *pattern_name,
-                                        bool fixed_at);
+bool yx_condition_pattern_nonanchorable(const yx_condition *condition, const char *pattern_name, bool fixed_at);
 /* The condition with every constant that decides an `and` / `or` (and every
  * `not` of constants) spelled `true` or `false`, as YARA-X's IR has them
  * once folded: `$a or 1` gives `$a or true`. NULL when nothing changes;
@@ -282,26 +250,19 @@ char *yx_condition_folded_text(const char *expression);
 int yx_condition_alias_free_text(const char *expression, char **text);
 /* Set while the archive codecs read conditions with `?` frame items. */
 extern _Thread_local bool yx_condition_frame_markers;
-char *yx_condition_literal_text(const char *expression,
-                                const char *const *imports, size_t import_count,
-                                const yx_global *globals, size_t global_count);
+char *yx_condition_literal_text(const char *expression, const char *const *imports, size_t import_count, const yx_global *globals, size_t global_count);
 /* Folds the module constants of a compiled condition once its symbols are
  * known: a path folds only when its root is one of `imports` and no global
  * has that name. yx_condition_validate does it; a condition compiled from
  * text alone needs it for constant anchors. False when the folding fails. */
-bool yx_condition_fold_modules(yx_condition *condition,
-                               const char *const *imports, size_t import_count,
-                               const yx_global *globals, size_t global_count,
-                               char *error, size_t error_capacity);
+bool yx_condition_fold_modules(yx_condition *condition, const char *const *imports, size_t import_count, const yx_global *globals, size_t global_count, char *error,
+                               size_t error_capacity);
 /* Tells a condition compiled without validation the rule's patterns, for
  * the number of patterns in each of its pattern sets (the anchoring of
  * `any of ($a*) at 0` and `2 of (..) at 0` depends on it). */
-void yx_condition_bind_pattern_sets(yx_condition *condition,
-                                    const char *const *pattern_names,
-                                    size_t pattern_count);
+void yx_condition_bind_pattern_sets(yx_condition *condition, const char *const *pattern_names, size_t pattern_count);
 /* A simple `at` condition can only observe this pattern at one fixed offset. */
-bool yx_condition_pattern_fixed_at(const yx_condition *condition,
-                                   const char *pattern_name, size_t *offset);
+bool yx_condition_pattern_fixed_at(const yx_condition *condition, const char *pattern_name, size_t *offset);
 /* The filesize bounds and header constraints YARA-X's Compiler::c_rule
  * derives from a rule's condition (IR::filesize_bounds and
  * IR::header_constraints). Bound kinds: 0 unbounded, 1 included, 2 excluded.
@@ -317,21 +278,16 @@ typedef struct yx_rule_constraints {
 typedef const yx_rule_constraints *(*yx_constraints_rule_lookup)(void *user, const char *name);
 /* The literal bytes of a pattern that `$name at 0` constrains the header
  * with (false when the pattern is not eligible). */
-typedef bool (*yx_constraints_pattern_lookup)(void *user, const char *name,
-                                              const uint8_t **bytes, size_t *length);
+typedef bool (*yx_constraints_pattern_lookup)(void *user, const char *name, const uint8_t **bytes, size_t *length);
 /* The condition's own constraints, with those of the rules it requires.
  * False only when out of memory. */
-bool yx_condition_rule_constraints(const yx_condition *condition,
-                                   yx_constraints_rule_lookup rule_lookup,
-                                   yx_constraints_pattern_lookup pattern_lookup,
-                                   void *user, yx_rule_constraints *out);
+bool yx_condition_rule_constraints(const yx_condition *condition, yx_constraints_rule_lookup rule_lookup, yx_constraints_pattern_lookup pattern_lookup, void *user,
+                                   yx_rule_constraints *out);
 /* FilesizeBounds::merge and HeaderConstraint::merge. False when out of memory. */
 bool yx_rule_constraints_merge(yx_rule_constraints *into, const yx_rule_constraints *other);
 bool yx_rule_constraints_equal(const yx_rule_constraints *a, const yx_rule_constraints *b);
 /* Fast scans can stop tracking a root count comparison once it is true. */
-bool yx_condition_pattern_fast_count(const yx_condition *condition,
-                                     const char *pattern_name,
-                                     size_t *minimum_count);
+bool yx_condition_pattern_fast_count(const yx_condition *condition, const char *pattern_name, size_t *minimum_count);
 /* The four pattern queries above for every pattern of a rule at once:
  * requires_all is yx_condition_pattern_requires_all_matches, fast_count and
  * its threshold yx_condition_pattern_fast_count, fixed_at and its offset
@@ -345,15 +301,10 @@ typedef struct {
     size_t fixed_at_offset;
     bool nonanchorable;
 } yx_condition_pattern_answers;
-bool yx_condition_pattern_queries(const yx_condition *condition,
-                                  const char *const *pattern_names, size_t pattern_count,
-                                  yx_condition_pattern_answers *answers);
+bool yx_condition_pattern_queries(const yx_condition *condition, const char *const *pattern_names, size_t pattern_count, yx_condition_pattern_answers *answers);
 /* Whether every parsed reference to a module reads exactly one field. */
-bool yx_condition_uses_only_module_field(const yx_condition *condition,
-                                         const char *module,
-                                         const char *field);
-bool yx_condition_uses_module(const yx_condition *condition,
-                              const char *module);
+bool yx_condition_uses_only_module_field(const yx_condition *condition, const char *module, const char *field);
+bool yx_condition_uses_module(const yx_condition *condition, const char *module);
 /* YARA-X folds an `and`/`or` decided by a constant operand (and `not` of
  * a Boolean constant) into a constant, so the console calls inside never
  * run. Turns those calls into the constant true they return; called once
@@ -363,28 +314,16 @@ void yx_condition_drop_absorbed_console_calls(yx_condition *condition);
  * like); *floating tells a float constant from an integer one. */
 bool yx_condition_module_constant(const char *path, bool *floating);
 /* The same, with the constant's value (an i64, or `real` for a float). */
-bool yx_condition_module_constant_number(const char *path, uint64_t *value,
-                                         bool *floating, double *real);
+bool yx_condition_module_constant_number(const char *path, uint64_t *value, bool *floating, double *real);
 /* The same with the constant's value: *number for a float constant,
  * *integer (its 64 bits) otherwise. */
-bool yx_condition_module_constant_value(const char *path, bool *floating,
-                                        uint64_t *integer, double *number);
+bool yx_condition_module_constant_value(const char *path, bool *floating, uint64_t *integer, double *number);
 bool yx_condition_uses_only_pe_locale_fields(const yx_condition *condition);
 bool yx_condition_uses_only_dex_scalar_fields(const yx_condition *condition);
-bool yx_dex_output_root_string_at(const uint8_t *data, size_t size,
-                                  unsigned field, uint64_t index,
-                                  const uint8_t **bytes, size_t *length);
-bool yx_dex_output_record_string_at(const uint8_t *data, size_t size,
-                                    unsigned root_field, uint64_t index,
-                                    unsigned record_field,
-                                    const uint8_t **bytes, size_t *length);
-bool yx_dex_output_record_numeric_at(const uint8_t *data, size_t size,
-                                     unsigned root_field, uint64_t index,
-                                     unsigned record_field, bool signed_enum,
-                                     uint64_t *value);
-bool yx_dex_output_map_item_numeric_at(const uint8_t *data, size_t size,
-                                       uint64_t index, unsigned item_field,
-                                       bool signed_enum, uint64_t *value);
+bool yx_dex_output_root_string_at(const uint8_t *data, size_t size, unsigned field, uint64_t index, const uint8_t **bytes, size_t *length);
+bool yx_dex_output_record_string_at(const uint8_t *data, size_t size, unsigned root_field, uint64_t index, unsigned record_field, const uint8_t **bytes, size_t *length);
+bool yx_dex_output_record_numeric_at(const uint8_t *data, size_t size, unsigned root_field, uint64_t index, unsigned record_field, bool signed_enum, uint64_t *value);
+bool yx_dex_output_map_item_numeric_at(const uint8_t *data, size_t size, uint64_t index, unsigned item_field, bool signed_enum, uint64_t *value);
 void yx_condition_destroy(yx_condition *condition);
 #ifdef XXYARA_VERIFY_LOAD
 /* Whether two compiled conditions are the same tree, field by field. */
@@ -395,8 +334,7 @@ yx_eval_string_arena *yx_condition_scratch_create(void);
 void yx_condition_scratch_destroy(yx_eval_string_arena *scratch);
 /* Call once per scan: drops caches derived from the previous scan's data. */
 void yx_condition_scratch_new_scan(yx_eval_string_arena *scratch);
-bool yx_condition_evaluate(const yx_condition *condition,
-                           const yx_eval_context *context, bool *out);
+bool yx_condition_evaluate(const yx_condition *condition, const yx_eval_context *context, bool *out);
 /* Proves a regexp-with expression independent of scan data and globals,
  * then evaluates it for the archive's ordinary constant-condition codec. */
 bool yx_condition_regexp_constant(const yx_condition *condition, bool *out);
@@ -405,8 +343,7 @@ bool yx_condition_regexp_constant(const yx_condition *condition, bool *out);
  * `icontains` under a trailing i. The same analysis decides the condition
  * evaluator's rewrite. Returns 1 with a malloc'd NUL-terminated literal,
  * 0 for no literal and -1 on allocation failure. */
-int yx_condition_regex_literal_bytes(const char *regexp, char **literal,
-                                     size_t *length);
+int yx_condition_regex_literal_bytes(const char *regexp, char **literal, size_t *length);
 
 #ifdef __cplusplus
 }

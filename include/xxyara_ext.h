@@ -48,8 +48,7 @@ extern "C" {
 // (this differs from YARA-X). Callers that never use the multi-block API get
 // results identical to the default, without one copy of every scanned
 // buffer.
-enum YRX_RESULT xxyara_scanner_retain_scan_data(struct YRX_SCANNER *scanner,
-                                                bool retain);
+enum YRX_RESULT xxyara_scanner_retain_scan_data(struct YRX_SCANNER *scanner, bool retain);
 
 // Calls `callback` for every rule, private ones included, that did not match
 // in the last scan, in rule declaration order (YARA-X's
@@ -57,11 +56,10 @@ enum YRX_RESULT xxyara_scanner_retain_scan_data(struct YRX_SCANNER *scanner,
 // to that scan: their patterns report the matches found, as for the rules
 // passed to the callback set with [`yrx_scanner_on_matching_rule`]. They are
 // valid until the next scan or the scanner's destruction.
-enum YRX_RESULT xxyara_scanner_iter_non_matching_rules(
-    struct YRX_SCANNER *scanner, YRX_RULE_CALLBACK callback, void *user_data);
+enum YRX_RESULT xxyara_scanner_iter_non_matching_rules(struct YRX_SCANNER *scanner, YRX_RULE_CALLBACK callback, void *user_data);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  /* XXYARA_EXT_H */
+#endif /* XXYARA_EXT_H */

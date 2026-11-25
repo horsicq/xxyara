@@ -88,8 +88,7 @@ static bool yx_u8_any_except_newline(const yx_tr_node *node)
     const yx_re_range *r = (const yx_re_range *)node->bytes;
     size_t end = 1;
     while (yx_u8_joins(node, r, node->length, end)) ++end;
-    return r[0].first == 0 && r[0].last == 9 && r[1].first == 11 && r[end].last == 0x10ffff &&
-           end + 1 == node->length;
+    return r[0].first == 0 && r[0].last == 9 && r[1].first == 11 && r[end].last == 0x10ffff && end + 1 == node->length;
 }
 
 /* The repetition gaps that the FastVM splitter and split_at_large_gaps read:
@@ -114,25 +113,35 @@ static bool yx_tr_gap_class(const yx_tr_node *node, bool *newline)
 }
 
 /* One regex-syntax Utf8Sequence: a byte range per encoded byte. */
-typedef struct { uint8_t first[4], last[4], length; } yx_u8_seq;
-enum { YX_U8_MAX_SEQUENCES = 255 }; /* re::MAX_ALTERNATIVES */
+typedef struct {
+    uint8_t first[4], last[4], length;
+} yx_u8_seq;
+enum {
+    YX_U8_MAX_SEQUENCES = 255
+}; /* re::MAX_ALTERNATIVES */
 
 static unsigned yx_u8_encode(uint32_t cp, uint8_t out[4])
 {
-    if (cp < 0x80) { out[0] = (uint8_t)cp; return 1; }
+    if (cp < 0x80) {
+        out[0] = (uint8_t)cp;
+        return 1;
+    }
     if (cp < 0x800) {
         out[0] = (uint8_t)(0xc0 | (cp >> 6));
-        out[1] = (uint8_t)(0x80 | (cp & 63)); return 2;
+        out[1] = (uint8_t)(0x80 | (cp & 63));
+        return 2;
     }
     if (cp < 0x10000) {
         out[0] = (uint8_t)(0xe0 | (cp >> 12));
         out[1] = (uint8_t)(0x80 | ((cp >> 6) & 63));
-        out[2] = (uint8_t)(0x80 | (cp & 63)); return 3;
+        out[2] = (uint8_t)(0x80 | (cp & 63));
+        return 3;
     }
     out[0] = (uint8_t)(0xf0 | (cp >> 18));
     out[1] = (uint8_t)(0x80 | ((cp >> 12) & 63));
     out[2] = (uint8_t)(0x80 | ((cp >> 6) & 63));
-    out[3] = (uint8_t)(0x80 | (cp & 63)); return 4;
+    out[3] = (uint8_t)(0x80 | (cp & 63));
+    return 4;
 }
 
 /* Utf8Sequences::next for one scalar range, in the iterator's order: every
@@ -141,24 +150,17 @@ static unsigned yx_u8_encode(uint32_t cp, uint8_t out[4])
 static int yx_u8_range(uint32_t first, uint32_t last, yx_u8_seq *out, size_t *count, unsigned depth)
 {
     if (first > last || depth > 64) return first > last;
-    if (first < 0xe000 && last > 0xd7ff)
-        return yx_u8_range(first, 0xd7ff, out, count, depth + 1) &&
-               yx_u8_range(0xe000, last, out, count, depth + 1);
+    if (first < 0xe000 && last > 0xd7ff) return yx_u8_range(first, 0xd7ff, out, count, depth + 1) && yx_u8_range(0xe000, last, out, count, depth + 1);
     static const uint32_t maxima[] = {0x7f, 0x7ff, 0xffff};
     for (unsigned i = 0; i < 3; ++i)
         if (first <= maxima[i] && maxima[i] < last)
-            return yx_u8_range(first, maxima[i], out, count, depth + 1) &&
-                   yx_u8_range(maxima[i] + 1, last, out, count, depth + 1);
+            return yx_u8_range(first, maxima[i], out, count, depth + 1) && yx_u8_range(maxima[i] + 1, last, out, count, depth + 1);
     if (last > 0x7f)
         for (unsigned i = 1; i < 4; ++i) {
             uint32_t m = (1u << (6 * i)) - 1;
             if ((first & ~m) == (last & ~m)) continue;
-            if (first & m)
-                return yx_u8_range(first, first | m, out, count, depth + 1) &&
-                       yx_u8_range((first | m) + 1, last, out, count, depth + 1);
-            if ((last & m) != m)
-                return yx_u8_range(first, (last & ~m) - 1, out, count, depth + 1) &&
-                       yx_u8_range(last & ~m, last, out, count, depth + 1);
+            if (first & m) return yx_u8_range(first, first | m, out, count, depth + 1) && yx_u8_range((first | m) + 1, last, out, count, depth + 1);
+            if ((last & m) != m) return yx_u8_range(first, (last & ~m) - 1, out, count, depth + 1) && yx_u8_range(last & ~m, last, out, count, depth + 1);
         }
     if (*count == YX_U8_MAX_SEQUENCES) return 0;
     yx_u8_seq *seq = &out[(*count)++];
@@ -184,10 +186,13 @@ static bool yx_u8_byte_range(yx_writer *w, uint8_t first, uint8_t last)
     if (first == last) return yx_put_u8(w, first) && (first != 0xaa || yx_put_u8(w, first));
     unsigned neg_mask = (unsigned)(first ^ last), bits = 0;
     bool masked = true;
-    for (unsigned b = first; b <= last; ++b) if ((b & first) != first) { masked = false; break; }
+    for (unsigned b = first; b <= last; ++b)
+        if ((b & first) != first) {
+            masked = false;
+            break;
+        }
     for (unsigned k = 0; k < 8; ++k) bits += (neg_mask >> k) & 1u;
-    if (masked && (1u << bits) == (unsigned)(last - first) + 1u)
-        return yx_tr_instr(w, 6, 0, 0) && yx_put_u8(w, first) && yx_put_u8(w, (uint8_t)~neg_mask);
+    if (masked && (1u << bits) == (unsigned)(last - first) + 1u) return yx_tr_instr(w, 6, 0, 0) && yx_put_u8(w, first) && yx_put_u8(w, (uint8_t)~neg_mask);
     return yx_tr_instr(w, 9, 0, 0) && yx_put_u8(w, 1) && yx_put_u8(w, first) && yx_put_u8(w, last);
 }
 
@@ -215,28 +220,28 @@ static bool yx_u8_class_code(const yx_re_range *ranges, size_t count, yx_tr_prog
     }
     yx_u8_seq *seqs = malloc(YX_U8_MAX_SEQUENCES * sizeof(*seqs));
     /* Per branch: forward and backward start, forward and backward jump. */
-    size_t (*at)[4] = malloc(YX_U8_MAX_SEQUENCES * sizeof(*at));
+    size_t(*at)[4] = malloc(YX_U8_MAX_SEQUENCES * sizeof(*at));
     size_t n = 0, f0 = out->forward.used, b0 = out->backward.used;
     bool ok = seqs && at && yx_u8_sequences(ranges, count, seqs, &n) && n;
     if (ok && n == 1) ok = yx_u8_seq_code(out, &seqs[0]);
     else if (ok) {
         ok = yx_tr_pair(out, 3, split, (unsigned)n);
         for (size_t i = 0; ok && i < n; ++i) {
-            at[i][0] = out->forward.used; at[i][1] = out->backward.used;
+            at[i][0] = out->forward.used;
+            at[i][1] = out->backward.used;
             ok = yx_u8_seq_code(out, &seqs[i]);
             if (ok && i + 1 < n) {
-                at[i][2] = out->forward.used; at[i][3] = out->backward.used;
+                at[i][2] = out->forward.used;
+                at[i][3] = out->backward.used;
                 ok = yx_tr_pair(out, 4, split, 0);
             }
         }
         for (size_t i = 0; ok && i + 1 < n; ++i)
-            ok = yx_tr_patch(&out->forward, at[i][2], 2, out->forward.used) &&
-                 yx_tr_patch(&out->backward, at[i][3], 2, out->backward.used);
-        for (size_t i = 0; ok && i < n; ++i)
-            ok = yx_tr_patch(&out->forward, f0, 5 + 4 * i, at[i][0]) &&
-                 yx_tr_patch(&out->backward, b0, 5 + 4 * i, at[i][1]);
+            ok = yx_tr_patch(&out->forward, at[i][2], 2, out->forward.used) && yx_tr_patch(&out->backward, at[i][3], 2, out->backward.used);
+        for (size_t i = 0; ok && i < n; ++i) ok = yx_tr_patch(&out->forward, f0, 5 + 4 * i, at[i][0]) && yx_tr_patch(&out->backward, b0, 5 + 4 * i, at[i][1]);
     }
-    free(seqs); free(at);
+    free(seqs);
+    free(at);
     return ok;
 }
 #endif

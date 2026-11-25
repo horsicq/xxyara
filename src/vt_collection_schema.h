@@ -19,7 +19,6 @@
  * SOFTWARE.
  */
 
-
 /* Collection shapes from the pinned VT protobuf declarations. */
 static yx_global_array yx_vt_array_string;
 static yx_global_array yx_vt_array_vt_fileanalysis_BehaviourTag;
@@ -60,22 +59,14 @@ static yx_global_field yx_vt_array_vt_fileanalysis_DnsLookup_fields[] = {
 static yx_global_object yx_vt_array_vt_fileanalysis_DnsLookup_object = {yx_vt_array_vt_fileanalysis_DnsLookup_fields, 3};
 static yx_global_scalar_value yx_vt_array_vt_fileanalysis_DnsLookup_item = {.object = &yx_vt_array_vt_fileanalysis_DnsLookup_object};
 static yx_global_field yx_vt_array_vt_fileanalysis_DroppedFile_fields[] = {
-    {.name = "path", .type = YX_GLOBAL_STR},
-    {.name = "sha256", .type = YX_GLOBAL_STR},
-    {.name = "type", .type = YX_GLOBAL_INT},
-    {.name = "download_url", .type = YX_GLOBAL_STR},
-    {.name = "process_name", .type = YX_GLOBAL_STR},
-    {.name = "process_id", .type = YX_GLOBAL_STR},
+    {.name = "path", .type = YX_GLOBAL_STR},         {.name = "sha256", .type = YX_GLOBAL_STR},       {.name = "type", .type = YX_GLOBAL_INT},
+    {.name = "download_url", .type = YX_GLOBAL_STR}, {.name = "process_name", .type = YX_GLOBAL_STR}, {.name = "process_id", .type = YX_GLOBAL_STR},
 };
 static yx_global_object yx_vt_array_vt_fileanalysis_DroppedFile_object = {yx_vt_array_vt_fileanalysis_DroppedFile_fields, 6};
 static yx_global_scalar_value yx_vt_array_vt_fileanalysis_DroppedFile_item = {.object = &yx_vt_array_vt_fileanalysis_DroppedFile_object};
 static yx_global_field yx_vt_array_vt_fileanalysis_ExtractedPayload_fields[] = {
-    {.name = "sha256", .type = YX_GLOBAL_STR},
-    {.name = "type", .type = YX_GLOBAL_INT},
-    {.name = "size", .type = YX_GLOBAL_INT},
-    {.name = "payload_type", .type = YX_GLOBAL_STR},
-    {.name = "process_name", .type = YX_GLOBAL_STR},
-    {.name = "timestamp.seconds", .type = YX_GLOBAL_INT},
+    {.name = "sha256", .type = YX_GLOBAL_STR},          {.name = "type", .type = YX_GLOBAL_INT},         {.name = "size", .type = YX_GLOBAL_INT},
+    {.name = "payload_type", .type = YX_GLOBAL_STR},    {.name = "process_name", .type = YX_GLOBAL_STR}, {.name = "timestamp.seconds", .type = YX_GLOBAL_INT},
     {.name = "timestamp.nanos", .type = YX_GLOBAL_INT},
 };
 static yx_global_object yx_vt_array_vt_fileanalysis_ExtractedPayload_object = {yx_vt_array_vt_fileanalysis_ExtractedPayload_fields, 7};
@@ -96,10 +87,8 @@ static yx_global_field yx_vt_array_vt_fileanalysis_HttpConversation_fields[] = {
 static yx_global_object yx_vt_array_vt_fileanalysis_HttpConversation_object = {yx_vt_array_vt_fileanalysis_HttpConversation_fields, 5};
 static yx_global_scalar_value yx_vt_array_vt_fileanalysis_HttpConversation_item = {.object = &yx_vt_array_vt_fileanalysis_HttpConversation_object};
 static yx_global_field yx_vt_array_vt_fileanalysis_IpTraffic_fields[] = {
-    {.name = "destination_ip", .type = YX_GLOBAL_STR},
-    {.name = "destination_port", .type = YX_GLOBAL_INT},
-    {.name = "transport_layer_protocol", .type = YX_GLOBAL_INT},
-    {.name = "destination_ip_asn", .type = YX_GLOBAL_INT},
+    {.name = "destination_ip", .type = YX_GLOBAL_STR},           {.name = "destination_port", .type = YX_GLOBAL_INT},
+    {.name = "transport_layer_protocol", .type = YX_GLOBAL_INT}, {.name = "destination_ip_asn", .type = YX_GLOBAL_INT},
     {.name = "destination_ip_as_int", .type = YX_GLOBAL_INT},
 };
 static yx_global_object yx_vt_array_vt_fileanalysis_IpTraffic_object = {yx_vt_array_vt_fileanalysis_IpTraffic_fields, 5};
@@ -187,12 +176,8 @@ static yx_global_field yx_vt_array_vt_fileanalysis_SmtpConversation_fields[] = {
 static yx_global_object yx_vt_array_vt_fileanalysis_SmtpConversation_object = {yx_vt_array_vt_fileanalysis_SmtpConversation_fields, 18};
 static yx_global_scalar_value yx_vt_array_vt_fileanalysis_SmtpConversation_item = {.object = &yx_vt_array_vt_fileanalysis_SmtpConversation_object};
 static yx_global_field yx_vt_array_vt_fileanalysis_TLS_fields[] = {
-    {.name = "serial_number", .type = YX_GLOBAL_STR},
-    {.name = "thumbprint", .type = YX_GLOBAL_STR},
-    {.name = "version", .type = YX_GLOBAL_STR},
-    {.name = "sni", .type = YX_GLOBAL_STR},
-    {.name = "ja3", .type = YX_GLOBAL_STR},
-    {.name = "ja3s", .type = YX_GLOBAL_STR},
+    {.name = "serial_number", .type = YX_GLOBAL_STR}, {.name = "thumbprint", .type = YX_GLOBAL_STR}, {.name = "version", .type = YX_GLOBAL_STR},
+    {.name = "sni", .type = YX_GLOBAL_STR},           {.name = "ja3", .type = YX_GLOBAL_STR},        {.name = "ja3s", .type = YX_GLOBAL_STR},
     {.name = "ja4", .type = YX_GLOBAL_STR},
 };
 static yx_global_object yx_vt_array_vt_fileanalysis_TLS_object = {yx_vt_array_vt_fileanalysis_TLS_fields, 7};
@@ -205,31 +190,17 @@ static yx_global_field yx_vt_array_vt_net_ConsoleMessage_fields[] = {
 static yx_global_object yx_vt_array_vt_net_ConsoleMessage_object = {yx_vt_array_vt_net_ConsoleMessage_fields, 3};
 static yx_global_scalar_value yx_vt_array_vt_net_ConsoleMessage_item = {.object = &yx_vt_array_vt_net_ConsoleMessage_object};
 static yx_global_field yx_vt_array_vt_net_DNSRecord_fields[] = {
-    {.name = "type", .type = YX_GLOBAL_STR},
-    {.name = "dns_class", .type = YX_GLOBAL_STR},
-    {.name = "ttl", .type = YX_GLOBAL_INT},
-    {.name = "mname", .type = YX_GLOBAL_STR},
-    {.name = "rname", .type = YX_GLOBAL_STR},
-    {.name = "priority", .type = YX_GLOBAL_INT},
-    {.name = "serial", .type = YX_GLOBAL_INT},
-    {.name = "retry", .type = YX_GLOBAL_INT},
-    {.name = "refresh", .type = YX_GLOBAL_INT},
-    {.name = "expire", .type = YX_GLOBAL_INT},
-    {.name = "minimum", .type = YX_GLOBAL_INT},
-    {.name = "value", .type = YX_GLOBAL_STR},
+    {.name = "type", .type = YX_GLOBAL_STR},   {.name = "dns_class", .type = YX_GLOBAL_STR}, {.name = "ttl", .type = YX_GLOBAL_INT},
+    {.name = "mname", .type = YX_GLOBAL_STR},  {.name = "rname", .type = YX_GLOBAL_STR},     {.name = "priority", .type = YX_GLOBAL_INT},
+    {.name = "serial", .type = YX_GLOBAL_INT}, {.name = "retry", .type = YX_GLOBAL_INT},     {.name = "refresh", .type = YX_GLOBAL_INT},
+    {.name = "expire", .type = YX_GLOBAL_INT}, {.name = "minimum", .type = YX_GLOBAL_INT},   {.name = "value", .type = YX_GLOBAL_STR},
 };
 static yx_global_object yx_vt_array_vt_net_DNSRecord_object = {yx_vt_array_vt_net_DNSRecord_fields, 12};
 static yx_global_scalar_value yx_vt_array_vt_net_DNSRecord_item = {.object = &yx_vt_array_vt_net_DNSRecord_object};
 static yx_global_field yx_vt_array_vt_net_ExtendedCookie_fields[] = {
-    {.name = "name", .type = YX_GLOBAL_STR},
-    {.name = "value", .type = YX_GLOBAL_STR},
-    {.name = "domain", .type = YX_GLOBAL_STR},
-    {.name = "expires", .type = YX_GLOBAL_INT},
-    {.name = "secure", .type = YX_GLOBAL_BOOL},
-    {.name = "http_only", .type = YX_GLOBAL_BOOL},
-    {.name = "session", .type = YX_GLOBAL_BOOL},
-    {.name = "size", .type = YX_GLOBAL_INT},
-    {.name = "priority", .type = YX_GLOBAL_INT},
+    {.name = "name", .type = YX_GLOBAL_STR},     {.name = "value", .type = YX_GLOBAL_STR},   {.name = "domain", .type = YX_GLOBAL_STR},
+    {.name = "expires", .type = YX_GLOBAL_INT},  {.name = "secure", .type = YX_GLOBAL_BOOL}, {.name = "http_only", .type = YX_GLOBAL_BOOL},
+    {.name = "session", .type = YX_GLOBAL_BOOL}, {.name = "size", .type = YX_GLOBAL_INT},    {.name = "priority", .type = YX_GLOBAL_INT},
 };
 static yx_global_object yx_vt_array_vt_net_ExtendedCookie_object = {yx_vt_array_vt_net_ExtendedCookie_fields, 9};
 static yx_global_scalar_value yx_vt_array_vt_net_ExtendedCookie_item = {.object = &yx_vt_array_vt_net_ExtendedCookie_object};
@@ -356,7 +327,8 @@ static yx_global_field yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_
     {.name = "rule_raw", .type = YX_GLOBAL_STR},
 };
 static yx_global_object yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_object = {yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_fields, 18};
-static yx_global_scalar_value yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_item = {.object = &yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_object};
+static yx_global_scalar_value yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_item = {.object =
+                                                                                                   &yx_vt_array_vt_tools_net_analysis_CrowdSourcedIdsResults_object};
 static yx_global_array yx_vt_array_string = {YX_GLOBAL_STR, NULL, 0};
 static yx_global_array yx_vt_array_vt_fileanalysis_BehaviourTag = {YX_GLOBAL_INT, NULL, 0};
 static yx_global_array yx_vt_array_vt_fileanalysis_DnsLookup = {YX_GLOBAL_STRUCT, &yx_vt_array_vt_fileanalysis_DnsLookup_item, 1};

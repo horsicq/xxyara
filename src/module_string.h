@@ -36,7 +36,6 @@ bool yx_string_length(const uint8_t *bytes, size_t size, int64_t *out);
  * unsupported base, or signed 64-bit overflow. A NULL bytes pointer with
  * size zero represents an empty string and therefore returns false. */
 bool yx_string_to_int(const uint8_t *bytes, size_t size, int64_t *out);
-bool yx_string_to_int_base(const uint8_t *bytes, size_t size, int64_t base,
-                           int64_t *out);
+bool yx_string_to_int_base(const uint8_t *bytes, size_t size, int64_t base, int64_t *out);
 
 #endif

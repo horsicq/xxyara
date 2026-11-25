@@ -81,21 +81,18 @@ static char *yx_rx_format(const char *format, ...)
     int length = vsnprintf(NULL, 0, format, copy);
     va_end(copy);
     char *result = length < 0 ? NULL : malloc((size_t)length + 1);
-    if (result)
-        vsnprintf(result, (size_t)length + 1, format, ap);
+    if (result) vsnprintf(result, (size_t)length + 1, format, ap);
     va_end(ap);
     return result;
 }
 static bool yx_rx_append(yx_rx_buffer *out, const char *text)
 {
     size_t length = strlen(text);
-    if (length > SIZE_MAX - out->length - 1)
-        return false;
+    if (length > SIZE_MAX - out->length - 1) return false;
     if (out->length + length + 1 > out->capacity) {
         size_t capacity = out->length + length + 64;
         char *grown = realloc(out->text, capacity);
-        if (!grown)
-            return false;
+        if (!grown) return false;
         out->text = grown;
         out->capacity = capacity;
     }
@@ -103,26 +100,21 @@ static bool yx_rx_append(yx_rx_buffer *out, const char *text)
     out->length += length;
     return true;
 }
-static void yx_rx_error(yx_rx_parser *p, size_t start, size_t end,
-                        const char *message)
+static void yx_rx_error(yx_rx_parser *p, size_t start, size_t end, const char *message)
 {
-    if (p->error->message[0])
-        return;
+    if (p->error->message[0]) return;
     snprintf(p->error->message, sizeof(p->error->message), "%s", message);
     p->error->start = start;
     p->error->end = end;
 }
-static void yx_rx_semantic(yx_rx_parser *p, size_t start, size_t end,
-                           const char *message)
+static void yx_rx_semantic(yx_rx_parser *p, size_t start, size_t end, const char *message)
 {
-    if (p->semantic.message[0])
-        return;
+    if (p->semantic.message[0]) return;
     snprintf(p->semantic.message, sizeof(p->semantic.message), "%s", message);
     p->semantic.start = start;
     p->semantic.end = end;
 }
-static void yx_rx_nesting_error(yx_rx_parser *p, size_t start,
-                                char open, char close)
+static void yx_rx_nesting_error(yx_rx_parser *p, size_t start, char open, char close)
 {
     size_t end = start + 1, nesting = 1;
     while (end < p->length && nesting) {
@@ -131,8 +123,7 @@ static void yx_rx_nesting_error(yx_rx_parser *p, size_t start,
         else if (c == open) ++nesting;
         else if (c == close) --nesting;
     }
-    yx_rx_error(p, start, end,
-        "exceed the maximum number of nested parentheses/brackets (250)");
+    yx_rx_error(p, start, end, "exceed the maximum number of nested parentheses/brackets (250)");
 }
 
 static char *yx_rx_oom(yx_rx_parser *p)
@@ -144,25 +135,19 @@ static unsigned yx_rx_point(yx_rx_parser *p)
 {
     unsigned c = (unsigned char)p->text[p->at++];
     unsigned count = c < 0xc0 ? 0 : c < 0xe0 ? 1 : c < 0xf0 ? 2 : 3;
-    if (!count)
-        return c;
+    if (!count) return c;
     c &= (1u << (6 - count)) - 1;
-    while (count-- && p->at < p->length)
-        c = (c << 6) | ((unsigned char)p->text[p->at++] & 63);
+    while (count-- && p->at < p->length) c = (c << 6) | ((unsigned char)p->text[p->at++] & 63);
     return c;
 }
 static void yx_rx_space(yx_rx_parser *p, yx_rx_flags flags)
 {
-    if (!flags.x)
-        return;
+    if (!flags.x) return;
     while (p->at < p->length) {
-        if (strchr(" \t\r\n\v\f", p->text[p->at]) && p->text[p->at])
-            ++p->at;
+        if (strchr(" \t\r\n\v\f", p->text[p->at]) && p->text[p->at]) ++p->at;
         else if (p->text[p->at] == '#')
-            while (p->at < p->length && p->text[p->at] != '\n')
-                ++p->at;
-        else
-            break;
+            while (p->at < p->length && p->text[p->at] != '\n') ++p->at;
+        else break;
     }
 }
 /* A byte-regex may mix Unicode atoms and explicit non-Unicode atoms. Encode
@@ -178,52 +163,34 @@ static size_t yx_rx_utf8(unsigned point, unsigned char bytes[4])
         bytes[i] = (unsigned char)(0x80 | (point & 63));
         point >>= 6;
     }
-    bytes[0] = (unsigned char)((length == 2   ? 0xc0
-                                : length == 3 ? 0xe0
-                                              : 0xf0) |
-                               point);
+    bytes[0] = (unsigned char)((length == 2 ? 0xc0 : length == 3 ? 0xe0 : 0xf0) | point);
     return length;
 }
 static bool yx_rx_byte_span(yx_rx_buffer *out, unsigned low, unsigned high)
 {
     char text[32];
-    if (low == high)
-        snprintf(text, sizeof(text), "\\x%02x", low);
-    else
-        snprintf(text, sizeof(text), "[\\x%02x-\\x%02x]", low, high);
+    if (low == high) snprintf(text, sizeof(text), "\\x%02x", low);
+    else snprintf(text, sizeof(text), "[\\x%02x-\\x%02x]", low, high);
     return yx_rx_append(out, text);
 }
-static bool yx_rx_byte_range(yx_rx_buffer *out, const unsigned char *low,
-                             const unsigned char *high, size_t length)
+static bool yx_rx_byte_range(yx_rx_buffer *out, const unsigned char *low, const unsigned char *high, size_t length)
 {
-    if (!length)
-        return true;
-    if (low[0] == high[0])
-        return yx_rx_byte_span(out, low[0], low[0]) &&
-               yx_rx_byte_range(out, low + 1, high + 1, length - 1);
-    if (length == 1)
-        return yx_rx_byte_span(out, low[0], high[0]);
+    if (!length) return true;
+    if (low[0] == high[0]) return yx_rx_byte_span(out, low[0], low[0]) && yx_rx_byte_range(out, low + 1, high + 1, length - 1);
+    if (length == 1) return yx_rx_byte_span(out, low[0], high[0]);
     unsigned char minimum[4] = {0x80, 0x80, 0x80, 0x80};
     unsigned char maximum[4] = {0xbf, 0xbf, 0xbf, 0xbf};
-    if (!yx_rx_append(out, "(?:") || !yx_rx_byte_span(out, low[0], low[0]) ||
-        !yx_rx_byte_range(out, low + 1, maximum, length - 1))
-        return false;
+    if (!yx_rx_append(out, "(?:") || !yx_rx_byte_span(out, low[0], low[0]) || !yx_rx_byte_range(out, low + 1, maximum, length - 1)) return false;
     if (low[0] + 1 < high[0]) {
-        if (!yx_rx_append(out, "|") ||
-            !yx_rx_byte_span(out, low[0] + 1, high[0] - 1))
-            return false;
+        if (!yx_rx_append(out, "|") || !yx_rx_byte_span(out, low[0] + 1, high[0] - 1)) return false;
         for (size_t i = 1; i < length; ++i)
-            if (!yx_rx_byte_span(out, 0x80, 0xbf))
-                return false;
+            if (!yx_rx_byte_span(out, 0x80, 0xbf)) return false;
     }
-    return yx_rx_append(out, "|") && yx_rx_byte_span(out, high[0], high[0]) &&
-           yx_rx_byte_range(out, minimum, high + 1, length - 1) &&
-           yx_rx_append(out, ")");
+    return yx_rx_append(out, "|") && yx_rx_byte_span(out, high[0], high[0]) && yx_rx_byte_range(out, minimum, high + 1, length - 1) && yx_rx_append(out, ")");
 }
 static bool yx_rx_scalar_range(yx_rx_buffer *out, unsigned low, unsigned high)
 {
-    static const unsigned limits[] = {0x7f,   0x7ff,  0xd7ff,
-                                      0xdfff, 0xffff, 0x10ffff};
+    static const unsigned limits[] = {0x7f, 0x7ff, 0xd7ff, 0xdfff, 0xffff, 0x10ffff};
     while (low <= high) {
         if (low >= 0xd800 && low <= 0xdfff) {
             low = 0xe000;
@@ -238,26 +205,19 @@ static bool yx_rx_scalar_range(yx_rx_buffer *out, unsigned low, unsigned high)
         unsigned char first[4], last[4];
         size_t length = yx_rx_utf8(low, first);
         yx_rx_utf8(end, last);
-        if (out->length && !yx_rx_append(out, "|"))
-            return false;
-        if (!yx_rx_byte_range(out, first, last, length))
-            return false;
+        if (out->length && !yx_rx_append(out, "|")) return false;
+        if (!yx_rx_byte_range(out, first, last, length)) return false;
         low = end + 1;
     }
     return true;
 }
 static char *yx_rx_unicode_bytes(yx_rx_parser *p, char *pattern)
 {
-    if (!p->byte_engine || !pattern)
-        return pattern;
+    if (!p->byte_engine || !pattern) return pattern;
     int error;
     PCRE2_SIZE offset;
-    pcre2_code *code = pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED,
-                                     PCRE2_UTF | PCRE2_UCP | PCRE2_ANCHORED |
-                                         PCRE2_ENDANCHORED,
-                                     &error, &offset, NULL);
-    if (!code)
-        return pattern; /* A deferred semantic error owns this case. */
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED, PCRE2_UTF | PCRE2_UCP | PCRE2_ANCHORED | PCRE2_ENDANCHORED, &error, &offset, NULL);
+    if (!code) return pattern; /* A deferred semantic error owns this case. */
     pcre2_match_data *match = pcre2_match_data_create_from_pattern(code, NULL);
     if (!match) {
         pcre2_code_free(code);
@@ -274,8 +234,7 @@ static char *yx_rx_unicode_bytes(yx_rx_parser *p, char *pattern)
             size_t length = yx_rx_utf8(point, data);
             matched = pcre2_match(code, data, length, 0, 0, match, NULL) >= 0;
         }
-        if (matched && start == UINT32_MAX)
-            start = point;
+        if (matched && start == UINT32_MAX) start = point;
         else if (!matched && start != UINT32_MAX) {
             if (!yx_rx_scalar_range(&out, start, point - 1)) {
                 ok = false;
@@ -287,8 +246,7 @@ static char *yx_rx_unicode_bytes(yx_rx_parser *p, char *pattern)
     pcre2_match_data_free(match);
     pcre2_code_free(code);
     free(pattern);
-    char *result =
-        ok ? yx_rx_format(out.length ? "(?:%s)" : "(?!)", out.text) : NULL;
+    char *result = ok ? yx_rx_format(out.length ? "(?:%s)" : "(?!)", out.text) : NULL;
     free(out.text);
     return result ? result : yx_rx_oom(p);
 }
@@ -296,8 +254,7 @@ static char *yx_rx_unicode_bytes(yx_rx_parser *p, char *pattern)
  * length (parts[n - 1] holds the n-byte sequences, NULL when there are
  * none). The byte engine's lookbehind needs one fixed width, so a class is
  * tested there length by length. Returns false when memory ran out. */
-static bool yx_rx_unicode_split(const char *pattern, char *parts[4],
-                                bool *compiled)
+static bool yx_rx_unicode_split(const char *pattern, char *parts[4], bool *compiled)
 {
     int error;
     PCRE2_SIZE offset;
@@ -305,13 +262,9 @@ static bool yx_rx_unicode_split(const char *pattern, char *parts[4],
     unsigned start = UINT32_MAX;
     bool ok = true;
     parts[0] = parts[1] = parts[2] = parts[3] = NULL;
-    pcre2_code *code = pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED,
-                                     PCRE2_UTF | PCRE2_UCP | PCRE2_ANCHORED |
-                                         PCRE2_ENDANCHORED,
-                                     &error, &offset, NULL);
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED, PCRE2_UTF | PCRE2_UCP | PCRE2_ANCHORED | PCRE2_ENDANCHORED, &error, &offset, NULL);
     *compiled = code != NULL;
-    if (!code)
-        return true;
+    if (!code) return true;
     pcre2_match_data *match = pcre2_match_data_create_from_pattern(code, NULL);
     if (!match) {
         pcre2_code_free(code);
@@ -327,16 +280,14 @@ static bool yx_rx_unicode_split(const char *pattern, char *parts[4],
         }
         /* a run ends where the sequence length changes */
         for (size_t i = 0; i < 3; ++i)
-            if (point == limits[i] + 1)
-                boundary = true;
+            if (point == limits[i] + 1) boundary = true;
         if (start != UINT32_MAX && (!matched || boundary)) {
             unsigned char first[4];
             size_t length = yx_rx_utf8(start, first);
             ok = yx_rx_scalar_range(&out[length - 1], start, point - 1);
             start = UINT32_MAX;
         }
-        if (matched && start == UINT32_MAX)
-            start = point;
+        if (matched && start == UINT32_MAX) start = point;
     }
     pcre2_match_data_free(match);
     pcre2_code_free(code);
@@ -359,22 +310,16 @@ static char *yx_rx_split_behind(char *const parts[4], bool negative)
 {
     yx_rx_buffer out = {0};
     bool ok = true, any = false;
-    if (!negative)
-        ok = yx_rx_append(&out, "(?:");
+    if (!negative) ok = yx_rx_append(&out, "(?:");
     for (size_t i = 0; ok && i < 4; ++i) {
-        if (!parts[i])
-            continue;
-        if (!negative && any)
-            ok = yx_rx_append(&out, "|");
-        ok = ok && yx_rx_append(&out, negative ? "(?<!" : "(?<=") &&
-             yx_rx_append(&out, parts[i]) && yx_rx_append(&out, ")");
+        if (!parts[i]) continue;
+        if (!negative && any) ok = yx_rx_append(&out, "|");
+        ok = ok && yx_rx_append(&out, negative ? "(?<!" : "(?<=") && yx_rx_append(&out, parts[i]) && yx_rx_append(&out, ")");
         any = true;
     }
     /* an empty class: nothing precedes (positive fails, negative holds) */
-    if (ok && !negative)
-        ok = yx_rx_append(&out, any ? ")" : "(?!))");
-    if (ok && negative && !any)
-        ok = yx_rx_append(&out, "(?:)");
+    if (ok && !negative) ok = yx_rx_append(&out, any ? ")" : "(?!))");
+    if (ok && negative && !any) ok = yx_rx_append(&out, "(?:)");
     if (!ok) {
         free(out.text);
         return NULL;
@@ -389,24 +334,17 @@ static char *yx_rx_class_named(char c, yx_rx_flags flags)
 {
     const char *body;
     switch (tolower((unsigned char)c)) {
-    case 'd':
-        body = flags.u ? "\\p{Nd}" : "0-9";
-        break;
-    case 's':
-        body = flags.u
-                   ? "\\x{9}-\\x{d}\\x{20}\\x{85}\\x{a0}\\x{1680}\\x{2000}-\\x{"
-                     "200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}"
-                   : "\\x{9}-\\x{d}\\x{20}";
-        break;
-    default:
-        body = flags.u ? "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}\\x{200c}\\x{200d}"
-                       : "A-Za-z0-9_";
-        break;
+        case 'd': body = flags.u ? "\\p{Nd}" : "0-9"; break;
+        case 's':
+            body = flags.u ? "\\x{9}-\\x{d}\\x{20}\\x{85}\\x{a0}\\x{1680}\\x{2000}-\\x{"
+                             "200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}"
+                           : "\\x{9}-\\x{d}\\x{20}";
+            break;
+        default: body = flags.u ? "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}\\x{200c}\\x{200d}" : "A-Za-z0-9_"; break;
     }
     return yx_rx_format("[%s%s]", isupper((unsigned char)c) ? "^" : "", body);
 }
-static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags,
-                            const char *kind)
+static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags, const char *kind)
 {
     char *word = yx_rx_class_named('w', flags), *result = NULL;
     char *parts[4] = {NULL, NULL, NULL, NULL}, *was = NULL, *was_not = NULL;
@@ -424,18 +362,13 @@ static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags,
             yx_rx_buffer joined = {0};
             bool ok = true;
             for (size_t i = 0; ok && i < 4; ++i)
-                if (parts[i])
-                    ok = (!joined.length || yx_rx_append(&joined, "|")) &&
-                         yx_rx_append(&joined, parts[i]);
+                if (parts[i]) ok = (!joined.length || yx_rx_append(&joined, "|")) && yx_rx_append(&joined, parts[i]);
             free(word);
-            word = ok ? yx_rx_format(joined.length ? "(?:%s)" : "(?!)",
-                                     joined.text)
-                      : NULL;
+            word = ok ? yx_rx_format(joined.length ? "(?:%s)" : "(?!)", joined.text) : NULL;
             free(joined.text);
             was = yx_rx_split_behind(parts, false);
             was_not = yx_rx_split_behind(parts, true);
-            for (size_t i = 0; i < 4; ++i)
-                free(parts[i]);
+            for (size_t i = 0; i < 4; ++i) free(parts[i]);
             if (!word || !was || !was_not) {
                 free(was);
                 free(was_not);
@@ -445,8 +378,7 @@ static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags,
             split = true;
         }
     }
-    if (flags.u && !split)
-        word = yx_rx_unicode_bytes(p, word);
+    if (flags.u && !split) word = yx_rx_unicode_bytes(p, word);
     if (!word) {
         free(was);
         free(was_not);
@@ -462,113 +394,74 @@ static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags,
             return NULL;
         }
     }
-    if (strcmp(kind, "start") == 0)
-        result = yx_rx_format("%s(?=%s)", was_not, word);
-    else if (strcmp(kind, "end") == 0)
-        result = yx_rx_format("%s(?!%s)", was, word);
-    else if (strcmp(kind, "start-half") == 0)
-        result = yx_rx_format("%s", was_not);
-    else if (strcmp(kind, "end-half") == 0)
-        result = yx_rx_format("(?!%s)", word);
-    else if (strcmp(kind, "B") == 0)
-        result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was, word, was_not,
-                              word);
-    else
-        result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was_not, word, was,
-                              word);
+    if (strcmp(kind, "start") == 0) result = yx_rx_format("%s(?=%s)", was_not, word);
+    else if (strcmp(kind, "end") == 0) result = yx_rx_format("%s(?!%s)", was, word);
+    else if (strcmp(kind, "start-half") == 0) result = yx_rx_format("%s", was_not);
+    else if (strcmp(kind, "end-half") == 0) result = yx_rx_format("(?!%s)", word);
+    else if (strcmp(kind, "B") == 0) result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was, word, was_not, word);
+    else result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was_not, word, was, word);
     free(was);
     free(was_not);
     free(word);
     return result;
 }
-static char *yx_rx_property(yx_rx_parser *p, size_t start, const char *name,
-                            size_t length, bool negate, yx_rx_flags flags)
+static char *yx_rx_property(yx_rx_parser *p, size_t start, const char *name, size_t length, bool negate, yx_rx_flags flags)
 {
     char property[160];
     size_t out = 0;
     for (size_t i = 0; i < length && out + 1 < sizeof(property); ++i)
-        if (name[i] != '_' && name[i] != '-' &&
-            !isspace((unsigned char)name[i]))
-            property[out++] = name[i];
+        if (name[i] != '_' && name[i] != '-' && !isspace((unsigned char)name[i])) property[out++] = name[i];
     property[out] = 0;
     const char *value = property;
     char *equals = strchr(property, '=');
     if (equals) {
         *equals++ = 0;
-        if (strcmp(property, "gc") == 0 ||
-            strcmp(property, "GeneralCategory") == 0 ||
-            strcmp(property, "generalcategory") == 0)
-            value = equals;
-        else if (strcmp(property, "Script") == 0 ||
-                 strcmp(property, "script") == 0 || strcmp(property, "sc") == 0)
-            value = equals;
+        if (strcmp(property, "gc") == 0 || strcmp(property, "GeneralCategory") == 0 || strcmp(property, "generalcategory") == 0) value = equals;
+        else if (strcmp(property, "Script") == 0 || strcmp(property, "script") == 0 || strcmp(property, "sc") == 0) value = equals;
         else {
             equals[-1] = '=';
             value = property;
         }
     }
-    if (strncmp(value, "Is", 2) == 0)
-        value += 2;
+    if (strncmp(value, "Is", 2) == 0) value += 2;
     /* Rust matches property names loosely (case, `_`, `-` and spaces
      * ignored). The PCRE2 shim lacks the binary White_Space property, so
      * spell it as the `\s` class it equals (aliases WSpace and space). */
     char loose[160];
     size_t loose_length = 0;
-    for (const char *at = value; *at && loose_length + 1 < sizeof(loose); ++at)
-        loose[loose_length++] = (char)tolower((unsigned char)*at);
+    for (const char *at = value; *at && loose_length + 1 < sizeof(loose); ++at) loose[loose_length++] = (char)tolower((unsigned char)*at);
     loose[loose_length] = 0;
-    if (strcmp(loose, "whitespace") == 0 || strcmp(loose, "wspace") == 0 ||
-        strcmp(loose, "space") == 0) {
-        if (!flags.u)
-            yx_rx_semantic(p, start, p->at, "Unicode not allowed here");
+    if (strcmp(loose, "whitespace") == 0 || strcmp(loose, "wspace") == 0 || strcmp(loose, "space") == 0) {
+        if (!flags.u) yx_rx_semantic(p, start, p->at, "Unicode not allowed here");
         char *spaces = yx_rx_class_named(negate ? 'S' : 's', flags);
         return spaces ? spaces : yx_rx_oom(p);
     }
     const char *alias = value;
-    if (strcmp(value, "Letter") == 0)
-        alias = "L";
-    else if (strcmp(value, "Number") == 0)
-        alias = "N";
-    else if (strcmp(value, "DecimalNumber") == 0)
-        alias = "Nd";
-    else if (strcmp(value, "LowercaseLetter") == 0)
-        alias = "Ll";
-    else if (strcmp(value, "UppercaseLetter") == 0)
-        alias = "Lu";
-    else if (strcmp(value, "Mark") == 0)
-        alias = "M";
-    else if (strcmp(value, "Punctuation") == 0)
-        alias = "P";
-    else if (strcmp(value, "Separator") == 0)
-        alias = "Z";
-    else if (strcmp(value, "Symbol") == 0)
-        alias = "S";
-    char *result = strcmp(alias, "ASCII") == 0
-                       ? yx_rx_format("[%s\\x{0}-\\x{7f}]", negate ? "^" : "")
-                       : yx_rx_format("\\%c{%s}", negate ? 'P' : 'p', alias);
-    if (!result)
-        return yx_rx_oom(p);
+    if (strcmp(value, "Letter") == 0) alias = "L";
+    else if (strcmp(value, "Number") == 0) alias = "N";
+    else if (strcmp(value, "DecimalNumber") == 0) alias = "Nd";
+    else if (strcmp(value, "LowercaseLetter") == 0) alias = "Ll";
+    else if (strcmp(value, "UppercaseLetter") == 0) alias = "Lu";
+    else if (strcmp(value, "Mark") == 0) alias = "M";
+    else if (strcmp(value, "Punctuation") == 0) alias = "P";
+    else if (strcmp(value, "Separator") == 0) alias = "Z";
+    else if (strcmp(value, "Symbol") == 0) alias = "S";
+    char *result = strcmp(alias, "ASCII") == 0 ? yx_rx_format("[%s\\x{0}-\\x{7f}]", negate ? "^" : "") : yx_rx_format("\\%c{%s}", negate ? 'P' : 'p', alias);
+    if (!result) return yx_rx_oom(p);
     int code;
     PCRE2_SIZE offset;
-    pcre2_code *compiled =
-        pcre2_compile((PCRE2_SPTR)result, PCRE2_ZERO_TERMINATED,
-                      PCRE2_UTF | PCRE2_UCP, &code, &offset, NULL);
-    if (!flags.u)
-        yx_rx_semantic(p, start, p->at, "Unicode not allowed here");
-    else if (!compiled)
-        yx_rx_semantic(p, start, p->at, "Unicode property not found");
+    pcre2_code *compiled = pcre2_compile((PCRE2_SPTR)result, PCRE2_ZERO_TERMINATED, PCRE2_UTF | PCRE2_UCP, &code, &offset, NULL);
+    if (!flags.u) yx_rx_semantic(p, start, p->at, "Unicode not allowed here");
+    else if (!compiled) yx_rx_semantic(p, start, p->at, "Unicode property not found");
     pcre2_code_free(compiled);
     return result;
 }
-static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
-                               bool in_class)
+static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags, bool in_class)
 {
     yx_rx_atom atom = {0};
     atom.start = p->at++;
     if (p->at == p->length) {
-        yx_rx_error(
-            p, atom.start, p->at,
-            "incomplete escape sequence, reached end of pattern prematurely");
+        yx_rx_error(p, atom.start, p->at, "incomplete escape sequence, reached end of pattern prematurely");
         return atom;
     }
     unsigned char c = (unsigned char)p->text[p->at++];
@@ -578,28 +471,24 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
     }
     if (strchr("dDsSwW", c)) {
         atom.text = yx_rx_class_named(c, flags);
-        if (!flags.u && !p->bytes && isupper(c))
-            yx_rx_semantic(p, atom.start, p->at,
-                           "pattern can match invalid UTF-8");
+        if (!flags.u && !p->bytes && isupper(c)) yx_rx_semantic(p, atom.start, p->at, "pattern can match invalid UTF-8");
         /* The exact per-repetition NFA cost below is only known for these
          * classes under Unicode mode (upstream's default); (?-u) rewrites
          * them to small ASCII-only ranges that are never expensive. */
-        if (flags.u)
-            switch (c) {
-            case 'w': atom.repeat_cost_kind = YX_RX_REPEAT_COST_WORD; break;
-            case 'W': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_WORD; break;
-            case 'd': atom.repeat_cost_kind = YX_RX_REPEAT_COST_DIGIT; break;
-            case 'D': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_DIGIT; break;
-            case 's': atom.repeat_cost_kind = YX_RX_REPEAT_COST_SPACE; break;
-            case 'S': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_SPACE; break;
-            default: break;
+        if (flags.u) switch (c) {
+                case 'w': atom.repeat_cost_kind = YX_RX_REPEAT_COST_WORD; break;
+                case 'W': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_WORD; break;
+                case 'd': atom.repeat_cost_kind = YX_RX_REPEAT_COST_DIGIT; break;
+                case 'D': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_DIGIT; break;
+                case 's': atom.repeat_cost_kind = YX_RX_REPEAT_COST_SPACE; break;
+                case 'S': atom.repeat_cost_kind = YX_RX_REPEAT_COST_NOT_SPACE; break;
+                default: break;
             }
     } else if (c == 'p' || c == 'P') {
         size_t begin = p->at, end = begin;
         if (p->at < p->length && p->text[p->at] == '{') {
             begin = ++p->at;
-            while (p->at < p->length && p->text[p->at] != '}')
-                ++p->at;
+            while (p->at < p->length && p->text[p->at] != '}') ++p->at;
             end = p->at;
             if (p->at == p->length) {
                 yx_rx_error(p, p->at, p->at,
@@ -617,50 +506,37 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
                         "prematurely");
             return atom;
         }
-        atom.text = yx_rx_property(p, atom.start, p->text + begin, end - begin,
-                                   c == 'P', flags);
+        atom.text = yx_rx_property(p, atom.start, p->text + begin, end - begin, c == 'P', flags);
         /* Only the plain Letter/Number general categories have a known
          * exact repetition cost below; other properties fall back to the
          * generic estimate. */
         if (flags.u && atom.text)
-            if (strcmp(atom.text, "\\p{L}") == 0)
-                atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_L;
-            else if (strcmp(atom.text, "\\P{L}") == 0)
-                atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_NOT_L;
-            else if (strcmp(atom.text, "\\p{N}") == 0)
-                atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_N;
-            else if (strcmp(atom.text, "\\P{N}") == 0)
-                atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_NOT_N;
-    } else if (c == 'b' || c == 'B' || c == '<' || c == '>' ||
-               ((c == 'A' || c == 'z') && in_class)) {
+            if (strcmp(atom.text, "\\p{L}") == 0) atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_L;
+            else if (strcmp(atom.text, "\\P{L}") == 0) atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_NOT_L;
+            else if (strcmp(atom.text, "\\p{N}") == 0) atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_N;
+            else if (strcmp(atom.text, "\\P{N}") == 0) atom.repeat_cost_kind = YX_RX_REPEAT_COST_PROP_NOT_N;
+    } else if (c == 'b' || c == 'B' || c == '<' || c == '>' || ((c == 'A' || c == 'z') && in_class)) {
         char kind[24] = {(char)c, 0};
-        if (c == '<')
-            strcpy(kind, "start");
-        if (c == '>')
-            strcpy(kind, "end");
+        if (c == '<') strcpy(kind, "start");
+        if (c == '>') strcpy(kind, "end");
         /* regex-syntax, maybe_parse_special_word_boundary: `\b{` starts a
          * special boundary only when a name character follows the brace;
          * otherwise the brace belongs to a repetition of `\b`. */
         if (c == 'b' && p->at < p->length && p->text[p->at] == '{') {
             size_t brace = p->at, end = brace + 1;
             if (end == p->length) {
-                yx_rx_error(
-                    p, atom.start, end,
-                    "found either the beginning of a special word boundary "
-                    "or a bounded repetition on a \\b with an opening brace, "
-                    "but no closing brace");
+                yx_rx_error(p, atom.start, end,
+                            "found either the beginning of a special word boundary "
+                            "or a bounded repetition on a \\b with an opening brace, "
+                            "but no closing brace");
                 return atom;
             }
             if (isalpha((unsigned char)p->text[end]) || p->text[end] == '-') {
-                while (end < p->length &&
-                       (isalpha((unsigned char)p->text[end]) ||
-                        p->text[end] == '-'))
-                    ++end;
+                while (end < p->length && (isalpha((unsigned char)p->text[end]) || p->text[end] == '-')) ++end;
                 if (end == p->length || p->text[end] != '}') {
-                    yx_rx_error(
-                        p, brace, end,
-                        "special word boundary assertion is either unclosed "
-                        "or contains an invalid character");
+                    yx_rx_error(p, brace, end,
+                                "special word boundary assertion is either unclosed "
+                                "or contains an invalid character");
                     return atom;
                 }
                 size_t length = end - brace - 1;
@@ -668,13 +544,10 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
                     memcpy(kind, p->text + brace + 1, length);
                     kind[length] = 0;
                 }
-                if (length >= sizeof(kind) ||
-                    (strcmp(kind, "start") && strcmp(kind, "end") &&
-                     strcmp(kind, "start-half") && strcmp(kind, "end-half"))) {
-                    yx_rx_error(
-                        p, brace + 1, end,
-                        "unrecognized special word boundary assertion, valid "
-                        "choices are: start, end, start-half or end-half");
+                if (length >= sizeof(kind) || (strcmp(kind, "start") && strcmp(kind, "end") && strcmp(kind, "start-half") && strcmp(kind, "end-half"))) {
+                    yx_rx_error(p, brace + 1, end,
+                                "unrecognized special word boundary assertion, valid "
+                                "choices are: start, end, start-half or end-half");
                     return atom;
                 }
                 p->at = end + 1;
@@ -682,13 +555,11 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
         }
         if (in_class) {
             /* an assertion is not a class member (ClassEscapeInvalid) */
-            yx_rx_error(p, atom.start, p->at,
-                        "invalid escape sequence found in character class");
+            yx_rx_error(p, atom.start, p->at, "invalid escape sequence found in character class");
             return atom;
         }
         atom.text = yx_rx_boundary(p, flags, kind);
-    } else if (c == 'A' || c == 'z')
-        atom.text = yx_rx_format("\\%c", c);
+    } else if (c == 'A' || c == 'z') atom.text = yx_rx_format("\\%c", c);
     else if (c == 'x' || c == 'u' || c == 'U') {
         unsigned value = 0;
         size_t begin = p->at, count = c == 'x' ? 2 : c == 'u' ? 4 : 8;
@@ -698,18 +569,13 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
             count = SIZE_MAX;
         }
         size_t digits = 0;
-        while (digits < count && p->at < p->length &&
-               !(braced && p->text[p->at] == '}')) {
+        while (digits < count && p->at < p->length && !(braced && p->text[p->at] == '}')) {
             char digit = p->text[p->at];
             if (!isxdigit((unsigned char)digit)) {
                 yx_rx_error(p, p->at, p->at + 1, "invalid hexadecimal digit");
                 return atom;
             }
-            if (value <= 0x110000)
-                value =
-                    value * 16 +
-                    (digit <= '9' ? digit - '0'
-                                  : tolower((unsigned char)digit) - 'a' + 10);
+            if (value <= 0x110000) value = value * 16 + (digit <= '9' ? digit - '0' : tolower((unsigned char)digit) - 'a' + 10);
             ++p->at;
             ++digits;
         }
@@ -720,68 +586,46 @@ static yx_rx_atom yx_rx_escape(yx_rx_parser *p, yx_rx_flags flags,
             return atom;
         }
         size_t end = p->at;
-        if (braced)
-            ++p->at;
+        if (braced) ++p->at;
         if (!digits) {
             yx_rx_error(p, begin - 1, p->at, "hexadecimal literal empty");
             return atom;
         }
         if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) {
-            yx_rx_error(p, begin, end,
-                        "hexadecimal literal is not a Unicode scalar value");
+            yx_rx_error(p, begin, end, "hexadecimal literal is not a Unicode scalar value");
             return atom;
         }
         atom.literal = true;
         atom.point = value;
         bool byte_escape = c == 'x' && !braced;
         if (!flags.u && value >= 128) {
-            if (!byte_escape && in_class)
-                yx_rx_semantic(p, atom.start, p->at,
-                               "Unicode not allowed here");
-            else if (byte_escape && !p->bytes)
-                yx_rx_semantic(p, atom.start, p->at,
-                               "pattern can match invalid UTF-8");
+            if (!byte_escape && in_class) yx_rx_semantic(p, atom.start, p->at, "Unicode not allowed here");
+            else if (byte_escape && !p->bytes) yx_rx_semantic(p, atom.start, p->at, "pattern can match invalid UTF-8");
         }
         atom.text = yx_rx_literal(value, flags);
-        if (!flags.u && !in_class && !byte_escape && value >= 128)
-            atom.text = yx_rx_unicode_bytes(p, atom.text);
+        if (!flags.u && !in_class && !byte_escape && value >= 128) atom.text = yx_rx_unicode_bytes(p, atom.text);
     } else {
         unsigned point = c;
         switch (c) {
-        case 'a':
-            point = 7;
-            break;
-        case 'f':
-            point = 12;
-            break;
-        case 't':
-            point = 9;
-            break;
-        case 'n':
-            point = 10;
-            break;
-        case 'r':
-            point = 13;
-            break;
-        case 'v':
-            point = 11;
-            break;
-        default:
-            if (isalnum(c) || c == '_' || c >= 128) {
-                yx_rx_error(p, atom.start, p->at,
-                            "unrecognized escape sequence");
-                return atom;
-            }
+            case 'a': point = 7; break;
+            case 'f': point = 12; break;
+            case 't': point = 9; break;
+            case 'n': point = 10; break;
+            case 'r': point = 13; break;
+            case 'v': point = 11; break;
+            default:
+                if (isalnum(c) || c == '_' || c >= 128) {
+                    yx_rx_error(p, atom.start, p->at, "unrecognized escape sequence");
+                    return atom;
+                }
         }
         atom.literal = true;
         atom.point = point;
         atom.text = yx_rx_literal(point, flags);
     }
-    if (flags.u && !in_class && (atom.literal || strchr("dDsSwWpP", c)))
-        atom.text = yx_rx_unicode_bytes(p, atom.text);
+    if (flags.u && !in_class && (atom.literal || strchr("dDsSwWpP", c))) atom.text = yx_rx_unicode_bytes(p, atom.text);
     atom.end = p->at;
-    if (!atom.text && !p->error->message[0])
-        yx_rx_oom(p);
+    if (!atom.text && !p->error->message[0]) yx_rx_oom(p);
     return atom;
 }
 static char *yx_rx_class(yx_rx_parser *, yx_rx_flags);
@@ -789,8 +633,7 @@ static yx_rx_atom yx_rx_class_atom(yx_rx_parser *p, yx_rx_flags flags)
 {
     yx_rx_atom result = {0};
     result.start = p->at;
-    if (p->text[p->at] == '\\')
-        return yx_rx_escape(p, flags, true);
+    if (p->text[p->at] == '\\') return yx_rx_escape(p, flags, true);
     if (p->text[p->at] == '[') {
         /* An unknown POSIX name is a nested literal class in Rust syntax. */
         if (p->at + 2 < p->length && p->text[p->at + 1] == ':') {
@@ -815,12 +658,9 @@ static yx_rx_atom yx_rx_class_atom(yx_rx_parser *p, yx_rx_flags flags)
             begin += negate;
             for (size_t i = 0; i < sizeof(classes) / sizeof(*classes); ++i) {
                 size_t len = strlen(classes[i].name);
-                if (begin + len + 2 <= p->length &&
-                    !memcmp(p->text + begin, classes[i].name, len) &&
-                    !memcmp(p->text + begin + len, ":]", 2)) {
+                if (begin + len + 2 <= p->length && !memcmp(p->text + begin, classes[i].name, len) && !memcmp(p->text + begin + len, ":]", 2)) {
                     p->at = begin + len + 2;
-                    result.text = yx_rx_format("[%s%s]", negate ? "^" : "",
-                                               classes[i].body);
+                    result.text = yx_rx_format("[%s%s]", negate ? "^" : "", classes[i].body);
                     result.end = p->at;
                     return result;
                 }
@@ -830,8 +670,7 @@ static yx_rx_atom yx_rx_class_atom(yx_rx_parser *p, yx_rx_flags flags)
     } else {
         result.literal = true;
         result.point = yx_rx_point(p);
-        if (!flags.u && result.point >= 128)
-            yx_rx_semantic(p, result.start, p->at, "Unicode not allowed here");
+        if (!flags.u && result.point >= 128) yx_rx_semantic(p, result.start, p->at, "Unicode not allowed here");
         result.text = yx_rx_literal(result.point, flags);
     }
     result.end = p->at;
@@ -842,13 +681,9 @@ static char *yx_rx_class_union(yx_rx_parser *p, yx_rx_flags flags, bool *first)
     yx_rx_buffer out = {0};
     while (p->at < p->length) {
         yx_rx_space(p, flags);
-        if (p->at == p->length)
-            break;
+        if (p->at == p->length) break;
         char c = p->text[p->at];
-        if ((c == ']' && !*first) ||
-            ((!*first || c != '-') && p->at + 1 < p->length &&
-             strchr("&-~", c) && p->text[p->at + 1] == c))
-            break;
+        if ((c == ']' && !*first) || ((!*first || c != '-') && p->at + 1 < p->length && strchr("&-~", c) && p->text[p->at + 1] == c)) break;
         *first = false;
         yx_rx_atom left = yx_rx_class_atom(p, flags);
         if (!left.text) {
@@ -856,8 +691,7 @@ static char *yx_rx_class_union(yx_rx_parser *p, yx_rx_flags flags, bool *first)
             return NULL;
         }
         yx_rx_space(p, flags);
-        if (p->at + 1 < p->length && p->text[p->at] == '-' &&
-            p->text[p->at + 1] != ']' && p->text[p->at + 1] != '-') {
+        if (p->at + 1 < p->length && p->text[p->at] == '-' && p->text[p->at + 1] != ']' && p->text[p->at + 1] != '-') {
             ++p->at;
             yx_rx_space(p, flags);
             yx_rx_atom right = yx_rx_class_atom(p, flags);
@@ -868,21 +702,17 @@ static char *yx_rx_class_union(yx_rx_parser *p, yx_rx_flags flags, bool *first)
             }
             if (!left.literal || !right.literal) {
                 yx_rx_atom *bad = !left.literal ? &left : &right;
-                yx_rx_error(p, bad->start, bad->end,
-                            "invalid range boundary, must be a literal");
+                yx_rx_error(p, bad->start, bad->end, "invalid range boundary, must be a literal");
             } else if (left.point > right.point)
                 yx_rx_error(p, left.start, right.end,
                             "invalid character class range, the start must be "
                             "<= the end");
-            char *range = yx_rx_format(flags.i ? "(?i:[\\x{%x}-\\x{%x}])"
-                                               : "[\\x{%x}-\\x{%x}]",
-                                       left.point, right.point);
+            char *range = yx_rx_format(flags.i ? "(?i:[\\x{%x}-\\x{%x}])" : "[\\x{%x}-\\x{%x}]", left.point, right.point);
             free(left.text);
             free(right.text);
             left.text = range;
         }
-        if ((out.length && !yx_rx_append(&out, "|")) || !left.text ||
-            !yx_rx_append(&out, left.text)) {
+        if ((out.length && !yx_rx_append(&out, "|")) || !left.text || !yx_rx_append(&out, left.text)) {
             free(left.text);
             free(out.text);
             return yx_rx_oom(p);
@@ -893,8 +723,7 @@ static char *yx_rx_class_union(yx_rx_parser *p, yx_rx_flags flags, bool *first)
             return NULL;
         }
     }
-    char *result =
-        out.length ? yx_rx_format("(?:%s)", out.text) : yx_rx_format("(?!)");
+    char *result = out.length ? yx_rx_format("(?:%s)", out.text) : yx_rx_format("(?!)");
     free(out.text);
     return result;
 }
@@ -908,14 +737,11 @@ static char *yx_rx_class(yx_rx_parser *p, yx_rx_flags flags)
     }
     yx_rx_space(p, flags);
     bool negate = p->at < p->length && p->text[p->at] == '^';
-    if (negate)
-        ++p->at;
+    if (negate) ++p->at;
     bool first = true;
     char *left = yx_rx_class_union(p, flags, &first);
-    if (!left)
-        return NULL;
-    while (p->at + 1 < p->length && strchr("&-~", p->text[p->at]) &&
-           p->text[p->at] == p->text[p->at + 1]) {
+    if (!left) return NULL;
+    while (p->at + 1 < p->length && strchr("&-~", p->text[p->at]) && p->text[p->at] == p->text[p->at + 1]) {
         char op = p->text[p->at];
         p->at += 2;
         first = false;
@@ -926,19 +752,15 @@ static char *yx_rx_class(yx_rx_parser *p, yx_rx_flags flags)
         }
         char *combined = op == '&'   ? yx_rx_format("(?=%s)%s", left, right)
                          : op == '-' ? yx_rx_format("(?!%s)%s", right, left)
-                                     : yx_rx_format("(?:(?!%s)%s|(?!%s)%s)",
-                                                    right, left, left, right);
+                                     : yx_rx_format("(?:(?!%s)%s|(?!%s)%s)", right, left, left, right);
         free(left);
         free(right);
         left = combined;
-        if (!left)
-            return yx_rx_oom(p);
+        if (!left) return yx_rx_oom(p);
     }
     if (p->at == p->length || p->text[p->at] != ']') {
         size_t end = start + 1;
-        if (p->length - start <= 3 && p->length &&
-            p->text[p->length - 1] == ']')
-            end = p->length;
+        if (p->length - start <= 3 && p->length && p->text[p->length - 1] == ']') end = p->length;
         yx_rx_error(p, start, end, "unclosed character class");
         free(left);
         return NULL;
@@ -948,12 +770,10 @@ static char *yx_rx_class(yx_rx_parser *p, yx_rx_flags flags)
         char *other = yx_rx_format("(?!(?:%s))[\\s\\S]", left);
         free(left);
         left = other;
-        if (!flags.u && !p->bytes)
-            yx_rx_semantic(p, start, p->at, "pattern can match invalid UTF-8");
+        if (!flags.u && !p->bytes) yx_rx_semantic(p, start, p->at, "pattern can match invalid UTF-8");
     }
     --p->class_depth;
-    if (flags.u && !p->class_depth)
-        left = yx_rx_unicode_bytes(p, left);
+    if (flags.u && !p->class_depth) left = yx_rx_unicode_bytes(p, left);
     return left;
 }
 static char *yx_rx_expr(yx_rx_parser *, yx_rx_flags, size_t);
@@ -970,28 +790,19 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
         ++p->at;
         capture = false;
         if (p->at < p->length &&
-            (p->text[p->at] == '=' || p->text[p->at] == '!' ||
-             (p->text[p->at] == '<' && p->at + 1 < p->length &&
-              strchr("=!", p->text[p->at + 1])))) {
-            yx_rx_error(
-                p, start, p->at + (p->text[p->at] == '<' ? 2 : 1),
-                "look-around, including look-ahead and look-behind, is not "
-                "supported");
+            (p->text[p->at] == '=' || p->text[p->at] == '!' || (p->text[p->at] == '<' && p->at + 1 < p->length && strchr("=!", p->text[p->at + 1])))) {
+            yx_rx_error(p, start, p->at + (p->text[p->at] == '<' ? 2 : 1),
+                        "look-around, including look-ahead and look-behind, is not "
+                        "supported");
             return NULL;
         }
-        if (p->at < p->length &&
-            (p->text[p->at] == '<' ||
-             (p->text[p->at] == 'P' && p->at + 1 < p->length &&
-              p->text[p->at + 1] == '<'))) {
+        if (p->at < p->length && (p->text[p->at] == '<' || (p->text[p->at] == 'P' && p->at + 1 < p->length && p->text[p->at + 1] == '<'))) {
             p->at += p->text[p->at] == 'P' ? 2 : 1;
             size_t begin = p->at;
             while (p->at < p->length && p->text[p->at] != '>') {
                 unsigned char c = (unsigned char)p->text[p->at];
-                if (!(c == '_' || isalpha(c) || c >= 128 ||
-                      (p->at > begin &&
-                       (isdigit(c) || c == '.' || c == '[' || c == ']')))) {
-                    yx_rx_error(p, p->at, p->at + 1,
-                                "invalid capture group character");
+                if (!(c == '_' || isalpha(c) || c >= 128 || (p->at > begin && (isdigit(c) || c == '.' || c == '[' || c == ']')))) {
+                    yx_rx_error(p, p->at, p->at + 1, "invalid capture group character");
                     return NULL;
                 }
                 yx_rx_point(p);
@@ -1005,40 +816,31 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
                 return NULL;
             }
             for (size_t i = 0; i < p->name_count; ++i)
-                if (p->names[i].end - p->names[i].start == p->at - begin &&
-                    !memcmp(p->text + p->names[i].start, p->text + begin,
-                            p->at - begin)) {
-                    yx_rx_error(p, begin, p->at,
-                                "duplicate capture group name");
+                if (p->names[i].end - p->names[i].start == p->at - begin && !memcmp(p->text + p->names[i].start, p->text + begin, p->at - begin)) {
+                    yx_rx_error(p, begin, p->at, "duplicate capture group name");
                     p->error->has_secondary = true;
                     p->error->secondary_start = p->names[i].start;
                     p->error->secondary_end = p->names[i].end;
                     return NULL;
                 }
-            yx_rx_name *grown =
-                realloc(p->names, (p->name_count + 1) * sizeof(*grown));
-            if (!grown)
-                return yx_rx_oom(p);
+            yx_rx_name *grown = realloc(p->names, (p->name_count + 1) * sizeof(*grown));
+            if (!grown) return yx_rx_oom(p);
             p->names = grown;
             p->names[p->name_count++] = (yx_rx_name){begin, p->at};
             ++p->at;
             capture = true;
-        } else if (p->at < p->length && p->text[p->at] == ':')
-            ++p->at;
+        } else if (p->at < p->length && p->text[p->at] == ':') ++p->at;
         else {
             bool negative = false, any = false;
             size_t positions[128];
-            for (size_t i = 0; i < 128; ++i)
-                positions[i] = SIZE_MAX;
+            for (size_t i = 0; i < 128; ++i) positions[i] = SIZE_MAX;
             size_t dash = SIZE_MAX;
             bool afterdash = false;
-            while (p->at < p->length && p->text[p->at] != ')' &&
-                   p->text[p->at] != ':') {
+            while (p->at < p->length && p->text[p->at] != ')' && p->text[p->at] != ':') {
                 unsigned char c = (unsigned char)p->text[p->at];
                 if (c == '-') {
                     if (dash != SIZE_MAX) {
-                        yx_rx_error(p, p->at, p->at + 1,
-                                    "flag negation operator repeated");
+                        yx_rx_error(p, p->at, p->at + 1, "flag negation operator repeated");
                         p->error->has_secondary = true;
                         p->error->secondary_start = dash;
                         p->error->secondary_end = dash + 1;
@@ -1051,27 +853,13 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
                 }
                 bool *field = NULL;
                 switch (c) {
-                case 'i':
-                    field = &inner.i;
-                    break;
-                case 'm':
-                    field = &inner.m;
-                    break;
-                case 's':
-                    field = &inner.s;
-                    break;
-                case 'u':
-                    field = &inner.u;
-                    break;
-                case 'x':
-                    field = &inner.x;
-                    break;
-                case 'R':
-                    field = &inner.R;
-                    break;
-                case 'U':
-                    field = &inner.U;
-                    break;
+                    case 'i': field = &inner.i; break;
+                    case 'm': field = &inner.m; break;
+                    case 's': field = &inner.s; break;
+                    case 'u': field = &inner.u; break;
+                    case 'x': field = &inner.x; break;
+                    case 'R': field = &inner.R; break;
+                    case 'U': field = &inner.U; break;
                 }
                 if (!field) {
                     yx_rx_error(p, p->at, p->at + 1, "unrecognized flag");
@@ -1090,19 +878,15 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
                 afterdash = true;
             }
             if (dash != SIZE_MAX && !afterdash) {
-                yx_rx_error(p, dash, dash + 1,
-                            "dangling flag negation operator");
+                yx_rx_error(p, dash, dash + 1, "dangling flag negation operator");
                 return NULL;
             }
             if (p->at == p->length) {
-                yx_rx_error(p, any ? p->at : start, any ? p->at : start + 1,
-                            any ? "expected flag but got end of regex"
-                                : "unclosed group");
+                yx_rx_error(p, any ? p->at : start, any ? p->at : start + 1, any ? "expected flag but got end of regex" : "unclosed group");
                 return NULL;
             }
             if (!any) {
-                yx_rx_error(p, start + 1, start + 2,
-                            "repetition operator missing expression");
+                yx_rx_error(p, start + 1, start + 2, "repetition operator missing expression");
                 return NULL;
             }
             if (p->text[p->at++] == ')') {
@@ -1114,8 +898,7 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
         }
     }
     char *body = yx_rx_expr(p, inner, start);
-    if (!body)
-        return NULL;
+    if (!body) return NULL;
     if (p->at == p->length || p->text[p->at] != ')') {
         yx_rx_error(p, start, start + 1, "unclosed group");
         free(body);
@@ -1149,34 +932,30 @@ static char *yx_rx_group(yx_rx_parser *p, yx_rx_flags *flags, bool *only_flags)
 static uint64_t yx_rx_repeat_cost_limit(int kind)
 {
     switch (kind) {
-    case YX_RX_REPEAT_COST_WORD: return 209;
-    case YX_RX_REPEAT_COST_NOT_WORD: return 225;
-    case YX_RX_REPEAT_COST_DIGIT: return 2046;
-    case YX_RX_REPEAT_COST_NOT_DIGIT: return 822;
-    case YX_RX_REPEAT_COST_SPACE: return 15419;
-    case YX_RX_REPEAT_COST_NOT_SPACE: return 5448;
-    case YX_RX_REPEAT_COST_DOT: return 10485;
-    case YX_RX_REPEAT_COST_PROP_L: return 244;
-    case YX_RX_REPEAT_COST_PROP_NOT_L: return 244;
-    case YX_RX_REPEAT_COST_PROP_N: return 1074;
-    case YX_RX_REPEAT_COST_PROP_NOT_N: return 512;
-    default: return UINT64_MAX;
+        case YX_RX_REPEAT_COST_WORD: return 209;
+        case YX_RX_REPEAT_COST_NOT_WORD: return 225;
+        case YX_RX_REPEAT_COST_DIGIT: return 2046;
+        case YX_RX_REPEAT_COST_NOT_DIGIT: return 822;
+        case YX_RX_REPEAT_COST_SPACE: return 15419;
+        case YX_RX_REPEAT_COST_NOT_SPACE: return 5448;
+        case YX_RX_REPEAT_COST_DOT: return 10485;
+        case YX_RX_REPEAT_COST_PROP_L: return 244;
+        case YX_RX_REPEAT_COST_PROP_NOT_L: return 244;
+        case YX_RX_REPEAT_COST_PROP_N: return 1074;
+        case YX_RX_REPEAT_COST_PROP_NOT_N: return 512;
+        default: return UINT64_MAX;
     }
 }
-static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
-                          int repeat_cost_kind)
+static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom, int repeat_cost_kind)
 {
     while (p->at < p->length) {
         yx_rx_space(p, flags);
-        if (p->at == p->length)
-            break;
+        if (p->at == p->length) break;
         size_t start = p->at;
         char c = p->text[p->at];
-        if (!strchr("*+?{", c) || !c)
-            break;
+        if (!strchr("*+?{", c) || !c) break;
         char quantifier[80];
-        bool simple_literal = strncmp(atom, "\\x{", 3) == 0 &&
-                              strchr(atom, '}') == atom + strlen(atom) - 1;
+        bool simple_literal = strncmp(atom, "\\x{", 3) == 0 && strchr(atom, '}') == atom + strlen(atom) - 1;
         uint64_t large_min = 0, large_max = 0;
         bool large_count = false, large_unlimited = false;
         bool zero_count = false;
@@ -1196,14 +975,11 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
                 break;
             }
             if (!isdigit((unsigned char)p->text[p->at])) {
-                yx_rx_error(p, p->at, p->at,
-                            "repetition quantifier expects a valid decimal");
+                yx_rx_error(p, p->at, p->at, "repetition quantifier expects a valid decimal");
                 break;
             }
-            while (p->at < p->length &&
-                   isdigit((unsigned char)p->text[p->at])) {
-                if (min <= UINT32_MAX)
-                    min = min * 10 + (unsigned)(p->text[p->at] - '0');
+            while (p->at < p->length && isdigit((unsigned char)p->text[p->at])) {
+                if (min <= UINT32_MAX) min = min * 10 + (unsigned)(p->text[p->at] - '0');
                 ++p->at;
             }
             if (min > UINT32_MAX) {
@@ -1225,15 +1001,11 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
                 }
                 unlimited = p->text[p->at] == '}';
                 if (!unlimited && !isdigit((unsigned char)p->text[p->at])) {
-                    yx_rx_error(
-                        p, p->at, p->at,
-                        "repetition quantifier expects a valid decimal");
+                    yx_rx_error(p, p->at, p->at, "repetition quantifier expects a valid decimal");
                     break;
                 }
-                while (p->at < p->length &&
-                       isdigit((unsigned char)p->text[p->at])) {
-                    if (max <= UINT32_MAX)
-                        max = max * 10 + (unsigned)(p->text[p->at] - '0');
+                while (p->at < p->length && isdigit((unsigned char)p->text[p->at])) {
+                    if (max <= UINT32_MAX) max = max * 10 + (unsigned)(p->text[p->at] - '0');
                     ++p->at;
                 }
                 if (max > UINT32_MAX) {
@@ -1258,31 +1030,21 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
              * the pinned engine reserves seven states for the unanchored
              * search. */
             uint64_t exact_limit = yx_rx_repeat_cost_limit(repeat_cost_kind);
-            uint64_t limit = exact_limit != UINT64_MAX ? exact_limit
-                             : simple_literal ? 10485760 / 32 - 7 : 1000000;
-            if (*atom && !zero_count &&
-                (min > limit || (!unlimited && max > limit)))
-                p->semantic.size_limit = true;
-            if (*atom && !zero_count && simple_literal && !p->semantic.size_limit &&
-                (min > 65535 || (!unlimited && max > 65535))) {
+            uint64_t limit = exact_limit != UINT64_MAX ? exact_limit : simple_literal ? 10485760 / 32 - 7 : 1000000;
+            if (*atom && !zero_count && (min > limit || (!unlimited && max > limit))) p->semantic.size_limit = true;
+            if (*atom && !zero_count && simple_literal && !p->semantic.size_limit && (min > 65535 || (!unlimited && max > 65535))) {
                 large_count = true;
                 large_min = min;
                 large_max = max;
                 large_unlimited = unlimited;
             }
-            if (!comma)
-                snprintf(quantifier, sizeof(quantifier), "{%u}", (unsigned)min);
-            else if (unlimited)
-                snprintf(quantifier, sizeof(quantifier), "{%u,}",
-                         (unsigned)min);
-            else
-                snprintf(quantifier, sizeof(quantifier), "{%u,%u}",
-                         (unsigned)min, (unsigned)max);
+            if (!comma) snprintf(quantifier, sizeof(quantifier), "{%u}", (unsigned)min);
+            else if (unlimited) snprintf(quantifier, sizeof(quantifier), "{%u,}", (unsigned)min);
+            else snprintf(quantifier, sizeof(quantifier), "{%u,%u}", (unsigned)min, (unsigned)max);
         }
         yx_rx_space(p, flags);
         bool lazy = p->at < p->length && p->text[p->at] == '?';
-        if (lazy)
-            ++p->at;
+        if (lazy) ++p->at;
         char *repeated = NULL;
         if (zero_count || !*atom) {
             /* HIR removes repetitions of an empty expression. Keeping a
@@ -1292,8 +1054,7 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
         } else if (large_count) {
             yx_rx_buffer pieces = {0};
             for (uint64_t remaining = large_min; remaining;) {
-                unsigned count =
-                    remaining > 65535 ? 65535 : (unsigned)remaining;
+                unsigned count = remaining > 65535 ? 65535 : (unsigned)remaining;
                 char *piece = yx_rx_format("%s{%u}", atom, count);
                 bool ok = piece && yx_rx_append(&pieces, piece);
                 free(piece);
@@ -1307,11 +1068,8 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
             uint64_t optional = large_unlimited ? 0 : large_max - large_min;
             do {
                 unsigned count = optional > 65535 ? 65535 : (unsigned)optional;
-                char *piece = large_unlimited
-                                  ? yx_rx_format("%s*%s", atom,
-                                                 lazy != flags.U ? "?" : "")
-                                  : yx_rx_format("%s{0,%u}%s", atom, count,
-                                                 lazy != flags.U ? "?" : "");
+                char *piece =
+                    large_unlimited ? yx_rx_format("%s*%s", atom, lazy != flags.U ? "?" : "") : yx_rx_format("%s{0,%u}%s", atom, count, lazy != flags.U ? "?" : "");
                 bool ok = piece && yx_rx_append(&pieces, piece);
                 free(piece);
                 if (!ok) {
@@ -1323,14 +1081,10 @@ static char *yx_rx_repeat(yx_rx_parser *p, yx_rx_flags flags, char *atom,
             } while (optional);
             repeated = yx_rx_format("(?:%s)", pieces.text);
             free(pieces.text);
-        } else
-            repeated =
-                yx_rx_format(simple_literal ? "%s%s%s" : "(?:%s)%s%s", atom,
-                             quantifier, lazy != flags.U ? "?" : "");
+        } else repeated = yx_rx_format(simple_literal ? "%s%s%s" : "(?:%s)%s%s", atom, quantifier, lazy != flags.U ? "?" : "");
         free(atom);
         atom = repeated;
-        if (!atom)
-            return yx_rx_oom(p);
+        if (!atom) return yx_rx_oom(p);
     }
     if (p->error->message[0]) {
         free(atom);
@@ -1343,92 +1097,68 @@ static char *yx_rx_expr(yx_rx_parser *p, yx_rx_flags flags, size_t group_start)
     yx_rx_buffer out = {0};
     while (p->at < p->length) {
         yx_rx_space(p, flags);
-        if (p->at == p->length)
-            break;
+        if (p->at == p->length) break;
         size_t start = p->at;
         unsigned char c = (unsigned char)p->text[p->at];
         char *atom = NULL;
         bool only_flags = false;
         int repeat_cost_kind = YX_RX_REPEAT_COST_NONE;
         if (c == ')') {
-            if (group_start == SIZE_MAX)
-                yx_rx_error(p, p->at, p->at + 1, "unopened group");
+            if (group_start == SIZE_MAX) yx_rx_error(p, p->at, p->at + 1, "unopened group");
             break;
         }
         if (c == '|') {
             ++p->at;
-            if (!yx_rx_append(&out, "|"))
-                goto oom;
+            if (!yx_rx_append(&out, "|")) goto oom;
             continue;
         }
         if (strchr("*+?{", c) && c) {
-            yx_rx_error(p, p->at, p->at + 1,
-                        "repetition operator missing expression");
+            yx_rx_error(p, p->at, p->at + 1, "repetition operator missing expression");
             break;
         }
-        if (c == '(')
-            atom = yx_rx_group(p, &flags, &only_flags);
-        else if (c == '[')
-            atom = yx_rx_class(p, flags);
+        if (c == '(') atom = yx_rx_group(p, &flags, &only_flags);
+        else if (c == '[') atom = yx_rx_class(p, flags);
         else if (c == '\\') {
             yx_rx_atom parsed = yx_rx_escape(p, flags, false);
             atom = parsed.text;
             repeat_cost_kind = parsed.repeat_cost_kind;
         } else if (c == '.') {
             ++p->at;
-            if (flags.u && !flags.s && !flags.R)
-                repeat_cost_kind = YX_RX_REPEAT_COST_DOT;
-            atom = yx_rx_format(flags.s   ? "[\\s\\S]"
-                                : flags.R ? "[^\\r\\n]"
-                                          : "[^\\n]");
-            if (!flags.u && !p->bytes)
-                yx_rx_semantic(p, start, p->at,
-                               "pattern can match invalid UTF-8");
-            if (flags.u)
-                atom = yx_rx_unicode_bytes(p, atom);
+            if (flags.u && !flags.s && !flags.R) repeat_cost_kind = YX_RX_REPEAT_COST_DOT;
+            atom = yx_rx_format(flags.s ? "[\\s\\S]" : flags.R ? "[^\\r\\n]" : "[^\\n]");
+            if (!flags.u && !p->bytes) yx_rx_semantic(p, start, p->at, "pattern can match invalid UTF-8");
+            if (flags.u) atom = yx_rx_unicode_bytes(p, atom);
         } else if (c == '^' || c == '$') {
             ++p->at;
-            if (!flags.m)
-                atom = yx_rx_format(c == '^' ? "\\A" : "\\z");
-            else if (c == '^')
-                atom = yx_rx_format(flags.R ? "(?:\\A|(?<=\\n)|(?<=\\r)(?!\\n))"
-                                            : "(?:\\A|(?<=\\n))");
-            else
-                atom = yx_rx_format(flags.R ? "(?:\\z|(?=\\r)|(?<!\\r)(?=\\n))"
-                                            : "(?:\\z|(?=\\n))");
+            if (!flags.m) atom = yx_rx_format(c == '^' ? "\\A" : "\\z");
+            else if (c == '^') atom = yx_rx_format(flags.R ? "(?:\\A|(?<=\\n)|(?<=\\r)(?!\\n))" : "(?:\\A|(?<=\\n))");
+            else atom = yx_rx_format(flags.R ? "(?:\\z|(?=\\r)|(?<!\\r)(?=\\n))" : "(?:\\z|(?=\\n))");
         } else {
             unsigned point = yx_rx_point(p);
             atom = yx_rx_literal(point, flags);
-            if (p->byte_engine && (point >= 128 || (flags.u && flags.i)))
-                atom = yx_rx_unicode_bytes(p, atom);
+            if (p->byte_engine && (point >= 128 || (flags.u && flags.i))) atom = yx_rx_unicode_bytes(p, atom);
         }
         if (!atom) {
-            if (!p->error->message[0])
-                yx_rx_oom(p);
+            if (!p->error->message[0]) yx_rx_oom(p);
             break;
         }
-        if (!only_flags)
-            atom = yx_rx_repeat(p, flags, atom, repeat_cost_kind);
-        if (!atom)
-            break;
+        if (!only_flags) atom = yx_rx_repeat(p, flags, atom, repeat_cost_kind);
+        if (!atom) break;
         bool ok = yx_rx_append(&out, atom);
         free(atom);
-        if (!ok)
-            goto oom;
+        if (!ok) goto oom;
     }
     if (p->error->message[0]) {
         free(out.text);
         return NULL;
     }
-    if (!out.text)
-        out.text = yx_rx_format("");
+    if (!out.text) out.text = yx_rx_format("");
     return out.text;
 oom:
     free(out.text);
     return yx_rx_oom(p);
 }
-bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode,
-                            yx_cli_regex *result, yx_cli_regex_error *error)
+bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode, yx_cli_regex *result, yx_cli_regex_error *error)
 {
     memset(result, 0, sizeof(*result));
     memset(error, 0, sizeof(*error));
@@ -1444,24 +1174,18 @@ bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode,
             ++i;
             continue;
         }
-        if (pattern[i] != '(' || pattern[i + 1] != '?')
-            continue;
+        if (pattern[i] != '(' || pattern[i + 1] != '?') continue;
         bool negative = false;
-        for (size_t j = i + 2;
-             j < length && strchr("imsuxRU-", pattern[j]) && pattern[j]; ++j) {
-            if (pattern[j] == '-')
-                negative = true;
-            else if (negative && pattern[j] == 'u')
-                parser.byte_engine = true;
+        for (size_t j = i + 2; j < length && strchr("imsuxRU-", pattern[j]) && pattern[j]; ++j) {
+            if (pattern[j] == '-') negative = true;
+            else if (negative && pattern[j] == 'u') parser.byte_engine = true;
         }
     }
     yx_rx_flags flags = {0};
     flags.u = true;
     char *translated = yx_rx_expr(&parser, flags, SIZE_MAX);
     free(parser.names);
-    if (!error->message[0] &&
-        (parser.semantic.message[0] || parser.semantic.size_limit))
-        *error = parser.semantic;
+    if (!error->message[0] && (parser.semantic.message[0] || parser.semantic.size_limit)) *error = parser.semantic;
     if (error->message[0] || error->size_limit) {
         free(translated);
         return false;
@@ -1472,17 +1196,12 @@ bool yx_cli_regex_translate(const char *pattern, size_t length, bool bytes_mode,
     }
     result->pattern = translated;
     result->length = strlen(translated);
-    result->options =
-        PCRE2_DOLLAR_ENDONLY |
-        (parser.byte_engine ? 0
-                            : PCRE2_UTF | PCRE2_UCP |
-                                  (bytes_mode ? PCRE2_MATCH_INVALID_UTF : 0));
+    result->options = PCRE2_DOLLAR_ENDONLY | (parser.byte_engine ? 0 : PCRE2_UTF | PCRE2_UCP | (bytes_mode ? PCRE2_MATCH_INVALID_UTF : 0));
     return true;
 }
 void yx_cli_regex_free(yx_cli_regex *result)
 {
-    if (!result)
-        return;
+    if (!result) return;
     free(result->pattern);
     memset(result, 0, sizeof(*result));
 }
