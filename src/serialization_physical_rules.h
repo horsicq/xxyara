@@ -208,7 +208,16 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules, const yx_ph
         status = YX_SER_NO_MEMORY;
         goto done;
     }
-    if (yx_physical_ident(a, "default") != 0 || !yx_put_uint(&metadata, count)) goto done;
+    size_t default_id = yx_physical_ident(a, "default");
+    if (default_id == SIZE_MAX) {
+        status = YX_SER_NO_MEMORY;
+        goto done;
+    }
+    if (default_id != 0) goto done;
+    if (!yx_put_uint(&metadata, count)) {
+        status = YX_SER_NO_MEMORY;
+        goto done;
+    }
     size_t next_import = 0, next_namespace = 0;
     for (size_t i = 0; i < count; ++i) {
         const YRX_RULE *r = &rules->rules[i];
@@ -219,49 +228,88 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules, const yx_ph
             size_t ordinal = rules->import_namespace_indices ? rules->import_namespace_indices[next_import] : r->namespace_index;
             while (next_namespace < rules->namespace_count && next_namespace <= ordinal) {
                 const char *name = rules->namespace_names[next_namespace++];
-                if (name && yx_physical_ident(a, name) == SIZE_MAX) goto done;
+                if (name && yx_physical_ident(a, name) == SIZE_MAX) {
+                    status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
             }
-            if (rules->import_namespaces && yx_physical_ident(a, rules->import_namespaces[next_import]) == SIZE_MAX) goto done;
+            if (rules->import_namespaces && yx_physical_ident(a, rules->import_namespaces[next_import]) == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             size_t import_id = yx_physical_ident(a, rules->imports[next_import++]);
-            if (import_id == SIZE_MAX) goto done;
+            if (import_id == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             bool duplicate = false;
             for (size_t m = 0; m < a->import_count; ++m) duplicate |= a->imports[m] == import_id;
             if (!duplicate) a->imports[a->import_count++] = import_id;
         }
         while (next_namespace < rules->namespace_count && next_namespace <= r->namespace_index) {
             const char *name = rules->namespace_names[next_namespace++];
-            if (name && yx_physical_ident(a, name) == SIZE_MAX) goto done;
+            if (name && yx_physical_ident(a, name) == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
         }
         size_t namespace_id = yx_physical_ident(a, ns);
-        if (namespace_id == SIZE_MAX || !yx_put_uint(&fields, r->tag_count)) goto done;
+        if (namespace_id == SIZE_MAX || !yx_put_uint(&fields, r->tag_count)) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         for (size_t j = 0; j < r->tag_count; ++j) {
             size_t tag = yx_physical_ident(a, r->tags[j]);
-            if (tag == SIZE_MAX || !yx_put_uint(&fields, tag)) goto done;
+            if (tag == SIZE_MAX || !yx_put_uint(&fields, tag)) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
         }
-        if (!yx_put_uint(&fields, r->metadata_count)) goto done;
+        if (!yx_put_uint(&fields, r->metadata_count)) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         for (size_t j = 0; j < r->metadata_count; ++j) {
             const YRX_METADATA *v = &r->metadata[j];
             size_t key = yx_physical_ident(a, v->identifier);
             unsigned kind = v->value_type == YRX_BOOLEAN ? 0 : v->value_type == YRX_I64 ? 1 : v->value_type == YRX_F64 ? 2 : v->value_type == YRX_STRING ? 3 : 4;
-            if (key == SIZE_MAX || !yx_put_uint(&fields, key) || !yx_put_uint(&fields, kind)) goto done;
+            if (key == SIZE_MAX || !yx_put_uint(&fields, key) || !yx_put_uint(&fields, kind)) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             if (kind == 0) {
-                if (!yx_put_u8(&fields, v->value.boolean)) goto done;
+                if (!yx_put_u8(&fields, v->value.boolean)) {
+                    status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
             } else if (kind == 1) {
-                if (!yx_put_signed(&fields, v->value.i64)) goto done;
+                if (!yx_put_signed(&fields, v->value.i64)) {
+                    status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
             } else if (kind == 2) {
-                if (!yx_put_float(&fields, v->value.f64)) goto done;
+                if (!yx_put_float(&fields, v->value.f64)) {
+                    if (sizeof(v->value.f64) == 8 && DBL_MANT_DIG == 53 && FLT_RADIX == 2) status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
             } else {
                 yx_literal literal =
                     kind == 3 ? (yx_literal){(const uint8_t *)v->value.string, strlen(v->value.string)} : (yx_literal){v->value.bytes.data, v->value.bytes.length};
                 size_t pool = yx_physical_pool(a, literal);
-                if (pool == SIZE_MAX || !yx_put_uint(&fields, pool)) goto done;
+                if (pool == SIZE_MAX || !yx_put_uint(&fields, pool)) {
+                    status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
             }
         }
         for (size_t j = 0; j < r->pattern_count; ++j) {
             const YRX_PATTERN *p = &r->patterns[j];
             size_t index = a->logical++;
             a->name_ids[index] = yx_physical_ident(a, p->identifier);
-            if (a->name_ids[index] == SIZE_MAX) goto done;
+            if (a->name_ids[index] == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             a->kinds[index] = (uint8_t)p->kind;
             a->pattern_private[index] = (p->modifiers & YX_MOD_PRIVATE) != 0;
             private_count += a->pattern_private[index];
@@ -353,7 +401,10 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules, const yx_ph
                     goto done;
                 }
                 for (size_t k = 0; k < part->pool_count; ++k)
-                    if ((pools[k] = yx_physical_pool(a, part->pool[k])) == SIZE_MAX) goto done;
+                    if ((pools[k] = yx_physical_pool(a, part->pool[k])) == SIZE_MAX) {
+                        status = YX_SER_NO_MEMORY;
+                        goto done;
+                    }
                 if (part->frame_count > SIZE_MAX - a->frame_count || part->atom_count > SIZE_MAX / sizeof(*a->atoms) - a->atom_count || code.used > UINT32_MAX ||
                     part->code_length > UINT32_MAX - code.used)
                     goto done;
@@ -397,35 +448,60 @@ static yx_ser_result yx_physical_rules_build(const YRX_RULES *rules, const yx_ph
         }
         if (assembly->condition_literals && i < assembly->condition_rule_count)
             for (size_t k = 0; k < assembly->condition_literal_counts[i]; ++k)
-                if (yx_physical_pool(a, assembly->condition_literals[i][k]) == SIZE_MAX) goto done;
+                if (yx_physical_pool(a, assembly->condition_literals[i][k]) == SIZE_MAX) {
+                    status = YX_SER_NO_MEMORY;
+                    goto done;
+                }
         size_t rule_id = yx_physical_ident(a, r->identifier);
-        if (rule_id == SIZE_MAX) goto done;
-        if (!yx_put_uint(&metadata, r->namespace_index * 2) || !yx_put_uint(&metadata, namespace_id) || !yx_put_uint(&metadata, rule_id) ||
-            !yx_put_bytes(&metadata, fields.data, fields.used) || !yx_put_uint(&metadata, r->pattern_count))
+        if (rule_id == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
             goto done;
+        }
+        if (!yx_put_uint(&metadata, r->namespace_index * 2) || !yx_put_uint(&metadata, namespace_id) || !yx_put_uint(&metadata, rule_id) ||
+            !yx_put_bytes(&metadata, fields.data, fields.used) || !yx_put_uint(&metadata, r->pattern_count)) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         for (size_t j = 0; j < r->pattern_count; ++j)
             if (!yx_put_uint(&metadata, a->mapping[first + j] * 2) || !yx_put_uint(&metadata, a->name_ids[first + j]) || !yx_put_uint(&metadata, a->kinds[first + j]) ||
-                !yx_put_u8(&metadata, a->pattern_private[first + j]))
+                !yx_put_u8(&metadata, a->pattern_private[first + j])) {
+                status = YX_SER_NO_MEMORY;
                 goto done;
-        if (!yx_put_uint(&metadata, private_count) || !yx_put_uint(&metadata, r->is_global) || !yx_put_u8(&metadata, r->is_private)) goto done;
+            }
+        if (!yx_put_uint(&metadata, private_count) || !yx_put_uint(&metadata, r->is_global) || !yx_put_u8(&metadata, r->is_private)) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
     }
 
     while (next_import < rules->import_count) {
         size_t ordinal = rules->import_namespace_indices ? rules->import_namespace_indices[next_import] : rules->rules[count - 1].namespace_index;
         while (next_namespace < rules->namespace_count && next_namespace <= ordinal) {
             const char *name = rules->namespace_names[next_namespace++];
-            if (name && yx_physical_ident(a, name) == SIZE_MAX) goto done;
+            if (name && yx_physical_ident(a, name) == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
         }
-        if (rules->import_namespaces && yx_physical_ident(a, rules->import_namespaces[next_import]) == SIZE_MAX) goto done;
+        if (rules->import_namespaces && yx_physical_ident(a, rules->import_namespaces[next_import]) == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         size_t id = yx_physical_ident(a, rules->imports[next_import++]);
-        if (id == SIZE_MAX) goto done;
+        if (id == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         bool duplicate = false;
         for (size_t i = 0; i < a->import_count; ++i) duplicate |= a->imports[i] == id;
         if (!duplicate) a->imports[a->import_count++] = id;
     }
     while (next_namespace < rules->namespace_count) {
         const char *name = rules->namespace_names[next_namespace++];
-        if (name && yx_physical_ident(a, name) == SIZE_MAX) goto done;
+        if (name && yx_physical_ident(a, name) == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
     }
     if (!hashed) {
         free(a->pattern_hashes);

@@ -1011,16 +1011,24 @@ static yx_ser_result yx_encode_physical_patterns(const YRX_RULES *rules, uint8_t
     }
     a->logical = rule->pattern_count;
     a->private_rule = rule->is_private;
-    if (yx_physical_ident(a, "default") == SIZE_MAX || (a->namespace_id = yx_physical_ident(a, rule->namespace_name ? rule->namespace_name : "default")) == SIZE_MAX)
+    if (yx_physical_ident(a, "default") == SIZE_MAX || (a->namespace_id = yx_physical_ident(a, rule->namespace_name ? rule->namespace_name : "default")) == SIZE_MAX) {
+        status = YX_SER_NO_MEMORY;
         goto done;
+    }
     a->tag_count = rule->tag_count;
     a->metadata_count = rule->metadata_count;
     for (size_t i = 0; i < a->tag_count; ++i)
-        if ((a->tags[i] = yx_physical_ident(a, rule->tags[i])) == SIZE_MAX) goto done;
+        if ((a->tags[i] = yx_physical_ident(a, rule->tags[i])) == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
     for (size_t i = 0; i < a->metadata_count; ++i) {
         const YRX_METADATA *value = &rule->metadata[i];
         yx_physical_meta *m = &a->metadata[i];
-        if ((m->key = yx_physical_ident(a, value->identifier)) == SIZE_MAX) goto done;
+        if ((m->key = yx_physical_ident(a, value->identifier)) == SIZE_MAX) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         m->variant = value->value_type == YRX_BOOLEAN ? 0 : value->value_type == YRX_I64 ? 1 : value->value_type == YRX_F64 ? 2 : value->value_type == YRX_STRING ? 3 : 4;
         if (m->variant == 0) m->boolean = value->value.boolean;
         else if (m->variant == 1) m->integer = value->value.i64;
@@ -1028,7 +1036,10 @@ static yx_ser_result yx_encode_physical_patterns(const YRX_RULES *rules, uint8_t
         else {
             yx_literal literal = m->variant == 3 ? (yx_literal){(const uint8_t *)value->value.string, strlen(value->value.string)}
                                                  : (yx_literal){value->value.bytes.data, value->value.bytes.length};
-            if ((m->literal = yx_physical_pool(a, literal)) == SIZE_MAX) goto done;
+            if ((m->literal = yx_physical_pool(a, literal)) == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
         }
     }
     for (size_t i = 0; i < rule->pattern_count; ++i) {
@@ -1084,7 +1095,10 @@ static yx_ser_result yx_encode_physical_patterns(const YRX_RULES *rules, uint8_t
             goto done;
         }
         for (size_t j = 0; j < part->pool_count; ++j)
-            if ((pool[j] = yx_physical_pool(a, part->pool[j])) == SIZE_MAX) goto done;
+            if ((pool[j] = yx_physical_pool(a, part->pool[j])) == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
         if (part->frame_count > SIZE_MAX - a->frame_count || part->atom_count > SIZE_MAX / sizeof(*a->atoms) - a->atom_count || code.used > UINT32_MAX ||
             part->code_length > UINT32_MAX - code.used)
             goto done;
@@ -1118,7 +1132,10 @@ static yx_ser_result yx_encode_physical_patterns(const YRX_RULES *rules, uint8_t
         }
         yx_physical_destroy(part);
     }
-    if ((a->rule_name_id = yx_physical_ident(a, rule->identifier)) == SIZE_MAX) goto done;
+    if ((a->rule_name_id = yx_physical_ident(a, rule->identifier)) == SIZE_MAX) {
+        status = YX_SER_NO_MEMORY;
+        goto done;
+    }
     context.name = rule->patterns[0].identifier;
     context.pattern_count = rule->pattern_count;
     for (size_t i = 0; i < rule->pattern_count; ++i) yx_pattern_names(&context)[i] = rule->patterns[i].identifier, yx_pattern_mapping(&context)[i] = a->mapping[i];
@@ -1995,12 +2012,18 @@ static yx_ser_result yx_physical_load_part(const yx_physical_parts_job *job, siz
         f.pattern = 0;
         if ((f.frame.variant <= 3 || f.frame.variant >= 7)) {
             size_t pool = yx_physical_pool(one, a->pool[f.frame.literal_index]);
-            if (pool == SIZE_MAX) goto done;
+            if (pool == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             f.frame.literal_index = pool;
         }
         if (f.frame.variant == 1 || f.frame.variant >= 10) {
             size_t pool = yx_physical_pool(one, a->pool[f.mask]);
-            if (pool == SIZE_MAX) goto done;
+            if (pool == SIZE_MAX) {
+                status = YX_SER_NO_MEMORY;
+                goto done;
+            }
             f.mask = pool;
         }
         if (f.frame.variant == 3 || f.frame.variant == 6) {

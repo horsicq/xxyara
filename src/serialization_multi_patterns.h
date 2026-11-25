@@ -361,30 +361,51 @@ static bool yx_multi_pattern_metadata_read(yx_reader *r, const yx_physical_archi
         if (*namespace_id >= a->name_count || *rule_id >= a->name_count || !yx_valid_rule_name(a->names[*rule_id])) return false;
         out->namespace_name = yx_copy_string(a->names[*namespace_id]);
         out->identifier = yx_copy_string(a->names[*rule_id]);
-        if (!out->namespace_name || !out->identifier) return false;
+        if (!out->namespace_name || !out->identifier) {
+            r->no_memory = true;
+            return false;
+        }
     }
     if (!yx_get_uint(r, &n) || n > r->length - r->at) return false;
     size_t tags = (size_t)n;
     if (out && tags) {
         out->tags = calloc(tags, sizeof(*out->tags));
-        if (!out->tags) return false;
+        if (!out->tags) {
+            r->no_memory = true;
+            return false;
+        }
         out->tag_count = tags;
     }
     for (size_t i = 0; i < tags; ++i) {
         if (!yx_get_uint(r, &n) || n >= r->length) return false;
-        if (out && (n >= a->name_count || !yx_valid_rule_name(a->names[n]) || !(out->tags[i] = yx_copy_string(a->names[n])))) return false;
+        if (out) {
+            if (n >= a->name_count || !yx_valid_rule_name(a->names[n])) return false;
+            if (!(out->tags[i] = yx_copy_string(a->names[n]))) {
+                r->no_memory = true;
+                return false;
+            }
+        }
     }
     if (!yx_get_uint(r, &n) || n > r->length - r->at) return false;
     size_t count = (size_t)n;
     if (out && count) {
         out->metadata = calloc(count, sizeof(*out->metadata));
-        if (!out->metadata) return false;
+        if (!out->metadata) {
+            r->no_memory = true;
+            return false;
+        }
         out->metadata_count = count;
     }
     for (size_t i = 0; i < count; ++i) {
         if (!yx_get_uint(r, &n) || n >= r->length || !yx_get_uint(r, &kind) || kind > 4) return false;
         YRX_METADATA *v = out ? &out->metadata[i] : NULL;
-        if (v && (n >= a->name_count || !yx_valid_rule_name(a->names[n]) || !(v->identifier = yx_copy_string(a->names[n])))) return false;
+        if (v) {
+            if (n >= a->name_count || !yx_valid_rule_name(a->names[n])) return false;
+            if (!(v->identifier = yx_copy_string(a->names[n]))) {
+                r->no_memory = true;
+                return false;
+            }
+        }
         if (kind == 0) {
             if (!yx_get_u8(r, &flag) || flag > 1) return false;
             if (v) v->value_type = YRX_BOOLEAN, v->value.boolean = flag != 0;
@@ -405,12 +426,18 @@ static bool yx_multi_pattern_metadata_read(yx_reader *r, const yx_physical_archi
                     if (memchr(literal->data, 0, literal->length) || !yx_valid_utf8(literal->data, literal->length)) return false;
                     v->value_type = YRX_STRING;
                     v->value.string = (const char *)yx_copy_literal(literal, true);
-                    if (!v->value.string) return false;
+                    if (!v->value.string) {
+                        r->no_memory = true;
+                        return false;
+                    }
                 } else {
                     v->value_type = YRX_BYTES;
                     v->value.bytes.length = literal->length;
                     v->value.bytes.data = yx_copy_literal(literal, false);
-                    if (!v->value.bytes.data) return false;
+                    if (!v->value.bytes.data) {
+                        r->no_memory = true;
+                        return false;
+                    }
                 }
             }
         }
@@ -865,6 +892,10 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data, size_t length
         if (yx_multi_pattern_wasm_list(&trees, roots, contexts, count, a->physical, profile, &canonical, &canonical_length, limits) &&
             canonical_length == a->wasm_length && !memcmp(canonical, a->wasm, a->wasm_length))
             break;
+        if (yx_walk_no_memory) {
+            status = YX_SER_NO_MEMORY;
+            goto done;
+        }
     }
     if (profile == 4) goto done;
     if (reconstructing) {
@@ -989,14 +1020,13 @@ static yx_ser_result yx_decode_multi_patterns(const uint8_t *data, size_t length
     }
     for (size_t i = 0; i < count; ++i) {
         r.at = metadata_starts[i];
-        if (!yx_multi_pattern_metadata_read(&r, a, &decoded[i], &namespaces[i], &ids[i])) goto done;
+        if (!yx_multi_pattern_metadata_read(&r, a, &decoded[i], &namespaces[i], &ids[i])) {
+            if (r.no_memory) status = YX_SER_NO_MEMORY;
+            goto done;
+        }
         decoded[i].is_private = private_rules[i];
         decoded[i].truth = true;
         decoded[i].preserve_serialized_prefix = true;
-        if (!decoded[i].namespace_name || !decoded[i].identifier) {
-            status = YX_SER_NO_MEMORY;
-            goto done;
-        }
     }
     size_t print_capacity = a->physical > 5 ? a->physical : 5;
     print_names = calloc(print_capacity, sizeof(*print_names));

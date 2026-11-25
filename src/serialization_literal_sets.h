@@ -75,6 +75,7 @@ static int yx_string_set_regex_primary(yx_module_program *p, unsigned depth)
     p->nodes[node].bytes = malloc(size);
     if (!p->nodes[node].bytes) {
         p->failed = true;
+        yx_walk_no_memory = true;
         return -1;
     }
     memcpy(p->nodes[node].bytes, start, size);

@@ -18420,6 +18420,23 @@ bool yx_ser_regexp_literal_atoms(const char *regexp)
     return valid;
 }
 
+/* A regexp that is one literal without ASCII letters: `nocase` (or /i)
+ * changes nothing, so YARA-X compiles it as a literal and anchors it at a
+ * fixed `at` offset like the case-sensitive form. */
+bool yx_ser_regexp_literal_caseless(const char *regexp)
+{
+    if(!regexp)return false;
+    yx_tr_parser parser={.text=(const uint8_t *)regexp,.length=strlen(regexp)};
+    yx_tr_node *root=yx_tr_expression(&parser),*node=root;
+    bool valid=root&&!parser.failed&&!parser.oom&&parser.at==parser.length;
+    if(valid&&node->kind==YX_TR_CAPTURE)node=node->children[0];
+    valid=valid&&node->kind==YX_TR_LITERAL&&node->length!=0;
+    for(size_t i=0;valid&&i<node->length;++i)
+        if((node->bytes[i]|32)>='a'&&(node->bytes[i]|32)<='z')valid=false;
+    yx_tr_destroy(root);
+    return valid;
+}
+
 #include "serialization_pattern_hash.h"
 #include "serialization_physical.h"
 #include "serialization_physical_rules.h"

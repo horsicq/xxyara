@@ -2840,10 +2840,11 @@ static yx_ser_result yx_encode_module_patterns_profile(const YRX_RULES *rules, u
     status = yx_ser_encode(&rs, &base, &base_length);
     if (status != YX_SER_SUCCESS) goto done;
     status = YX_SER_UNSUPPORTED;
-    if (!yx_physical_read(base, base_length, a) || !yx_physical_imports_reserve(a, rules->import_count)) goto done;
+    if (!yx_physical_read(base, base_length, a)) goto done;
+    if (!yx_physical_imports_reserve(a, rules->import_count)) goto memory;
     /* Imports are interned before rule-local names and namespaces. */
     for (size_t m = 0; m < rules->import_count; ++m) {
-        if (!yx_physical_names_reserve(a, a->name_count + 1)) goto done;
+        if (!yx_physical_names_reserve(a, a->name_count + 1)) goto memory;
         char *module_name = yx_copy_string(rules->imports[m]);
         if (!module_name) goto memory;
         size_t position = 1 + m;
@@ -2872,15 +2873,15 @@ static yx_ser_result yx_encode_module_patterns_profile(const YRX_RULES *rules, u
     yx_module_pattern_setup(p, &c);
     for (size_t i = 0; i < a->pool_count; ++i) {
         size_t id;
-        if (!yx_intern_literal(a->pool[i].data, a->pool[i].length, &p->literals, &p->literal_count, &p->literal_capacity, &id) || id != i) goto done;
+        if (!yx_intern_literal(a->pool[i].data, a->pool[i].length, &p->literals, &p->literal_count, &p->literal_capacity, &id)) goto memory;
+        if (id != i) goto done;
     }
     int root = yx_module_parse(p, 1, 0);
     yx_bool_skip_space(&p->parser);
     c.limit_roots = &root;
     c.limit_root_count = 1;
-    if (root < 0 || *p->parser.at || p->failed || !yx_module_pattern_limits(p) || !yx_module_pattern_wasm_sized(p, root, &wasm, &wasm_length) ||
-        !yx_physical_pool_reserve(a, p->literal_count))
-        goto done;
+    if (root < 0 || *p->parser.at || p->failed || !yx_module_pattern_limits(p) || !yx_module_pattern_wasm_sized(p, root, &wasm, &wasm_length)) goto done;
+    if (!yx_physical_pool_reserve(a, p->literal_count)) goto memory;
     for (size_t i = 0; i < p->count; ++i)
         if (p->nodes[i].op == YX_MP_AT || (p->nodes[i].op == YX_MP_OF && (p->nodes[i].comparison >> 4))) goto done;
     yx_module_pattern_apply_bounds(p, root);

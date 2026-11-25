@@ -3075,9 +3075,13 @@ static yx_ser_result yx_encode_thompson_regex(const YRX_RULES *rules, bool vba_o
     yx_writer hex_text = {0};
     const char *regexp = pattern->regexp;
     if (hex) {
-        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) || !yx_put_u8(&hex_text, 0)) {
+        if (!pattern->hex_atoms || !yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0)) {
             free(hex_text.data);
             return YX_SER_UNSUPPORTED;
+        }
+        if (!yx_put_u8(&hex_text, 0)) {
+            free(hex_text.data);
+            return YX_SER_NO_MEMORY;
         }
         regexp = (char *)hex_text.data;
     }
@@ -3094,7 +3098,7 @@ static yx_ser_result yx_encode_thompson_regex(const YRX_RULES *rules, bool vba_o
     if (!supported) {
         free(code.data);
         free(hex_text.data);
-        return YX_SER_UNSUPPORTED;
+        return eligibility.oom ? YX_SER_NO_MEMORY : YX_SER_UNSUPPORTED;
     }
     yx_tr_program program = {0};
     bool greedy = false;

@@ -430,7 +430,10 @@ static bool yx_module_nodes_reserve(yx_module_program *p, size_t additional)
     }
     if (capacity > SIZE_MAX / sizeof(*p->nodes)) return false;
     yx_module_node *grown = realloc(p->nodes, capacity * sizeof(*grown));
-    if (!grown) return false;
+    if (!grown) {
+        yx_walk_no_memory = true;
+        return false;
+    }
     p->nodes = grown;
     p->node_capacity = capacity;
     return true;
@@ -585,7 +588,10 @@ static int yx_module_parse_with(yx_module_program *p, unsigned depth)
     size_t first = p->binding_count, count = 0;
     int *values = malloc(YX_ARCHIVE_MAX_VARS * sizeof(*values));
     int body = -1;
-    if (!values) return -1;
+    if (!values) {
+        yx_walk_no_memory = true;
+        return -1;
+    }
     do {
         const unsigned char *name;
         size_t length;
@@ -694,6 +700,7 @@ static int yx_module_regex(yx_module_program *p)
     if (n < 0) return -1;
     if (!(p->nodes[n].bytes = malloc(size))) {
         p->failed = true;
+        yx_walk_no_memory = true;
         return -1;
     }
     memcpy(p->nodes[n].bytes, start, size);
@@ -1328,7 +1335,10 @@ static bool yx_module_call(yx_module_program *p, yx_writer *body, const char *mo
         size_t capacity = p->call_capacity ? p->call_capacity * 2 : 64;
         if (capacity < p->call_capacity || capacity > SIZE_MAX / sizeof(*p->calls)) return false;
         size_t *grown = realloc(p->calls, capacity * sizeof(*grown));
-        if (!grown) return false;
+        if (!grown) {
+            yx_walk_no_memory = true;
+            return false;
+        }
         p->calls = grown;
         p->call_capacity = capacity;
     }
@@ -1673,7 +1683,10 @@ static int *yx_module_left_chain(const yx_module_program *p, int index, uint8_t 
     }
     if (length > SIZE_MAX / sizeof(int)) return NULL;
     int *items = malloc(length * sizeof(*items));
-    if (!items) return NULL;
+    if (!items) {
+        yx_walk_no_memory = true;
+        return NULL;
+    }
     *count = length;
     at = index;
     while (p->nodes[at].op == op) {
@@ -1862,6 +1875,7 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
                 size_t next = capacity ? capacity * 2 : 16;
                 bool *grown = realloc(saved_defined, next * sizeof(*grown));
                 if (!grown) {
+                    yx_walk_no_memory = true;
                     ok = false;
                     break;
                 }
@@ -1885,8 +1899,10 @@ static bool yx_module_emit(yx_module_program *p, int index, yx_writer *w, unsign
         /* Each declaration's slot gets back the state it had, innermost first. */
         if (chain) {
             int *links = malloc(chain * sizeof(*links));
-            if (!links) ok = false;
-            else {
+            if (!links) {
+                yx_walk_no_memory = true;
+                ok = false;
+            } else {
                 int at = index;
                 for (size_t i = 0; i < chain; ++i) {
                     links[i] = at;
@@ -2284,7 +2300,10 @@ static bool yx_module_decode_string(yx_module_program *p, int node)
     if (n->op != YX_ME_INT || n->integer < 0 || n->integer % 4 || (uint64_t)n->integer / 4 >= p->literal_count) return false;
     const yx_literal *literal = &p->literals[(uint64_t)n->integer / 4];
     n->bytes = malloc(literal->length ? literal->length : 1);
-    if (!n->bytes) return false;
+    if (!n->bytes) {
+        yx_walk_no_memory = true;
+        return false;
+    }
     if (literal->length) memcpy(n->bytes, literal->data, literal->length);
     n->length = literal->length;
     n->op = YX_ME_STRING;
@@ -2300,6 +2319,7 @@ static bool yx_module_decode_regex(yx_module_program *p, int node)
     n->bytes = malloc(text->length ? text->length : 1);
     if (!n->bytes) {
         p->failed = true;
+        yx_walk_no_memory = true;
         return false;
     }
     if (text->length) memcpy(n->bytes, text->data, text->length);
@@ -2414,14 +2434,15 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
     int64_t address;
     if (!p->memory || !yx_get_sleb_i64(r, &address) || address < 32 || address > (YX_ARCHIVE_MAX_VARS - 3) * 8 || address % 8) return -1;
     int64_t slot = address / 8 - 4;
+    size_t saved_count = p->count, saved_guards = p->decoded_guards;
     int array = yx_module_decode_block(r, end, p, depth + 1);
     const yx_archive_module_map *map = NULL;
     if (array >= 0 && (p->nodes[array].op == YX_ME_LOOKUP || p->nodes[array].op == YX_ME_VARIABLE || p->nodes[array].op == YX_ME_MEMBER) && p->nodes[array].type == 8) {
         map = yx_module_map_types(p->nodes[array].field);
-        if (!yx_module_map_by_index_name(map)) return -1;
+        if (!yx_module_map_by_index_name(map)) goto fail;
     } else if (array < 0 || (p->nodes[array].op != YX_ME_LOOKUP && p->nodes[array].op != YX_ME_MEMBER) || p->nodes[array].type != 7 || !p->nodes[array].field ||
                p->nodes[array].field->element > 4)
-        return -1;
+        goto fail;
     static const uint8_t types[] = {3, 2, 1, 4, 6};
     uint8_t type = map ? map->value : types[p->nodes[array].field->element];
     /* A body has a void catch block or a result block, depending on whether
@@ -2451,10 +2472,10 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
         if (!matched) {
             for (size_t i = prefix_count; i < p->count; ++i) free(p->nodes[i].bytes);
             p->count = prefix_count;
-            if (p->failed) return -1;
+            if (p->failed) goto fail;
         }
     }
-    if (!matched) return -1;
+    if (!matched) goto fail;
     p->slot_types[slot + 5] = map ? map->key : type;
     p->slot_defined[slot + 5] = true;
     p->slot_fields[slot + 5] = p->nodes[array].field;
@@ -2467,7 +2488,7 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
     p->undefined_slot = -1;
     int body = catching ? yx_module_loop_catch_decode(r, end, p, depth + 1) : yx_module_decode_block(r, end, p, depth + 1);
     p->undefined_slot = saved;
-    if (body < 0) return -1;
+    if (body < 0) goto fail;
     for (uint8_t quantifier = counted ? 0xc7 : 0xc4; quantifier <= (counted ? 0xc7 : 0xc6); ++quantifier) {
         size_t start = r->at;
         yx_writer expected = {0};
@@ -2478,17 +2499,20 @@ static int yx_module_decode_loop(yx_reader *r, size_t end, yx_module_program *p,
         free(expected.data);
         if (matched) {
             int node = yx_module_node_new(p, YX_ME_LOOP, 1);
-            if (node >= 0) {
-                p->nodes[node].integer = slot;
-                p->nodes[node].comparison = counted == 4 ? 0xc8 : quantifier;
-                p->nodes[node].args[0] = array;
-                p->nodes[node].args[1] = body;
-                p->nodes[node].args[2] = quantity;
-            }
+            if (node < 0) goto fail;
+            p->nodes[node].integer = slot;
+            p->nodes[node].comparison = counted == 4 ? 0xc8 : quantifier;
+            p->nodes[node].args[0] = array;
+            p->nodes[node].args[1] = body;
+            p->nodes[node].args[2] = quantity;
             return node;
         }
         r->at = start;
     }
+fail:
+    for (size_t i = saved_count; i < p->count; ++i) free(p->nodes[i].bytes);
+    p->count = saved_count;
+    p->decoded_guards = saved_guards;
     return -1;
 }
 static int yx_module_decode_binding(yx_reader *r, size_t end, yx_module_program *p, int *slot, unsigned depth)
@@ -2581,7 +2605,10 @@ static int yx_module_decode_block(yx_reader *r, size_t end, yx_module_program *p
     if (capacity > SIZE_MAX / sizeof(int) - bindings * 2) return -1;
     if (!depth && !yx_module_nodes_for_input(p, end - r->at)) return -1;
     int *stack = malloc((capacity + bindings * 2) * sizeof(*stack));
-    if (!stack) return -1;
+    if (!stack) {
+        yx_walk_no_memory = true;
+        return -1;
+    }
     int result = yx_module_decode_block_inner(r, end, p, depth, stack, capacity, stack + capacity, stack + capacity + bindings, bindings);
     free(stack);
     return result;
@@ -3325,7 +3352,10 @@ static yx_ser_result yx_decode_module_expression(const uint8_t *data, size_t len
         goto done;
     }
     for (size_t i = 0; i < pool_count; ++i)
-        if (!yx_get_string(&r, &pool[i])) goto done;
+        if (!yx_get_string(&r, &pool[i])) {
+            if (r.no_memory) result = YX_SER_NO_MEMORY;
+            goto done;
+        }
     if (!yx_get_uint(&r, &count) || count > length - r.at) goto done;
     regex_count = (size_t)count;
     regexes = calloc(regex_count ? regex_count : 1, sizeof(*regexes));
@@ -3369,7 +3399,11 @@ static yx_ser_result yx_decode_module_expression(const uint8_t *data, size_t len
     if (!yx_module_decode_header(&wr, p, &body_end)) goto done;
     p->undefined_slot = -1;
     int root = yx_module_decode_block(&wr, body_end, p, 0);
-    if (root < 0 || !yx_module_print(p, root, &source, 0) || !yx_put_u8(&source, 0)) goto done;
+    if (root < 0 || !yx_module_print(p, root, &source, 0)) goto done;
+    if (!yx_put_u8(&source, 0)) {
+        result = YX_SER_NO_MEMORY;
+        goto done;
+    }
     YRX_RULE source_rule = {0};
     YRX_RULES source_rules = {0};
     source_rule.identifier = pool[rule_id];

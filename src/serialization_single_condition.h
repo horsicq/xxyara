@@ -51,7 +51,8 @@ static yx_ser_result yx_physical_single_condition_encode(const YRX_RULES *rules,
         base.serialized_prefix_length = 0;
         yx_ser_result result = yx_ser_encode(&base, &archive, &archive_length);
         bool valid = result == YX_SER_SUCCESS && yx_rule_expression_wasm_span(archive, archive_length, &prefix, &start, &wasm_length, &count) && count == 1;
-        if (valid) {
+        if (result == YX_SER_NO_MEMORY) status = YX_SER_NO_MEMORY;
+        else if (valid) {
             wasm = malloc(wasm_length);
             if (wasm) memcpy(wasm, archive + start, wasm_length);
             else status = YX_SER_NO_MEMORY;

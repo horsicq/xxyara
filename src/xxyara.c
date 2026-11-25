@@ -11424,6 +11424,9 @@ static bool yx_pattern_uses_fixed_at_atom(const YRX_PATTERN *pattern)
     /* An alternation of literals: c_alternation_literal anchors each, with
      * nocase too. */
     if (pattern->rx_literals) return true;
+    if (pattern->kind == YX_PATTERN_REGEX && pattern->regexp && (pattern->modifiers & YX_MOD_NOCASE) &&
+        !(pattern->modifiers & (YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE)))
+        return yx_ser_regexp_literal_caseless(pattern->regexp);
     if (pattern->modifiers & (YX_MOD_NOCASE | YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE)) return false;
     if (pattern->kind == YX_PATTERN_TEXT) return true;
     if (pattern->kind == YX_PATTERN_HEX) {

@@ -120,6 +120,18 @@ static bool yx_suppress_ident_char(uint8_t ch)
     return yx_suppress_alpha(ch) || (ch >= '0' && ch <= '9') || ch == '_';
 }
 
+/* Width of one identifier-continuation character, or 0: the tokenizer's
+ * identifier regexes take `\d` Unicode-aware (any Nd digit). */
+static size_t yx_suppress_ident_width(const uint8_t *at, size_t left)
+{
+    uint32_t scalar;
+    size_t width;
+    if (!left) return 0;
+    if (at[0] < 0x80) return yx_suppress_ident_char(at[0]) ? 1 : 0;
+    width = yx_suppress_decode(at, left, &scalar);
+    return width && yx_suppress_in_class(scalar, XX_REGEX_UNICODE16_DECIMAL) ? width : 0;
+}
+
 /* Width of one character of the tokenizer's Whitespace token, or 0. */
 static size_t yx_suppress_blank(const uint8_t *at, size_t left)
 {
@@ -262,11 +274,11 @@ static yx_suppress_token yx_suppress_next(yx_suppress_lexer *lexer)
     } else if (ch == '$' || ch == '#' || ch == '@' || ch == '!') {
         if (ch == '!' && end < length && source[end] == '=') ++end;
         else {
-            while (end < length && yx_suppress_ident_char(source[end])) ++end;
+            while (end < length && (width = yx_suppress_ident_width(source + end, length - end)) != 0) end += width;
             if (ch == '$') token.kind = YX_SUPPRESS_PATTERN_IDENT;
         }
     } else if (yx_suppress_alpha(ch) || ch == '_') {
-        while (end < length && yx_suppress_ident_char(source[end])) ++end;
+        while (end < length && (width = yx_suppress_ident_width(source + end, length - end)) != 0) end += width;
         if (yx_suppress_word_is(source, at, end, "rule") || yx_suppress_word_is(source, at, end, "global") || yx_suppress_word_is(source, at, end, "private"))
             token.kind = YX_SUPPRESS_RULE_WORD;
         else if (yx_suppress_word_is(source, at, end, "condition")) token.kind = YX_SUPPRESS_CONDITION;

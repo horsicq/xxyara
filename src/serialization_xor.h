@@ -27,7 +27,10 @@ static yx_ser_result yx_encode_xor_pattern(const YRX_RULES *rules, uint8_t **dat
 {
     if (!rules || rules->rule_count != 1 || rules->import_count || rules->global_count) return YX_SER_UNSUPPORTED;
     const YRX_RULE *r = &rules->rules[0];
-    if (r->pattern_count != 1 || r->tag_count || r->metadata_count || r->is_global || !r->condition_text || (r->namespace_name && strcmp(r->namespace_name, "default")))
+    if (r->pattern_count != 1 || r->tag_count || r->metadata_count || r->is_global || !r->condition_text || (r->namespace_name && strcmp(r->namespace_name, "default")) ||
+        /* The three names below are written without interning: a rule
+         * named like the namespace shares its identifier in YARA-X. */
+        !r->identifier || !strcmp(r->identifier, "default"))
         return YX_SER_UNSUPPORTED;
     const YRX_PATTERN *p = &r->patterns[0];
     if (p->kind != YX_PATTERN_TEXT || !p->bytes || !p->length || !(p->modifiers & YX_MOD_XOR) ||
