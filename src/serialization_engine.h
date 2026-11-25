@@ -1364,6 +1364,94 @@ done:
     return result;
 }
 
+/* One Literal sub-pattern of c_alternation_literal: the literal as it is
+ * searched (wide: every byte followed by a zero), and its best atom
+ * (best_atom_in_bytes: exact when it is the whole literal) or, with nocase,
+ * that atom's case combinations. */
+static bool yx_se_literal_item(yx_rx_literal *item, const uint8_t *bytes, size_t length, bool wide,
+                               unsigned flags)
+{
+    size_t encoded = length * (wide ? 2 : 1), offset = 0, width = 0, letters = 0, count;
+    uint8_t *masks = malloc(encoded ? encoded : 1), atom[8];
+    memset(item, 0, sizeof(*item));
+    item->bytes = malloc(encoded ? encoded : 1);
+    if (!item->bytes || !masks) { free(masks); return false; }
+    for (size_t i = 0; i < length; ++i) {
+        if (wide) { item->bytes[2 * i] = bytes[i]; item->bytes[2 * i + 1] = 0; }
+        else item->bytes[i] = bytes[i];
+    }
+    item->length = encoded;
+    item->sub.flags = flags | (wide ? YX_RX_WIDE : 0);
+    memset(masks, 255, encoded);
+    yx_fast_literal literal = {item->bytes, masks, encoded, false};
+    yx_fast_best_atom(&literal, &offset, &width);
+    free(masks);
+    if (!width || width > sizeof(atom)) return false;
+    memcpy(atom, item->bytes + offset, width);
+    if (flags & YX_RX_NOCASE)
+        for (size_t i = 0; i < width; ++i) {
+            if (atom[i] >= 'A' && atom[i] <= 'Z') atom[i] = (uint8_t)(atom[i] + 32);
+            if (atom[i] >= 'a' && atom[i] <= 'z') ++letters;
+        }
+    count = (size_t)1 << letters;
+    item->sub.atoms = calloc(count, sizeof(*item->sub.atoms));
+    if (!item->sub.atoms) return false;
+    item->sub.atom_count = count;
+    /* CaseCombinations: lowercase before uppercase, the last byte varying
+     * fastest. */
+    for (size_t bits = 0; bits < count; ++bits) {
+        yx_rx_atom *to = &item->sub.atoms[bits];
+        size_t letter = letters;
+        for (size_t i = width; i-- > 0;) {
+            to->bytes[i] = atom[i];
+            if ((flags & YX_RX_NOCASE) && atom[i] >= 'a' && atom[i] <= 'z') {
+                --letter;
+                if ((bits >> (letters - 1 - letter)) & 1u) to->bytes[i] = (uint8_t)(atom[i] - 32);
+            }
+        }
+        to->length = (uint8_t)width;
+        to->backtrack = offset;
+        to->exact = width == encoded;
+    }
+    return true;
+}
+
+yx_rx_literals *yx_ser_literal_set(const YRX_PATTERN *pattern)
+{
+    uint8_t *bytes = NULL;
+    size_t *offsets = NULL;
+    yx_rx_literals *set = NULL;
+    if (!pattern || (pattern->kind != YX_PATTERN_REGEX && pattern->kind != YX_PATTERN_HEX) ||
+        (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_NOCASE |
+                                YX_MOD_FULLWORD | YX_MOD_PRIVATE))) return NULL;
+    int count = yx_ser_literal_branches(pattern, &bytes, &offsets);
+    bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0;
+    bool raw = !wide || (pattern->modifiers & YX_MOD_ASCII) != 0;
+    unsigned flags = ((pattern->modifiers & YX_MOD_NOCASE) ? YX_RX_NOCASE : 0) |
+                     ((pattern->modifiers & YX_MOD_FULLWORD) ? YX_RX_FULLWORD_LEFT | YX_RX_FULLWORD_RIGHT : 0);
+    bool ok = count >= 2;
+    if (ok) {
+        set = calloc(1, sizeof(*set));
+        if (set) set->items = calloc((size_t)count * 2, sizeof(*set->items));
+        ok = set && set->items;
+    }
+    /* Per branch the raw literal, then the wide one. */
+    for (int branch = 0; ok && branch < count; ++branch) {
+        const uint8_t *literal = bytes + offsets[branch];
+        size_t length = offsets[branch + 1] - offsets[branch];
+        for (unsigned encoding = 0; ok && encoding < 2; ++encoding) {
+            if (encoding ? !wide : !raw) continue;
+            ok = yx_se_literal_item(&set->items[set->count], literal, length, encoding != 0, flags);
+            /* A failed item still owns what it allocated. */
+            ++set->count;
+        }
+    }
+    free(bytes);
+    free(offsets);
+    if (!ok) { yx_rx_literals_free(set); set = NULL; }
+    return set;
+}
+
 /* The reference's automaton atoms for one pattern, in insertion order:
  * regexp sub-patterns from their program, and plain, nocase, wide or ascii
  * literals as c_literal_pattern builds them. Other kinds are not modeled. */
@@ -1402,6 +1490,14 @@ int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom
             for (size_t a = 0; a < program->subs[s].atom_count; ++a)
                 if (!yx_se_push_atom(atoms, count, &capacity, program->subs[s].atoms[a].bytes,
                                      program->subs[s].atoms[a].length)) goto fail;
+        return 1;
+    }
+    if (pattern->rx_literals) {
+        const yx_rx_literals *set = pattern->rx_literals;
+        for (size_t s = 0; s < set->count; ++s)
+            for (size_t a = 0; a < set->items[s].sub.atom_count; ++a)
+                if (!yx_se_push_atom(atoms, count, &capacity, set->items[s].sub.atoms[a].bytes,
+                                     set->items[s].sub.atoms[a].length)) goto fail;
         return 1;
     }
     if (pattern->kind == YX_PATTERN_REGEX) {
@@ -1709,6 +1805,169 @@ static int yx_ss_masked_literal(const yx_tr_node *node)
     }
     free(bytes.data);
     free(mask.data);
+    return result;
+}
+
+/* The atoms of a LiteralWithMask sub-pattern (a regexp or hex pattern
+ * without nocase or wide that try_extract_literal_with_mask accepts): the
+ * mask combinations of its best masked atom. 1 with the atoms, 0 for
+ * another pattern, -1 without memory. */
+static int yx_ss_masked_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, size_t *count, size_t *capacity)
+{
+    yx_writer hex_text = {0}, bytes = {0}, mask = {0};
+    yx_tr_node *root = NULL;
+    int result = 0;
+    const char *regexp = pattern->regexp;
+    if (pattern->modifiers & ~(YX_MOD_DOTALL | YX_MOD_ASCII | YX_MOD_FULLWORD | YX_MOD_PRIVATE)) return 0;
+    if (pattern->kind == YX_PATTERN_HEX) {
+        if (!pattern->hex_atoms) return 0;
+        if (!yx_tr_hex_regex(&hex_text, pattern->hex_atoms, pattern->hex_atom_count, 0) ||
+            !yx_put_u8(&hex_text, 0)) { result = hex_text.data ? 0 : -1; goto done; }
+        regexp = (const char *)hex_text.data;
+    } else if (pattern->kind != YX_PATTERN_REGEX || !regexp || pattern->gap_head_regexp) return 0;
+    yx_tr_parser parser = {.text = (const uint8_t *)regexp, .length = strlen(regexp),
+                           .dotall = (pattern->modifiers & YX_MOD_DOTALL) != 0};
+    root = yx_tr_expression(&parser);
+    if (!root || parser.failed || parser.oom || parser.at != parser.length) {
+        result = parser.oom ? -1 : 0; goto done;
+    }
+    if (yx_se_has_large_gap(root) || yx_se_alternation_literal(root) || !yx_se_masked_literal(root)) goto done;
+    if (!yx_ss_masked_bytes(root, &bytes, &mask, 0) || !bytes.used) goto done;
+    {
+        /* best_range_in_masked_bytes searches the first 32,768 bytes;
+         * MaskedAtom::trim cuts the atom down to 16,384 combinations. */
+        size_t length = bytes.used < 32768 ? bytes.used : 32768, offset = 0, width = 0;
+        uint64_t combinations = 1;
+        yx_fast_literal literal = {bytes.data, mask.data, length, true};
+        yx_fast_best_atom(&literal, &offset, &width);
+        for (;;) {
+            combinations = 1;
+            for (size_t i = 0; i < width; ++i) {
+                unsigned zeros = 0;
+                for (unsigned k = 0; k < 8; ++k) zeros += !((mask.data[offset + i] >> k) & 1u);
+                combinations <<= zeros;
+                if (combinations > 16384) break;
+            }
+            if (combinations <= 16384 || !width) break;
+            --width;
+            while (width && mask.data[offset + width - 1] == 0x00) --width;
+        }
+        if (!width || width > 8) goto done;
+        for (uint64_t n = 0; n < combinations; ++n) {
+            uint8_t atom[8];
+            uint64_t rest = n;
+            for (size_t i = width; i-- > 0;) {
+                uint8_t fixed = mask.data[offset + i], value = (uint8_t)(bytes.data[offset + i] & fixed);
+                for (unsigned k = 0; k < 8; ++k)
+                    if (!((fixed >> k) & 1u)) { value |= (uint8_t)((rest & 1u) << k); rest >>= 1; }
+                atom[i] = value;
+            }
+            if (!yx_se_push_atom(atoms, count, capacity, atom, width)) { result = -1; goto done; }
+        }
+        result = 1;
+    }
+done:
+    yx_tr_destroy(root);
+    free(hex_text.data); free(bytes.data); free(mask.data);
+    return result;
+}
+
+/* The atoms of a text literal with xor or base64 modifiers, as
+ * c_literal_pattern adds them: for the wide form, then the plain one, the
+ * best atom under every xor key, or the best atoms of the three base64
+ * forms (base64_patterns), plain and then wide. */
+static int yx_ss_encoded_text_atoms(const YRX_PATTERN *pattern, yx_rx_atom **atoms, size_t *count,
+                                    size_t *capacity)
+{
+    static const char standard[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    bool wide = (pattern->modifiers & YX_MOD_WIDE) != 0, ascii = (pattern->modifiers & YX_MOD_ASCII) != 0;
+    bool xored = (pattern->modifiers & YX_MOD_XOR) != 0;
+    unsigned base64 = pattern->modifiers & (YX_MOD_BASE64 | YX_MOD_BASE64WIDE);
+    if (!pattern->bytes || !pattern->length || xored == (base64 != 0) ||
+        (pattern->modifiers & ~(YX_MOD_ASCII | YX_MOD_WIDE | YX_MOD_FULLWORD | YX_MOD_PRIVATE | YX_MOD_XOR |
+                                YX_MOD_BASE64 | YX_MOD_BASE64WIDE)) ||
+        (base64 && pattern->length < 2) || pattern->length > (SIZE_MAX - 16) / 8) return 0;
+    size_t room = pattern->length * 2 + 2, encoded_room = (room / 3 + 1) * 4 * 2;
+    size_t mask_room = encoded_room > room ? encoded_room : room;
+    uint8_t *plain = malloc(room), *encoded = malloc(encoded_room), *masks = malloc(mask_room);
+    int result = 1;
+    if (!plain || !encoded || !masks) { result = -1; goto done; }
+    memset(masks, 255, mask_room);
+    for (unsigned variant = 0; result == 1 && variant < 2; ++variant) {
+        bool as_wide = variant == 0;
+        if (as_wide ? !wide : (wide && !ascii)) continue;
+        size_t length = pattern->length * (as_wide ? 2 : 1), offset = 0, width = 0;
+        /* Two bytes in front for the base64 forms of "XX" + s and "X" + s. */
+        plain[0] = plain[1] = 'X';
+        for (size_t i = 0; i < pattern->length; ++i) {
+            if (as_wide) { plain[2 + 2 * i] = pattern->bytes[i]; plain[2 + 2 * i + 1] = 0; }
+            else plain[2 + i] = pattern->bytes[i];
+        }
+        if (xored) {
+            yx_fast_literal literal = {plain + 2, masks, length, false};
+            yx_fast_best_atom(&literal, &offset, &width);
+            for (unsigned key = pattern->xor_min; result == 1 && key <= pattern->xor_max; ++key) {
+                uint8_t atom[8];
+                for (size_t i = 0; i < width; ++i) atom[i] = (uint8_t)(plain[2 + offset + i] ^ key);
+                if (!yx_se_push_atom(atoms, count, capacity, atom, width)) result = -1;
+            }
+            continue;
+        }
+        for (unsigned kind = 0; result == 1 && kind < 2; ++kind) {
+            const char *alphabet = kind ? pattern->base64wide_alphabet : pattern->base64_alphabet;
+            if (!(base64 & (kind ? YX_MOD_BASE64WIDE : YX_MOD_BASE64))) continue;
+            if (!alphabet) alphabet = standard;
+            if (strlen(alphabet) != 64) { result = 0; break; }
+            for (size_t skip = 0; result == 1 && skip < 3; ++skip) {
+                const uint8_t *in = plain + skip;
+                size_t n = length + 2 - skip, used = 0;
+                for (size_t i = 0; i < n; i += 3) {
+                    uint32_t group = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) |
+                                     (i + 2 < n ? in[i + 2] : 0);
+                    size_t symbols = n - i >= 3 ? 4 : n - i + 1;
+                    for (size_t k = 0; k < symbols; ++k)
+                        encoded[used++] = (uint8_t)alphabet[(group >> (18 - 6 * k)) & 63u];
+                }
+                size_t begin = skip == 0 ? 3 : skip == 1 ? 2 : 0, end = used - (n % 3 ? 1 : 0);
+                if (end <= begin) { result = 0; break; }
+                size_t form = end - begin;
+                if (kind) {
+                    /* The base64 form as a wide string, in place from its end. */
+                    memmove(encoded, encoded + begin, form);
+                    for (size_t i = form; i-- > 0;) { encoded[2 * i] = encoded[i]; encoded[2 * i + 1] = 0; }
+                    begin = 0;
+                    form *= 2;
+                }
+                yx_fast_literal literal = {encoded + begin, masks, form, false};
+                yx_fast_best_atom(&literal, &offset, &width);
+                if (!yx_se_push_atom(atoms, count, capacity, encoded + begin + offset, width)) result = -1;
+            }
+        }
+    }
+done:
+    free(plain); free(encoded); free(masks);
+    return result;
+}
+
+/* The atoms the reference's search holds for one pattern, for the count
+ * that decides between Teddy and Aho-Corasick (yx_view_atom_order):
+ * yx_ser_pattern_reference_atoms_status, and the kinds it leaves out whose
+ * atoms no caller orders matches by. */
+int yx_ser_search_atoms_status(const YRX_PATTERN *pattern, yx_rx_atom **atoms, size_t *count)
+{
+    size_t capacity = 0;
+    int result = yx_ser_pattern_reference_atoms_status(pattern, atoms, count);
+    if (result || !pattern) return result;
+    *atoms = NULL;
+    *count = 0;
+    if (pattern->kind == YX_PATTERN_TEXT) result = yx_ss_encoded_text_atoms(pattern, atoms, count, &capacity);
+    else if (!pattern->rx_program && !pattern->rx_chain)
+        result = yx_ss_masked_atoms(pattern, atoms, count, &capacity);
+    if (result != 1) {
+        free(*atoms);
+        *atoms = NULL;
+        *count = 0;
+    }
     return result;
 }
 

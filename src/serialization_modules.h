@@ -877,7 +877,10 @@ static int yx_module_primary(yx_module_program *p, unsigned depth)
         }
     }
     if (yx_module_take(p, '(')) {
-        for (size_t i = p->binding_count; i > 0; --i) {
+        /* Only when the loop above did not expand the path: a variable named
+         * like the first component of its own value (`with pe =
+         * pe.rich_signature`) would be expanded twice. */
+        for (size_t i = base < 0 ? p->binding_count : 0; i > 0; --i) {
             size_t prefix = p->bindings[i - 1].length;
             const yx_module_node *binding = &p->nodes[p->bindings[i - 1].value];
             if (prefix < length && path[prefix] == '.' && !memcmp(p->bindings[i - 1].name, path, prefix) &&

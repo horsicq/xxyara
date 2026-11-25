@@ -568,7 +568,8 @@ static yx_ser_result yx_encode_literal_patterns(const YRX_RULES *rules, bool vba
     yx_tr_node *root = yx_tr_expression(&parser), *n = root;
     yx_chain_archive a = {0};
     yx_ser_result result = YX_SER_UNSUPPORTED;
-    if (!root || parser.failed || parser.oom || parser.at != parser.length)
+    if (parser.oom) { result = YX_SER_NO_MEMORY; goto done; }
+    if (!root || parser.failed || parser.at != parser.length)
         goto done;
     if (n->kind == YX_TR_CAPTURE)
         n = n->children[0];
@@ -761,7 +762,8 @@ static yx_ser_result yx_encode_chained_pattern(const YRX_RULES *rules, bool vba_
     yx_tr_node *root = yx_tr_expression(&parser);
     yx_ser_result result = YX_SER_UNSUPPORTED;
     yx_chain_archive a = {0};
-    if (!root || parser.failed || parser.oom || parser.at != parser.length ||
+    if (parser.oom) { result = YX_SER_NO_MEMORY; goto done; }
+    if (!root || parser.failed || parser.at != parser.length ||
         root->kind != YX_TR_CONCAT)
         goto done;
     literal_count = root->count;

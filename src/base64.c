@@ -20,6 +20,7 @@
  */
 
 #include "internal.h"
+#include "serialization.h"
 
 #include <xxfclib/data/xx_data.h>
 #include <xxfclib/algo/base64/xx_base64.h>
@@ -243,23 +244,35 @@ static bool yx_scan_encoded_variant(YRX_PATTERN *pattern,
             if (wide) needle[i * 2 + 1] = 0;
         }
         free(encoded);
+        /* YARA-X searches for the best atom of the trimmed encoded text and
+         * verifies each hit by decoding (compiler/mod.rs, base64 patterns;
+         * scanner/context.rs verify_base64): the text itself need not be
+         * contiguous in the data (a wide text may hold '='). */
+        size_t atom_offset, atom_width;
+        int atom = yx_ser_best_atom(needle, needle_length, &atom_offset,
+                                    &atom_width);
+        if (atom < 0) {
+            free(needle);
+            return false;
+        }
         start = 0;
-        while (start <= size && needle_length <= size - start) {
+        while (atom > 0 && start <= size && atom_width <= size - start) {
             int64_t found = xx_data_find_bytes_buffer_optimize(
-                data, size, start, needle, needle_length, NULL);
+                data, size, start, needle + atom_offset, atom_width, NULL);
             size_t matched_length = 0;
             int verified;
             if (found < 0) break;
+            start = (size_t) found + 1;
+            if ((size_t) found < atom_offset) continue;
             verified = yx_verify_base64(plain, plain_length, data, size,
-                                        padding, (size_t) found, alphabet,
-                                        wide, &matched_length);
+                                        padding, (size_t) found - atom_offset,
+                                        alphabet, wide, &matched_length);
             if (verified < 0 || (verified > 0 &&
-                !yx_append_base64_match(pattern, (size_t) found,
+                !yx_append_base64_match(pattern, (size_t) found - atom_offset,
                                         matched_length, first_only))) {
                 free(needle);
                 return false;
             }
-            start = (size_t) found + 1;
         }
         free(needle);
         if (padding == 0) break;
@@ -459,8 +472,8 @@ void yx_base64_candidates_destroy(yx_base64_candidate *variants, size_t count)
 int yx_base64_candidate_verify(const yx_base64_candidate *variant,
     const uint8_t *data, size_t size, size_t start, size_t *length)
 {
-    if (start > size || variant->length > size - start ||
-        memcmp(data + start, variant->needle, variant->length) != 0) return 0;
+    /* The candidate comes from YARA-X's atom; verify_base64 decides. */
+    if (start > size) return 0;
     return yx_verify_base64(variant->plain, variant->plain_length, data, size,
         variant->padding, start, variant->alphabet, variant->wide, length);
 }

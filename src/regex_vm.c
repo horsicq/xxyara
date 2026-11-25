@@ -2814,6 +2814,146 @@ bool yx_rx_scan(const yx_rx_program *program, const uint8_t *data, size_t size,
     return yx_rx_scan_ordered(program, data, size, deadline, list, NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* Literal sub-patterns of an alternation of literals.                 */
+
+void yx_rx_literals_free(yx_rx_literals *set)
+{
+    if (!set) return;
+    for (size_t i = 0; i < set->count; ++i) {
+        free(set->items[i].sub.atoms);
+        free(set->items[i].bytes);
+    }
+    free(set->items);
+    free(set);
+}
+
+/* verify_literal at start; *end is the end of the match. */
+static bool yx_rx_literal_at(const yx_rx_literal *literal, const uint8_t *data, size_t size,
+                             size_t start, size_t *end)
+{
+    if (start > size || literal->length > size - start) return false;
+    *end = start + literal->length;
+    if (!yx_rx_full_word(data, size, start, *end, literal->sub.flags)) return false;
+    if (!(literal->sub.flags & YX_RX_NOCASE)) return memcmp(data + start, literal->bytes, literal->length) == 0;
+    for (size_t i = 0; i < literal->length; ++i) {
+        uint8_t a = data[start + i], b = literal->bytes[i];
+        if (a >= 'A' && a <= 'Z') a = (uint8_t)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (uint8_t)(b + 32);
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* handle_atom_match for a Literal sub-pattern: an exact atom's occurrence
+ * is the match; another atom's is verified against the whole literal. */
+static bool yx_rx_literal_process(const yx_rx_hit *hit, const uint8_t *data, size_t size,
+                                  yx_rx_match_list *list)
+{
+    const yx_rx_literal *literal = (const yx_rx_literal *)hit->sub;
+    size_t start, end;
+    if (hit->position < hit->atom->backtrack) return true;
+    start = hit->position - hit->atom->backtrack;
+    if (hit->atom->exact) {
+        end = start + hit->atom->length;
+        if (!yx_rx_full_word(data, size, start, end, literal->sub.flags)) return true;
+    } else if (!yx_rx_literal_at(literal, data, size, start, &end)) return true;
+    return yx_rx_add(list, start, end, false);
+}
+
+/* The hit of an atom occurrence. Atoms of one pattern have consecutive ids,
+ * and two of them found at one offset share a Teddy bucket (the same first
+ * bytes): the atom's index orders them as its id does. The anchored order
+ * (the match's start, then the sub-pattern) uses the automaton's keys. */
+static yx_rx_hit yx_rx_literal_hit(const yx_rx_sub *sub, const yx_rx_atom *atom, size_t index,
+                                   size_t position, int order)
+{
+    if (order == YX_RX_LITERALS_ANCHORED)
+        return (yx_rx_hit){position >= atom->backtrack ? position - atom->backtrack : 0, 0, index,
+                           position, 0, false, sub, atom};
+    return (yx_rx_hit){position + atom->length, atom->length, index, position, 0,
+                       order == YX_RX_LITERALS_TEDDY, sub, atom};
+}
+
+/* The next of the listed offsets, from *cursor on, where the literal
+ * matches (verify_literal); *cursor is left after it. */
+static bool yx_rx_literal_next(const yx_rx_literal *literal, const uint8_t *data, size_t size,
+                               const yx_rx_candidate *starts, size_t start_count, size_t *cursor,
+                               size_t *start)
+{
+    while (*cursor < start_count) {
+        size_t end;
+        *start = starts[(*cursor)++].position;
+        if (yx_rx_literal_at(literal, data, size, *start, &end)) return true;
+    }
+    return false;
+}
+
+/* yx_rx_scan_literals over listed offsets. A literal that matches at an
+ * offset has one occurrence of its atom there, backtrack bytes on, and
+ * without nocase one atom: the hits and their order are those of the atom
+ * search. */
+static bool yx_rx_scan_literal_starts(const yx_rx_literals *set, const uint8_t *data, size_t size,
+                                      yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
+                                      const yx_rx_candidate *starts, size_t start_count)
+{
+    yx_rx_heap heap = {0};
+    size_t *cursors = calloc(set->count ? set->count : 1, sizeof(*cursors));
+    bool ok = cursors != NULL;
+    size_t index = 0, steps = 0, start;
+    for (size_t s = 0; ok && s < set->count; ++s) {
+        const yx_rx_literal *literal = &set->items[s];
+        if (literal->sub.atom_count &&
+            yx_rx_literal_next(literal, data, size, starts, start_count, &cursors[s], &start))
+            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(&literal->sub, literal->sub.atoms, index,
+                                                          start + literal->sub.atoms->backtrack, order));
+        index += literal->sub.atom_count;
+    }
+    while (ok && heap.used && !list->limit_reached) {
+        yx_rx_hit hit = yx_rx_heap_pop(&heap);
+        const yx_rx_literal *literal = (const yx_rx_literal *)hit.sub;
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        start = hit.position - hit.atom->backtrack;
+        ok = yx_rx_add(list, start, start + literal->length, false);
+        if (ok && yx_rx_literal_next(literal, data, size, starts, start_count,
+                                     &cursors[literal - set->items], &start))
+            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index,
+                                                          start + hit.atom->backtrack, order));
+    }
+    free(heap.items);
+    free(cursors);
+    return ok;
+}
+
+bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size,
+                         yx_scan_deadline *deadline, yx_rx_match_list *list, int order,
+                         const yx_rx_candidate *starts, size_t start_count)
+{
+    yx_rx_heap heap = {0};
+    bool ok = true;
+    size_t index = 0, steps = 0;
+    if (starts) return yx_rx_scan_literal_starts(set, data, size, deadline, list, order, starts, start_count);
+    for (size_t s = 0; ok && s < set->count; ++s) {
+        const yx_rx_sub *sub = &set->items[s].sub;
+        for (size_t a = 0; ok && a < sub->atom_count; ++a, ++index) {
+            const yx_rx_atom *atom = &sub->atoms[a];
+            size_t position;
+            if (atom->length && yx_rx_find(data, size, atom, 0, &position))
+                ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(sub, atom, index, position, order));
+        }
+    }
+    while (ok && heap.used && !list->limit_reached) {
+        yx_rx_hit hit = yx_rx_heap_pop(&heap);
+        size_t position;
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) { ok = false; break; }
+        ok = yx_rx_literal_process(&hit, data, size, list);
+        if (ok && yx_rx_find(data, size, hit.atom, hit.position + 1, &position))
+            ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index, position, order));
+    }
+    free(heap.items);
+    return ok;
+}
+
 /* The shared scanner supplies occurrences; ordering and verification stay
  * identical to the per-program scan, including cap-dependent tie semantics. */
 

@@ -37,6 +37,11 @@ int yx_ser_archived_regexp_program(const yx_archived_regexp *archived, struct yx
 /* A copy of such a program for a pattern with the same inputs: 1, or -1. */
 int yx_ser_regexp_program_copy(const struct yx_rx_program *from, struct yx_rx_program *out);
 int yx_ser_literal_branches(const YRX_PATTERN *pattern, uint8_t **bytes, size_t **offsets);
+struct yx_rx_literals;
+/* The Literal sub-patterns of a regexp or hex pattern that is an alternation
+ * of two or more literals, with their atoms; NULL for another pattern or
+ * without memory. */
+struct yx_rx_literals *yx_ser_literal_set(const YRX_PATTERN *pattern);
 /* Boolean condition regexp, compiled once: 1 success, 0 unsupported/too large,
  * -1 allocation failure. The caller owns the unanchored PikeVM program. */
 int yx_ser_search_program(const char *regexp, size_t length, bool dotall,
@@ -52,6 +57,9 @@ struct yx_rx_atom;
 bool yx_ser_pattern_reference_atoms(const YRX_PATTERN *pattern, struct yx_rx_atom **atoms, size_t *count);
 /* The same: 1 with the atoms, 0 when not modeled, -1 on allocation failure. */
 int yx_ser_pattern_reference_atoms_status(const YRX_PATTERN *pattern, struct yx_rx_atom **atoms, size_t *count);
+/* The same, with the atoms of masked literals and of xor and base64 text
+ * literals too: every atom the reference's search holds for the pattern. */
+int yx_ser_search_atoms_status(const YRX_PATTERN *pattern, struct yx_rx_atom **atoms, size_t *count);
 /* -2: ordinary path, -1: allocation error, 0: empty verifier, 1: owned source, 3: chain. */
 int yx_ser_lower_fast_regex(const YRX_PATTERN *pattern, char **lowered);
 int yx_ser_scan_large_fast_chain(YRX_PATTERN *pattern, const uint8_t *data, size_t size,
@@ -65,6 +73,10 @@ bool yx_ser_regex_chain(const YRX_PATTERN *pattern);
 /* Hir::as_literal_bytes of a regexp pattern: 1 with the bytes (the caller
  * frees them), 0 when it is not one literal, -1 on allocation failure. */
 int yx_ser_regexp_literal(const YRX_PATTERN *pattern, uint8_t **bytes, size_t *length);
+/* best_atom_in_bytes (atoms/quality.rs) of a literal: the offset (the atom's
+ * backtrack) and width of the atom YARA-X searches for. 1 with the atom, 0
+ * when there is none, -1 when memory ran out. */
+int yx_ser_best_atom(const uint8_t *bytes, size_t length, size_t *offset, size_t *width);
 /* The same tests: 1 a chain, 0 not one, -1 when memory ran out first. */
 int yx_ser_hex_chain_status(const YRX_PATTERN *pattern);
 int yx_ser_regex_chain_status(const YRX_PATTERN *pattern);

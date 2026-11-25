@@ -8189,7 +8189,7 @@ static yx_static_type yx_static_node_type_uncached(const yx_node *node)
         return strncmp(node->name, "dotnet.classes.", 15) == 0 ?
                yx_dotnet_class_triple_type(node->name + 15) :
                YX_STATIC_UNKNOWN;
-    case N_WITH: return yx_static_node_type(node->body);
+    case N_WITH: return node->with_body_type ? (yx_static_type)node->with_body_type : yx_static_node_type(node->body);
     case N_CALL:
         {
             const char *dot = strchr(node->name, '.');
@@ -9965,7 +9965,7 @@ static bool yx_module_alias_node(const yx_node *node, const char *alias,
     }
     if (yx_signature_member(result->name) &&
         !strcmp(yx_signature_member(result->name), "valid_on") &&
-        node->kind == N_CALL &&
+        (node->kind == N_CALL || node->kind == N_MODULE_INDEXED_FIELD) &&
         before + after == 1 && node->item_count == 1) {
         result->b = node->items[0];
         result->items = NULL;
@@ -10064,6 +10064,25 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
 {
     yx_static_type left, right;
     if (!node) return YX_STATIC_UNKNOWN;
+    if (node->kind == N_WITH) {
+        if (node->with_body_type) return (yx_static_type)node->with_body_type;
+        if (node->item_count && node->set_names) {
+            yx_scope_name *locals = (yx_scope_name *)calloc(node->item_count, sizeof(*locals));
+            if (locals) {
+                const yx_scope_name *curr = scope;
+                for (size_t i = 0; i < node->item_count; ++i) {
+                    locals[i].name = node->set_names[i];
+                    locals[i].type = yx_scoped_node_type(node->items[i], curr);
+                    locals[i].parent = curr;
+                    curr = &locals[i];
+                }
+                yx_static_type t = yx_scoped_node_type(node->body, curr);
+                free(locals);
+                return t;
+            }
+        }
+        return yx_static_node_type(node);
+    }
     {
         yx_node alias;
         char *name = NULL;
@@ -10076,7 +10095,7 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
     if (node->kind == N_GLOBAL_DEEP_PATH)
         return yx_deep_schema(node, scope, &left, NULL) ? left :
                YX_STATIC_UNKNOWN;
-    if (node->kind == N_RULE) {
+    if (node->kind == N_RULE && !node->resolved_module_alias) {
         for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
              at = yx_scope_named(at->parent, node->name, strlen(node->name)))
             if (strcmp(at->name, node->name) == 0) return at->type;
@@ -10087,13 +10106,13 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
                 break;
             }
     }
-    if (node->kind == N_GLOBAL_INDEXED) {
+    if (node->kind == N_GLOBAL_INDEXED && !node->resolved_module_alias) {
         for (const yx_scope_name *at = scope; at; at = at->parent)
             if (strcmp(at->name, node->name) == 0 &&
                 at->type == YX_STATIC_ARRAY)
                 return at->element_type;
     }
-    if (node->kind == N_MODULE_FIELD) {
+    if (node->kind == N_MODULE_FIELD && !node->resolved_module_alias) {
         const char *dot = strchr(node->name, '.');
         if (dot) {
             size_t root_length = (size_t)(dot - node->name);
@@ -10108,7 +10127,8 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
                 }
         }
     }
-    if (node->kind == N_MODULE_INDEXED_FIELD || node->kind == N_CALL) {
+    if ((node->kind == N_MODULE_INDEXED_FIELD || node->kind == N_CALL) &&
+        !node->resolved_module_alias) {
         const char *suffix = node->kind == N_CALL ? ".len" : ".value";
         for (const yx_scope_name *at = scope;
              at && (node->kind == N_CALL || node->implicit_value);
@@ -10141,7 +10161,7 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
             }
         }
     }
-    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD) {
+    if (node->kind == N_MODULE_NESTED_INDEXED_FIELD && !node->resolved_module_alias) {
         const char *member = NULL;
         const char *inner_member = NULL;
         const yx_global_array *array = yx_scoped_object_array_path(
@@ -10169,7 +10189,7 @@ static yx_static_type yx_scoped_node_type_uncached(const yx_node *node,
             }
         }
     }
-    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD) {
+    if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD && !node->resolved_module_alias) {
         const char *member = NULL, *second_member = NULL;
         const char *third_member = NULL;
         const yx_global_array *outer = yx_scoped_object_array_path(
@@ -10240,7 +10260,7 @@ static bool yx_scoped_unsigned(const yx_node *node, const yx_scope_name *scope)
     if (node->kind == N_INTEGER) return node->is_unsigned;
     if (node->kind == N_READ)
         return !node->floating_read && !node->signed_read && node->width == 8;
-    if (node->kind == N_RULE) {
+    if (node->kind == N_RULE && !node->resolved_module_alias) {
         const yx_scope_name *local = yx_scope_find(scope, node->name, strlen(node->name));
         return local && local->is_unsigned;
     }
@@ -10285,13 +10305,13 @@ static const yx_global_array *yx_scoped_array_from_node(
         return yx_deep_schema(node, scope, &type, &array) &&
                type == YX_STATIC_ARRAY ? array : NULL;
     }
-    if (node->kind == N_RULE) {
+    if (node->kind == N_RULE && !node->resolved_module_alias) {
         for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
              at = yx_scope_named(at->parent, node->name, strlen(node->name)))
             if (strcmp(at->name, node->name) == 0)
                 return at->type == YX_STATIC_ARRAY ? at->array : NULL;
     }
-    if (node->kind == N_MODULE_FIELD) {
+    if (node->kind == N_MODULE_FIELD && !node->resolved_module_alias) {
         const char *dot = strchr(node->name, '.');
         if (!dot) return NULL;
         for (const yx_scope_name *at = scope; at; at = at->parent) {
@@ -10307,7 +10327,7 @@ static const yx_global_array *yx_scoped_array_from_node(
         }
     }
     if (node->kind == N_MODULE_INDEXED_FIELD && !node->implicit_value &&
-        node->operation != TK_LPAREN) {
+        node->operation != TK_LPAREN && !node->resolved_module_alias) {
         const char *member = NULL;
         const yx_global_array *outer = yx_scoped_object_array_path(
             scope, node->name, &member);
@@ -10317,7 +10337,7 @@ static const yx_global_array *yx_scoped_array_from_node(
                field->value.array : NULL;
     }
     if (node->kind == N_MODULE_NESTED_INDEXED_FIELD &&
-        !node->implicit_value && node->operation != TK_LPAREN) {
+        !node->implicit_value && node->operation != TK_LPAREN && !node->resolved_module_alias) {
         const char *member = NULL, *inner_member = NULL;
         const yx_global_array *outer = yx_scoped_object_array_path(
             scope, node->name, &member);
@@ -10331,7 +10351,7 @@ static const yx_global_array *yx_scoped_array_from_node(
                field->value.array : NULL;
     }
     if (node->kind == N_MODULE_TRIPLE_INDEXED_FIELD &&
-        !node->implicit_value && node->operation != TK_LPAREN) {
+        !node->implicit_value && node->operation != TK_LPAREN && !node->resolved_module_alias) {
         const char *member = NULL, *second_member = NULL;
         const char *third_member = NULL;
         const yx_global_array *outer = yx_scoped_object_array_path(
@@ -11088,10 +11108,11 @@ static bool yx_validate_scoped_member(const yx_node *node,
     yx_static_type type;
     size_t cursor, previous = 0;
     *handled = false;
-    if (!node->name || (node->kind != N_MODULE_FIELD && node->kind != N_CALL) ||
+    if (!node->name || node->resolved_module_alias ||
+        (node->kind != N_MODULE_FIELD && node->kind != N_CALL) ||
         !(dot = strchr(node->name, '.')) ||
         !(root = yx_scope_find(scope, node->name, (size_t)(dot - node->name))) ||
-        root->module_binding || root->type == YX_STATIC_UNKNOWN)
+        root->module_binding || root->imported_module || root->type == YX_STATIC_UNKNOWN)
         return true;
     type = root->type;
     object = root->object;
@@ -11529,11 +11550,11 @@ static bool yx_method_member_check(const yx_node *node, yx_validation *state,
     const char *name = node->name, *last, *type = NULL;
     const yx_scope_name *binding;
     size_t root;
-    if (!name || node->function_alias || node->resolved_module_alias ||
+    if (!name || node->function_alias ||
         yx_module_node_indices(node) || !state->error || !state->error_capacity ||
         !(last = strrchr(name, '.'))) return true;
     root = strcspn(name, ".");
-    binding = yx_scope_find(scope, name, root);
+    binding = node->resolved_module_alias ? NULL : yx_scope_find(scope, name, root);
     if (node->kind == N_MODULE_FIELD) {
         if (binding && !binding->table && binding->type == YX_STATIC_STRUCT &&
             binding->object && node->span_start != SIZE_MAX &&
@@ -11617,6 +11638,20 @@ static bool yx_method_member_check(const yx_node *node, yx_validation *state,
         strcmp(type, "boolean") == 0) {
         snprintf(state->error, state->error_capacity,
                  "unknown identifier span:%zu:%zu:%s",
+                 node->call_member_start, node->call_member_end, last + 1);
+        return false;
+    }
+    if (strcmp(type, "struct") == 0) {
+        const char *field_type = yx_mo_schema_path_type_name(name, false, NULL);
+        if (field_type) {
+            yx_node function = *node;
+            function.span_start = node->call_member_start;
+            function.span_end = node->call_member_end;
+            return yx_wrong_type_span_exact(state, &function, "`function`",
+                                            field_type);
+        }
+        snprintf(state->error, state->error_capacity,
+                 "test proto unknown field:%zu:%zu:%s",
                  node->call_member_start, node->call_member_end, last + 1);
         return false;
     }
@@ -12729,6 +12764,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         if (valid) valid = yx_validate_node(node->body, state, inside_for_of,
                                             current);
         if (valid) valid = yx_bool_context_check(state, node->body, current);
+        ((yx_node *)node)->with_body_type = (int)yx_scoped_node_type(node->body, current);
         free(locals);
         return valid;
     }
@@ -12836,8 +12872,8 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         }
         {
             const char *array_member = NULL;
-            const yx_global_array *array = yx_scoped_object_array_path(
-                scope, node->name, &array_member);
+            const yx_global_array *array = !node->resolved_module_alias ?
+                yx_scoped_object_array_path(scope, node->name, &array_member) : NULL;
             if (array) {
                 const yx_global_field *item_field = array->count ?
                     yx_global_object_field(array->items[0].object,
@@ -13062,8 +13098,8 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         {
             const char *array_member = NULL;
             const char *inner_member = NULL;
-            const yx_global_array *array = yx_scoped_object_array_path(
-                scope, node->name, &array_member);
+            const yx_global_array *array = !node->resolved_module_alias ?
+                yx_scoped_object_array_path(scope, node->name, &array_member) : NULL;
             const yx_global_field *field = array && array->count &&
                 node->implicit_value ?
                 yx_global_object_field_suffix(
@@ -13169,8 +13205,8 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
         {
             const char *member = NULL, *second_member = NULL;
             const char *third_member = NULL;
-            const yx_global_array *outer = yx_scoped_object_array_path(
-                scope, node->name, &member);
+            const yx_global_array *outer = !node->resolved_module_alias ?
+                yx_scoped_object_array_path(scope, node->name, &member) : NULL;
             const yx_global_field *second = outer && outer->count ?
                 yx_global_object_nested_array_field(
                     outer->items[0].object, member, &second_member) : NULL;
@@ -13252,7 +13288,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
     if (node->kind == N_MODULE_FIELD) {
         const char *module_name;
         const char *dot = strchr(node->name, '.');
-        if (dot) {
+        if (dot && !node->resolved_module_alias) {
             size_t root_length = (size_t)(dot - node->name);
             for (const yx_scope_name *at = scope; at; at = at->parent)
                 if (at->type == YX_STATIC_STRUCT && at->object &&
@@ -13428,7 +13464,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state,
                 return true;
             }
         }
-        for (const yx_scope_name *at = scope; at; at = at->parent) {
+        for (const yx_scope_name *at = node->resolved_module_alias ? NULL : scope; at; at = at->parent) {
             const yx_global_field *field;
             if (at->type != YX_STATIC_STRUCT || !at->object) continue;
             if (yx_signature_scope_method(at->object, at->name, node->name)) {
@@ -15137,7 +15173,7 @@ static int yx_node_string_case(const yx_node *node, const yx_scope_name *scope)
             strcmp(node->name, "test_proto2.string_foo") == 0) return -1;
         if (yx_string_result_constraint(node, scope, &length, &letter_case))
             return letter_case;
-        if (node->kind == N_RULE)
+        if (node->kind == N_RULE && !node->resolved_module_alias)
             for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
              at = yx_scope_named(at->parent, node->name, strlen(node->name)))
                 if (strcmp(node->name, at->name) == 0) return at->string_case;
@@ -15162,7 +15198,7 @@ static size_t yx_node_string_length(const yx_node *node,
         /* Only a call with accepted arguments has a constrained result. */
         if (yx_string_result_constraint(node, scope, &length, &letter_case))
             return length;
-        if (node->kind == N_RULE)
+        if (node->kind == N_RULE && !node->resolved_module_alias)
             for (const yx_scope_name *at = yx_scope_named(scope, node->name, strlen(node->name)); at;
              at = yx_scope_named(at->parent, node->name, strlen(node->name)))
                 if (!strcmp(node->name, at->name)) return at->string_length_constraint;
@@ -15221,7 +15257,15 @@ static char *yx_warning_module_path(const yx_node *node,
          node->kind != N_MODULE_TRIPLE_INDEXED_FIELD) ||
         yx_test_proto_path(node->name)) return NULL;
     root_length = strcspn(node->name, ".");
-    root = yx_scope_find(scope, node->name, root_length);
+    root = node->resolved_module_alias ? NULL : yx_scope_find(scope, node->name, root_length);
+    if (node->resolved_module_alias) {
+        for (const yx_scope_name *at = scope; at; at = at->parent)
+            if (at->imported_module && strlen(at->name) == root_length &&
+                memcmp(at->name, node->name, root_length) == 0) {
+                root = at;
+                break;
+            }
+    }
     length = strlen(node->name);
     implicit = node->implicit_value && length > root_length + 6 &&
                strcmp(node->name + length - 6, ".value") == 0;
@@ -19489,7 +19533,7 @@ static bool yx_eval_array_view_from_global(const yx_node *node,
         *view = result.array;
         return true;
     }
-    if (node->kind == N_MODULE_FIELD) {
+    if (node->kind == N_MODULE_FIELD && !node->resolved_module_alias) {
         const char *dot = strchr(node->name, '.');
         for (const yx_binding *local = bindings; local && dot;
              local = local->parent) {
@@ -22270,10 +22314,12 @@ static yx_value yx_eval_module_extension(const yx_node *node,
 #endif
         )
         return yx_undefined();
-    for (const yx_binding *local = bindings; local; local = local->parent) {
-        size_t length = strlen(local->name);
-        if (strncmp(name, local->name, length) == 0 && name[length] == '.')
-            return yx_undefined();
+    if (!node->resolved_module_alias) {
+        for (const yx_binding *local = bindings; local; local = local->parent) {
+            size_t length = strlen(local->name);
+            if (strncmp(name, local->name, length) == 0 && name[length] == '.')
+                return yx_undefined();
+        }
     }
     if (strncmp(name, "macho.file.", 11) == 0 && count) {
         const uint8_t *bytes;
@@ -22838,11 +22884,12 @@ static yx_value yx_eval(const yx_node *node, const yx_eval_context *ctx,
         case N_FILESIZE: case N_READ: case N_UNARY:
             return yx_eval_scalar(node, ctx, current_pattern, bindings);
         case N_RULE:
-            for (const yx_binding *local = bindings; local; local = local->parent)
-                if (!strcmp(local->name, node->name)) {
-                    if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
-                    return local->value;
-                }
+            if (!node->resolved_module_alias)
+                for (const yx_binding *local = bindings; local; local = local->parent)
+                    if (!strcmp(local->name, node->name)) {
+                        if (yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
+                        return local->value;
+                    }
             break;
         default: break;
         }
@@ -22923,7 +22970,7 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
     const yx_eval_match_list *list;
     yx_value value, low, high;
     if (!node || yx_scan_deadline_poll(ctx->deadline)) return yx_undefined();
-    if (node->kind == N_RULE)
+    if (node->kind == N_RULE && !node->resolved_module_alias)
         for (const yx_binding *local = bindings; local; local = local->parent)
             if (strcmp(local->name, node->name) == 0) return local->value;
     /* Only identifier/field/call nodes can resolve module paths or aliases.
@@ -23026,7 +23073,7 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
                     strlen(ctx->globals[global].name) == root_length &&
                     !memcmp(ctx->globals[global].name, node->name, root_length))
                     shadowed = true;
-            for (const yx_binding *local = bindings; !shadowed && local;
+            for (const yx_binding *local = bindings; !node->resolved_module_alias && !shadowed && local;
                  local = local->parent)
                 if (strlen(local->name) == root_length &&
                     !memcmp(local->name, node->name, root_length)) shadowed = true;
@@ -23154,8 +23201,9 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
         }
         return yx_undefined();
     case N_RULE:
-        for (const yx_binding *local = bindings; local; local = local->parent)
-            if (strcmp(local->name, node->name) == 0) return local->value;
+        if (!node->resolved_module_alias)
+            for (const yx_binding *local = bindings; local; local = local->parent)
+                if (strcmp(local->name, node->name) == 0) return local->value;
         for (i = 0; ctx->globals && i < ctx->global_count; ++i) {
             const yx_eval_global *global = &ctx->globals[i];
             if (!global->name || strcmp(global->name, node->name)) continue;
@@ -23362,7 +23410,7 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
     case N_MATCHES:
         return yx_eval_matches(node, ctx, current_pattern, bindings);
     case N_CALL:
-        for (const yx_binding *local = bindings; local; local = local->parent) {
+        for (const yx_binding *local = node->resolved_module_alias ? NULL : bindings; local; local = local->parent) {
             const yx_global_field *field;
             size_t root_length = strlen(local->name);
             if (local->value.type == V_STRING &&
@@ -23918,13 +23966,13 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
             if (yx_vt_permutation_constant(node->name, &vt_value))
                 return yx_defined(vt_value);
             const char *dot = strchr(node->name, '.');
-            if (dot) {
+            if (dot && !node->resolved_module_alias) {
                 size_t root_length = (size_t)(dot - node->name);
                 for (const yx_binding *local = bindings; local;
                      local = local->parent)
                     if (strlen(local->name) == root_length &&
                         memcmp(local->name, node->name, root_length) == 0 &&
-                        local->value.type == V_STRUCT)
+                        local->value.type == V_STRUCT && local->value.object)
                         return yx_eval_global_object_field(
                             local->value.object, dot + 1);
                 for (i = 0; i < ctx->global_count; ++i) {
@@ -24204,7 +24252,7 @@ static yx_value yx_eval_uncached(const yx_node *node, const yx_eval_context *ctx
         return yx_undefined();
     case N_MODULE_INDEXED_FIELD:
         for (const yx_binding *local = bindings;
-             local && node->implicit_value;
+             !node->resolved_module_alias && local && node->implicit_value;
              local = local->parent) {
             const yx_global_field *field;
             if (local->value.type != V_STRUCT || !local->value.object)

@@ -13474,6 +13474,9 @@ static size_t yx_known_global_atom_count(const YRX_RULES *rules,
 
 static bool yx_pattern_uses_fixed_at_atom(const YRX_PATTERN *pattern)
 {
+    /* An alternation of literals: c_alternation_literal anchors each, with
+     * nocase too. */
+    if (pattern->rx_literals) return true;
     if (pattern->modifiers &
         (YX_MOD_NOCASE | YX_MOD_XOR | YX_MOD_BASE64 | YX_MOD_BASE64WIDE))
         return false;
@@ -13543,30 +13546,77 @@ static bool yx_compat_same_pattern(const YRX_PATTERN *a,
  * searcher when there are at most 64 atoms (16 for one-byte atoms) and no
  * empty atom, and with Aho-Corasick otherwise. Teddy reports matches by
  * start, bucket and atom id, which decides ties between sub-patterns of a
- * pattern. Atoms of patterns shared by several rules are counted once.
+ * pattern. Atoms of patterns shared by several rules are counted once, and
+ * a literal anchored at an offset (`$a at 10`) is verified there and has no
+ * atom (Compiler::add_sub_pattern). A pattern whose atoms are not modeled
+ * leaves the search unknown, unless the atoms of the others already rule
+ * Teddy out: atoms are only ever added.
  * False when out of memory: without the order, chains would report other
  * matches. */
+
+/* Whether two rules give their regexp and hex patterns the same filesize
+ * bounds and header constraints (yx_view_constraints_build, on first use):
+ * 1 equal, 0 different, 2 not known, -1 out of memory. */
+typedef struct yx_view_sharing yx_view_sharing;
+static yx_view_sharing *yx_view_sharing_new(const YRX_RULES *rules);
+static int yx_view_sharing_rules(yx_view_sharing *sharing, size_t rule, size_t other);
+static void yx_view_sharing_free(yx_view_sharing *sharing);
+static bool yx_hex_atoms_equal(const yx_hex_atom *x, size_t x_count,
+                               const yx_hex_atom *y, size_t y_count, unsigned depth);
+
+/* Equal regexp or hex patterns but for their rules' constraints: with those
+ * equal too, Compiler::c_rule gives both one PatternId. */
+static bool yx_view_same_regexp_pattern(const YRX_PATTERN *a, const YRX_PATTERN *b)
+{
+    if (a->kind != b->kind || a->modifiers != b->modifiers ||
+        a->compat_nonanchorable != b->compat_nonanchorable ||
+        a->fixed_at_enabled != b->fixed_at_enabled ||
+        (a->fixed_at_enabled && a->fixed_at_offset != b->fixed_at_offset) ||
+        a->fast_scan_needs_all != b->fast_scan_needs_all ||
+        a->fast_count_enabled != b->fast_count_enabled ||
+        (a->fast_count_enabled && a->fast_count_threshold != b->fast_count_threshold)) return false;
+    if (a->kind == YX_PATTERN_HEX)
+        return a->hex_atoms && b->hex_atoms &&
+               yx_hex_atoms_equal(a->hex_atoms, a->hex_atom_count, b->hex_atoms, b->hex_atom_count, 0);
+    return a->kind == YX_PATTERN_REGEX && a->regexp && b->regexp && !strcmp(a->regexp, b->regexp);
+}
+
+/* Regexp and hex patterns whose atoms were counted, to find their copies in
+ * later rules. Past this many, a copy counts as a pattern of its own. */
+#define YX_VIEW_COUNTED_PATTERNS 512
+
 static bool yx_view_atom_order(YRX_SCANNER *scanner)
 {
     yx_rx_atom *all = NULL, *atoms = NULL;
     size_t all_count = 0, all_capacity = 0, count = 0;
+    /* Atoms of copies that share the earlier pattern's atoms or do not,
+     * depending on rule constraints that are not known. */
+    size_t unsure_count = 0;
+    yx_view_sharing *sharing = NULL;
+    struct { const YRX_PATTERN *pattern; size_t rule, index; } *counted = NULL;
+    size_t counted_count = 0;
     size_t *first = NULL, *buckets = NULL, total_patterns = 0, minimum_len = 0;
     const yx_rx_atom **pointers = NULL;
-    bool known = true, empty = false, oom = false;
+    bool known = true, empty = false, oom = false, one_byte = false;
     for (size_t i = 0; i < scanner->rules->rule_count; ++i) total_patterns += scanner->views[i].pattern_count;
     first = calloc(total_patterns ? total_patterns : 1, sizeof(*first));
     size_t *first_with_id = malloc((total_patterns ? total_patterns : 1) * sizeof(*first_with_id));
     /* Atoms per pattern: hex chains have no program to count them from. */
     size_t *counts = calloc(total_patterns ? total_patterns : 1, sizeof(*counts));
-    if (!first || !first_with_id || !counts) { free(first); free(first_with_id); free(counts); return false; }
+    counted = malloc(YX_VIEW_COUNTED_PATTERNS * sizeof(*counted));
+    if (!first || !first_with_id || !counts || !counted) {
+        free(first); free(first_with_id); free(counts); free(counted);
+        return false;
+    }
     for (size_t k = 0; k < total_patterns; ++k) first_with_id[k] = SIZE_MAX;
     size_t index = 0;
-    /* Only a set of at most 64 atoms is used, and all_count never shrinks:
+    /* Only a set of at most 64 atoms is used, and the count never shrinks:
      * the atoms of later patterns are not needed once it has more. */
-    for (size_t i = 0; known && all_count <= 64 && i < scanner->rules->rule_count; ++i) {
+    for (size_t i = 0; !oom && all_count - unsure_count <= 64 && i < scanner->rules->rule_count; ++i) {
         YRX_RULE *view = &scanner->views[i];
-        for (size_t j = 0; known && all_count <= 64 && j < view->pattern_count; ++j, ++index) {
+        for (size_t j = 0; !oom && all_count - unsure_count <= 64 && j < view->pattern_count; ++j, ++index) {
             YRX_PATTERN *pattern = &view->patterns[j];
+            bool unsure = false;
             first[index] = SIZE_MAX;
             /* An earlier identical pattern supplies the atoms. */
             size_t id = pattern->compat_pattern_id;
@@ -13575,9 +13625,43 @@ static bool yx_view_atom_order(YRX_SCANNER *scanner)
                 counts[index] = counts[first_with_id[id]];
                 continue;
             }
+            /* So does an equal regexp or hex pattern of an earlier rule
+             * with the same constraints. */
+            if (pattern->kind != YX_PATTERN_TEXT) {
+                size_t k = 0;
+                int same = 0;
+                for (; k < counted_count; ++k) {
+                    if (counted[k].rule == i || !yx_view_same_regexp_pattern(counted[k].pattern, pattern)) continue;
+                    if (!sharing) sharing = yx_view_sharing_new(scanner->rules);
+                    same = sharing ? yx_view_sharing_rules(sharing, i, counted[k].rule) : -1;
+                    if (same == 1 || same < 0) break;
+                    if (same == 2) unsure = true;
+                }
+                if (same < 0) { oom = true; break; }
+                if (same == 1) {
+                    first[index] = first[counted[k].index];
+                    counts[index] = counts[counted[k].index];
+                    if (id < total_patterns) first_with_id[id] = counted[k].index;
+                    continue;
+                }
+                if (counted_count < YX_VIEW_COUNTED_PATTERNS) {
+                    counted[counted_count].pattern = pattern;
+                    counted[counted_count].rule = i;
+                    counted[counted_count++].index = index;
+                } else unsure = true;
+            }
             if (id < total_patterns) first_with_id[id] = index;
-            int modeled = yx_ser_pattern_reference_atoms_status(pattern, &atoms, &count);
-            if (modeled != 1) { known = false; oom = modeled < 0; break; }
+            if (pattern->fixed_at_enabled && !pattern->rx_program) {
+                first[index] = all_count;
+                continue;
+            }
+            int modeled = yx_ser_search_atoms_status(pattern, &atoms, &count);
+            if (modeled != 1) {
+                known = false; oom = modeled < 0;
+                if (id < total_patterns) first_with_id[id] = SIZE_MAX;
+                if (oom) break;
+                continue;
+            }
             first[index] = all_count;
             counts[index] = count;
             if (all_count + count > all_capacity) {
@@ -13589,13 +13673,21 @@ static bool yx_view_atom_order(YRX_SCANNER *scanner)
             }
             for (size_t a = 0; a < count; ++a) {
                 if (!atoms[a].length) empty = true;
+                if (atoms[a].length == 1) one_byte = true;
                 all[all_count++] = atoms[a];
             }
+            if (unsure) unsure_count += count;
             free(atoms);
             atoms = NULL;
         }
     }
-    if (known && all_count && all_count <= 64 && !empty) {
+    /* Aho-Corasick for certain, also with atoms that are not modeled. A
+     * copy that may share its atoms has the atoms of the pattern it copies:
+     * Teddy with them is Teddy without them. */
+    size_t least = all_count - unsure_count;
+    bool automaton = !oom && (least > 64 || empty || (one_byte && least > 16) || (known && !all_count));
+    bool teddy = false;
+    if (!oom && known && all_count && all_count <= 64 && !empty) {
         pointers = calloc(all_count, sizeof(*pointers));
         buckets = calloc(all_count, sizeof(*buckets));
         if (!pointers || !buckets) oom = true;
@@ -13603,6 +13695,7 @@ static bool yx_view_atom_order(YRX_SCANNER *scanner)
             for (size_t a = 0; a < all_count; ++a) pointers[a] = &all[a];
             yx_rx_teddy_buckets(pointers, all_count, buckets, &minimum_len);
             if (!(minimum_len == 16 && all_count > 16)) {
+                teddy = true;
                 index = 0;
                 for (size_t i = 0; i < scanner->rules->rule_count; ++i)
                     for (size_t j = 0; j < scanner->views[i].pattern_count; ++j, ++index) {
@@ -13638,7 +13731,17 @@ static bool yx_view_atom_order(YRX_SCANNER *scanner)
             }
         }
     }
+    if (!oom && (teddy || automaton))
+        for (size_t i = 0; i < scanner->rules->rule_count; ++i)
+            for (size_t j = 0; j < scanner->views[i].pattern_count; ++j) {
+                YRX_PATTERN *pattern = &scanner->views[i].patterns[j];
+                pattern->atom_search_known = true;
+                pattern->atom_search_teddy = teddy;
+                pattern->atom_search_minimum = teddy ? minimum_len : 0;
+            }
     free(pointers); free(buckets); free(all); free(first); free(first_with_id); free(counts);
+    free(counted);
+    yx_view_sharing_free(sharing);
     return !oom;
 }
 
@@ -13909,6 +14012,36 @@ done:
     free(globals); free(globals_known);
     if (!ok) yx_view_constraints_free(c, count);
     return ok;
+}
+
+struct yx_view_sharing {
+    const YRX_RULES *rules;
+    yx_view_constraints constraints;
+    bool built, failed;
+};
+
+static yx_view_sharing *yx_view_sharing_new(const YRX_RULES *rules)
+{
+    yx_view_sharing *sharing = calloc(1, sizeof(*sharing));
+    if (sharing) sharing->rules = rules;
+    return sharing;
+}
+
+static int yx_view_sharing_rules(yx_view_sharing *sharing, size_t rule, size_t other)
+{
+    if (!sharing->built && !sharing->failed)
+        sharing->failed = !(sharing->built = yx_view_constraints_build(&sharing->constraints, sharing->rules));
+    if (!sharing->built) return -1;
+    if (sharing->constraints.known[rule] <= 0 || sharing->constraints.known[other] <= 0) return 2;
+    return yx_rule_constraints_equal(&sharing->constraints.constraints[rule],
+                                     &sharing->constraints.constraints[other]) ? 1 : 0;
+}
+
+static void yx_view_sharing_free(yx_view_sharing *sharing)
+{
+    if (!sharing) return;
+    if (sharing->built) yx_view_constraints_free(&sharing->constraints, sharing->rules->rule_count);
+    free(sharing);
 }
 
 /* YARA-X gives equal patterns of the whole rule set one PatternId
@@ -15425,6 +15558,19 @@ static void yx_build_chains(YRX_RULES *rules)
         }
 }
 
+/* Alternations of literals: their Literal sub-patterns, once per rule set. */
+static void yx_build_literal_sets(YRX_RULES *rules)
+{
+    for (size_t i = 0; rules && i < rules->rule_count; ++i)
+        for (size_t j = 0; j < rules->rules[i].pattern_count; ++j) {
+            YRX_PATTERN *pattern = &rules->rules[i].patterns[j];
+            if (!pattern->rx_program && !pattern->rx_chain && !pattern->rx_literals &&
+                !pattern->archived_regexp &&
+                (pattern->kind == YX_PATTERN_HEX || pattern->kind == YX_PATTERN_REGEX))
+                pattern->rx_literals = yx_ser_literal_set(pattern);
+        }
+}
+
 static void yx_plan_build_task(size_t index, void *context)
 {
     YRX_PATTERN **patterns = context;
@@ -15740,6 +15886,7 @@ static YRX_RULES *yx_compiler_build_impl(YRX_COMPILER *compiler,
     if (!yx_inspect_depth) yx_build_archived_programs(rules);
     if (!yx_inspect_depth) yx_build_regexp_programs(rules);
     if (!yx_inspect_depth) yx_build_chains(rules);
+    if (!yx_inspect_depth) yx_build_literal_sets(rules);
     if (prepare_candidates && !yx_inspect_depth) yx_build_candidate_plans(rules);
     yx_free_globals(compiler->redefined_global_symbols,
                     compiler->redefined_global_symbol_count);

@@ -292,6 +292,95 @@ static char *yx_rx_unicode_bytes(yx_rx_parser *p, char *pattern)
     free(out.text);
     return result ? result : yx_rx_oom(p);
 }
+/* The byte form of a Unicode class, one alternation per UTF-8 sequence
+ * length (parts[n - 1] holds the n-byte sequences, NULL when there are
+ * none). The byte engine's lookbehind needs one fixed width, so a class is
+ * tested there length by length. Returns false when memory ran out. */
+static bool yx_rx_unicode_split(const char *pattern, char *parts[4],
+                                bool *compiled)
+{
+    int error;
+    PCRE2_SIZE offset;
+    yx_rx_buffer out[4] = {{0}, {0}, {0}, {0}};
+    unsigned start = UINT32_MAX;
+    bool ok = true;
+    parts[0] = parts[1] = parts[2] = parts[3] = NULL;
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED,
+                                     PCRE2_UTF | PCRE2_UCP | PCRE2_ANCHORED |
+                                         PCRE2_ENDANCHORED,
+                                     &error, &offset, NULL);
+    *compiled = code != NULL;
+    if (!code)
+        return true;
+    pcre2_match_data *match = pcre2_match_data_create_from_pattern(code, NULL);
+    if (!match) {
+        pcre2_code_free(code);
+        return false;
+    }
+    for (unsigned point = 0; ok && point <= 0x110000; ++point) {
+        static const unsigned limits[] = {0x7f, 0x7ff, 0xffff, 0x10ffff};
+        bool matched = false, boundary = false;
+        if (point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff)) {
+            unsigned char data[4];
+            size_t length = yx_rx_utf8(point, data);
+            matched = pcre2_match(code, data, length, 0, 0, match, NULL) >= 0;
+        }
+        /* a run ends where the sequence length changes */
+        for (size_t i = 0; i < 3; ++i)
+            if (point == limits[i] + 1)
+                boundary = true;
+        if (start != UINT32_MAX && (!matched || boundary)) {
+            unsigned char first[4];
+            size_t length = yx_rx_utf8(start, first);
+            ok = yx_rx_scalar_range(&out[length - 1], start, point - 1);
+            start = UINT32_MAX;
+        }
+        if (matched && start == UINT32_MAX)
+            start = point;
+    }
+    pcre2_match_data_free(match);
+    pcre2_code_free(code);
+    for (size_t i = 0; i < 4; ++i) {
+        if (ok && out[i].length) {
+            parts[i] = yx_rx_format("(?:%s)", out[i].text);
+            ok = parts[i] != NULL;
+        }
+        free(out[i].text);
+    }
+    if (!ok)
+        for (size_t i = 0; i < 4; ++i) {
+            free(parts[i]);
+            parts[i] = NULL;
+        }
+    return ok;
+}
+/* (?<=class) or (?<!class) for a class given by sequence length. */
+static char *yx_rx_split_behind(char *const parts[4], bool negative)
+{
+    yx_rx_buffer out = {0};
+    bool ok = true, any = false;
+    if (!negative)
+        ok = yx_rx_append(&out, "(?:");
+    for (size_t i = 0; ok && i < 4; ++i) {
+        if (!parts[i])
+            continue;
+        if (!negative && any)
+            ok = yx_rx_append(&out, "|");
+        ok = ok && yx_rx_append(&out, negative ? "(?<!" : "(?<=") &&
+             yx_rx_append(&out, parts[i]) && yx_rx_append(&out, ")");
+        any = true;
+    }
+    /* an empty class: nothing precedes (positive fails, negative holds) */
+    if (ok && !negative)
+        ok = yx_rx_append(&out, any ? ")" : "(?!))");
+    if (ok && negative && !any)
+        ok = yx_rx_append(&out, "(?:)");
+    if (!ok) {
+        free(out.text);
+        return NULL;
+    }
+    return out.text;
+}
 static char *yx_rx_literal(unsigned point, yx_rx_flags flags)
 {
     return yx_rx_format(flags.i ? "(?i:\\x{%x})" : "\\x{%x}", point);
@@ -320,24 +409,75 @@ static char *yx_rx_boundary(yx_rx_parser *p, yx_rx_flags flags,
                             const char *kind)
 {
     char *word = yx_rx_class_named('w', flags), *result = NULL;
-    if (flags.u)
+    char *parts[4] = {NULL, NULL, NULL, NULL}, *was = NULL, *was_not = NULL;
+    bool split = false;
+    if (flags.u && p->byte_engine && word) {
+        /* before the class becomes bytes: its lookbehind forms */
+        bool compiled = false;
+        if (!yx_rx_unicode_split(word, parts, &compiled)) {
+            free(word);
+            return yx_rx_oom(p);
+        }
+        if (compiled) {
+            /* the class itself, as yx_rx_unicode_bytes gives it: the
+             * sequences in code point order, which is by length */
+            yx_rx_buffer joined = {0};
+            bool ok = true;
+            for (size_t i = 0; ok && i < 4; ++i)
+                if (parts[i])
+                    ok = (!joined.length || yx_rx_append(&joined, "|")) &&
+                         yx_rx_append(&joined, parts[i]);
+            free(word);
+            word = ok ? yx_rx_format(joined.length ? "(?:%s)" : "(?!)",
+                                     joined.text)
+                      : NULL;
+            free(joined.text);
+            was = yx_rx_split_behind(parts, false);
+            was_not = yx_rx_split_behind(parts, true);
+            for (size_t i = 0; i < 4; ++i)
+                free(parts[i]);
+            if (!word || !was || !was_not) {
+                free(was);
+                free(was_not);
+                free(word);
+                return yx_rx_oom(p);
+            }
+            split = true;
+        }
+    }
+    if (flags.u && !split)
         word = yx_rx_unicode_bytes(p, word);
-    if (!word)
+    if (!word) {
+        free(was);
+        free(was_not);
         return NULL;
+    }
+    if (!split) {
+        was = yx_rx_format("(?<=%s)", word);
+        was_not = yx_rx_format("(?<!%s)", word);
+        if (!was || !was_not) {
+            free(was);
+            free(was_not);
+            free(word);
+            return NULL;
+        }
+    }
     if (strcmp(kind, "start") == 0)
-        result = yx_rx_format("(?<!%s)(?=%s)", word, word);
+        result = yx_rx_format("%s(?=%s)", was_not, word);
     else if (strcmp(kind, "end") == 0)
-        result = yx_rx_format("(?<=%s)(?!%s)", word, word);
+        result = yx_rx_format("%s(?!%s)", was, word);
     else if (strcmp(kind, "start-half") == 0)
-        result = yx_rx_format("(?<!%s)", word);
+        result = yx_rx_format("%s", was_not);
     else if (strcmp(kind, "end-half") == 0)
         result = yx_rx_format("(?!%s)", word);
     else if (strcmp(kind, "B") == 0)
-        result = yx_rx_format("(?:(?<=%s)(?=%s)|(?<!%s)(?!%s))", word, word,
-                              word, word);
+        result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was, word, was_not,
+                              word);
     else
-        result = yx_rx_format("(?:(?<!%s)(?=%s)|(?<=%s)(?!%s))", word, word,
-                              word, word);
+        result = yx_rx_format("(?:%s(?=%s)|%s(?!%s))", was_not, word, was,
+                              word);
+    free(was);
+    free(was_not);
     free(word);
     return result;
 }

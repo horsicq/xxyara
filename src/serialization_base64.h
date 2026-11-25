@@ -53,7 +53,7 @@ static yx_ser_result yx_encode_base64_pattern(const YRX_RULES *rules,uint8_t **d
     for(size_t v=0;v<variants;++v) {
         bool w=wide_input&&v==0;
         const uint8_t *bytes=w?wide:p->bytes;size_t size=p->length*(w?2u:1u);
-        size_t pool=yx_physical_pool(a,(yx_literal){bytes,size});if(pool==SIZE_MAX)goto done;
+        size_t pool=yx_physical_pool(a,(yx_literal){bytes,size});if(pool==SIZE_MAX){status=YX_SER_NO_MEMORY;goto done;}
         for(unsigned output=0;output<2;++output) {
             if(!(p->modifiers&(output?YX_MOD_BASE64WIDE:YX_MOD_BASE64)))continue;
             const char *alphabet=output?p->base64wide_alphabet:p->base64_alphabet;
@@ -61,7 +61,7 @@ static yx_ser_result yx_encode_base64_pattern(const YRX_RULES *rules,uint8_t **d
             if(alphabet) {
                 if(strlen(alphabet)!=64)goto done;
                 alphabet_pool=yx_physical_pool(a,(yx_literal){(const uint8_t *)alphabet,64});
-                if(alphabet_pool==SIZE_MAX)goto done;
+                if(alphabet_pool==SIZE_MAX){status=YX_SER_NO_MEMORY;goto done;}
             }
             uint8_t *phases[3]={0};size_t widths[3],offsets[3],atom_widths[3];
             if(!yx_archive_base64_phases(bytes,size,output!=0,alphabet,phases,widths,offsets,atom_widths))goto done;

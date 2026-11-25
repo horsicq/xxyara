@@ -9361,12 +9361,17 @@ condition_failed:
                 if (cursor < p->at) ++cursor;
                 continue;
             }
-            if (!(isalnum((unsigned char)*cursor) || *cursor == '_')) {
+            /* The name comes from the condition's own lexer and may hold
+             * non-ASCII letters or digits: every byte of a UTF-8 sequence
+             * continues a word here. */
+            if (!(isalnum((unsigned char)*cursor) || *cursor == '_' ||
+                  (unsigned char)*cursor >= 0x80)) {
                 ++cursor;
                 continue;
             }
             while (cursor < p->at &&
-                   (isalnum((unsigned char)*cursor) || *cursor == '_'))
+                   (isalnum((unsigned char)*cursor) || *cursor == '_' ||
+                    (unsigned char)*cursor >= 0x80))
                 ++cursor;
             if ((size_t)(cursor - word) == name_length &&
                 memcmp(word, name, name_length) == 0) {
@@ -10573,6 +10578,7 @@ void yx_free_rule(YRX_RULE *rule)
             free(pattern->rx_program);
         }
         yx_ser_chain_free(pattern->rx_chain);
+        yx_rx_literals_free(pattern->rx_literals);
     }
     free(rule->patterns);
     yx_condition_destroy(rule->condition);

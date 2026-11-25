@@ -1086,7 +1086,7 @@ static bool yx_fast_widen_atoms(yx_fast_program *p, bool ascii_wide)
     size_t count = p->atom_count * (ascii_wide ? 2u : 1u);
     if (count > YX_FAST_MAX_ATOMS) return false;
     yx_archive_regexp_atom *atoms = calloc(count, sizeof(*atoms));
-    if (!atoms) return false;
+    if (!atoms) { yx_walk_no_memory = true; return false; }
     for (size_t i = 0; i < p->atom_count; ++i) {
         const yx_archive_regexp_atom *from = &p->atoms[i];
         if (from->length > 4 || from->backtrack > UINT16_MAX / 2) { free(atoms); return false; }
@@ -1221,8 +1221,10 @@ static bool yx_fast_read_sequence(yx_fast_program *p, const uint8_t *code, size_
         if (!yx_fast_piece_reserve(p)) return false;
         uint8_t opcode = code[*at]; yx_fast_piece *piece = &p->pieces[p->count++];
         if (opcode == 1 || opcode == 2) {
-            piece->kind = 1; piece->alternative_count = 1; piece->alternatives = calloc(1,sizeof(*piece->alternatives));
-            if (!piece->alternatives || !yx_fast_read_literal(code,end,at,piece->alternatives)) return false;
+            piece->kind = 1; piece->alternatives = calloc(1,sizeof(*piece->alternatives));
+            if (!piece->alternatives) return false;
+            piece->alternative_count = 1;
+            if (!yx_fast_read_literal(code,end,at,piece->alternatives)) return false;
         } else if (opcode >= 3 && opcode <= 6) {
             ++*at; piece->kind = opcode < 5 ? opcode : (uint8_t)(opcode - 2); piece->newline = opcode < 5;
             uint32_t minimum,maximum;

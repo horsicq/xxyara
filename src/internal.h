@@ -272,6 +272,15 @@ struct YRX_PATTERN {
     size_t *rx_order_ids, *rx_order_buckets;
     bool rx_teddy;
     size_t rx_teddy_minimum;
+    /* The Literal sub-patterns of a whole-expression alternation of
+     * literals (regex_vm.h), built once with the programs, owned by the
+     * compiled rules; views share it read-only. */
+    struct yx_rx_literals *rx_literals;
+    /* Scanner views only: whether the reference's search of this rule set
+     * is known (atom_search_known), and then whether it is Teddy for inputs
+     * of at least atom_search_minimum bytes or always Aho-Corasick. */
+    bool atom_search_known, atom_search_teddy;
+    size_t atom_search_minimum;
     /* Scanner views only: owner index in the scanner's text prefilter, or
      * SIZE_MAX when the pattern is always scanned. */
     size_t prefilter_owner;

@@ -193,6 +193,37 @@ bool yx_rx_scan_from_candidates(const yx_rx_program *program, const uint8_t *dat
 void yx_rx_teddy_buckets(const yx_rx_atom *const *atoms, size_t count, size_t *buckets,
                          size_t *minimum_len);
 
+/* The Literal sub-patterns of a pattern that is a whole-expression
+ * alternation of literals (Compiler::c_alternation_literal): per branch the
+ * raw literal, then the wide one, each with the atoms of its best atom
+ * (sub.atoms: bytes, length, backtrack, exact). sub is the first member: a
+ * hit's sub-pattern pointer is its literal. */
+typedef struct yx_rx_literal {
+    yx_rx_sub sub;
+    uint8_t *bytes;
+    size_t length;
+} yx_rx_literal;
+typedef struct yx_rx_literals {
+    yx_rx_literal *items;
+    size_t count;
+} yx_rx_literals;
+void yx_rx_literals_free(yx_rx_literals *set);
+/* Searches every atom occurrence and verifies the literals
+ * (handle_atom_match, verify_literal); a start keeps the match added first.
+ * The order is that of the reference's search: Aho-Corasick's, or Teddy's
+ * (by atom offset, then atom id). YX_RX_LITERALS_ANCHORED is for a pattern
+ * anchored at an offset the caller filters by: each start gets the match
+ * verify_anchored_patterns finds there, the first literal in sub-pattern
+ * order, and starts are added in ascending order.
+ * starts (may be NULL) lists, in ascending order, every offset where one of
+ * the literals occurs (no literal is nocase then): the scan visits those
+ * offsets instead of searching the atoms, with the same result. False on
+ * allocation failure or when the deadline expires. */
+enum { YX_RX_LITERALS_AUTOMATON, YX_RX_LITERALS_TEDDY, YX_RX_LITERALS_ANCHORED };
+bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size,
+                         yx_scan_deadline *deadline, yx_rx_match_list *matches, int order,
+                         const yx_rx_candidate *starts, size_t start_count);
+
 /* A set of short atoms, each owned by a pattern, searched in one pass to
  * learn which owners have at least one atom occurrence in the input. */
 typedef struct yx_atom_set yx_atom_set;

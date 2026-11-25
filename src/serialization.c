@@ -18380,6 +18380,22 @@ static yx_ser_result yx_encode_cuckoo(const YRX_RULES *rules,
 #include "serialization_thompson_vm.h"
 #include "serialization_chain.h"
 
+int yx_ser_best_atom(const uint8_t *bytes, size_t length, size_t *offset, size_t *width)
+{
+    /* MAX_ATOM_SEARCH_BYTES: the backtrack is a u16. */
+    size_t searched = length < YX_CHAIN_ATOM_SEARCH_BYTES ? length : YX_CHAIN_ATOM_SEARCH_BYTES;
+    uint8_t *mask;
+    *offset = *width = 0;
+    if (!bytes || !searched) return 0;
+    mask = malloc(searched);
+    if (!mask) return -1;
+    memset(mask, 255, searched);
+    yx_fast_literal literal = {(uint8_t *)bytes, mask, searched, false};
+    yx_fast_best_atom(&literal, offset, width);
+    free(mask);
+    return *width && *offset <= UINT16_MAX ? 1 : 0;
+}
+
 bool yx_ser_regexp_literal_atoms(const char *regexp)
 {
     if(!regexp)return false;

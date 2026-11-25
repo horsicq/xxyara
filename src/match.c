@@ -12239,6 +12239,27 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
     pattern->match_count = 0;
     pattern->match_capacity = 0;
     if (!size) return YRX_SUCCESS;
+    if (pattern->rx_literals && (pattern->atom_search_known || pattern->fixed_at_enabled)) {
+        /* An alternation of literals: its Literal sub-patterns, in the
+         * order of the reference's search of this rule set. Anchored at an
+         * offset (the caller keeps the match there) it is not searched:
+         * the first sub-pattern that matches at an offset has the match. */
+        yx_rx_match_list list = {0};
+        bool ok;
+        list.limit = max_matches;
+        ok = yx_rx_scan_literals(pattern->rx_literals, data, size, pattern->deadline, &list,
+                                 pattern->fixed_at_enabled ? YX_RX_LITERALS_ANCHORED :
+                                 pattern->atom_search_teddy && size >= pattern->atom_search_minimum ?
+                                 YX_RX_LITERALS_TEDDY : YX_RX_LITERALS_AUTOMATON,
+                                 /* A gate's sorted branch starts (yx_candidate_finalize). */
+                                 pattern->candidate_gate_starts ? pattern->candidate_hits : NULL,
+                                 pattern->candidate_gate_starts ? pattern->candidate_hit_count : 0);
+        for (size_t i = 0; ok && i < list.count; ++i)
+            ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
+        yx_rx_match_list_free(&list);
+        if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
+        return ok ? YRX_SUCCESS : YRX_SCAN_ERROR;
+    }
     if (pattern->rx_program) {
 #ifdef _WIN32
         bool pike_only = true;
@@ -13200,9 +13221,11 @@ yx_candidate_plan *yx_candidate_plan_build(const YRX_PATTERN *pattern)
             ok = plan->base64 != NULL;
             for (size_t i = 0; ok && i < plan->base64_count; ++i) {
                 size_t start, length;
-                yx_candidate_select_window(plan->base64[i].needle, NULL,
-                    plan->base64[i].length, false, &start, &length);
-                ok = length && yx_candidate_add_atom(plan,
+                /* YARA-X's own atom: where it lies decides which data
+                 * verify_base64 is asked about. */
+                ok = yx_ser_best_atom(plan->base64[i].needle,
+                    plan->base64[i].length, &start, &length) > 0;
+                ok = ok && length && yx_candidate_add_atom(plan,
                     plan->base64[i].needle + start, length, start,
                     (uint32_t)i, 0);
             }

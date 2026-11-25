@@ -347,11 +347,11 @@ static yx_ser_result yx_encode_composed_rules_mode(const YRX_RULES *rules,uint8_
     yx_writer *header_storage=calloc(rules->rule_count,sizeof(*header_storage));
     uint8_t *wasm=NULL;size_t wasm_length=0;yx_ser_result status=YX_SER_UNSUPPORTED;
     if(!provisional||!p||!roots||!options||!header_storage){status=YX_SER_NO_MEMORY;goto done;}
-    if(!yx_physical_patterns_reserve(provisional,logical))goto done;
+    if(!yx_physical_patterns_reserve(provisional,logical)){status=YX_SER_NO_MEMORY;goto done;}
     if(!yx_module_pattern_schema_build(&schema,rules,profile))goto done;
     for(size_t i=0,k=0;i<rules->rule_count;++i)for(size_t j=0;j<rules->rules[i].pattern_count;++j,++k) {
         provisional->name_ids[k]=yx_physical_ident(provisional,rules->rules[i].patterns[j].identifier);
-        if(provisional->name_ids[k]==SIZE_MAX)goto done;
+        if(provisional->name_ids[k]==SIZE_MAX){status=YX_SER_NO_MEMORY;goto done;}
         provisional->mapping[k]=k;provisional->kinds[k]=(uint8_t)rules->rules[i].patterns[j].kind;
     }
     provisional->physical=provisional->logical=logical;c.archive=provisional;yx_module_pattern_setup(p,&c);
@@ -359,7 +359,7 @@ static yx_ser_result yx_encode_composed_rules_mode(const YRX_RULES *rules,uint8_
     if(!yx_composed_parse_rules(p,&c,rules,roots)||!yx_composed_options(p,rules,roots,options,header_storage)||
        !yx_composed_condition_literals(p,&c,roots,rules->rule_count,&assembly)){if(p->no_memory)status=YX_SER_NO_MEMORY;goto done;}
     assembly.archive=calloc(1,sizeof(*assembly.archive));if(!assembly.archive){status=YX_SER_NO_MEMORY;goto done;}
-    if(yx_physical_ident(assembly.archive,"default")!=0)goto done;
+    if(yx_physical_ident(assembly.archive,"default")!=0){status=YX_SER_NO_MEMORY;goto done;}
     assembly.archive->globals=schema.dynamic.globals.data;assembly.archive->globals_length=schema.dynamic.globals.used;
     status=yx_physical_rules_build(rules,options,&assembly);if(status!=YX_SER_SUCCESS)goto done;
     /* The condition literals stay borrowed from the first program's nodes. */
@@ -375,7 +375,8 @@ static yx_ser_result yx_encode_composed_rules_mode(const YRX_RULES *rules,uint8_
         if(!yx_intern_literal(assembly.archive->pool[i].data,assembly.archive->pool[i].length,&p->literals,&p->literal_count,&p->literal_capacity,&id)||id!=i)goto done;
     }
     }
-    if(!yx_composed_parse_rules(p,&c,rules,roots)||!yx_composed_module_wasm(p,roots,rules->rule_count,&wasm,&wasm_length)||!yx_physical_pool_reserve(assembly.archive,p->literal_count))goto done;
+    if(!yx_composed_parse_rules(p,&c,rules,roots)||!yx_composed_module_wasm(p,roots,rules->rule_count,&wasm,&wasm_length))goto done;
+    if(!yx_physical_pool_reserve(assembly.archive,p->literal_count)){status=YX_SER_NO_MEMORY;goto done;}
     assembly.archive->pool_count=p->literal_count;if(p->literal_count)memcpy(assembly.archive->pool,p->literals,p->literal_count*sizeof(*p->literals));
     if(c.regex_count) {
         if(!(assembly.archive->regexps=malloc(c.regex_count*sizeof(*c.regexes)))){status=YX_SER_NO_MEMORY;goto done;}
