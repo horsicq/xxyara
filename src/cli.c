@@ -24563,288 +24563,973 @@ static bool yx_fix_ranked_label_matches(const uint8_t *source, size_t length, co
     return match;
 }
 
-static bool yx_fix_glob(const char *pattern, const char *name)
+/* `--filter` patterns, as globwalk applies them: each one is a line of an
+ * ignore::overrides::OverrideBuilder (a lone `*` is given as `/*`), with
+ * the line rules of ignore's GitignoreBuilder::add_line (a leading `#` is a
+ * comment; trailing whitespace is trimmed unless escaped; `!` negates; a
+ * leading `/` anchors; a trailing `/` only matches directories; a glob
+ * without `/` gets `**` + `/` in front; one ending in `/` + `**` gets `/*`),
+ * and globset's syntax with literal_separator and backslash_escape
+ * (globset/src/glob.rs, Parser): `?`, `*`, `**` as a whole path component
+ * (anything else is two `*`), `[...]` classes (`!` or `^` first negates;
+ * `]` first and `-` first or last are members; no escapes inside), `{...}`
+ * alternates nested to any depth with empty alternatives dropped, `\`
+ * escapes. A glob matches the path's bytes as globset's `(?-u)` regex
+ * does: `?` and a class match one byte, and a non-ASCII class member is its
+ * UTF-8 bytes. The last glob that matches a path decides (an override glob
+ * includes, a negated one excludes); a file needs an including glob, and a
+ * directory an excluding one prunes what is under it. The glob is run as an
+ * NFA, without backtracking. */
+typedef enum yx_glob_kind {
+    YX_GLOB_LITERAL,
+    YX_GLOB_ANY,
+    YX_GLOB_STAR,
+    YX_GLOB_RPREFIX,
+    YX_GLOB_RSUFFIX,
+    YX_GLOB_RZOM,
+    YX_GLOB_CLASS,
+    YX_GLOB_ALT
+} yx_glob_kind;
+
+typedef struct yx_glob_token {
+    yx_glob_kind kind;
+    uint8_t bytes[4], length; /* LITERAL: the character's UTF-8 */
+    bool empty;               /* ALT: every alternative's regex is empty */
+    size_t index, count;      /* CLASS: its set; ALT: its branches in alt_branches */
+} yx_glob_token;
+
+typedef struct yx_glob_branch {
+    yx_glob_token *items;
+    size_t count, capacity;
+    size_t solid; /* tokens other than empty ALTs: 0 means an empty regex */
+} yx_glob_branch;
+
+typedef enum yx_glob_op {
+    YX_GLOB_BYTE,
+    YX_GLOB_NOT_SLASH,
+    YX_GLOB_NOT_NEWLINE,
+    YX_GLOB_SET,
+    YX_GLOB_SPLIT,
+    YX_GLOB_JUMP,
+    YX_GLOB_MATCH
+} yx_glob_op;
+
+typedef struct yx_glob_insn {
+    uint8_t op, byte;
+    size_t x, y;
+} yx_glob_insn;
+
+typedef struct yx_glob {
+    yx_glob_insn *code;
+    size_t count, capacity;
+    uint8_t (*sets)[32];
+    size_t set_count;
+    size_t *scratch; /* the NFA run's marks, thread lists and stack */
+    bool include, only_dir;
+    /* Over regex-syntax's nest limit: GlobSetBuilder::build fails. The
+     * regex (for the message) and the strategy that compiles it. */
+    bool too_deep, required_ext, regex_strategy;
+    char *regex;
+} yx_glob;
+
+typedef struct yx_globs {
+    yx_glob *items;
+    size_t count, capacity;
+    /* The last file's directory and whether a glob prunes it. */
+    char *last_directory;
+    size_t last_directory_length;
+    bool last_pruned;
+} yx_globs;
+
+#define YX_GLOB_NONE 0xffffffffu
+/* regex-syntax's default nest_limit, which globset does not change. */
+#define YX_GLOB_NEST_LIMIT 250
+
+typedef struct yx_glob_text {
+    char *data;
+    size_t length, capacity;
+    bool failed;
+} yx_glob_text;
+
+typedef struct yx_glob_parser {
+    const uint8_t *at, *end, *cur_text;
+    uint32_t prev, cur;
+    size_t cur_length;
+    yx_glob_branch *branches;
+    size_t branch_count, branch_capacity;
+    size_t *open, open_count, open_capacity;         /* the branches being parsed */
+    size_t *alts, alt_count, alt_capacity;           /* each open `{`: its first branch in open */
+    size_t *alt_branches, alt_branch_count, alt_branch_capacity;
+    uint8_t (*sets)[32];
+    size_t set_count, set_capacity;
+    char **set_texts;     /* each class's regex text */
+    size_t *set_items;    /* and the number of its class set items */
+    size_t set_text_capacity, set_item_capacity;
+    char *error;
+    size_t error_size;
+    bool failed;
+} yx_glob_parser;
+
+static bool yx_glob_grow(void **items, size_t *capacity, size_t needed, size_t size)
 {
-    if (!*pattern) return !*name;
-    if (*pattern == '*') {
-        bool double_star = pattern[1] == '*';
-        const char *next = pattern + (double_star ? 2 : 1);
-        /* A recursive wildcard followed by slash also matches a base file. */
-        if (double_star && *next == '/' && yx_fix_glob(next + 1, name)) return true;
-        if (yx_fix_glob(next, name)) return true;
-        for (; *name && (double_star || (*name != '/' && *name != '\\')); ++name)
-            if (yx_fix_glob(next, name + 1)) return true;
-        return false;
+    size_t next;
+    void *grown;
+    if (needed <= *capacity) return true;
+    next = *capacity ? *capacity : 8;
+    while (next < needed) {
+        if (next > SIZE_MAX / 2 / size) return false;
+        next *= 2;
     }
-    if (*pattern == '?') return *name && *name != '/' && *name != '\\' && yx_fix_glob(pattern + 1, name + 1);
-    if (*pattern == '[') {
-        const char *end = strchr(pattern + 1, ']');
-        const char *item;
-        bool negate = false, matched = false;
-        unsigned char ch = (unsigned char)*name;
-        if (!end) return *name == '[' && yx_fix_glob(pattern + 1, name + 1);
-        if (!*name || *name == '/' || *name == '\\') return false;
-        item = pattern + 1;
-        if (*item == '!') {
-            negate = true;
-            ++item;
-        }
-        while (item < end) {
-            unsigned char first = (unsigned char)*item++;
-            if (item + 1 < end && *item == '-') {
-                unsigned char last = (unsigned char)item[1];
-                if (first <= ch && ch <= last) matched = true;
-                item += 2;
-            } else if (first == ch) {
-                matched = true;
-            }
-        }
-        return (matched != negate) && yx_fix_glob(end + 1, name + 1);
+    grown = realloc(*items, next * size);
+    if (!grown) return false;
+    *items = grown;
+    *capacity = next;
+    return true;
+}
+
+static void yx_glob_append(yx_glob_text *text, const char *data, size_t length)
+{
+    if (text->failed) return;
+    if (length > SIZE_MAX - 1 - text->length || !yx_glob_grow((void **)&text->data, &text->capacity, text->length + length + 1, 1)) {
+        text->failed = true;
+        return;
     }
-    if (*pattern == '\\' && pattern[1]) return *name == pattern[1] && yx_fix_glob(pattern + 2, name + 1);
-    return *pattern == *name && yx_fix_glob(pattern + 1, name + 1);
+    memcpy(text->data + text->length, data, length);
+    text->length += length;
+    text->data[text->length] = '\0';
 }
 
-static bool yx_cli_directory_filter_plain_matches(const char *pattern, const char *relative, bool basename_allowed)
+/* char_to_escaped_literal: regex::escape for ASCII, `\xNN` per byte else. */
+static void yx_glob_append_char(yx_glob_text *text, const uint8_t *bytes, size_t length)
 {
-    const char *basename;
-    /* A leading slash anchors the pattern to the walked directory. */
-    if (*pattern == '/') return yx_fix_glob(pattern + 1, relative);
-    if (yx_fix_glob(pattern, relative)) return true;
-    /* globwalk applies a pattern without a path separator to every file
-     * name, except for "*", which it explicitly confines to the root. */
-    if (!basename_allowed) return false;
-    basename = strrchr(relative, '/');
-    if (!basename) basename = strrchr(relative, '\\');
-    return basename && yx_fix_glob(pattern, basename + 1);
-}
-
-static const char *yx_cli_glob_class_end(const char *open)
-{
-    const char *p = open + 1;
-    if (*p == '!' || *p == '^') ++p;
-    if (*p == ']') ++p;
-    for (; *p; ++p)
-        if (*p == ']') return p;
-    return NULL;
-}
-
-static bool yx_cli_glob_group(const char *pattern, const char **open, const char **close)
-{
-    for (const char *p = pattern; *p; ++p) {
-        if (*p == '\\' && p[1]) {
-            ++p;
-            continue;
-        }
-        if (*p == '[') {
-            const char *end = yx_cli_glob_class_end(p);
-            if (end) {
-                p = end;
-                continue;
-            }
-        }
-        if (*p == '{') {
-            unsigned nesting = 1;
-            *open = p;
-            for (++p; *p; ++p) {
-                if (*p == '\\' && p[1]) {
-                    ++p;
-                    continue;
-                }
-                if (*p == '[') {
-                    const char *end = yx_cli_glob_class_end(p);
-                    if (end) {
-                        p = end;
-                        continue;
-                    }
-                }
-                if (*p == '{') ++nesting;
-                else if (*p == '}' && --nesting == 0) {
-                    *close = p;
-                    return true;
-                }
-            }
-            return false;
-        }
+    if (length == 1 && bytes[0] < 0x80) {
+        char escaped[2] = {'\\', (char)bytes[0]};
+        if (strchr("\\.+*?()|[]{}^$#&-~", bytes[0])) yx_glob_append(text, escaped, 2);
+        else yx_glob_append(text, escaped + 1, 1);
+        return;
     }
-    return false;
-}
-
-static bool yx_cli_directory_filter_matches_inner(const char *pattern, const char *relative, bool basename_allowed, unsigned depth)
-{
-    const char *open, *close;
-    const char *alternative;
-    unsigned nesting = 0;
-    if (depth >= 64 || !yx_cli_glob_group(pattern, &open, &close)) return yx_cli_directory_filter_plain_matches(pattern, relative, basename_allowed);
-    alternative = open + 1;
-    for (const char *p = alternative; p <= close; ++p) {
-        if (p != close) {
-            if (*p == '\\' && p[1]) {
-                ++p;
-                continue;
-            }
-            if (*p == '[') {
-                const char *end = yx_cli_glob_class_end(p);
-                if (end && end < close) {
-                    p = end;
-                    continue;
-                }
-            }
-            if (*p == '{') {
-                ++nesting;
-                continue;
-            }
-            if (*p == '}') {
-                --nesting;
-                continue;
-            }
-            if (*p != ',' || nesting != 0) continue;
-        }
-        size_t prefix_length = (size_t)(open - pattern);
-        size_t alternative_length = (size_t)(p - alternative);
-        size_t suffix_length = strlen(close + 1);
-        size_t total;
-        char *expanded;
-        bool matched;
-        if (prefix_length > SIZE_MAX - alternative_length) return false;
-        total = prefix_length + alternative_length;
-        if (total > SIZE_MAX - suffix_length - 1) return false;
-        total += suffix_length;
-        expanded = malloc(total + 1);
-        if (!expanded) return false;
-        memcpy(expanded, pattern, prefix_length);
-        memcpy(expanded + prefix_length, alternative, alternative_length);
-        memcpy(expanded + prefix_length + alternative_length, close + 1, suffix_length + 1);
-        matched = yx_cli_directory_filter_matches_inner(expanded, relative, basename_allowed, depth + 1);
-        free(expanded);
-        if (matched) return true;
-        alternative = p + 1;
+    for (size_t i = 0; i < length; ++i) {
+        char hex[5];
+        snprintf(hex, sizeof(hex), "\\x%02x", bytes[i]);
+        yx_glob_append(text, hex, 4);
     }
-    return false;
 }
 
-static bool yx_cli_directory_filter_matches(const char *pattern, const char *relative)
+static uint32_t yx_glob_decode(const uint8_t *at, const uint8_t *end, size_t *length)
 {
-    bool basename_allowed = strcmp(pattern, "*") != 0 && strchr(pattern, '/') == NULL;
+    uint32_t c = at[0];
+    size_t n = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+    if (n > (size_t)(end - at)) n = 1;
+    for (size_t i = 1; i < n; ++i)
+        if ((at[i] & 0xc0) != 0x80) n = 1;
+    if (n > 1) {
+        c &= 0x3f >> (n - 1);
+        for (size_t i = 1; i < n; ++i) c = (c << 6) | (at[i] & 0x3f);
+    }
+    *length = n;
+    return c;
+}
+
+static uint32_t yx_glob_bump(yx_glob_parser *p)
+{
+    p->prev = p->cur;
+    if (p->at >= p->end) {
+        p->cur = YX_GLOB_NONE;
+        p->cur_length = 0;
+        return p->cur;
+    }
+    p->cur_text = p->at;
+    p->cur = yx_glob_decode(p->at, p->end, &p->cur_length);
+    p->at += p->cur_length;
+    return p->cur;
+}
+
+static uint32_t yx_glob_peek(const yx_glob_parser *p)
+{
+    size_t length;
+    return p->at < p->end ? yx_glob_decode(p->at, p->end, &length) : YX_GLOB_NONE;
+}
+
+static bool yx_glob_separator(uint32_t c)
+{
 #ifdef _WIN32
-    char *normalized = yx_cli_copy((const uint8_t *)relative, strlen(relative));
-    bool matched;
-    if (!normalized) return false;
-    for (char *at = normalized; *at; ++at)
-        if (*at == '\\') *at = '/';
-    matched = yx_cli_directory_filter_matches_inner(pattern, normalized, basename_allowed, 0);
-    free(normalized);
-    return matched;
+    return c == '/' || c == '\\';
 #else
-    return yx_cli_directory_filter_matches_inner(pattern, relative, basename_allowed, 0);
+    return c == '/';
 #endif
 }
 
-static bool yx_cli_glob_has_unclosed_class(const char *pattern)
+static void yx_glob_fail(yx_glob_parser *p, const char *message)
 {
-    for (const char *p = pattern; *p; ++p) {
-        const char *end;
-        if (*p == '\\' && p[1]) {
-            ++p;
-            continue;
-        }
-        if (*p != '[') continue;
-        end = p + 1;
-        if (*end == '!' || *end == '^') ++end;
-        /* A closing bracket in the first position is class content. */
-        if (*end == ']') ++end;
-        while (*end && *end != ']') ++end;
-        if (!*end) return true;
-        p = end;
+    if (!p->failed && p->error) snprintf(p->error, p->error_size, "%s", message);
+    p->failed = true;
+}
+
+static size_t yx_glob_new_branch(yx_glob_parser *p)
+{
+    if (!yx_glob_grow((void **)&p->branches, &p->branch_capacity, p->branch_count + 1, sizeof(*p->branches)) ||
+        !yx_glob_grow((void **)&p->open, &p->open_capacity, p->open_count + 1, sizeof(*p->open))) {
+        p->failed = true;
+        return SIZE_MAX;
     }
-    return false;
+    p->branches[p->branch_count] = (yx_glob_branch){NULL, 0, 0, 0};
+    p->open[p->open_count++] = p->branch_count;
+    return p->branch_count++;
 }
 
-static size_t yx_cli_glob_utf8_width(const char *text)
+static void yx_glob_push(yx_glob_parser *p, yx_glob_kind kind, const uint8_t *bytes, size_t length, size_t index, size_t count)
 {
-    const unsigned char *bytes = (const unsigned char *)text;
-    if ((bytes[0] & 0xe0) == 0xc0 && bytes[1] && (bytes[1] & 0xc0) == 0x80) return 2;
-    if ((bytes[0] & 0xf0) == 0xe0 && bytes[1] && bytes[2] && (bytes[1] & 0xc0) == 0x80 && (bytes[2] & 0xc0) == 0x80) return 3;
-    if ((bytes[0] & 0xf8) == 0xf0 && bytes[1] && bytes[2] && bytes[3] && (bytes[1] & 0xc0) == 0x80 && (bytes[2] & 0xc0) == 0x80 && (bytes[3] & 0xc0) == 0x80) return 4;
-    return 1;
+    yx_glob_branch *branch = &p->branches[p->open[p->open_count - 1]];
+    yx_glob_token *token;
+    if (!yx_glob_grow((void **)&branch->items, &branch->capacity, branch->count + 1, sizeof(*branch->items))) {
+        p->failed = true;
+        return;
+    }
+    token = &branch->items[branch->count++];
+    memset(token, 0, sizeof(*token));
+    token->kind = kind;
+    if (bytes) memcpy(token->bytes, bytes, length);
+    token->length = (uint8_t)length;
+    token->index = index;
+    token->count = count;
+    ++branch->solid;
 }
 
-static bool yx_cli_glob_invalid_range(const char *pattern, const char **first, size_t *first_width, const char **last, size_t *last_width)
+/* Parser::parse_star. */
+static void yx_glob_star(yx_glob_parser *p)
 {
-    for (const char *p = pattern; *p; ++p) {
-        const char *item;
-        if (*p == '\\' && p[1]) {
-            ++p;
+    uint32_t prev = p->prev, next;
+    yx_glob_branch *branch;
+    yx_glob_kind popped;
+    bool suffix;
+    if (yx_glob_peek(p) != '*') {
+        yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        return;
+    }
+    yx_glob_bump(p);
+    branch = &p->branches[p->open[p->open_count - 1]];
+    if (!branch->count) {
+        next = yx_glob_peek(p);
+        if (next != YX_GLOB_NONE && !yx_glob_separator(next)) {
+            yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+            yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        } else {
+            yx_glob_push(p, YX_GLOB_RPREFIX, NULL, 0, 0, 0);
+            yx_glob_bump(p);
+        }
+        return;
+    }
+    if (!(prev != YX_GLOB_NONE && yx_glob_separator(prev)) && (!p->alt_count || (prev != ',' && prev != '{'))) {
+        yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        return;
+    }
+    next = yx_glob_peek(p);
+    if (next == YX_GLOB_NONE) {
+        yx_glob_bump(p);
+        suffix = true;
+    } else if ((next == ',' || next == '}') && p->alt_count) {
+        suffix = true;
+    } else if (yx_glob_separator(next)) {
+        yx_glob_bump(p);
+        suffix = false;
+    } else {
+        yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        yx_glob_push(p, YX_GLOB_STAR, NULL, 0, 0, 0);
+        return;
+    }
+    /* The popped token follows a separator: never an ALT. */
+    popped = branch->items[--branch->count].kind;
+    --branch->solid;
+    if (popped == YX_GLOB_RPREFIX || popped == YX_GLOB_RSUFFIX) yx_glob_push(p, popped, NULL, 0, 0, 0);
+    else yx_glob_push(p, suffix ? YX_GLOB_RSUFFIX : YX_GLOB_RZOM, NULL, 0, 0, 0);
+}
+
+typedef struct yx_glob_range {
+    uint32_t first, last;
+    uint8_t first_bytes[4], last_bytes[4];
+    size_t first_length, last_length;
+} yx_glob_range;
+
+/* Parser::parse_class; the set has the bytes the class's regex matches,
+ * its text is that regex, and its items are its regex's class items. */
+static void yx_glob_class(yx_glob_parser *p)
+{
+    yx_glob_range *ranges = NULL;
+    yx_glob_text text = {0};
+    size_t count = 0, capacity = 0, items = 0;
+    bool negated = false, first = true, in_range = false;
+    uint8_t *set;
+    if (yx_glob_peek(p) == '!' || yx_glob_peek(p) == '^') {
+        yx_glob_bump(p);
+        negated = true;
+    }
+    for (;;) {
+        uint32_t c = yx_glob_bump(p);
+        if (c == YX_GLOB_NONE) {
+            yx_glob_fail(p, "unclosed character class; missing ']'");
+            goto done;
+        }
+        if (c == ']' && !first) break;
+        if (c == '-' && !first && !in_range) {
+            in_range = true;
+        } else if (in_range) {
+            yx_glob_range *r = &ranges[count - 1];
+            r->last = c;
+            memcpy(r->last_bytes, p->cur_text, p->cur_length);
+            r->last_length = p->cur_length;
+            in_range = false;
+            if (r->last < r->first) {
+                char message[64];
+                snprintf(message, sizeof(message), "invalid range; '%.*s' > '%.*s'", (int)r->first_length, (const char *)r->first_bytes, (int)r->last_length,
+                         (const char *)r->last_bytes);
+                yx_glob_fail(p, message);
+                goto done;
+            }
+        } else {
+            if (!yx_glob_grow((void **)&ranges, &capacity, count + 1, sizeof(*ranges))) {
+                p->failed = true;
+                goto done;
+            }
+            ranges[count].first = ranges[count].last = c;
+            memcpy(ranges[count].first_bytes, p->cur_text, p->cur_length);
+            memcpy(ranges[count].last_bytes, p->cur_text, p->cur_length);
+            ranges[count].first_length = ranges[count].last_length = p->cur_length;
+            ++count;
+        }
+        first = false;
+    }
+    if (in_range) {
+        if (!yx_glob_grow((void **)&ranges, &capacity, count + 1, sizeof(*ranges))) {
+            p->failed = true;
+            goto done;
+        }
+        ranges[count] = (yx_glob_range){'-', '-', {'-'}, {'-'}, 1, 1};
+        ++count;
+    }
+    if (!yx_glob_grow((void **)&p->sets, &p->set_capacity, p->set_count + 1, sizeof(*p->sets)) ||
+        !yx_glob_grow((void **)&p->set_texts, &p->set_text_capacity, p->set_count + 1, sizeof(*p->set_texts)) ||
+        !yx_glob_grow((void **)&p->set_items, &p->set_item_capacity, p->set_count + 1, sizeof(*p->set_items))) {
+        p->failed = true;
+        goto done;
+    }
+    set = p->sets[p->set_count];
+    memset(set, 0, 32);
+    yx_glob_append(&text, negated ? "[^" : "[", negated ? 2 : 1);
+    for (size_t i = 0; i < count; ++i) {
+        const yx_glob_range *r = &ranges[i];
+        if (r->first == r->last) {
+            for (size_t b = 0; b < r->first_length; ++b) set[r->first_bytes[b] >> 3] |= (uint8_t)(1u << (r->first_bytes[b] & 7));
+            yx_glob_append_char(&text, r->first_bytes, r->first_length);
+            items += r->first_bytes[0] < 0x80 ? 1 : r->first_length;
             continue;
         }
-        if (*p != '[') continue;
-        item = p + 1;
-        if (*item == '!' || *item == '^') ++item;
-        if (*item == ']') ++item;
-        while (*item && *item != ']') {
-            size_t width;
-            const char *end;
-            if (*item == '\\' && item[1]) {
-                item += 1 + yx_cli_glob_utf8_width(item + 1);
-                continue;
-            }
-            width = yx_cli_glob_utf8_width(item);
-            end = item + width;
-            if (*end == '-' && end[1] && end[1] != ']') {
-                const char *range_end = end + 1;
-                size_t range_width;
-                size_t common;
-                int order;
-                if (*range_end == '\\' && range_end[1]) ++range_end;
-                range_width = yx_cli_glob_utf8_width(range_end);
-                common = width < range_width ? width : range_width;
-                order = memcmp(item, range_end, common);
-                if (order > 0 || (order == 0 && width > range_width)) {
-                    *first = item;
-                    *first_width = width;
-                    *last = range_end;
-                    *last_width = range_width;
-                    return true;
+        /* `\xc3\xa9-\xc3\xaf`: the range is between the bytes at the dash. */
+        for (size_t b = 0; b + 1 < r->first_length; ++b) set[r->first_bytes[b] >> 3] |= (uint8_t)(1u << (r->first_bytes[b] & 7));
+        for (unsigned b = r->first_bytes[r->first_length - 1]; b <= r->last_bytes[0]; ++b) set[b >> 3] |= (uint8_t)(1u << (b & 7));
+        for (size_t b = 1; b < r->last_length; ++b) set[r->last_bytes[b] >> 3] |= (uint8_t)(1u << (r->last_bytes[b] & 7));
+        yx_glob_append_char(&text, r->first_bytes, r->first_length);
+        yx_glob_append(&text, "-", 1);
+        yx_glob_append_char(&text, r->last_bytes, r->last_length);
+        items += (r->first_bytes[0] < 0x80 ? 1 : r->first_length) + (r->last_bytes[0] < 0x80 ? 1 : r->last_length) - 1;
+    }
+    yx_glob_append(&text, "]", 1);
+    if (text.failed) {
+        p->failed = true;
+        goto done;
+    }
+    if (negated)
+        for (size_t b = 0; b < 32; ++b) set[b] = (uint8_t)~set[b];
+    p->set_texts[p->set_count] = text.data;
+    p->set_items[p->set_count] = items;
+    text.data = NULL;
+    yx_glob_push(p, YX_GLOB_CLASS, NULL, 0, p->set_count++, 0);
+done:
+    free(text.data);
+    free(ranges);
+}
+
+static void yx_glob_parse(yx_glob_parser *p)
+{
+    uint32_t c;
+    if (yx_glob_new_branch(p) == SIZE_MAX) return;
+    while (!p->failed && (c = yx_glob_bump(p)) != YX_GLOB_NONE) {
+        switch (c) {
+            case '?': yx_glob_push(p, YX_GLOB_ANY, NULL, 0, 0, 0); break;
+            case '*': yx_glob_star(p); break;
+            case '[': yx_glob_class(p); break;
+            case '{':
+                if (!yx_glob_grow((void **)&p->alts, &p->alt_capacity, p->alt_count + 1, sizeof(*p->alts))) {
+                    p->failed = true;
+                    break;
                 }
-                item = range_end + range_width;
-            } else {
-                item = end;
+                p->alts[p->alt_count++] = p->open_count;
+                yx_glob_new_branch(p);
+                break;
+            case '}': {
+                size_t start, first;
+                bool empty = true;
+                yx_glob_branch *parent;
+                if (!p->alt_count) {
+                    yx_glob_fail(p, "unopened alternate group; missing '{' (maybe escape '}' with '[}]'?)");
+                    break;
+                }
+                start = p->alts[--p->alt_count];
+                if (!yx_glob_grow((void **)&p->alt_branches, &p->alt_branch_capacity, p->alt_branch_count + (p->open_count - start), sizeof(*p->alt_branches))) {
+                    p->failed = true;
+                    break;
+                }
+                first = p->alt_branch_count;
+                for (size_t i = start; i < p->open_count; ++i) {
+                    if (p->branches[p->open[i]].solid) empty = false;
+                    p->alt_branches[p->alt_branch_count++] = p->open[i];
+                }
+                p->open_count = start;
+                yx_glob_push(p, YX_GLOB_ALT, NULL, 0, first, p->alt_branch_count - first);
+                parent = &p->branches[p->open[p->open_count - 1]];
+                if (!p->failed && empty) {
+                    parent->items[parent->count - 1].empty = true;
+                    --parent->solid;
+                }
+                break;
+            }
+            case ',':
+                if (p->alt_count) yx_glob_new_branch(p);
+                else yx_glob_push(p, YX_GLOB_LITERAL, p->cur_text, p->cur_length, 0, 0);
+                break;
+            case '\\':
+                if (yx_glob_bump(p) == YX_GLOB_NONE) yx_glob_fail(p, "dangling '\\'");
+                else yx_glob_push(p, YX_GLOB_LITERAL, p->cur_text, p->cur_length, 0, 0);
+                break;
+            default: yx_glob_push(p, YX_GLOB_LITERAL, p->cur_text, p->cur_length, 0, 0); break;
+        }
+    }
+    if (!p->failed && p->alt_count) yx_glob_fail(p, "unclosed alternate group; missing '}' (maybe escape '{' with '[{]'?)");
+}
+
+/* The number of AST nodes of a branch's regex at its own level: two or
+ * more are a Concat. */
+static size_t yx_glob_atoms(const yx_glob_parser *p, size_t branch)
+{
+    const yx_glob_branch *b = &p->branches[branch];
+    size_t atoms = 0;
+    for (size_t i = 0; i < b->count; ++i) {
+        const yx_glob_token *t = &b->items[i];
+        atoms += t->kind == YX_GLOB_LITERAL ? (t->bytes[0] < 0x80 ? 1 : t->length) : t->kind == YX_GLOB_RSUFFIX ? 2 : t->kind == YX_GLOB_ALT && t->empty ? 0 : 1;
+    }
+    return atoms;
+}
+
+/* The deepest AST node of a branch's regex, its container at `parent`, as
+ * regex-syntax's NestLimiter counts (Concat, Alternation, Group,
+ * Repetition, ClassBracketed and a class union each add one). The count
+ * stops once it is over the limit, so the recursion is bounded. */
+static size_t yx_glob_depth(const yx_glob_parser *p, size_t branch, size_t parent, bool concat)
+{
+    const yx_glob_branch *b = &p->branches[branch];
+    size_t base = concat || yx_glob_atoms(p, branch) >= 2 ? parent + 1 : parent, deepest = base;
+    for (size_t i = 0; i < b->count && deepest <= YX_GLOB_NEST_LIMIT; ++i) {
+        const yx_glob_token *t = &b->items[i];
+        size_t d = base;
+        switch (t->kind) {
+            case YX_GLOB_LITERAL: break;
+            case YX_GLOB_ANY:
+            case YX_GLOB_RSUFFIX: d = base + 1; break; /* [^/]; .* */
+            case YX_GLOB_STAR: d = base + 2; break;    /* [^/]* */
+            case YX_GLOB_RPREFIX:
+            case YX_GLOB_RZOM: d = base + 4; break;    /* (?:/?|.*\/); (?:/|/.*\/) */
+            case YX_GLOB_CLASS: d = base + (p->set_items[t->index] >= 2 ? 2 : 1); break;
+            case YX_GLOB_ALT: {
+                size_t parts = 0, container;
+                if (t->empty) break;
+                for (size_t a = 0; a < t->count; ++a) parts += p->branches[p->alt_branches[t->index + a]].solid != 0;
+                container = base + 1 + (parts >= 2);
+                d = container;
+                for (size_t a = 0; a < t->count && d <= YX_GLOB_NEST_LIMIT; ++a) {
+                    size_t alt = p->alt_branches[t->index + a], part;
+                    if (!p->branches[alt].solid) continue;
+                    part = yx_glob_depth(p, alt, container, false);
+                    if (part > d) d = part;
+                }
+                break;
             }
         }
-        if (!*item) return false;
-        p = item;
+        if (d > deepest) deepest = d;
+    }
+    return deepest;
+}
+
+/* Tokens::to_regex_with, without recursion: the regex of a glob too deep
+ * for regex-syntax, for globset's error message. */
+static bool yx_glob_regex_text(const yx_glob_parser *p, yx_glob_text *text)
+{
+    typedef struct frame {
+        size_t branch, token, alt;
+        bool opened, first;
+    } frame;
+    frame *stack = NULL;
+    size_t depth = 0, capacity = 0;
+    bool ok = false;
+    yx_glob_append(text, "(?-u)^", 6);
+    if (!yx_glob_grow((void **)&stack, &capacity, 1, sizeof(*stack))) goto done;
+    stack[depth++] = (frame){0, 0, 0, false, true};
+    while (depth && !text->failed) {
+        frame *f = &stack[depth - 1];
+        const yx_glob_branch *b = &p->branches[f->branch];
+        const yx_glob_token *t;
+        if (f->token >= b->count) {
+            if (--depth) ++stack[depth - 1].alt;
+            continue;
+        }
+        t = &b->items[f->token];
+        if (t->kind != YX_GLOB_ALT || t->empty) {
+            switch (t->kind) {
+                case YX_GLOB_LITERAL: yx_glob_append_char(text, t->bytes, t->length); break;
+                case YX_GLOB_ANY: yx_glob_append(text, "[^/]", 4); break;
+                case YX_GLOB_STAR: yx_glob_append(text, "[^/]*", 5); break;
+                case YX_GLOB_RPREFIX: yx_glob_append(text, "(?:/?|.*/)", 10); break;
+                case YX_GLOB_RSUFFIX: yx_glob_append(text, "/.*", 3); break;
+                case YX_GLOB_RZOM: yx_glob_append(text, "(?:/|/.*/)", 10); break;
+                case YX_GLOB_CLASS: yx_glob_append(text, p->set_texts[t->index], strlen(p->set_texts[t->index])); break;
+                case YX_GLOB_ALT: break;
+            }
+            ++f->token;
+            continue;
+        }
+        if (!f->opened) {
+            yx_glob_append(text, "(?:", 3);
+            f->opened = f->first = true;
+            f->alt = 0;
+        }
+        while (f->alt < t->count && !p->branches[p->alt_branches[t->index + f->alt]].solid) ++f->alt;
+        if (f->alt >= t->count) {
+            yx_glob_append(text, ")", 1);
+            f->opened = false;
+            ++f->token;
+            continue;
+        }
+        if (!f->first) yx_glob_append(text, "|", 1);
+        f->first = false;
+        if (!yx_glob_grow((void **)&stack, &capacity, depth + 1, sizeof(*stack))) goto done;
+        f = &stack[depth - 1];
+        stack[depth++] = (frame){p->alt_branches[t->index + f->alt], 0, 0, false, true};
+    }
+    yx_glob_append(text, "$", 1);
+    ok = !text->failed;
+done:
+    free(stack);
+    return ok;
+}
+
+static bool yx_glob_literal_is(const yx_glob_token *t, char c)
+{
+    return t->kind == YX_GLOB_LITERAL && t->length == 1 && t->bytes[0] == (uint8_t)c;
+}
+
+/* Glob::required_ext: the glob ends with literal `.ext`, no `/` in it. */
+static bool yx_glob_required_ext(const yx_glob_branch *b)
+{
+    for (size_t i = b->count; i-- > 0;) {
+        const yx_glob_token *t = &b->items[i];
+        if (t->kind != YX_GLOB_LITERAL || yx_glob_literal_is(t, '/')) return false;
+        if (yx_glob_literal_is(t, '.')) return true;
     }
     return false;
 }
 
-static const char *yx_cli_glob_brace_error(const char *pattern)
+/* MatchStrategy::new gives the glob a regex of the regex set: it is not a
+ * literal, basename literal, extension, prefix, suffix or required
+ * extension (literal_separator, case sensitive). */
+static bool yx_glob_regex_strategy(const yx_glob_branch *b)
 {
-    unsigned nesting = 0;
-    for (const char *p = pattern; *p; ++p) {
-        if (*p == '\\' && p[1]) {
-            ++p;
-            continue;
-        }
-        if (*p == '[') {
-            const char *end = yx_cli_glob_class_end(p);
-            if (end) {
-                p = end;
-                continue;
+    size_t n = b->count, literals = 0;
+    for (size_t i = 0; i < n; ++i) literals += b->items[i].kind == YX_GLOB_LITERAL;
+    if (n && literals == n) return false; /* literal */
+    if (n > 1 && b->items[0].kind == YX_GLOB_RPREFIX && literals == n - 1) {
+        bool slash = false;
+        for (size_t i = 1; i < n; ++i) slash = slash || yx_glob_literal_is(&b->items[i], '/');
+        if (!slash) return false;                                  /* basename literal */
+        if (b->items[1].kind == YX_GLOB_LITERAL) return false;     /* suffix */
+    }
+    if (n >= 3 && b->items[0].kind == YX_GLOB_RPREFIX && b->items[1].kind == YX_GLOB_STAR && yx_glob_literal_is(&b->items[2], '.')) {
+        bool plain = true;
+        for (size_t i = 3; i < n; ++i) plain = plain && b->items[i].kind == YX_GLOB_LITERAL && !yx_glob_literal_is(&b->items[i], '.') && !yx_glob_literal_is(&b->items[i], '/');
+        if (plain) return false; /* extension */
+    }
+    if (n && b->items[n - 1].kind == YX_GLOB_RSUFFIX && literals == n - 1) return false; /* prefix */
+    return !yx_glob_required_ext(b);
+}
+
+static size_t yx_glob_emit(yx_glob *g, uint8_t op, uint8_t byte, size_t x, size_t y)
+{
+    if (!yx_glob_grow((void **)&g->code, &g->capacity, g->count + 1, sizeof(*g->code))) return SIZE_MAX;
+    g->code[g->count] = (yx_glob_insn){op, byte, x, y};
+    return g->count++;
+}
+
+/* `x*` for x one of NOT_SLASH or NOT_NEWLINE. */
+static bool yx_glob_emit_loop(yx_glob *g, uint8_t op)
+{
+    size_t split = yx_glob_emit(g, YX_GLOB_SPLIT, 0, 0, 0);
+    if (split == SIZE_MAX || yx_glob_emit(g, op, 0, 0, 0) == SIZE_MAX || yx_glob_emit(g, YX_GLOB_JUMP, 0, split, 0) == SIZE_MAX) return false;
+    g->code[split].x = split + 1;
+    g->code[split].y = g->count;
+    return true;
+}
+
+/* The NFA of a branch. Called only for a glob within the nest limit, so
+ * the recursion is at most that deep; Tokens::tokens_to_regex leaves out
+ * an alternative whose regex is empty. */
+static bool yx_glob_emit_branch(const yx_glob_parser *p, yx_glob *g, size_t branch)
+{
+    const yx_glob_branch *b = &p->branches[branch];
+    for (size_t i = 0; i < b->count; ++i) {
+        const yx_glob_token *t = &b->items[i];
+        size_t at, end_jump = SIZE_MAX;
+        switch (t->kind) {
+            case YX_GLOB_LITERAL:
+                for (size_t k = 0; k < t->length; ++k)
+                    if (yx_glob_emit(g, YX_GLOB_BYTE, t->bytes[k], 0, 0) == SIZE_MAX) return false;
+                break;
+            case YX_GLOB_ANY:
+                if (yx_glob_emit(g, YX_GLOB_NOT_SLASH, 0, 0, 0) == SIZE_MAX) return false;
+                break;
+            case YX_GLOB_STAR:
+                if (!yx_glob_emit_loop(g, YX_GLOB_NOT_SLASH)) return false;
+                break;
+            case YX_GLOB_CLASS:
+                if (yx_glob_emit(g, YX_GLOB_SET, 0, t->index, 0) == SIZE_MAX) return false;
+                break;
+            case YX_GLOB_RPREFIX: {
+                /* (?:/?|.*\/) */
+                size_t outer = yx_glob_emit(g, YX_GLOB_SPLIT, 0, 0, 0), inner, jump;
+                if (outer == SIZE_MAX || (inner = yx_glob_emit(g, YX_GLOB_SPLIT, 0, 0, 0)) == SIZE_MAX || yx_glob_emit(g, YX_GLOB_BYTE, '/', 0, 0) == SIZE_MAX ||
+                    (jump = yx_glob_emit(g, YX_GLOB_JUMP, 0, 0, 0)) == SIZE_MAX)
+                    return false;
+                g->code[outer].x = inner;
+                g->code[outer].y = g->count;
+                g->code[inner].x = inner + 1;
+                if (!yx_glob_emit_loop(g, YX_GLOB_NOT_NEWLINE) || yx_glob_emit(g, YX_GLOB_BYTE, '/', 0, 0) == SIZE_MAX) return false;
+                g->code[inner].y = g->code[jump].x = g->count;
+                break;
             }
-            /* The character-class error is reported before brace errors. */
-            return NULL;
-        }
-        if (*p == '{') ++nesting;
-        else if (*p == '}') {
-            if (nesting == 0)
-                return "unopened alternate group; missing '{' "
-                       "(maybe escape '}' with '[}]'?)";
-            --nesting;
+            case YX_GLOB_RSUFFIX:
+                /* /.* */
+                if (yx_glob_emit(g, YX_GLOB_BYTE, '/', 0, 0) == SIZE_MAX || !yx_glob_emit_loop(g, YX_GLOB_NOT_NEWLINE)) return false;
+                break;
+            case YX_GLOB_RZOM:
+                /* (?:/|/.*\/) as /(?:.*\/)? */
+                if (yx_glob_emit(g, YX_GLOB_BYTE, '/', 0, 0) == SIZE_MAX || (at = yx_glob_emit(g, YX_GLOB_SPLIT, 0, 0, 0)) == SIZE_MAX) return false;
+                g->code[at].x = at + 1;
+                if (!yx_glob_emit_loop(g, YX_GLOB_NOT_NEWLINE) || yx_glob_emit(g, YX_GLOB_BYTE, '/', 0, 0) == SIZE_MAX) return false;
+                g->code[at].y = g->count;
+                break;
+            case YX_GLOB_ALT: {
+                /* SPLIT(alternative, next SPLIT) ... the last alternative
+                 * without one; each other ends with a JUMP to the end. The
+                 * jumps are chained through their x until patched. */
+                size_t k = 0, emitted = 0;
+                if (t->empty) break;
+                for (size_t a = 0; a < t->count; ++a) k += p->branches[p->alt_branches[t->index + a]].solid != 0;
+                for (size_t a = 0; a < t->count; ++a) {
+                    size_t alt = p->alt_branches[t->index + a], split = SIZE_MAX, jump;
+                    bool last;
+                    if (!p->branches[alt].solid) continue;
+                    last = ++emitted == k;
+                    if (!last && (split = yx_glob_emit(g, YX_GLOB_SPLIT, 0, g->count + 1, 0)) == SIZE_MAX) return false;
+                    if (!yx_glob_emit_branch(p, g, alt)) return false;
+                    if (!last) {
+                        if ((jump = yx_glob_emit(g, YX_GLOB_JUMP, 0, end_jump, 0)) == SIZE_MAX) return false;
+                        end_jump = jump;
+                        g->code[split].y = g->count;
+                    }
+                }
+                for (size_t j = end_jump; j != SIZE_MAX;) {
+                    size_t next = g->code[j].x;
+                    g->code[j].x = g->count;
+                    j = next;
+                }
+                break;
+            }
         }
     }
-    return nesting ? "unclosed alternate group; missing '}' "
-                     "(maybe escape '{' with '[{]'?)"
-                   : NULL;
+    return true;
+}
+
+static void yx_glob_parser_free(yx_glob_parser *p)
+{
+    for (size_t i = 0; i < p->branch_count; ++i) free(p->branches[i].items);
+    for (size_t i = 0; i < p->set_count; ++i) free(p->set_texts[i]);
+    free(p->branches);
+    free(p->open);
+    free(p->alts);
+    free(p->alt_branches);
+    free(p->sets);
+    free(p->set_texts);
+    free(p->set_items);
+}
+
+static void yx_glob_free(yx_glob *g)
+{
+    free(g->code);
+    free(g->sets);
+    free(g->scratch);
+    free(g->regex);
+}
+
+static void yx_globs_clear(yx_globs *globs)
+{
+    for (size_t i = 0; i < globs->count; ++i) yx_glob_free(&globs->items[i]);
+    free(globs->items);
+    free(globs->last_directory);
+    memset(globs, 0, sizeof(*globs));
+}
+
+/* The length of the White_Space character (Rust's trim_end) that ends
+ * [start, end), or 0. */
+static size_t yx_glob_space_before(const char *start, const char *end)
+{
+    static const char *const spaces[] = {"\xc2\x85", "\xc2\xa0", "\xe1\x9a\x80", "\xe2\x80\xa8", "\xe2\x80\xa9", "\xe2\x80\xaf", "\xe2\x81\x9f", "\xe3\x80\x80"};
+    size_t length = (size_t)(end - start);
+    if (length && (end[-1] == ' ' || (end[-1] >= '\t' && end[-1] <= '\r'))) return 1;
+    for (size_t i = 0; i < sizeof(spaces) / sizeof(spaces[0]); ++i) {
+        size_t n = strlen(spaces[i]);
+        if (length >= n && memcmp(end - n, spaces[i], n) == 0) return n;
+    }
+    /* U+2000 to U+200A */
+    if (length >= 3 && (uint8_t)end[-3] == 0xe2 && (uint8_t)end[-2] == 0x80 && (uint8_t)end[-1] >= 0x80 && (uint8_t)end[-1] <= 0x8a) return 3;
+    return 0;
+}
+
+/* Adds the glob of a `--filter` value (GitignoreBuilder::add_line). 1: added
+ * (or a line without a glob); 0: an invalid glob, *error has the message
+ * (to free); -1: out of memory. */
+static int yx_globs_add(yx_globs *globs, const char *pattern, char **error)
+{
+    const char *original = strcmp(pattern, "*") == 0 ? "/*" : pattern, *line = original, *end, *trimmed;
+    char *actual = NULL;
+    size_t space, actual_length = 0, line_length;
+    bool negated = false, absolute = false, only_dir = false;
+    int status = -1;
+    yx_glob_parser p;
+    yx_glob g;
+    char kind[128];
+    *error = NULL;
+    memset(&p, 0, sizeof(p));
+    memset(&g, 0, sizeof(g));
+    if (line[0] == '#') return 1;
+    end = line + strlen(line);
+    if (!(end - line >= 2 && end[-1] == ' ' && end[-2] == '\\'))
+        while ((space = yx_glob_space_before(line, end)) != 0) end -= space;
+    if (end == line) return 1;
+    trimmed = end;
+    if (end - line >= 2 && line[0] == '\\' && (line[1] == '!' || line[1] == '#')) {
+        ++line;
+        absolute = line[0] == '/';
+    } else {
+        if (line[0] == '!') {
+            negated = true;
+            ++line;
+        }
+        if (line < end && line[0] == '/') {
+            ++line;
+            absolute = true;
+        }
+    }
+    if (line < end && end[-1] == '/') {
+        only_dir = true;
+        --end;
+        if (line < end && end[-1] == '\\') --end;
+    }
+    line_length = (size_t)(end - line);
+    if (line_length > SIZE_MAX - 6 || !(actual = (char *)malloc(line_length + 6))) goto done;
+    if (!absolute && !memchr(line, '/', line_length) && !((line_length >= 3 && memcmp(line, "**/", 3) == 0) || (line_length == 2 && memcmp(line, "**", 2) == 0))) {
+        memcpy(actual, "**/", 3);
+        actual_length = 3;
+    }
+    memcpy(actual + actual_length, line, line_length);
+    actual_length += line_length;
+    if (actual_length >= 3 && memcmp(actual + actual_length - 3, "/**", 3) == 0) {
+        memcpy(actual + actual_length, "/*", 2);
+        actual_length += 2;
+    }
+    p.at = (const uint8_t *)actual;
+    p.end = p.at + actual_length;
+    p.prev = p.cur = YX_GLOB_NONE;
+    p.error = kind;
+    p.error_size = sizeof(kind);
+    kind[0] = '\0';
+    yx_glob_parse(&p);
+    if (p.failed) {
+        /* The trimmed line, before its `!` or `/` is taken. */
+        size_t length = (size_t)(trimmed - original), size;
+        if (!kind[0]) goto done;
+        size = length + strlen(kind) + 32;
+        if (length > SIZE_MAX - 32 - strlen(kind) || !(*error = (char *)malloc(size))) goto done;
+        snprintf(*error, size, "error parsing glob '%.*s': %s", (int)length, original, kind);
+        status = 0;
+        goto done;
+    }
+    if (!yx_glob_grow((void **)&globs->items, &globs->capacity, globs->count + 1, sizeof(*globs->items))) goto done;
+    g.include = !negated;
+    g.only_dir = only_dir;
+    if (yx_glob_depth(&p, 0, 0, true) > YX_GLOB_NEST_LIMIT) {
+        /* The glob is kept for GlobSetBuilder::build's error. */
+        yx_glob_text text = {0};
+        g.too_deep = true;
+        g.required_ext = yx_glob_required_ext(&p.branches[0]);
+        g.regex_strategy = !g.required_ext;
+        if (g.required_ext && !yx_glob_regex_text(&p, &text)) {
+            free(text.data);
+            goto done;
+        }
+        g.regex = text.data;
+    } else {
+        g.regex_strategy = yx_glob_regex_strategy(&p.branches[0]);
+        g.sets = p.sets;
+        g.set_count = p.set_count;
+        p.sets = NULL;
+        /* Tokens::to_regex: a glob of just `**` is `.*`. */
+        if (p.branches[0].count == 1 && p.branches[0].items[0].kind == YX_GLOB_RPREFIX) {
+            if (!yx_glob_emit_loop(&g, YX_GLOB_NOT_NEWLINE)) goto done;
+        } else if (!yx_glob_emit_branch(&p, &g, 0)) goto done;
+        if (yx_glob_emit(&g, YX_GLOB_MATCH, 0, 0, 0) == SIZE_MAX) goto done;
+        /* marks, two thread lists and a stack of 2 * count + 2 */
+        if (g.count > (SIZE_MAX / sizeof(*g.scratch) - 2) / 5 || !(g.scratch = (size_t *)malloc((g.count * 5 + 2) * sizeof(*g.scratch)))) goto done;
+    }
+    globs->items[globs->count++] = g;
+    memset(&g, 0, sizeof(g));
+    status = 1;
+done:
+    yx_glob_free(&g);
+    yx_glob_parser_free(&p);
+    free(actual);
+    return status;
+}
+
+static void yx_glob_add_thread(const yx_glob *g, size_t *list, size_t *count, size_t pc, size_t *marks, size_t generation, size_t *stack)
+{
+    size_t top = 0;
+    stack[top++] = pc;
+    while (top) {
+        const yx_glob_insn *insn;
+        pc = stack[--top];
+        if (marks[pc] == generation) continue;
+        marks[pc] = generation;
+        insn = &g->code[pc];
+        if (insn->op == YX_GLOB_SPLIT) {
+            stack[top++] = insn->y;
+            stack[top++] = insn->x;
+        } else if (insn->op == YX_GLOB_JUMP) stack[top++] = insn->x;
+        else list[(*count)++] = pc;
+    }
+}
+
+static bool yx_glob_matches(const yx_glob *g, const uint8_t *text, size_t length)
+{
+    size_t *marks = g->scratch, *current = marks + g->count, *next = current + g->count, *stack = next + g->count;
+    size_t current_count = 0, next_count, generation = 1;
+    for (size_t i = 0; i < g->count; ++i) marks[i] = 0;
+    yx_glob_add_thread(g, current, &current_count, 0, marks, generation, stack);
+    for (size_t at = 0; at < length && current_count; ++at) {
+        uint8_t ch = text[at];
+        next_count = 0;
+        ++generation;
+        for (size_t t = 0; t < current_count; ++t) {
+            const yx_glob_insn *insn = &g->code[current[t]];
+            bool step = insn->op == YX_GLOB_BYTE        ? ch == insn->byte
+                        : insn->op == YX_GLOB_NOT_SLASH   ? ch != '/'
+                        : insn->op == YX_GLOB_NOT_NEWLINE ? ch != '\n'
+                        : insn->op == YX_GLOB_SET         ? (g->sets[insn->x][ch >> 3] >> (ch & 7)) & 1
+                                                          : false;
+            if (step) yx_glob_add_thread(g, next, &next_count, current[t] + 1, marks, generation, stack);
+        }
+        {
+            size_t *swap = current;
+            current = next;
+            next = swap;
+            current_count = next_count;
+        }
+    }
+    for (size_t t = 0; t < current_count; ++t)
+        if (g->code[current[t]].op == YX_GLOB_MATCH) return true;
+    return false;
+}
+
+/* Gitignore::matched_stripped: the last glob that matches decides. */
+static const yx_glob *yx_globs_match(const yx_globs *globs, const char *path, size_t length, bool directory)
+{
+    for (size_t i = globs->count; i-- > 0;) {
+        const yx_glob *g = &globs->items[i];
+        if ((!g->only_dir || directory) && yx_glob_matches(g, (const uint8_t *)path, length)) return g;
+    }
+    return NULL;
+}
+
+/* Whether the walk yields the file at `relative` (from the walked root):
+ * 1 yes, 0 no, -1 out of memory. */
+static int yx_globs_select(yx_globs *globs, const char *relative)
+{
+    const yx_glob *g;
+    char *normalized = yx_cli_copy((const uint8_t *)relative, strlen(relative));
+    const char *slash;
+    size_t directory = 0;
+    int selected = -1;
+    if (!normalized) return -1;
+#ifdef _WIN32
+    for (char *at = normalized; *at; ++at)
+        if (*at == '\\') *at = '/';
+#endif
+    if ((slash = strrchr(normalized, '/')) != NULL) directory = (size_t)(slash - normalized);
+    /* A directory a glob excludes is not walked: decided once for the
+     * files of one directory. */
+    if (!globs->last_directory || globs->last_directory_length != directory || memcmp(globs->last_directory, normalized, directory) != 0) {
+        free(globs->last_directory);
+        if (!(globs->last_directory = yx_cli_copy((const uint8_t *)normalized, directory))) goto done;
+        globs->last_directory_length = directory;
+        globs->last_pruned = false;
+        for (slash = strchr(normalized, '/'); slash && !globs->last_pruned; slash = strchr(slash + 1, '/')) {
+            g = yx_globs_match(globs, normalized, (size_t)(slash - normalized), true);
+            globs->last_pruned = g && !g->include;
+        }
+    }
+    g = globs->last_pruned ? NULL : yx_globs_match(globs, normalized, strlen(normalized), false);
+    selected = g && g->include;
+done:
+    free(normalized);
+    return selected;
+}
+
+/* Builds the globs of the `--filter` values, as globwalk does: each line
+ * is added (a glob error stops it there), then the set is built, which
+ * fails for a glob over the nest limit: a RequiredExtension glob's regex
+ * is compiled alone (its error names it), the others in one regex set
+ * (the error has the index in that set). 1: built; 0: a glob error,
+ * reported; -1: out of memory, reported. */
+static int yx_globs_build(yx_globs *globs, const yx_cli_paths *filters)
+{
+    size_t regexes = 0;
+    for (size_t i = 0; i < filters->count; ++i) {
+        char *error;
+        int added = yx_globs_add(globs, filters->items[i], &error);
+        if (added == 0) fprintf(stderr, "error: %s\n", error);
+        free(error);
+        if (added < 0) fputs("yr: out of memory\n", stderr);
+        if (added <= 0) return added;
+    }
+    for (size_t i = 0; i < globs->count; ++i)
+        if (globs->items[i].too_deep && globs->items[i].required_ext) {
+            fprintf(stderr, "error: error parsing glob '%s': error parsing pattern 0\n", globs->items[i].regex);
+            return 0;
+        }
+    for (size_t i = 0; i < globs->count; ++i) {
+        if (globs->items[i].too_deep && globs->items[i].regex_strategy) {
+            fprintf(stderr, "error: error parsing pattern %zu\n", regexes);
+            return 0;
+        }
+        regexes += globs->items[i].regex_strategy;
+    }
+    return 1;
 }
 
 /* This command must retain the OS write protections. The general file
@@ -25255,23 +25940,37 @@ static int yx_cli_fix_encoding(int argc, char **argv)
             goto done;
         }
         path = directory;
+        yx_globs globs = {0};
+        int built = yx_globs_build(&globs, &filters);
+        if (built <= 0) {
+            if (built < 0) status = 1;
+            yx_globs_clear(&globs);
+            goto done;
+        }
         if (!yx_cli_collect_directory(path, 0, recursive ? depth : 0, false, &files)) {
+            yx_globs_clear(&globs);
             fprintf(stderr, "error: can't open `%s`\n", path);
             goto done;
         }
         size_t selected_count = 0;
         for (size_t i = 0; i < files.count; ++i) {
-            bool selected = filters.count == 0 && yx_cli_is_rule_source(files.items[i]);
             const char *relative = files.items[i] + strlen(path);
+            int selected;
             while (*relative == '/' || *relative == '\\') ++relative;
-            for (size_t j = 0; j < filters.count; ++j)
-                if (yx_cli_directory_filter_matches(filters.items[j], relative)) selected = true;
+            selected = filters.count ? yx_globs_select(&globs, relative) : yx_cli_is_rule_source(files.items[i]);
+            if (selected < 0) {
+                fputs("yr: out of memory\n", stderr);
+                status = 1;
+                yx_globs_clear(&globs);
+                goto done;
+            }
             if (selected) {
                 char *swap = files.items[selected_count];
                 files.items[selected_count++] = files.items[i];
                 files.items[i] = swap;
             }
         }
+        yx_globs_clear(&globs);
         yx_cli_encoding_work work = {&files, dry_run};
         status = yx_cli_parallel_files(selected_count, worker_threads, 0, "Fixing encoding", false, yx_cli_encoding_action, NULL, NULL, &work);
     } else {
@@ -25387,6 +26086,59 @@ typedef struct yx_cli_check_meta {
     pcre2_code *regexp_pattern;
 } yx_cli_check_meta;
 
+/* Where the lines of a source start, so that a diagnostic finds its line
+ * number without counting the newlines before it. */
+typedef struct yx_cli_check_lines {
+    size_t *starts;
+    size_t count;
+} yx_cli_check_lines;
+
+static bool yx_cli_check_lines_init(yx_cli_check_lines *lines, const uint8_t *source, size_t length)
+{
+    size_t count = 1;
+    for (size_t i = 0; i < length; ++i) count += source[i] == '\n';
+    lines->count = 0;
+    lines->starts = count > SIZE_MAX / sizeof(*lines->starts) ? NULL : (size_t *)malloc(count * sizeof(*lines->starts));
+    if (!lines->starts) return false;
+    lines->starts[lines->count++] = 0;
+    for (size_t i = 0; i < length; ++i)
+        if (source[i] == '\n') lines->starts[lines->count++] = i + 1;
+    return true;
+}
+
+/* The line (1-based) of offset and the offset where that line starts. */
+static size_t yx_cli_check_line(const yx_cli_check_lines *lines, const uint8_t *source, size_t offset, size_t *line_start)
+{
+    size_t line = 1, start = 0;
+    if (lines && lines->starts) {
+        size_t low = 0, high = lines->count;
+        while (high - low > 1) {
+            size_t middle = low + (high - low) / 2;
+            if (lines->starts[middle] <= offset) low = middle;
+            else high = middle;
+        }
+        *line_start = lines->starts[low];
+        return low + 1;
+    }
+    for (size_t i = 0; i < offset; ++i)
+        if (source[i] == '\n') {
+            ++line;
+            start = i + 1;
+        }
+    *line_start = start;
+    return line;
+}
+
+/* The offset where line (1-based) starts, or length past the last one. */
+static size_t yx_cli_check_line_start(const yx_cli_check_lines *lines, const uint8_t *source, size_t length, size_t line)
+{
+    size_t offset = 0;
+    if (lines && lines->starts) return line < 2 ? 0 : line - 1 < lines->count ? lines->starts[line - 1] : length;
+    while (offset < length && line > 1)
+        if (source[offset++] == '\n') --line;
+    return offset;
+}
+
 typedef struct yx_cli_check_config {
     yx_fmt_options fmt;
     char *rule_regexp;
@@ -25400,6 +26152,13 @@ typedef struct yx_cli_check_config {
     pcre2_code *tags_pattern;
     bool tags_error;
     size_t rule_start, rule_end;
+    /* The file's tokens, lexed once for the per-rule linters (NULL: each
+     * lexes the source), and its rules' order by name (rule_order_count
+     * entries, indices into the lint compiler's rules). */
+    const yx_dep_tokens *tokens;
+    const size_t *rule_order;
+    size_t rule_order_count;
+    const yx_cli_check_lines *lines;
     yx_cli_check_meta *metadata;
     size_t metadata_count;
     yx_cli_paths disabled_warnings;
@@ -25888,14 +26647,9 @@ static void yx_cli_check_source_line(FILE *output, const uint8_t *source, size_t
 static void yx_cli_check_rule_diagnostic(const char *path, const uint8_t *source, size_t source_length, const yx_dep_token *name, const yx_cli_check_config *config)
 {
     size_t offset = (size_t)(name->text - source);
-    size_t line = 1, line_start = 0, line_end, digits = 1, column;
+    size_t line, line_start, line_end, digits = 1, column;
     size_t count = 10;
-    for (size_t i = 0; i < offset; ++i) {
-        if (source[i] == '\n') {
-            ++line;
-            line_start = i + 1;
-        }
-    }
+    line = yx_cli_check_line(config->lines, source, offset, &line_start);
     column = offset - line_start + 1;
     line_end = line_start;
     while (line_end < source_length && source[line_end] != '\n' && source[line_end] != '\r') ++line_end;
@@ -25918,23 +26672,101 @@ static void yx_cli_check_rule_diagnostic(const char *path, const uint8_t *source
     fputs("`\n", stderr);
 }
 
+/* The tokens the per-rule linters walk: the file's, lexed once by
+ * yx_cli_check_file (else lexed here into *own; NULL: out of memory), and
+ * in *from the first one that can be the `rule` of a name in the item
+ * [rule_start, rule_end): the one before the item's first token. The walk
+ * ends at the first token at rule_end or after it. */
+static const yx_dep_tokens *yx_cli_check_rule_tokens(const uint8_t *source, size_t length, const yx_cli_check_config *config, yx_dep_tokens *own, size_t *from)
+{
+    const yx_dep_tokens *tokens = config->tokens;
+    size_t low = 0, high;
+    *from = 0;
+    if (!tokens) {
+        if (!yx_cli_check_lex(source, length, own)) return NULL;
+        tokens = own;
+    }
+    if (!config->rule_end) return tokens;
+    high = tokens->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if ((size_t)(tokens->items[middle].text - source) < config->rule_start) low = middle + 1;
+        else high = middle;
+    }
+    *from = low ? low - 1 : 0;
+    return tokens;
+}
+
+static bool yx_cli_check_rule_past(const uint8_t *source, const yx_cli_check_config *config, const yx_dep_token *token)
+{
+    return config->rule_end && (size_t)(token->text - source) >= config->rule_end;
+}
+
+/* strcmp's order of the identifier and text[0..length). */
+static int yx_cli_check_rule_name_compare(const char *identifier, const char *text, size_t length)
+{
+    size_t i = 0;
+    for (; i < length && identifier[i]; ++i)
+        if (identifier[i] != text[i]) return (unsigned char)identifier[i] < (unsigned char)text[i] ? -1 : 1;
+    return identifier[i] ? 1 : i < length ? -1 : 0;
+}
+
+typedef struct yx_cli_check_rule_key {
+    const char *identifier;
+    size_t index;
+} yx_cli_check_rule_key;
+
+static int yx_cli_check_rule_key_compare(const void *a, const void *b)
+{
+    const yx_cli_check_rule_key *x = (const yx_cli_check_rule_key *)a, *y = (const yx_cli_check_rule_key *)b;
+    int order = strcmp(x->identifier, y->identifier);
+    return order ? order : x->index < y->index ? -1 : x->index > y->index ? 1 : 0;
+}
+
+/* The compiled rules' indices by name, then index; false: out of memory. */
+static bool yx_cli_check_rule_order(const YRX_COMPILER *compiler, size_t **order, size_t *count)
+{
+    size_t total = compiler && compiler->rules ? compiler->rules->rule_count : 0;
+    yx_cli_check_rule_key *keys;
+    *order = NULL;
+    *count = 0;
+    if (!total) return true;
+    if (total > SIZE_MAX / sizeof(*keys)) return false;
+    keys = (yx_cli_check_rule_key *)malloc(total * sizeof(*keys));
+    *order = (size_t *)malloc(total * sizeof(**order));
+    if (!keys || !*order) {
+        free(keys);
+        free(*order);
+        *order = NULL;
+        return false;
+    }
+    for (size_t r = 0; r < total; ++r) keys[r] = (yx_cli_check_rule_key){compiler->rules->rules[r].identifier, r};
+    qsort(keys, total, sizeof(*keys), yx_cli_check_rule_key_compare);
+    for (size_t r = 0; r < total; ++r) (*order)[r] = keys[r].index;
+    free(keys);
+    *count = total;
+    return true;
+}
+
 static bool yx_cli_check_rule_names(const char *path, const uint8_t *source, size_t length, const yx_cli_check_config *config, size_t *count)
 {
-    yx_dep_tokens tokens = {0};
+    yx_dep_tokens own = {0};
+    const yx_dep_tokens *tokens;
     pcre2_match_data *match_data;
+    size_t from;
     bool ok = false;
     *count = 0;
     if (!config->rule_pattern) return true;
     match_data = pcre2_match_data_create_from_pattern(config->rule_pattern, NULL);
     if (!match_data) return false;
-    if (!yx_cli_check_lex(source, length, &tokens)) goto done;
-    for (size_t i = 0; i + 1 < tokens.count; ++i) {
+    if (!(tokens = yx_cli_check_rule_tokens(source, length, config, &own, &from))) goto done;
+    for (size_t i = from; i + 1 < tokens->count && !yx_cli_check_rule_past(source, config, &tokens->items[i]); ++i) {
         const yx_dep_token *name;
         char *copy;
         int result;
-        if (!yx_dep_equal(&tokens.items[i], "rule") || tokens.items[i + 1].kind != YX_DEP_IDENT) continue;
-        name = &tokens.items[i + 1];
-        if (config->rule_end && ((size_t)(tokens.items[i + 1].text - source) < config->rule_start || (size_t)(tokens.items[i + 1].text - source) >= config->rule_end))
+        if (!yx_dep_equal(&tokens->items[i], "rule") || tokens->items[i + 1].kind != YX_DEP_IDENT) continue;
+        name = &tokens->items[i + 1];
+        if (config->rule_end && ((size_t)(tokens->items[i + 1].text - source) < config->rule_start || (size_t)(tokens->items[i + 1].text - source) >= config->rule_end))
             continue;
         copy = yx_cli_copy(name->text, name->length);
         if (!copy) goto done;
@@ -25947,7 +26779,7 @@ static bool yx_cli_check_rule_names(const char *path, const uint8_t *source, siz
     }
     ok = true;
 done:
-    free(tokens.items);
+    free(own.items);
     pcre2_match_data_free(match_data);
     return ok;
 }
@@ -25956,14 +26788,10 @@ static void yx_cli_check_tag_diagnostic(const char *path, const uint8_t *source,
                                         const yx_cli_check_config *config)
 {
     size_t offset = (size_t)(span->text - source);
-    size_t line = 1, line_start = 0, line_end, digits = 1, column;
+    size_t line, line_start, line_end, digits = 1, column;
     size_t count = 10;
     bool allowed = config->allowed_tags.count != 0;
-    for (size_t i = 0; i < offset; ++i)
-        if (source[i] == '\n') {
-            ++line;
-            line_start = i + 1;
-        }
+    line = yx_cli_check_line(config->lines, source, offset, &line_start);
     column = offset - line_start + 1;
     line_end = line_start;
     while (line_end < source_length && source[line_end] != '\n' && source[line_end] != '\r') ++line_end;
@@ -26010,8 +26838,10 @@ static void yx_cli_check_tag_diagnostic(const char *path, const uint8_t *source,
 
 static bool yx_cli_check_tags(const char *path, const uint8_t *source, size_t length, const yx_cli_check_config *config, size_t *count)
 {
-    yx_dep_tokens tokens = {0};
+    yx_dep_tokens own = {0};
+    const yx_dep_tokens *tokens;
     pcre2_match_data *match_data = NULL;
+    size_t from;
     bool ok = false;
     *count = 0;
     if (!config->allowed_tags.count && !config->tags_pattern) return true;
@@ -26019,23 +26849,23 @@ static bool yx_cli_check_tags(const char *path, const uint8_t *source, size_t le
         match_data = pcre2_match_data_create_from_pattern(config->tags_pattern, NULL);
         if (!match_data) return false;
     }
-    if (!yx_cli_check_lex(source, length, &tokens)) goto done;
-    for (size_t i = 0; i + 1 < tokens.count; ++i) {
+    if (!(tokens = yx_cli_check_rule_tokens(source, length, config, &own, &from))) goto done;
+    for (size_t i = from; i + 1 < tokens->count && !yx_cli_check_rule_past(source, config, &tokens->items[i]); ++i) {
         size_t open, close, depth = 1, colon = 0;
-        if (!yx_dep_equal(&tokens.items[i], "rule") || tokens.items[i + 1].kind != YX_DEP_IDENT) continue;
-        if (config->rule_end && ((size_t)(tokens.items[i + 1].text - source) < config->rule_start || (size_t)(tokens.items[i + 1].text - source) >= config->rule_end))
+        if (!yx_dep_equal(&tokens->items[i], "rule") || tokens->items[i + 1].kind != YX_DEP_IDENT) continue;
+        if (config->rule_end && ((size_t)(tokens->items[i + 1].text - source) < config->rule_start || (size_t)(tokens->items[i + 1].text - source) >= config->rule_end))
             continue;
-        for (open = i + 2; open < tokens.count; ++open)
-            if (yx_dep_symbol(&tokens.items[open], '{')) break;
-        if (open == tokens.count) break;
+        for (open = i + 2; open < tokens->count; ++open)
+            if (yx_dep_symbol(&tokens->items[open], '{')) break;
+        if (open == tokens->count) break;
         for (size_t j = i + 2; j < open; ++j)
-            if (yx_dep_symbol(&tokens.items[j], ':')) {
+            if (yx_dep_symbol(&tokens->items[j], ':')) {
                 colon = j + 1;
                 break;
             }
         if (colon) {
             for (size_t j = colon; j < open; ++j) {
-                const yx_dep_token *token = &tokens.items[j];
+                const yx_dep_token *token = &tokens->items[j];
                 char *tag;
                 bool accepted = false;
                 if (token->kind != YX_DEP_IDENT) continue;
@@ -26063,15 +26893,15 @@ static bool yx_cli_check_tags(const char *path, const uint8_t *source, size_t le
                 if (!accepted && config->tags_error) break;
             }
         }
-        for (close = open + 1; close < tokens.count; ++close) {
-            if (yx_dep_symbol(&tokens.items[close], '{')) ++depth;
-            else if (yx_dep_symbol(&tokens.items[close], '}') && --depth == 0) break;
+        for (close = open + 1; close < tokens->count; ++close) {
+            if (yx_dep_symbol(&tokens->items[close], '{')) ++depth;
+            else if (yx_dep_symbol(&tokens->items[close], '}') && --depth == 0) break;
         }
         i = close;
     }
     ok = true;
 done:
-    free(tokens.items);
+    free(own.items);
     pcre2_match_data_free(match_data);
     return ok;
 }
@@ -26110,11 +26940,11 @@ static size_t yx_cli_check_scalar_count(const uint8_t *start, const uint8_t *end
     return count;
 }
 
-static void yx_cli_check_meta_diagnostic(const char *path, const uint8_t *source, size_t source_length, const yx_dep_token *span, const yx_cli_check_meta *meta,
-                                         bool missing)
+static void yx_cli_check_meta_diagnostic(const char *path, const uint8_t *source, size_t source_length, const yx_cli_check_lines *lines, const yx_dep_token *span,
+                                         const yx_cli_check_meta *meta, bool missing)
 {
     size_t offset = (size_t)(span->text - source);
-    size_t line = 1, line_start = 0, line_end, digits = 1, column;
+    size_t line, line_start, line_end, digits = 1, column;
     size_t indent_width, marker_width;
     size_t count = 10;
     const char *kind = meta->error ? "error" : "warning";
@@ -26127,12 +26957,7 @@ static void yx_cli_check_meta_diagnostic(const char *path, const uint8_t *source
                            : meta->type == YX_CLI_META_SHA1    ? "a SHA-1"
                            : meta->type == YX_CLI_META_SHA256  ? "a SHA-256"
                                                                : "a MD5, SHA-1 or SHA-256";
-    for (size_t i = 0; i < offset; ++i) {
-        if (source[i] == '\n') {
-            ++line;
-            line_start = i + 1;
-        }
-    }
+    line = yx_cli_check_line(lines, source, offset, &line_start);
     column = yx_cli_check_scalar_count(source + line_start, source + offset) + 1;
     indent_width = yx_cli_check_display_width(source + line_start, source + offset);
     marker_width = yx_cli_check_display_width(span->text, span->text + span->length);
@@ -26249,48 +27074,64 @@ typedef struct yx_cli_check_meta_issue {
 static bool yx_cli_check_metadata(const char *path, const uint8_t *source, size_t length, const YRX_COMPILER *compiler, const yx_cli_check_config *config, size_t *errors,
                                   size_t *warnings)
 {
-    yx_dep_tokens tokens = {0};
+    yx_dep_tokens own = {0};
+    const yx_dep_tokens *tokens;
     yx_cli_check_meta_issue *error_issues = NULL, *warning_issues = NULL;
+    size_t from;
     bool ok = false;
     *errors = *warnings = 0;
     if (!config->metadata_count) return true;
     error_issues = (yx_cli_check_meta_issue *)calloc(config->metadata_count, sizeof(*error_issues));
     warning_issues = (yx_cli_check_meta_issue *)calloc(config->metadata_count, sizeof(*warning_issues));
     if (!error_issues || !warning_issues) goto done;
-    if (!yx_cli_check_lex(source, length, &tokens)) goto done;
-    for (size_t i = 0; i + 1 < tokens.count; ++i) {
+    if (!(tokens = yx_cli_check_rule_tokens(source, length, config, &own, &from))) goto done;
+    for (size_t i = from; i + 1 < tokens->count && !yx_cli_check_rule_past(source, config, &tokens->items[i]); ++i) {
         const yx_dep_token *name;
         const YRX_RULE *compiled_rule = NULL;
         size_t open, close, depth = 1, meta_begin = 0, meta_end;
         size_t error_count = 0, warning_count = 0;
-        if (!yx_dep_equal(&tokens.items[i], "rule") || tokens.items[i + 1].kind != YX_DEP_IDENT) continue;
-        name = &tokens.items[i + 1];
-        if (config->rule_end && ((size_t)(tokens.items[i + 1].text - source) < config->rule_start || (size_t)(tokens.items[i + 1].text - source) >= config->rule_end))
+        if (!yx_dep_equal(&tokens->items[i], "rule") || tokens->items[i + 1].kind != YX_DEP_IDENT) continue;
+        name = &tokens->items[i + 1];
+        if (config->rule_end && ((size_t)(tokens->items[i + 1].text - source) < config->rule_start || (size_t)(tokens->items[i + 1].text - source) >= config->rule_end))
             continue;
         if (!compiler || !compiler->rules) continue;
-        for (size_t r = 0; r < compiler->rules->rule_count; ++r) {
-            const YRX_RULE *candidate = &compiler->rules->rules[r];
-            if (strlen(candidate->identifier) == name->length && memcmp(candidate->identifier, name->text, name->length) == 0) {
-                compiled_rule = candidate;
-                break;
+        if (config->rule_order && config->rule_order_count == compiler->rules->rule_count) {
+            /* The first rule of that name: the order is by name, then index. */
+            size_t low = 0, high = config->rule_order_count;
+            while (low < high) {
+                size_t middle = low + (high - low) / 2;
+                if (yx_cli_check_rule_name_compare(compiler->rules->rules[config->rule_order[middle]].identifier, (const char *)name->text, name->length) < 0)
+                    low = middle + 1;
+                else high = middle;
+            }
+            if (low < config->rule_order_count &&
+                yx_cli_check_rule_name_compare(compiler->rules->rules[config->rule_order[low]].identifier, (const char *)name->text, name->length) == 0)
+                compiled_rule = &compiler->rules->rules[config->rule_order[low]];
+        } else {
+            for (size_t r = 0; r < compiler->rules->rule_count; ++r) {
+                const YRX_RULE *candidate = &compiler->rules->rules[r];
+                if (strlen(candidate->identifier) == name->length && memcmp(candidate->identifier, name->text, name->length) == 0) {
+                    compiled_rule = candidate;
+                    break;
+                }
             }
         }
         if (!compiled_rule) continue;
-        for (open = i + 2; open < tokens.count; ++open)
-            if (yx_dep_symbol(&tokens.items[open], '{')) break;
-        if (open == tokens.count) break;
-        for (close = open + 1; close < tokens.count; ++close) {
-            if (yx_dep_symbol(&tokens.items[close], '{')) ++depth;
-            else if (yx_dep_symbol(&tokens.items[close], '}') && --depth == 0) break;
+        for (open = i + 2; open < tokens->count; ++open)
+            if (yx_dep_symbol(&tokens->items[open], '{')) break;
+        if (open == tokens->count) break;
+        for (close = open + 1; close < tokens->count; ++close) {
+            if (yx_dep_symbol(&tokens->items[close], '{')) ++depth;
+            else if (yx_dep_symbol(&tokens->items[close], '}') && --depth == 0) break;
         }
         meta_end = close;
         depth = 1;
         for (size_t j = open + 1; j + 1 < close; ++j) {
-            if (yx_dep_symbol(&tokens.items[j], '{')) ++depth;
-            else if (yx_dep_symbol(&tokens.items[j], '}')) --depth;
-            if (depth != 1 || !yx_dep_symbol(&tokens.items[j + 1], ':')) continue;
-            if (yx_dep_equal(&tokens.items[j], "meta")) meta_begin = j + 2;
-            else if (meta_begin && (yx_dep_equal(&tokens.items[j], "strings") || yx_dep_equal(&tokens.items[j], "condition"))) {
+            if (yx_dep_symbol(&tokens->items[j], '{')) ++depth;
+            else if (yx_dep_symbol(&tokens->items[j], '}')) --depth;
+            if (depth != 1 || !yx_dep_symbol(&tokens->items[j + 1], ':')) continue;
+            if (yx_dep_equal(&tokens->items[j], "meta")) meta_begin = j + 2;
+            else if (meta_begin && (yx_dep_equal(&tokens->items[j], "strings") || yx_dep_equal(&tokens->items[j], "condition"))) {
                 meta_end = j;
                 break;
             }
@@ -26305,15 +27146,15 @@ static bool yx_cli_check_metadata(const char *path, const uint8_t *source, size_
                     const YRX_METADATA *value = NULL;
                     size_t occurrence = 0;
                     int valid;
-                    if (tokens.items[j].kind != YX_DEP_IDENT ||
-                        (tokens.items[j].length != meta->name_length || memcmp(tokens.items[j].text, meta->name, meta->name_length) != 0) ||
-                        !yx_dep_symbol(&tokens.items[j + 1], '='))
+                    if (tokens->items[j].kind != YX_DEP_IDENT ||
+                        (tokens->items[j].length != meta->name_length || memcmp(tokens->items[j].text, meta->name, meta->name_length) != 0) ||
+                        !yx_dep_symbol(&tokens->items[j + 1], '='))
                         continue;
                     found = true;
-                    (void)yx_cli_check_meta_value_type(&tokens, j + 2, &issue.value_span);
+                    (void)yx_cli_check_meta_value_type(tokens, j + 2, &issue.value_span);
                     for (size_t prior = meta_begin; prior < j; ++prior)
-                        if (tokens.items[prior].length == meta->name_length && memcmp(tokens.items[prior].text, meta->name, meta->name_length) == 0 &&
-                            prior + 1 < meta_end && yx_dep_symbol(&tokens.items[prior + 1], '='))
+                        if (tokens->items[prior].length == meta->name_length && memcmp(tokens->items[prior].text, meta->name, meta->name_length) == 0 &&
+                            prior + 1 < meta_end && yx_dep_symbol(&tokens->items[prior + 1], '='))
                             ++occurrence;
                     for (size_t item = 0; item < compiled_rule->metadata_count; ++item) {
                         const YRX_METADATA *candidate = &compiled_rule->metadata[item];
@@ -26351,17 +27192,18 @@ static bool yx_cli_check_metadata(const char *path, const uint8_t *source, size_
         }
         /* The first linter error is returned after the remaining errors.
          * Warnings retain registration order. */
-        for (size_t e = 1; e < error_count; ++e) yx_cli_check_meta_diagnostic(path, source, length, error_issues[e].span, error_issues[e].meta, error_issues[e].missing);
-        if (error_count) yx_cli_check_meta_diagnostic(path, source, length, error_issues[0].span, error_issues[0].meta, error_issues[0].missing);
+        for (size_t e = 1; e < error_count; ++e)
+            yx_cli_check_meta_diagnostic(path, source, length, config->lines, error_issues[e].span, error_issues[e].meta, error_issues[e].missing);
+        if (error_count) yx_cli_check_meta_diagnostic(path, source, length, config->lines, error_issues[0].span, error_issues[0].meta, error_issues[0].missing);
         for (size_t w = 0; w < warning_count; ++w)
-            yx_cli_check_meta_diagnostic(path, source, length, warning_issues[w].span, warning_issues[w].meta, warning_issues[w].missing);
+            yx_cli_check_meta_diagnostic(path, source, length, config->lines, warning_issues[w].span, warning_issues[w].meta, warning_issues[w].missing);
         *errors += error_count;
         *warnings += warning_count;
         i = close;
     }
     ok = true;
 done:
-    free(tokens.items);
+    free(own.items);
     free(error_issues);
     free(warning_issues);
     return ok;
@@ -27211,6 +28053,36 @@ typedef struct yx_cli_check_message {
     bool error, linter, parser;
 } yx_cli_check_message;
 
+/* The publication order: errors first, the parser's errors after the
+ * others, then by rule. */
+static bool yx_cli_check_message_after(const yx_cli_check_message *a, const yx_cli_check_message *b)
+{
+    return a->error < b->error || (a->error == b->error && (a->parser > b->parser || (a->parser == b->parser && a->item > b->item)));
+}
+
+/* A stable sort by that order (the insertion sort it replaces moved a
+ * message only past the ones strictly after it); false: out of memory. */
+static bool yx_cli_check_sort_messages(yx_cli_check_message *messages, size_t count)
+{
+    yx_cli_check_message *scratch;
+    if (count < 2) return true;
+    if (count > SIZE_MAX / sizeof(*scratch)) return false;
+    scratch = (yx_cli_check_message *)malloc(count * sizeof(*scratch));
+    if (!scratch) return false;
+    for (size_t width = 1; width < count; width *= 2) {
+        for (size_t left = 0; left < count; left += 2 * width) {
+            size_t middle = left + width < count ? left + width : count;
+            size_t right = middle + width < count ? middle + width : count;
+            size_t x = left, y = middle, at = left;
+            while (x < middle || y < right)
+                scratch[at++] = y >= right || (x < middle && !yx_cli_check_message_after(&messages[x], &messages[y])) ? messages[x++] : messages[y++];
+        }
+        memcpy(messages, scratch, count * sizeof(*messages));
+    }
+    free(scratch);
+    return true;
+}
+
 /* Linters run before c_rule. Keep source positions while omitting a rejected
  * rule from the core compiler, so another rule can still produce warnings. */
 static void yx_cli_check_blank(uint8_t *source, size_t begin, size_t end)
@@ -27290,15 +28162,19 @@ static bool yx_cli_check_lint_source(const uint8_t *source, size_t length, uint8
 /* The CLI's source warning passes share the compiler's renderer. Merge their
  * reports by rule after linting; errors are displayed before warnings, as in
  * check.rs, and warnings retain linter-before-compiler order within a rule. */
-static bool yx_cli_check_publish(FILE *capture, FILE *destination, const char *path, const uint8_t *source, size_t length, const yx_sc_result *syntax,
-                                 const bool *rejected, long lint_end, size_t *errors, size_t *warnings)
+static bool yx_cli_check_publish(FILE *capture, FILE *destination, const char *path, const uint8_t *source, size_t length, const yx_cli_check_lines *lines,
+                                 const yx_sc_result *syntax, const bool *rejected, long lint_end, size_t *errors, size_t *warnings)
 {
     char *text = NULL;
     yx_cli_check_message *messages = NULL;
-    size_t count = 0, total;
+    size_t count = 0, capacity = 0, total;
     long size;
-    bool ok = false;
+    bool ok = false, items_ordered = true;
     *errors = *warnings = 0;
+    /* Items in source order without overlaps: an offset's item is found by
+     * a binary search, else by the first one that holds it. */
+    for (size_t i = 0; i + 1 < syntax->item_count && items_ordered; ++i)
+        items_ordered = syntax->items[i].start <= syntax->items[i].end && syntax->items[i].end <= syntax->items[i + 1].start;
     if (fflush(capture) != 0 || (size = ftell(capture)) < 0) goto done;
     total = (size_t)size;
     text = (char *)malloc(total + 1);
@@ -27310,26 +28186,48 @@ static bool yx_cli_check_publish(FILE *capture, FILE *destination, const char *p
         bool warning = strncmp(text + at, "warning[", 8) == 0;
         while (end < total && !(text[end - 1] == '\n' && (strncmp(text + end, "error[", 6) == 0 || strncmp(text + end, "warning[", 8) == 0))) ++end;
         if (error || warning) {
-            const char *arrow = strstr(text + at, "--> ");
-            if (arrow && arrow < text + end && strncmp(arrow + 4, path, strlen(path)) == 0 && arrow[4 + strlen(path)] == ':') {
+            /* The message's first `--> `, as strstr finds it, without
+             * searching past the message. */
+            const char *arrow = NULL;
+            for (const char *p = text + at; p < text + end && p + 4 <= text + total; ++p)
+                if (memcmp(p, "--> ", 4) == 0) {
+                    arrow = p;
+                    break;
+                }
+            if (arrow && strncmp(arrow + 4, path, strlen(path)) == 0 && arrow[4 + strlen(path)] == ':') {
                 char *next;
                 size_t line = (size_t)strtoull(arrow + 5 + strlen(path), &next, 10);
                 size_t column = *next == ':' ? (size_t)strtoull(next + 1, NULL, 10) : 1;
-                size_t offset = 0;
-                while (offset < length && line > 1)
-                    if (source[offset++] == '\n') --line;
+                size_t offset = yx_cli_check_line_start(lines, source, length, line);
                 if (column) offset += column - 1;
-                for (size_t i = 0; i < syntax->item_count; ++i)
-                    if (offset >= syntax->items[i].start && offset < syntax->items[i].end) {
-                        item = i;
-                        break;
+                if (items_ordered) {
+                    /* The one item that can hold offset: the last starting
+                     * at it or before it. */
+                    size_t low = 0, high = syntax->item_count;
+                    while (low < high) {
+                        size_t middle = low + (high - low) / 2;
+                        if (syntax->items[middle].start <= offset) low = middle + 1;
+                        else high = middle;
                     }
+                    if (low && offset < syntax->items[low - 1].end) item = low - 1;
+                } else
+                    for (size_t i = 0; i < syntax->item_count; ++i)
+                        if (offset >= syntax->items[i].start && offset < syntax->items[i].end) {
+                            item = i;
+                            break;
+                        }
             }
             bool linter = at < (size_t)lint_end;
             if (linter || item == SIZE_MAX || !rejected[item]) {
-                yx_cli_check_message *grown = (yx_cli_check_message *)realloc(messages, (count + 1) * sizeof(*grown));
-                if (!grown) goto done;
-                messages = grown;
+                if (count == capacity) {
+                    size_t next = capacity ? capacity * 2 : 64;
+                    yx_cli_check_message *grown;
+                    if (capacity > SIZE_MAX / 2 / sizeof(*grown)) goto done;
+                    grown = (yx_cli_check_message *)realloc(messages, next * sizeof(*grown));
+                    if (!grown) goto done;
+                    messages = grown;
+                    capacity = next;
+                }
                 bool parser =
                     error && (strncmp(text + at, "error[E001]", 11) == 0 || strncmp(text + at, "error[E027]", 11) == 0 || strncmp(text + at, "error[E029]", 11) == 0 ||
                               strncmp(text + at, "error[E030]", 11) == 0 || strncmp(text + at, "error[E031]", 11) == 0);
@@ -27345,17 +28243,7 @@ static bool yx_cli_check_publish(FILE *capture, FILE *destination, const char *p
     }
     /* add_source appends AST errors after compiling the surviving rules.
      * Keep that order before warnings, then source order within each group. */
-    for (size_t i = 1; i < count; ++i) {
-        yx_cli_check_message current = messages[i];
-        size_t j = i;
-        while (j && (messages[j - 1].error < current.error ||
-                     (messages[j - 1].error == current.error &&
-                      (messages[j - 1].parser > current.parser || (messages[j - 1].parser == current.parser && messages[j - 1].item > current.item))))) {
-            messages[j] = messages[j - 1];
-            --j;
-        }
-        messages[j] = current;
-    }
+    if (!yx_cli_check_sort_messages(messages, count)) goto done;
     /* c_rule retains its first linter error while adding the later ones;
      * that first error is appended only when c_rule returns. Metadata's
      * helper has already put its first error after its other metadata errors. */
@@ -27383,9 +28271,7 @@ static bool yx_cli_check_publish(FILE *capture, FILE *destination, const char *p
             char *number_end;
             size_t number = (size_t)strtoull(text + begin, &number_end, 10);
             if (message->item != SIZE_MAX && number_end > text + begin && number_end + 3 <= text + end && memcmp(number_end, " | ", 3) == 0) {
-                size_t from = 0, line = 1, to;
-                while (from < length && line < number)
-                    if (source[from++] == '\n') ++line;
+                size_t from = yx_cli_check_line_start(lines, source, length, number), to;
                 to = from;
                 while (to < length && source[to] != '\n' && source[to] != '\r') ++to;
                 fwrite(text + begin, 1, (size_t)(number_end + 3 - text - begin), destination);
@@ -27438,6 +28324,9 @@ static int yx_cli_check_file(const char *path, const yx_cli_check_config *shared
     yx_sc_result syntax = {0};
     bool *rejected = NULL;
     uint8_t *lint_source = NULL, *compile_source = NULL;
+    yx_dep_tokens file_tokens = {0};
+    yx_cli_check_lines lines = {0};
+    size_t *rule_order = NULL;
     FILE *capture = NULL, *destination = yx_cli_worker_stderr;
     long lint_end = 0;
     int status = 1;
@@ -27461,7 +28350,13 @@ static int yx_cli_check_file(const char *path, const yx_cli_check_config *shared
             if (!yx_cli_check_lint_source(source, length, &lint_source) || yrx_compiler_create(0, &compiler) != YRX_SUCCESS) goto done;
             yx_cli_compiler_colors(compiler);
             (void)yx_compiler_add_source_bytes(compiler, lint_source, length, path);
+            if (!yx_cli_check_rule_order(compiler, &rule_order, &config->rule_order_count)) goto done;
+            config->rule_order = rule_order;
         }
+        /* One lexing for every rule's linters, not one per rule. */
+        if (!yx_cli_check_lex(source, length, &file_tokens) || !yx_cli_check_lines_init(&lines, source, length)) goto done;
+        config->tokens = &file_tokens;
+        config->lines = &lines;
         for (size_t i = 0; i < syntax.item_count; ++i) {
             const yx_sc_item *item = &syntax.items[i];
             size_t names = 0, tags = 0, meta_errors = 0, meta_warnings = 0;
@@ -27482,6 +28377,10 @@ static int yx_cli_check_file(const char *path, const yx_cli_check_config *shared
             if (rejected[i]) yx_cli_check_blank(compile_source, item->start, item->end);
         }
         config->rule_start = config->rule_end = 0;
+        config->tokens = NULL;
+        config->rule_order = NULL;
+        config->rule_order_count = 0;
+        config->lines = NULL;
         lint_end = ftell(capture);
         if (lint_end < 0) goto done;
         if (compiler) yrx_compiler_destroy(compiler);
@@ -27538,7 +28437,7 @@ static int yx_cli_check_file(const char *path, const yx_cli_check_config *shared
         FILE *output = destination ? destination : yx_cli_stderr();
         yx_cli_worker_stderr = destination;
         if (!destination) output = yx_cli_stderr();
-        if (!yx_cli_check_publish(capture, output, path, source, length, &syntax, rejected, lint_end, &errors, &warnings)) goto done;
+        if (!yx_cli_check_publish(capture, output, path, source, length, &lines, &syntax, rejected, lint_end, &errors, &warnings)) goto done;
         fclose(capture);
         capture = NULL;
     }
@@ -27555,6 +28454,9 @@ done:
     free(rejected);
     free(lint_source);
     free(compile_source);
+    free(file_tokens.items);
+    free(lines.starts);
+    free(rule_order);
     yx_sc_result_free(&syntax);
     if (core_warnings_json) yrx_buffer_destroy(core_warnings_json);
     if (compiler) yrx_compiler_destroy(compiler);
@@ -27891,50 +28793,40 @@ static int yx_cli_check_command(int argc, char **argv, const char *config_path)
             status = 1;
             goto done;
         }
-        for (size_t i = 0; i < filters.count; ++i) {
-            const char *first, *last;
-            size_t first_width, last_width;
-            if (yx_cli_glob_invalid_range(filters.items[i], &first, &first_width, &last, &last_width)) {
-                fprintf(stderr,
-                        "error: error parsing glob '%s': "
-                        "invalid range; '%.*s' > '%.*s'\n",
-                        filters.items[i], (int)first_width, first, (int)last_width, last);
-                free(directory);
-                goto done;
-            }
-            if (yx_cli_glob_has_unclosed_class(filters.items[i])) {
-                fprintf(stderr,
-                        "error: error parsing glob '%s': "
-                        "unclosed character class; missing ']'\n",
-                        filters.items[i]);
-                free(directory);
-                goto done;
-            }
-            const char *brace_error = yx_cli_glob_brace_error(filters.items[i]);
-            if (brace_error) {
-                fprintf(stderr, "error: error parsing glob '%s': %s\n", filters.items[i], brace_error);
-                free(directory);
-                goto done;
-            }
+        yx_globs globs = {0};
+        int built = yx_globs_build(&globs, &filters);
+        if (built <= 0) {
+            if (built < 0) status = 1;
+            yx_globs_clear(&globs);
+            free(directory);
+            goto done;
         }
         if (!yx_cli_collect_directory(directory, 0, depth, false, &files)) {
+            yx_globs_clear(&globs);
             free(directory);
             fprintf(stderr, "error: can't open `%s`\n", path);
             goto done;
         }
         size_t selected_count = 0;
         for (size_t i = 0; i < files.count; ++i) {
-            bool selected = filters.count == 0 && yx_cli_is_rule_source(files.items[i]);
             const char *relative = files.items[i] + strlen(directory);
+            int selected;
             while (*relative == '/' || *relative == '\\') ++relative;
-            for (size_t j = 0; j < filters.count; ++j)
-                if (yx_cli_directory_filter_matches(filters.items[j], relative)) selected = true;
+            selected = filters.count ? yx_globs_select(&globs, relative) : yx_cli_is_rule_source(files.items[i]);
+            if (selected < 0) {
+                fputs("yr: out of memory\n", stderr);
+                status = 1;
+                yx_globs_clear(&globs);
+                free(directory);
+                goto done;
+            }
             if (selected) {
                 char *swap = files.items[selected_count];
                 files.items[selected_count++] = files.items[i];
                 files.items[i] = swap;
             }
         }
+        yx_globs_clear(&globs);
         yx_cli_check_work work = {&files, &config};
         status = yx_cli_parallel_files(selected_count, worker_threads, 0, "Checking", false, yx_cli_check_action, NULL, NULL, &work);
         free(directory);
@@ -29097,38 +29989,379 @@ static bool yx_fix_read_integer_range(const yx_dep_token *name, int64_t *minimum
     return false;
 }
 
-static bool yx_fix_integer_literal(const yx_dep_tokens *tokens, size_t index, bool left_operand, int64_t *value, size_t *start, size_t *end, const uint8_t *source)
+/* Constant folding of an integer operand of `==`, as YARA-X builds it
+ * (parser/src/ast/cst2ast.rs pratt_parser and term, compiler/ir/mod.rs):
+ * literals are signed unless they only fit in a u64; `-` directly before
+ * a literal is merged into it; `+ - * \ %` chains are one n-ary node, even
+ * across parentheses; add/sub/mul fold in exact 128-bit arithmetic and the
+ * result must fit its type (else a compile error); `\` and `%` are left
+ * unfolded by a zero divisor (and `\` by MIN \ -1); shifts by 64 or more
+ * give 0. A result is unsigned (u64) when an operand is. The span is the
+ * AST's: parentheses are not part of the expression they enclose. */
+typedef struct yx_fix_i128 {
+    uint64_t lo, hi;
+} yx_fix_i128;
+
+static yx_fix_i128 yx_fix_i128_of(int64_t bits, bool is_unsigned)
 {
-    const yx_dep_token *number;
-    char digits[64], *tail;
-    unsigned long long magnitude;
-    bool negative = false;
-    if (index >= tokens->count) return false;
-    if (left_operand) {
-        number = &tokens->items[index];
-        if (index && yx_dep_symbol(&tokens->items[index - 1], '-')) {
-            negative = true;
-            --index;
+    yx_fix_i128 v = {(uint64_t)bits, !is_unsigned && bits < 0 ? UINT64_MAX : 0};
+    return v;
+}
+
+static bool yx_fix_i128_negative(yx_fix_i128 v)
+{
+    return (v.hi >> 63) != 0;
+}
+
+static yx_fix_i128 yx_fix_i128_negate(yx_fix_i128 v)
+{
+    yx_fix_i128 r = {~v.lo + 1, ~v.hi + (v.lo == 0)};
+    return r;
+}
+
+static void yx_fix_mul64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
+{
+    uint64_t a0 = a & 0xffffffffu, a1 = a >> 32, b0 = b & 0xffffffffu, b1 = b >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t middle = (p00 >> 32) + (p01 & 0xffffffffu) + (p10 & 0xffffffffu);
+    *lo = (middle << 32) | (p00 & 0xffffffffu);
+    *hi = p11 + (p01 >> 32) + (p10 >> 32) + (middle >> 32);
+}
+
+/* r = a op b ('+', '-', '*') in i128; false: overflow (Rust checked_*). */
+static bool yx_fix_i128_op(yx_fix_i128 a, yx_fix_i128 b, char op, yx_fix_i128 *r)
+{
+    if (op == '+' || op == '-') {
+        bool sa = yx_fix_i128_negative(a), sb = yx_fix_i128_negative(b);
+        if (op == '-') {
+            r->lo = a.lo - b.lo;
+            r->hi = a.hi - b.hi - (a.lo < b.lo);
+            return sa == sb || yx_fix_i128_negative(*r) == sa;
         }
+        r->lo = a.lo + b.lo;
+        r->hi = a.hi + b.hi + (r->lo < a.lo);
+        return sa != sb || yx_fix_i128_negative(*r) == sa;
     } else {
-        if (yx_dep_symbol(&tokens->items[index], '-')) {
-            negative = true;
-            ++index;
-        }
-        if (index >= tokens->count) return false;
-        number = &tokens->items[index];
+        bool negative = yx_fix_i128_negative(a) != yx_fix_i128_negative(b);
+        yx_fix_i128 x = yx_fix_i128_negative(a) ? yx_fix_i128_negate(a) : a;
+        yx_fix_i128 y = yx_fix_i128_negative(b) ? yx_fix_i128_negate(b) : b;
+        uint64_t cross_hi = 0, cross_lo = 0, hi, lo;
+        if (x.hi && y.hi) return false;
+        if (x.hi) yx_fix_mul64(x.hi, y.lo, &cross_hi, &cross_lo);
+        else if (y.hi) yx_fix_mul64(y.hi, x.lo, &cross_hi, &cross_lo);
+        if (cross_hi) return false;
+        yx_fix_mul64(x.lo, y.lo, &hi, &lo);
+        if (hi + cross_lo < hi) return false;
+        hi += cross_lo;
+        /* The magnitude must be below 2^127, or 2^127 itself if negative. */
+        if ((hi >> 63) && !(negative && hi == (uint64_t)1 << 63 && !lo)) return false;
+        r->lo = lo;
+        r->hi = hi;
+        if (negative) *r = yx_fix_i128_negate(*r);
+        return true;
     }
-    if (!number->length || number->length >= sizeof(digits)) return false;
-    memcpy(digits, number->text, number->length);
-    digits[number->length] = '\0';
-    if (digits[0] < '0' || digits[0] > '9') return false;
-    errno = 0;
-    magnitude = strtoull(digits, &tail, number->length > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X') ? 16 : 10);
-    if (errno || tail == digits || *tail || magnitude > (unsigned long long)INT64_MAX + (negative ? 1ULL : 0ULL)) return false;
-    *value = negative && magnitude == (unsigned long long)INT64_MAX + 1ULL ? INT64_MIN : negative ? -(int64_t)magnitude : (int64_t)magnitude;
-    *start = (size_t)(tokens->items[index - (negative && !left_operand ? 1 : 0)].text - source);
-    *end = (size_t)(number->text - source) + number->length;
+}
+
+typedef struct yx_fix_const_node {
+    char kind;                /* 'n' literal, 'm' unary minus, '~', or the operator */
+    size_t first, last, next; /* operands, a list (SIZE_MAX: none) */
+    size_t start, end;        /* source span */
+    int64_t bits;
+    bool is_unsigned;
+} yx_fix_const_node;
+
+typedef struct yx_fix_const_parser {
+    const yx_dep_tokens *tokens;
+    const uint8_t *source;
+    size_t at, end, depth;
+    yx_fix_const_node *nodes;
+    size_t count, capacity;
+} yx_fix_const_parser;
+
+static size_t yx_fix_const_node_new(yx_fix_const_parser *p, char kind, size_t start, size_t end)
+{
+    yx_fix_const_node *node;
+    if (p->count == p->capacity) {
+        size_t next = p->capacity ? p->capacity * 2 : 16;
+        yx_fix_const_node *grown;
+        if (p->capacity > SIZE_MAX / 2 / sizeof(*grown)) return SIZE_MAX;
+        grown = (yx_fix_const_node *)realloc(p->nodes, next * sizeof(*grown));
+        if (!grown) return SIZE_MAX;
+        p->nodes = grown;
+        p->capacity = next;
+    }
+    node = &p->nodes[p->count];
+    node->kind = kind;
+    node->first = node->last = node->next = SIZE_MAX;
+    node->start = start;
+    node->end = end;
+    node->bits = 0;
+    node->is_unsigned = false;
+    return p->count++;
+}
+
+static void yx_fix_const_node_add(yx_fix_const_parser *p, size_t parent, size_t child)
+{
+    if (p->nodes[parent].last == SIZE_MAX) p->nodes[parent].first = child;
+    else p->nodes[p->nodes[parent].last].next = child;
+    p->nodes[parent].last = child;
+    p->nodes[parent].end = p->nodes[child].end;
+}
+
+/* An INTEGER_LIT token (tokenizer/mod.rs): `0x` hex, `0o` octal or decimal
+ * digits with `_` separators, a decimal one with an optional KB or MB. */
+static bool yx_fix_const_literal(const yx_dep_token *token, int64_t *bits, bool *is_unsigned)
+{
+    const uint8_t *text = token->text, *stop = token->text + token->length;
+    unsigned base = 10;
+    uint64_t value = 0, multiplier = 1;
+    bool digit = false;
+    if (token->kind != YX_DEP_OTHER || !token->length || text[0] < '0' || text[0] > '9') return false;
+    if (token->length > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'o')) {
+        base = text[1] == 'x' ? 16 : 8;
+        text += 2;
+    } else if (token->length > 2 && stop[-1] == 'B' && (stop[-2] == 'K' || stop[-2] == 'M')) {
+        multiplier = stop[-2] == 'K' ? 1024 : 1024 * 1024;
+        stop -= 2;
+    }
+    for (const uint8_t *at = text; at < stop; ++at) {
+        unsigned d = *at >= '0' && *at <= '9' ? (unsigned)(*at - '0') : *at >= 'a' && *at <= 'f' ? (unsigned)(*at - 'a' + 10) : *at >= 'A' && *at <= 'F' ? (unsigned)(*at - 'A' + 10) : 99;
+        if (*at == '_' && digit) continue;
+        if (d >= base) return false;
+        digit = true;
+        if (value > (UINT64_MAX - d) / base) return false;
+        value = value * base + d;
+    }
+    if (!digit || value > UINT64_MAX / multiplier) return false;
+    value *= multiplier;
+    *bits = (int64_t)value;
+    *is_unsigned = value > (uint64_t)INT64_MAX;
     return true;
+}
+
+static size_t yx_fix_const_expr(yx_fix_const_parser *p, unsigned min_bp);
+
+static size_t yx_fix_const_term(yx_fix_const_parser *p)
+{
+    const yx_dep_token *token;
+    size_t node, operand, start;
+    if (p->at >= p->end || ++p->depth > 200) return SIZE_MAX;
+    token = &p->tokens->items[p->at];
+    start = (size_t)(token->text - p->source);
+    if (yx_dep_symbol(token, '(')) {
+        ++p->at;
+        node = yx_fix_const_expr(p, 0);
+        if (node == SIZE_MAX || p->at >= p->end || !yx_dep_symbol(&p->tokens->items[p->at], ')')) return SIZE_MAX;
+        ++p->at;
+    } else if (yx_dep_symbol(token, '-') || yx_dep_symbol(token, '~')) {
+        ++p->at;
+        operand = yx_fix_const_term(p);
+        if (operand == SIZE_MAX) return SIZE_MAX;
+        if (token->text[0] == '-' && p->nodes[operand].kind == 'n' && !memchr(p->source + start, '(', p->nodes[operand].end - start)) {
+            yx_fix_const_node *literal = &p->nodes[operand];
+            /* -9223372036854775809 and below: an invalid integer. */
+            if (literal->is_unsigned && literal->bits != INT64_MIN) return SIZE_MAX;
+            if (literal->is_unsigned || literal->bits > 0) {
+                literal->bits = literal->is_unsigned ? INT64_MIN : -literal->bits;
+                literal->is_unsigned = false;
+                literal->start = start;
+                --p->depth;
+                return operand;
+            }
+        }
+        node = yx_fix_const_node_new(p, token->text[0] == '-' ? 'm' : '~', start, start);
+        if (node == SIZE_MAX) return SIZE_MAX;
+        yx_fix_const_node_add(p, node, operand);
+    } else {
+        int64_t bits;
+        bool is_unsigned;
+        if (!yx_fix_const_literal(token, &bits, &is_unsigned)) return SIZE_MAX;
+        node = yx_fix_const_node_new(p, 'n', start, start + token->length);
+        if (node == SIZE_MAX) return SIZE_MAX;
+        p->nodes[node].bits = bits;
+        p->nodes[node].is_unsigned = is_unsigned;
+        ++p->at;
+    }
+    --p->depth;
+    return node;
+}
+
+/* The arithmetic or bitwise operator at the parser's position: its kind,
+ * binding powers and token count (`<<` and `>>` are two tokens); 0: none. */
+static char yx_fix_const_operator(const yx_fix_const_parser *p, unsigned *left, unsigned *right, size_t *width)
+{
+    const yx_dep_token *token;
+    char ch;
+    if (p->at >= p->end) return 0;
+    token = &p->tokens->items[p->at];
+    if (token->kind != YX_DEP_SYMBOL || token->length != 1) return 0;
+    ch = (char)token->text[0];
+    *width = 1;
+    switch (ch) {
+    case '|': *left = 9; break;
+    case '^': *left = 11; break;
+    case '&': *left = 13; break;
+    case '+': case '-': *left = 17; break;
+    case '*': case '\\': case '%': *left = 19; break;
+    case '<': case '>':
+        if (p->at + 1 >= p->end || !yx_dep_symbol(&p->tokens->items[p->at + 1], ch) || p->tokens->items[p->at + 1].text != token->text + 1) return 0;
+        *left = 15;
+        *width = 2;
+        break;
+    default: return 0;
+    }
+    *right = *left + 1;
+    return ch;
+}
+
+static size_t yx_fix_const_expr(yx_fix_const_parser *p, unsigned min_bp)
+{
+    size_t lhs, rhs, width;
+    unsigned left, right;
+    char op;
+    if (++p->depth > 200) return SIZE_MAX;
+    lhs = yx_fix_const_term(p);
+    while (lhs != SIZE_MAX && (op = yx_fix_const_operator(p, &left, &right, &width)) != 0 && left >= min_bp) {
+        p->at += width;
+        rhs = yx_fix_const_expr(p, right);
+        if (rhs == SIZE_MAX) return SIZE_MAX;
+        /* `a + b + c` is one n-ary node, but `<<`, `&` ... are binary. */
+        if (!(strchr("+-*\\%", op) && p->nodes[lhs].kind == op && p->nodes[lhs].first != SIZE_MAX)) {
+            size_t node = yx_fix_const_node_new(p, op, p->nodes[lhs].start, p->nodes[lhs].end);
+            if (node == SIZE_MAX) return SIZE_MAX;
+            yx_fix_const_node_add(p, node, lhs);
+            lhs = node;
+        }
+        yx_fix_const_node_add(p, lhs, rhs);
+    }
+    --p->depth;
+    return lhs;
+}
+
+/* The folded value of node, false when it is not a constant (or folding
+ * fails with a compile error). */
+static bool yx_fix_const_fold(yx_fix_const_parser *p, size_t index, int64_t *bits, bool *is_unsigned, unsigned depth)
+{
+    const yx_fix_const_node *node = &p->nodes[index];
+    int64_t a, b;
+    bool ua, ub;
+    if (depth > 400) return false;
+    if (node->kind == 'n') {
+        *bits = node->bits;
+        *is_unsigned = node->is_unsigned;
+        return true;
+    }
+    if (!yx_fix_const_fold(p, node->first, &a, &ua, depth + 1)) return false;
+    if (node->kind == 'm') {
+        yx_fix_i128 v = yx_fix_i128_negate(yx_fix_i128_of(a, ua));
+        /* The result is signed and must fit an i64. */
+        if (v.hi != (yx_fix_i128_negative(v) ? UINT64_MAX : 0) || yx_fix_i128_negative(v) != ((int64_t)v.lo < 0)) return false;
+        *bits = (int64_t)v.lo;
+        *is_unsigned = false;
+        return true;
+    }
+    if (node->kind == '~') {
+        *bits = (int64_t)~(uint64_t)a;
+        *is_unsigned = ua;
+        return true;
+    }
+    if (node->kind == '+' || node->kind == '-' || node->kind == '*') {
+        yx_fix_i128 acc = yx_fix_i128_of(a, ua);
+        bool any_unsigned = ua;
+        for (size_t c = p->nodes[node->first].next; c != SIZE_MAX; c = p->nodes[c].next) {
+            if (!yx_fix_const_fold(p, c, &b, &ub, depth + 1) || !yx_fix_i128_op(acc, yx_fix_i128_of(b, ub), node->kind, &acc)) return false;
+            any_unsigned = any_unsigned || ub;
+        }
+        if (any_unsigned ? acc.hi != 0 : acc.hi != ((int64_t)acc.lo < 0 ? UINT64_MAX : 0)) return false;
+        *bits = (int64_t)acc.lo;
+        *is_unsigned = any_unsigned;
+        return true;
+    }
+    if (node->kind == '\\' || node->kind == '%') {
+        bool any_unsigned = ua;
+        for (size_t c = p->nodes[node->first].next; c != SIZE_MAX; c = p->nodes[c].next) {
+            if (!yx_fix_const_fold(p, c, &b, &ub, depth + 1) || b == 0) return false;
+            any_unsigned = any_unsigned || ub;
+            if (any_unsigned) a = (int64_t)(node->kind == '\\' ? (uint64_t)a / (uint64_t)b : (uint64_t)a % (uint64_t)b);
+            else if (b == -1) {
+                if (node->kind == '\\' && a == INT64_MIN) return false;
+                a = node->kind == '\\' ? -a : 0;
+            } else a = node->kind == '\\' ? a / b : a % b;
+        }
+        *bits = a;
+        *is_unsigned = any_unsigned;
+        return true;
+    }
+    if (!yx_fix_const_fold(p, node->last, &b, &ub, depth + 1)) return false;
+    if (node->kind == '<' || node->kind == '>') {
+        /* A negative shift is an error; the result has the left's sign. */
+        if (!ub && b < 0) return false;
+        if (ub || b >= 64) a = 0;
+        else if (node->kind == '<') a = (int64_t)((uint64_t)a << b);
+        else if (ua) a = (int64_t)((uint64_t)a >> b);
+        else a = a < 0 ? ~(int64_t)(~(uint64_t)a >> b) : a >> b;
+        *bits = a;
+        *is_unsigned = ua;
+        return true;
+    }
+    *bits = node->kind == '&' ? a & b : node->kind == '|' ? a | b : a ^ b;
+    *is_unsigned = ua || ub;
+    return true;
+}
+
+/* Tokens that can end an operand of `==`: what follows it binds less. */
+static bool yx_fix_operand_follows(const yx_dep_tokens *tokens, size_t index)
+{
+    const yx_dep_token *t = index < tokens->count ? &tokens->items[index] : NULL;
+    if (!t) return true;
+    if ((yx_dep_symbol(t, '=') || yx_dep_symbol(t, '!')) && index + 1 < tokens->count && yx_dep_symbol(&tokens->items[index + 1], '=') &&
+        tokens->items[index + 1].text == t->text + 1)
+        return true;
+    return yx_dep_symbol(t, ')') || yx_dep_symbol(t, '}') || yx_dep_symbol(t, ',') || yx_dep_equal(t, "and") || yx_dep_equal(t, "or");
+}
+
+/* Tokens that can precede an operand of `==` that ends at it. */
+static bool yx_fix_operand_precedes(const yx_dep_tokens *tokens, size_t index)
+{
+    const yx_dep_token *t = index < tokens->count ? &tokens->items[index] : NULL;
+    return t && (yx_dep_symbol(t, '(') || yx_dep_symbol(t, ':') || yx_dep_symbol(t, ',') || yx_dep_equal(t, "and") || yx_dep_equal(t, "or") || yx_dep_equal(t, "not"));
+}
+
+/* Folds the constant operand in tokens [from, to) (to: SIZE_MAX, up to the
+ * first token that is not part of it), which must be a whole operand of
+ * `==`: the token after it must end the operand. */
+static bool yx_fix_integer_operand(const yx_dep_tokens *tokens, const uint8_t *source, size_t from, size_t to, int64_t *bits, bool *is_unsigned, size_t *start,
+                                   size_t *end)
+{
+    yx_fix_const_parser p = {tokens, source, from, to == SIZE_MAX ? tokens->count : to, 0, NULL, 0, 0};
+    size_t root = yx_fix_const_expr(&p, 0);
+    bool ok = root != SIZE_MAX && (to == SIZE_MAX ? yx_fix_operand_follows(tokens, p.at) : p.at == to) && yx_fix_const_fold(&p, root, bits, is_unsigned, 0);
+    if (ok) {
+        *start = p.nodes[root].start;
+        *end = p.nodes[root].end;
+    }
+    free(p.nodes);
+    return ok;
+}
+
+/* The first token of the constant operand that ends before index `to`:
+ * the walk back stops at the first token that cannot be part of one, which
+ * must be one that precedes an operand. SIZE_MAX: none. */
+static size_t yx_fix_integer_operand_start(const yx_dep_tokens *tokens, size_t to)
+{
+    size_t depth = 0, k = to;
+    while (k > 0) {
+        const yx_dep_token *t = &tokens->items[k - 1];
+        if (yx_dep_symbol(t, ')')) ++depth;
+        else if (yx_dep_symbol(t, '(')) {
+            if (!depth) break;
+            --depth;
+        } else if (!(t->kind == YX_DEP_OTHER && t->text[0] >= '0' && t->text[0] <= '9') && !(t->kind == YX_DEP_SYMBOL && t->length == 1 && strchr("+-*\\%&|^~<>", t->text[0])))
+            break;
+        --k;
+    }
+    if (k == to || depth || !k || !yx_fix_operand_precedes(tokens, k - 1)) return SIZE_MAX;
+    return k;
 }
 
 static void yx_fix_unsat_pair_warning(const char *path, const uint8_t *source, size_t length, size_t left_start, size_t left_end, size_t right_start, size_t right_end,
@@ -29382,7 +30615,7 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled, boo
         size_t prefix = i, close, literal_index, func_start, func_end;
         size_t literal_start, literal_end, left_start, left_end;
         size_t right_start, right_end;
-        int64_t minimum = 0, maximum = 0, value;
+        int64_t minimum = 0, maximum = 0;
         size_t digest_length = 0, string_length = 0;
         bool hash = false, read = false, literal_left = false;
         bool hash_case = false;
@@ -29412,14 +30645,43 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled, boo
         if (close >= tokens.count) continue;
         func_start = (size_t)(tokens.items[i].text - source);
         func_end = (size_t)(tokens.items[close].text - source) + tokens.items[close].length;
-        if (close + 3 < tokens.count && yx_dep_symbol(&tokens.items[close + 1], '=') && yx_dep_symbol(&tokens.items[close + 2], '=')) {
-            literal_index = close + 3;
-        } else if (prefix >= 3 && yx_dep_symbol(&tokens.items[prefix - 2], '=') && yx_dep_symbol(&tokens.items[prefix - 1], '=')) {
-            literal_index = prefix - 3;
-            literal_left = true;
-        } else continue;
-        literal = &tokens.items[literal_index];
-        if (hash) {
+        if (read) {
+            /* eq_check (ast2ir.rs): the other operand of `==` is a constant
+             * integer once folded, and this call is the whole operand,
+             * parentheses aside: `1 + uint8(0) == 256` is an Add. */
+            size_t first = prefix, last = close;
+            int64_t bits;
+            bool is_unsigned;
+            while (first && last + 1 < tokens.count && yx_dep_symbol(&tokens.items[first - 1], '(') && yx_dep_symbol(&tokens.items[last + 1], ')')) {
+                --first;
+                ++last;
+            }
+            if (last + 2 < tokens.count && yx_dep_symbol(&tokens.items[last + 1], '=') && yx_dep_symbol(&tokens.items[last + 2], '=') && first &&
+                yx_fix_operand_precedes(&tokens, first - 1)) {
+                if (!yx_fix_integer_operand(&tokens, source, last + 3, SIZE_MAX, &bits, &is_unsigned, &literal_start, &literal_end)) continue;
+            } else if (first >= 3 && yx_dep_symbol(&tokens.items[first - 2], '=') && yx_dep_symbol(&tokens.items[first - 1], '=') &&
+                       yx_fix_operand_follows(&tokens, last + 1)) {
+                size_t from = yx_fix_integer_operand_start(&tokens, first - 2);
+                if (from == SIZE_MAX || !yx_fix_integer_operand(&tokens, source, from, first - 2, &bits, &is_unsigned, &literal_start, &literal_end)) continue;
+                literal_left = true;
+            } else continue;
+            if ((!is_unsigned || bits >= 0) && bits >= minimum && bits <= maximum) continue;
+            snprintf(function_message, sizeof(function_message),
+                     "this expression is an integer in the range "
+                     "[%" PRId64 ",%" PRId64 "]",
+                     minimum, maximum);
+            snprintf(literal_message, sizeof(literal_message),
+                     "this integer is outside the range "
+                     "[%" PRId64 ",%" PRId64 "]",
+                     minimum, maximum);
+        } else {
+            if (close + 3 < tokens.count && yx_dep_symbol(&tokens.items[close + 1], '=') && yx_dep_symbol(&tokens.items[close + 2], '=')) {
+                literal_index = close + 3;
+            } else if (prefix >= 3 && yx_dep_symbol(&tokens.items[prefix - 2], '=') && yx_dep_symbol(&tokens.items[prefix - 1], '=')) {
+                literal_index = prefix - 3;
+                literal_left = true;
+            } else continue;
+            literal = &tokens.items[literal_index];
             if (literal->length < 2 || literal->text[0] != '"' || literal->text[literal->length - 1] != '"' || memchr(literal->text + 1, '\\', literal->length - 2))
                 continue;
             string_length = literal->length - 2;
@@ -29437,17 +30699,6 @@ static bool yx_fix_warn_unsat_lengths_ranges(const char *path, bool enabled, boo
                 snprintf(function_message, sizeof(function_message), "the length of this string is %zu", digest_length);
                 snprintf(literal_message, sizeof(literal_message), "the length of this string is %zu", string_length);
             }
-        } else {
-            if (!yx_fix_integer_literal(&tokens, literal_index, literal_left, &value, &literal_start, &literal_end, source) || (value >= minimum && value <= maximum))
-                continue;
-            snprintf(function_message, sizeof(function_message),
-                     "this expression is an integer in the range "
-                     "[%" PRId64 ",%" PRId64 "]",
-                     minimum, maximum);
-            snprintf(literal_message, sizeof(literal_message),
-                     "this integer is outside the range "
-                     "[%" PRId64 ",%" PRId64 "]",
-                     minimum, maximum);
         }
         left_start = literal_left ? literal_start : func_start;
         left_end = literal_left ? literal_end : func_end;

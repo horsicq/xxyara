@@ -3595,27 +3595,10 @@ static bool yx_unknown_module_condition_error(yx_parser *p, const char *start, c
             continue;
         }
         if (*cursor == '/') {
-            const char *word_end = cursor;
-            const char *word_start;
-            bool in_class = false;
-            word_end = yx_condition_code_before(start, word_end);
-            word_start = word_end;
-            while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
-            if ((size_t)(word_end - word_start) == 7 && memcmp(word_start, "matches", 7) == 0) {
-                ++cursor;
-                while (cursor < p->at) {
-                    if (*cursor == '\\' && cursor + 1 < p->at) {
-                        cursor += 2;
-                        continue;
-                    }
-                    if (*cursor == '[') in_class = true;
-                    else if (*cursor == ']') in_class = false;
-                    else if (*cursor == '/' && !in_class) {
-                        ++cursor;
-                        break;
-                    }
-                    ++cursor;
-                }
+            /* A regexp literal, after `matches` or as an argument. */
+            const char *regexp_end = yx_regexp_literal_end(cursor, p->at);
+            if (regexp_end) {
+                cursor = regexp_end;
                 continue;
             }
         }
@@ -3758,27 +3741,10 @@ static bool yx_unknown_pattern_condition_error(yx_parser *p, const char *start, 
             continue;
         }
         if (*cursor == '/') {
-            const char *word_end = cursor;
-            const char *word_start;
-            bool in_class = false;
-            word_end = yx_condition_code_before(start, word_end);
-            word_start = word_end;
-            while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
-            if ((size_t)(word_end - word_start) == 7 && memcmp(word_start, "matches", 7) == 0) {
-                ++cursor;
-                while (cursor < p->at) {
-                    if (*cursor == '\\' && cursor + 1 < p->at) {
-                        cursor += 2;
-                        continue;
-                    }
-                    if (*cursor == '[') in_class = true;
-                    else if (*cursor == ']') in_class = false;
-                    else if (*cursor == '/' && !in_class) {
-                        ++cursor;
-                        break;
-                    }
-                    ++cursor;
-                }
+            /* A regexp literal, after `matches` or as an argument. */
+            const char *regexp_end = yx_regexp_literal_end(cursor, p->at);
+            if (regexp_end) {
+                cursor = regexp_end;
                 continue;
             }
         }
@@ -3818,25 +3784,12 @@ static const char *yx_condition_skip_noncode(const char *cursor, const char *sta
         return cursor < end ? cursor + 1 : end;
     }
     if (*cursor == '/') {
-        const char *word_end = cursor;
-        const char *word_start;
-        bool in_class = false;
-        word_end = yx_condition_code_before(start, word_end);
-        word_start = word_end;
-        while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
-        if ((size_t)(word_end - word_start) != 7 || memcmp(word_start, "matches", 7) != 0) return cursor;
-        ++cursor;
-        while (cursor < end) {
-            if (*cursor == '\\' && cursor + 1 < end) {
-                cursor += 2;
-                continue;
-            }
-            if (*cursor == '[') in_class = true;
-            else if (*cursor == ']') in_class = false;
-            else if (*cursor == '/' && !in_class) return cursor + 1;
-            ++cursor;
-        }
-        return end;
+        /* The tokenizer reads a regexp literal wherever a `/` opens no
+         * comment (yx_regexp_literal_end): after `matches`, as a function
+         * argument, after an operator. */
+        const char *regexp_end = yx_regexp_literal_end(cursor, end);
+        (void)start;
+        return regexp_end ? regexp_end : cursor;
     }
     return cursor;
 }
@@ -4007,7 +3960,12 @@ static bool yx_condition_diag_tokens(const char *start, const char *end, yx_diag
         }
         tokens[used++] = token;
         next = cursor;
-        if (token.kind == YX_DIAG_SYMBOL && token.start[0] == '/' && used >= 2 && yx_diag_token_is(&tokens[used - 2], "matches")) {
+        if (token.kind == YX_DIAG_SYMBOL && token.start[0] == '/' && !(used >= 2 && yx_diag_token_is(&tokens[used - 2], "matches"))) {
+            /* A regexp literal in any other place (a function argument): one
+             * token with its modifiers, as the tokenizer reads it. */
+            const char *regexp_end = yx_regexp_literal_end(token.start, end);
+            if (regexp_end) tokens[used - 1].end = cursor = regexp_end;
+        } else if (token.kind == YX_DIAG_SYMBOL && token.start[0] == '/') {
             bool in_class = false;
             while (next < end) {
                 if (*next == '\\' && next + 1 < end) {
@@ -7923,25 +7881,10 @@ static int yx_parse_condition_in_scope(yx_parser *p, YRX_RULE *rule)
         name[name_length] = '\0';
         cursor = yx_unknown_identifier_search_start(start, p->at, name, name_length);
         while (cursor < p->at) {
-            const char *word = cursor;
-            if (cursor[0] == '/' && cursor + 1 < p->at && cursor[1] == '/') {
-                cursor += 2;
-                while (cursor < p->at && *cursor != '\n') ++cursor;
-                continue;
-            }
-            if (cursor[0] == '/' && cursor + 1 < p->at && cursor[1] == '*') {
-                cursor += 2;
-                while (cursor + 1 < p->at && !(cursor[0] == '*' && cursor[1] == '/')) ++cursor;
-                cursor = cursor + 1 < p->at ? cursor + 2 : p->at;
-                continue;
-            }
-            if (*cursor == '"' || *cursor == '\'') {
-                char quote = *cursor++;
-                while (cursor < p->at && *cursor != quote) {
-                    if (*cursor == '\\' && cursor + 1 < p->at) ++cursor;
-                    ++cursor;
-                }
-                if (cursor < p->at) ++cursor;
+            /* Comments, strings and regexp literals name no identifier. */
+            const char *word = yx_condition_skip_noncode(cursor, start, p->at);
+            if (word != cursor) {
+                cursor = word;
                 continue;
             }
             /* The name comes from the condition's own lexer and may hold

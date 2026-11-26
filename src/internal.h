@@ -473,6 +473,10 @@ struct YRX_COMPILER {
     /* Global rules among rules->rules[0 .. global_rules_scanned): the rules
      * only grow until build replaces them, which resets both counts. */
     size_t global_rules_scanned, global_rule_count;
+    /* Those global rules by namespace and name: rule index + 1 (0: empty),
+     * open addressing. */
+    uint32_t *global_rule_slots;
+    size_t global_rule_slot_count;
     char error[1024];
 };
 /* A warning the caller will not show (warnings_disabled): not rendered. */
@@ -657,6 +661,8 @@ int yx_compiler_too_many_variables_error(YRX_COMPILER *compiler, const char *sou
 int yx_compiler_warn_deprecated_before(YRX_COMPILER *compiler, const char *condition, const char *source, const char *origin, size_t condition_offset, size_t limit,
                                        size_t first_type_warning);
 void yx_compiler_order_raised_warnings(YRX_COMPILER *compiler, size_t first_type_warning, size_t first_new);
+/* The end of the regexp literal at the `/` at `at`, or NULL (xxyara.c). */
+const char *yx_regexp_literal_end(const char *at, const char *limit);
 bool yx_compiler_json_span(const YRX_COMPILER *compiler, const char *span, size_t *start, size_t *end);
 bool yx_compiler_semantic_error_end(const YRX_COMPILER *compiler, size_t mark, size_t *end);
 bool yx_compiler_semantic_error_span(const YRX_COMPILER *compiler, size_t mark, size_t *start, size_t *end);

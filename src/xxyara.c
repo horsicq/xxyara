@@ -4208,6 +4208,64 @@ int yx_compiler_type_warning(YRX_COMPILER *compiler, const char *source, const c
     return 1;
 }
 
+/* The end of the regexp literal that starts at the `/` at `at`, as the
+ * YARA-X tokenizer reads one (parser/src/tokenizer/mod.rs, NormalToken::
+ * Regexp): `/`, an escape or a character other than `*` `/` `\` and a line
+ * feed, then escapes and characters other than `/` `\` and a line feed, the
+ * closing `/`, and up to two letters. The tokenizer has no `/` operator
+ * (division is `\`): a `/` that opens no comment opens a regexp wherever it
+ * stands, after `matches` or as a function argument alike. NULL when no
+ * literal starts there. Text that ends inside one: `limit`'s caller scans
+ * whole conditions, where that is no literal (NULL); with no `limit` the
+ * text may be a condition cut at a diagnostic, and the rest is the literal. */
+const char *yx_regexp_literal_end(const char *at, const char *limit)
+{
+    const char *cursor = at + 1;
+    bool first = true;
+    for (;; first = false) {
+        if (limit ? cursor >= limit : !*cursor) return limit ? NULL : cursor;
+        if (*cursor == '\n' || (first && (*cursor == '*' || *cursor == '/'))) return NULL;
+        if (*cursor == '/') break;
+        if (*cursor == '\\') {
+            ++cursor;
+            if (limit ? cursor >= limit : !*cursor) return limit ? NULL : cursor;
+            if (*cursor == '\n') return NULL;
+        }
+        ++cursor;
+    }
+    ++cursor;
+    for (unsigned letters = 0; letters < 2 && (limit ? cursor < limit : *cursor != 0) && isalpha((unsigned char)*cursor); ++letters) ++cursor;
+    return cursor;
+}
+
+/* The end of the comment, string or regexp literal that starts at `at`;
+ * `at` itself where code starts. A line comment ends before its line feed. */
+static const char *yx_warning_skip_noncode(const char *at)
+{
+    if (at[0] == '/' && at[1] == '/') {
+        while (*at && *at != '\n') ++at;
+        return at;
+    }
+    if (at[0] == '/' && at[1] == '*') {
+        at += 2;
+        while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
+        return *at ? at + 2 : at;
+    }
+    if (*at == '"') {
+        ++at;
+        while (*at && *at != '"') {
+            if (*at == '\\' && at[1]) ++at;
+            ++at;
+        }
+        return *at ? at + 1 : at;
+    }
+    if (*at == '/') {
+        const char *end = yx_regexp_literal_end(at, NULL);
+        if (end) return end;
+    }
+    return at;
+}
+
 static const char *yx_warning_skip_index(const char *at)
 {
     unsigned depth = 0;
@@ -4254,6 +4312,8 @@ static bool yx_compiler_warn_deprecated_chain(YRX_COMPILER *compiler, const char
 {
     const char *at = after_module;
     *end = at;
+    /* A name bound to an array is indexed first (`d[0].number_of_methods`). */
+    while (scope != YX_DEPRECATED_ROOT && *yx_deprecated_skip_blank(at) == '[') at = yx_warning_skip_index(yx_deprecated_skip_blank(at));
     while (*at) {
         const char *field_start, *field_end;
         size_t length;
@@ -4288,11 +4348,9 @@ static bool yx_compiler_warn_deprecated_chain(YRX_COMPILER *compiler, const char
         else if (scope == YX_DEPRECATED_DOTNET_CLASS && yx_warning_identifier_is(field_start, length, "methods")) scope = YX_DEPRECATED_DOTNET_METHOD;
         else scope = YX_DEPRECATED_OTHER;
         *end = at;
-        while (isspace((unsigned char)*at)) ++at;
-        while (*at == '[') {
-            at = yx_warning_skip_index(at);
+        while (*yx_deprecated_skip_blank(at) == '[') {
+            at = yx_warning_skip_index(yx_deprecated_skip_blank(at));
             *end = at;
-            while (isspace((unsigned char)*at)) ++at;
         }
     }
     *final_scope = scope;
@@ -4318,26 +4376,10 @@ typedef struct {
 static const char *yx_deprecated_scan(const char *at, bool separators)
 {
     unsigned depth = 0;
-    bool next_regex = false;
     while (*at) {
-        if (at[0] == '/' && at[1] == '/') {
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || (*at == '/' && next_regex)) {
-            char terminator = *at++;
-            while (*at && *at != terminator) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            next_regex = false;
+        const char *code = yx_warning_skip_noncode(at);
+        if (code != at) {
+            at = code;
             continue;
         }
         if (isalpha((unsigned char)*at) || *at == '_') {
@@ -4345,7 +4387,6 @@ static const char *yx_deprecated_scan(const char *at, bool separators)
             while (isalnum((unsigned char)*at) || *at == '_') ++at;
             if (separators && !depth && (yx_warning_identifier_is(word, (size_t)(at - word), "for") || yx_warning_identifier_is(word, (size_t)(at - word), "with")))
                 return NULL;
-            next_regex = yx_warning_identifier_is(word, (size_t)(at - word), "matches");
             continue;
         }
         if (*at == '(' || *at == '[') ++depth;
@@ -4353,10 +4394,19 @@ static const char *yx_deprecated_scan(const char *at, bool separators)
             if (!depth) return separators || *at != ')' ? NULL : at;
             --depth;
         } else if (separators && !depth && (*at == ',' || *at == ':')) return at;
-        if (!isspace((unsigned char)*at)) next_regex = false;
         ++at;
     }
     return NULL;
+}
+
+/* The end of the body opened before `at`: its `)`, or the end of a text
+ * that stops inside it (a condition cut at the diagnostic of a rule that
+ * fails, yx_compiler_warn_deprecated_before: the names bound for the body
+ * stay bound up to there). */
+static const char *yx_deprecated_body_end(const char *at)
+{
+    const char *end = yx_deprecated_scan(at, false);
+    return end ? end : at + strlen(at);
 }
 
 static const yx_deprecated_alias *yx_deprecated_alias_at(const yx_deprecated_alias *aliases, size_t count, const char *name, size_t length)
@@ -4378,56 +4428,169 @@ static const char *yx_deprecated_module(const YRX_COMPILER *compiler, const char
     return module && yx_warning_module_imported(compiler, module) ? module : NULL;
 }
 
+/* The scanners below read a condition forwards and keep the last two code
+ * characters (`"` for a string or regexp literal, `a` for a word) in `seen`:
+ * what stands before a name whatever white space and comments lie between,
+ * which a backward look from the name cannot tell (a line comment may end in
+ * `*` `/`). */
+static void yx_warning_seen(char seen[2], char code)
+{
+    seen[0] = seen[1];
+    seen[1] = code;
+}
+
+/* Skips the comment, string or regexp literal at `*at`, recording a literal
+ * as seen; false where code starts. */
+static bool yx_warning_skip_seen(const char **at, char seen[2])
+{
+    const char *code = yx_warning_skip_noncode(*at);
+    if (code == *at) return false;
+    if (!((*at)[0] == '/' && ((*at)[1] == '/' || (*at)[1] == '*'))) yx_warning_seen(seen, '"');
+    *at = code;
+    return true;
+}
+
+/* A name after a single `.` is a member, comment between or not; after `..`
+ * it is the upper bound of a range. */
+static bool yx_warning_seen_member(const char seen[2])
+{
+    return seen[1] == '.' && seen[0] != '.';
+}
+
+/* Bindings nest: those whose body ends at or before `at` are dropped from
+ * the top, so that a search of the bound names costs the nesting depth, not
+ * the number of `with` and `for` statements read so far. */
+static void yx_deprecated_expire(const yx_deprecated_alias *aliases, size_t *count, const char *at)
+{
+    while (*count && aliases[*count - 1].to && aliases[*count - 1].to <= at) --*count;
+}
+
+/* The module structure that the expression from `value` to `value_end` names
+ * (a module or a bound name and its member chain, nothing else): the alias
+ * receives its module and scope, or a NULL module for any other value. */
+static bool yx_deprecated_value(const YRX_COMPILER *compiler, const yx_deprecated_alias *aliases, size_t count, const char *value, const char *value_end,
+                                yx_deprecated_alias *alias)
+{
+    const char *word, *chain_end = NULL;
+    const yx_deprecated_alias *bound;
+    alias->module = NULL;
+    alias->scope = YX_DEPRECATED_ROOT;
+    value = yx_deprecated_skip_blank(value);
+    word = value;
+    while (isalnum((unsigned char)*value) || *value == '_') ++value;
+    if (value == word || isdigit((unsigned char)*word)) return true;
+    bound = yx_deprecated_alias_at(aliases, count, word, (size_t)(value - word));
+    if (bound) {
+        alias->module = bound->module;
+        alias->scope = bound->scope;
+    } else alias->module = yx_deprecated_module(compiler, word, (size_t)(value - word));
+    if (alias->module && !yx_compiler_warn_deprecated_chain(NULL, alias->module, alias->scope, value, NULL, NULL, NULL, 0, false, &alias->scope, &chain_end)) return false;
+    if (chain_end && yx_deprecated_skip_blank(chain_end) != value_end) alias->module = NULL;
+    return true;
+}
+
+static bool yx_deprecated_alias_add(yx_deprecated_alias **aliases, size_t *count, size_t *capacity, yx_deprecated_alias alias)
+{
+    if (*count == *capacity) {
+        size_t next = *capacity ? *capacity * 2 : 8;
+        yx_deprecated_alias *grown = realloc(*aliases, next * sizeof(*grown));
+        if (!grown) return false;
+        *aliases = grown;
+        *capacity = next;
+    }
+    (*aliases)[(*count)++] = alias;
+    return true;
+}
+
+/* Records the variables of the `for .. in` whose keyword ends at `at`. A
+ * loop over an array of module structures (`dotnet.classes`, `c.methods`,
+ * `macho.file`, a name bound to one) binds its variable to one of them for
+ * the loop's body: YARA-X reads the item's fields through the variable's
+ * symbol, deprecation notices included. Any other loop variable (a range, a
+ * list, the key and value of a map) hides an outer binding of its name. */
+static bool yx_deprecated_for(const YRX_COMPILER *compiler, const char *at, yx_deprecated_alias **aliases, size_t *count, size_t *capacity)
+{
+    const char *cursor = at, *names[2] = {NULL, NULL}, *value_end, *body, *body_end = NULL;
+    size_t lengths[2] = {0, 0}, named = 0;
+    unsigned depth = 0;
+    bool after_comma = false;
+    yx_deprecated_alias alias = {0};
+    /* The quantifier, then `of` (no variable) or the variables and `in`. */
+    for (;;) {
+        const char *code;
+        cursor = yx_deprecated_skip_blank(cursor);
+        if (!*cursor) return true;
+        code = yx_warning_skip_noncode(cursor);
+        if (code != cursor) {
+            cursor = code;
+            after_comma = false;
+            continue;
+        }
+        if (isalpha((unsigned char)*cursor) || *cursor == '_') {
+            const char *word = cursor;
+            size_t length;
+            while (isalnum((unsigned char)*cursor) || *cursor == '_') ++cursor;
+            length = (size_t)(cursor - word);
+            if (depth) continue;
+            if (yx_warning_identifier_is(word, length, "of")) return true;
+            if (yx_warning_identifier_is(word, length, "in")) break;
+            if (!after_comma || named != 1) named = 0;
+            names[named] = word;
+            lengths[named++] = length;
+            after_comma = false;
+            continue;
+        }
+        if (*cursor == '(' || *cursor == '[') ++depth;
+        else if (*cursor == ')' || *cursor == ']') {
+            if (!depth) return true;
+            --depth;
+        }
+        if (!depth) after_comma = *cursor == ',';
+        ++cursor;
+    }
+    if (!named) return true;
+    value_end = yx_deprecated_scan(cursor, true);
+    if (!value_end || *value_end != ':') return true;
+    if (!yx_deprecated_value(compiler, *aliases, *count, cursor, value_end, &alias)) return false;
+    if (named == 2) alias.module = NULL;
+    body = yx_deprecated_skip_blank(value_end + 1);
+    if (*body == '(') body_end = yx_deprecated_body_end(body + 1);
+    alias.from = value_end;
+    alias.to = body_end ? body_end : value_end;
+    for (size_t i = 0; i < named; ++i) {
+        alias.name = names[i];
+        alias.length = lengths[i];
+        if (!yx_deprecated_alias_add(aliases, count, capacity, alias)) return false;
+    }
+    return true;
+}
+
 /* Records the declarations of the `with` whose keyword ends at `at`. */
 static bool yx_deprecated_with(const YRX_COMPILER *compiler, const char *at, yx_deprecated_alias **aliases, size_t *count, size_t *capacity)
 {
     size_t first = *count;
     const char *cursor = at, *body_end = NULL;
     for (;;) {
-        const char *name, *value, *value_end, *word, *chain_end = NULL;
-        const yx_deprecated_alias *bound;
+        const char *name, *value, *value_end;
         yx_deprecated_alias alias = {0};
-        while (isspace((unsigned char)*cursor)) ++cursor;
+        cursor = yx_deprecated_skip_blank(cursor);
         name = cursor;
         if (!isalpha((unsigned char)*cursor) && *cursor != '_') break;
         while (isalnum((unsigned char)*cursor) || *cursor == '_') ++cursor;
         alias.name = name;
         alias.length = (size_t)(cursor - name);
-        while (isspace((unsigned char)*cursor)) ++cursor;
+        cursor = yx_deprecated_skip_blank(cursor);
         if (*cursor != '=' || cursor[1] == '=') break;
         value = ++cursor;
         value_end = yx_deprecated_scan(value, true);
         if (!value_end) break;
-        while (isspace((unsigned char)*value)) ++value;
-        word = value;
-        while (isalnum((unsigned char)*value) || *value == '_') ++value;
-        if (value > word && !isdigit((unsigned char)*word)) {
-            bound = yx_deprecated_alias_at(*aliases, *count, word, (size_t)(value - word));
-            if (bound) {
-                alias.module = bound->module;
-                alias.scope = bound->scope;
-            } else {
-                alias.module = yx_deprecated_module(compiler, word, (size_t)(value - word));
-                alias.scope = YX_DEPRECATED_ROOT;
-            }
-            if (alias.module && !yx_compiler_warn_deprecated_chain(NULL, alias.module, alias.scope, value, NULL, NULL, NULL, 0, false, &alias.scope, &chain_end))
-                return false;
-            while (chain_end && isspace((unsigned char)*chain_end)) ++chain_end;
-            if (chain_end != value_end) alias.module = NULL;
-        }
+        if (!yx_deprecated_value(compiler, *aliases, *count, value, value_end, &alias)) return false;
         alias.from = value_end;
-        if (*count == *capacity) {
-            size_t next = *capacity ? *capacity * 2 : 8;
-            yx_deprecated_alias *grown = realloc(*aliases, next * sizeof(*grown));
-            if (!grown) return false;
-            *aliases = grown;
-            *capacity = next;
-        }
-        (*aliases)[(*count)++] = alias;
+        if (!yx_deprecated_alias_add(aliases, count, capacity, alias)) return false;
         cursor = value_end + 1;
         if (*value_end == ',') continue;
-        while (isspace((unsigned char)*cursor)) ++cursor;
-        if (*cursor == '(') body_end = yx_deprecated_scan(cursor + 1, false);
+        cursor = yx_deprecated_skip_blank(cursor);
+        if (*cursor == '(') body_end = yx_deprecated_body_end(cursor + 1);
         break;
     }
     for (size_t i = first; i < *count; ++i) (*aliases)[i].to = body_end ? body_end : (*aliases)[i].from;
@@ -4437,52 +4600,38 @@ static bool yx_deprecated_with(const YRX_COMPILER *compiler, const char *at, yx_
 static bool yx_compiler_warn_deprecated_fields(YRX_COMPILER *compiler, const char *condition, const char *source, const char *origin, size_t condition_offset)
 {
     const char *at = condition;
-    bool next_regex = false;
     yx_deprecated_alias *aliases = NULL;
     size_t alias_count = 0, alias_capacity = 0;
     bool ok = false;
+    char seen[2] = {0, 0};
     while (*at) {
         const char *start;
         size_t length;
         const char *module = NULL;
-        if (at[0] == '/' && at[1] == '/') {
-            at += 2;
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || (*at == '/' && next_regex)) {
-            char terminator = *at++;
-            while (*at && *at != terminator) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            next_regex = false;
-            continue;
-        }
+        bool member;
+        if (yx_warning_skip_seen(&at, seen)) continue;
         if (!isalpha((unsigned char)*at) && *at != '_') {
-            if (!isspace((unsigned char)*at)) next_regex = false;
+            if (!isspace((unsigned char)*at)) yx_warning_seen(seen, *at);
             ++at;
             continue;
         }
         start = at++;
         while (isalnum((unsigned char)*at) || *at == '_') ++at;
         length = (size_t)(at - start);
-        if (yx_warning_identifier_is(start, length, "matches")) next_regex = true;
-        else next_regex = false;
         /* A '.' before the name is a member access, but `..` is the range
          * operator: `(0..pe.number_of_signatures)` uses the module. */
-        if (start > condition && (isalnum((unsigned char)start[-1]) || start[-1] == '_' || (start[-1] == '.' && !(start - 1 > condition && start[-2] == '.')) ||
-                                  start[-1] == '$' || start[-1] == '#' || start[-1] == '@' || start[-1] == '!'))
+        member = yx_warning_seen_member(seen);
+        yx_warning_seen(seen, 'a');
+        if (member || (start > condition && (isalnum((unsigned char)start[-1]) || start[-1] == '_' || start[-1] == '$' || start[-1] == '#' || start[-1] == '@' ||
+                                             start[-1] == '!')))
             continue;
+        yx_deprecated_expire(aliases, &alias_count, start);
         if (yx_warning_identifier_is(start, length, "with")) {
             if (!yx_deprecated_with(compiler, at, &aliases, &alias_count, &alias_capacity)) goto done;
+            continue;
+        }
+        if (yx_warning_identifier_is(start, length, "for")) {
+            if (!yx_deprecated_for(compiler, at, &aliases, &alias_count, &alias_capacity)) goto done;
             continue;
         }
         /* A field read through a name bound to a module structure. */
@@ -4636,6 +4785,55 @@ void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first, size_
     compiler->warning_count = kept;
 }
 
+static size_t yx_global_rule_hash(const char *name, size_t length, size_t namespace_index)
+{
+    uint64_t hash = UINT64_C(1469598103934665603) ^ (uint64_t)namespace_index;
+    for (size_t i = 0; i < length; ++i) hash = (hash ^ (unsigned char)name[i]) * UINT64_C(1099511628211);
+    return (size_t)(hash ^ (hash >> 32));
+}
+
+/* Adds rules->rules[index], a global rule, to the compiler's table of them. */
+static bool yx_global_rule_add(YRX_COMPILER *compiler, size_t index)
+{
+    const YRX_RULE *rules = compiler->rules->rules;
+    size_t mask, at;
+    if (index >= UINT32_MAX - 1) return false;
+    if ((compiler->global_rule_count + 1) * 2 > compiler->global_rule_slot_count) {
+        size_t count = compiler->global_rule_slot_count ? compiler->global_rule_slot_count * 2 : 64;
+        uint32_t *slots = count > compiler->global_rule_slot_count ? calloc(count, sizeof(*slots)) : NULL;
+        if (!slots) return false;
+        for (size_t i = 0; i < compiler->global_rule_slot_count; ++i) {
+            const YRX_RULE *rule;
+            if (!compiler->global_rule_slots[i]) continue;
+            rule = &rules[compiler->global_rule_slots[i] - 1];
+            at = yx_global_rule_hash(rule->identifier, strlen(rule->identifier), rule->namespace_index) & (count - 1);
+            while (slots[at]) at = (at + 1) & (count - 1);
+            slots[at] = compiler->global_rule_slots[i];
+        }
+        free(compiler->global_rule_slots);
+        compiler->global_rule_slots = slots;
+        compiler->global_rule_slot_count = count;
+    }
+    mask = compiler->global_rule_slot_count - 1;
+    at = yx_global_rule_hash(rules[index].identifier, strlen(rules[index].identifier), rules[index].namespace_index) & mask;
+    while (compiler->global_rule_slots[at]) at = (at + 1) & mask;
+    compiler->global_rule_slots[at] = (uint32_t)(index + 1);
+    ++compiler->global_rule_count;
+    return true;
+}
+
+/* The global rule of the current namespace with this name, or NULL. */
+static const YRX_RULE *yx_global_rule_find(const YRX_COMPILER *compiler, const char *name, size_t length)
+{
+    size_t mask = compiler->global_rule_slot_count - 1, at;
+    if (!compiler->global_rule_slot_count) return NULL;
+    for (at = yx_global_rule_hash(name, length, compiler->current_namespace_index) & mask; compiler->global_rule_slots[at]; at = (at + 1) & mask) {
+        const YRX_RULE *rule = &compiler->rules->rules[compiler->global_rule_slots[at] - 1];
+        if (rule->namespace_index == compiler->current_namespace_index && strncmp(rule->identifier, name, length) == 0 && !rule->identifier[length]) return rule;
+    }
+    return NULL;
+}
+
 /* References to a global rule are redundant because that rule is already a
  * prerequisite for every match. Inspect identifiers after semantic
  * validation, so text in strings, comments, and regular expressions cannot
@@ -4643,66 +4841,69 @@ void yx_compiler_drop_warnings_after(YRX_COMPILER *compiler, size_t first, size_
 static bool yx_compiler_warn_global_rule_references(YRX_COMPILER *compiler, const char *condition, const char *source, const char *origin, size_t condition_offset)
 {
     const char *at = condition;
-    bool next_regex = false;
+    yx_deprecated_alias *bound = NULL;
+    size_t bound_count = 0, bound_capacity = 0;
+    bool ok = false;
+    char seen[2] = {0, 0};
     /* Only a global rule draws this warning, and most rule sets have none:
-     * count them incrementally instead of scanning every earlier rule for
-     * each identifier of every condition (quadratic in the rule count). */
-    if (compiler->global_rules_scanned > compiler->rules->rule_count) compiler->global_rules_scanned = compiler->global_rule_count = 0;
+     * table them incrementally instead of scanning every earlier rule for
+     * each identifier of every condition (quadratic in the rule count; the
+     * identifiers of a condition then cost one probe each). */
+    if (compiler->global_rules_scanned > compiler->rules->rule_count) {
+        compiler->global_rules_scanned = compiler->global_rule_count = 0;
+        if (compiler->global_rule_slots) memset(compiler->global_rule_slots, 0, compiler->global_rule_slot_count * sizeof(*compiler->global_rule_slots));
+    }
     for (; compiler->global_rules_scanned < compiler->rules->rule_count; ++compiler->global_rules_scanned)
-        if (compiler->rules->rules[compiler->global_rules_scanned].is_global) ++compiler->global_rule_count;
+        if (compiler->rules->rules[compiler->global_rules_scanned].is_global && !yx_global_rule_add(compiler, compiler->global_rules_scanned)) return false;
     if (!compiler->global_rule_count) return true;
     while (*at) {
         const char *start;
         size_t length;
-        if (at[0] == '/' && at[1] == '/') {
-            at += 2;
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || (*at == '/' && next_regex)) {
-            char terminator = *at++;
-            while (*at && *at != terminator) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            next_regex = false;
-            continue;
-        }
+        bool declared = false, member;
+        if (yx_warning_skip_seen(&at, seen)) continue;
         if (!isalpha((unsigned char)*at) && *at != '_') {
-            if (!isspace((unsigned char)*at)) next_regex = false;
+            if (!isspace((unsigned char)*at)) yx_warning_seen(seen, *at);
             ++at;
             continue;
         }
         start = at++;
         while (isalnum((unsigned char)*at) || *at == '_') ++at;
         length = (size_t)(at - start);
-        next_regex = yx_warning_identifier_is(start, length, "matches");
-        if (start > condition &&
-            (isalnum((unsigned char)start[-1]) || start[-1] == '_' || start[-1] == '.' || start[-1] == '$' || start[-1] == '#' || start[-1] == '@' || start[-1] == '!'))
+        /* A member read, with or without white space and comments between
+         * the `.` and the name (`pe . machine`). */
+        member = yx_warning_seen_member(seen);
+        yx_warning_seen(seen, 'a');
+        if (member || (start > condition && (isalnum((unsigned char)start[-1]) || start[-1] == '_' || start[-1] == '.' || start[-1] == '$' || start[-1] == '#' ||
+                                             start[-1] == '@' || start[-1] == '!')))
             continue;
-        for (size_t i = 0; i < compiler->rules->rule_count; ++i) {
-            const YRX_RULE *rule = &compiler->rules->rules[i];
-            size_t offset;
-            if (!rule->is_global || strlen(rule->identifier) != length || memcmp(rule->identifier, start, length) != 0 ||
-                rule->namespace_index != compiler->current_namespace_index)
-                continue;
-            offset = condition_offset + (size_t)(start - condition);
+        yx_deprecated_expire(bound, &bound_count, start);
+        /* A variable of a `with` or a loop hides a rule of its name in the
+         * body (the symbol YARA-X looks up is the variable), and is not a
+         * reference where it is declared. */
+        if (yx_warning_identifier_is(start, length, "with")) {
+            if (!yx_deprecated_with(compiler, at, &bound, &bound_count, &bound_capacity)) goto done;
+            continue;
+        }
+        if (yx_warning_identifier_is(start, length, "for")) {
+            if (!yx_deprecated_for(compiler, at, &bound, &bound_count, &bound_capacity)) goto done;
+            continue;
+        }
+        if (yx_deprecated_alias_at(bound, bound_count, start, length)) continue;
+        for (size_t i = bound_count; i-- > 0 && !declared;) declared = bound[i].name == start;
+        if (declared) continue;
+        if (yx_global_rule_find(compiler, start, length)) {
+            size_t offset = condition_offset + (size_t)(start - condition);
             if (!yx_compiler_warning(compiler, "GlobalRuleMisuse", "global_rule_misuse", "global rule used in condition",
                                      "a global rule is being used as part of an condition", source, origin, offset, offset + length,
                                      "referencing a global rule in a condition is redundant, "
                                      "and may result in an unsatisfiable condition"))
-                return false;
-            break;
+                goto done;
         }
     }
-    return true;
+    ok = true;
+done:
+    free(bound);
+    return ok;
 }
 
 static void yx_free_compiler_policies(YRX_COMPILER *compiler)
@@ -7548,50 +7749,33 @@ int yx_compiler_skip_ignored_rule(YRX_COMPILER *compiler, const char *condition,
                                   const char *origin, size_t condition_offset)
 {
     const char *at = condition;
-    bool next_regex = false;
+    char seen[2] = {0, 0};
     while (*at) {
-        const char *start, *module = NULL;
-        bool indirect = false;
+        const char *start, *after, *module = NULL;
+        bool indirect = false, member;
         char *name;
         size_t length, span_start, span_end;
         char title[512], label[512], note[512];
-        if (at[0] == '/' && at[1] == '/') {
-            at += 2;
-            while (*at && *at != '\n') ++at;
-            continue;
-        }
-        if (at[0] == '/' && at[1] == '*') {
-            at += 2;
-            while (*at && !(at[0] == '*' && at[1] == '/')) ++at;
-            if (*at) at += 2;
-            continue;
-        }
-        if (*at == '"' || (*at == '/' && next_regex)) {
-            char terminator = *at++;
-            while (*at && *at != terminator) {
-                if (*at == '\\' && at[1]) ++at;
-                ++at;
-            }
-            if (*at) ++at;
-            next_regex = false;
-            continue;
-        }
+        if (yx_warning_skip_seen(&at, seen)) continue;
         if (!(isalpha((unsigned char)*at) || *at == '_') || (at > condition && (at[-1] == '$' || at[-1] == '#' || at[-1] == '@' || at[-1] == '!'))) {
-            if (!isspace((unsigned char)*at)) next_regex = false;
+            if (!isspace((unsigned char)*at)) yx_warning_seen(seen, *at);
             ++at;
             continue;
         }
         start = at++;
         while (isalnum((unsigned char)*at) || *at == '_') ++at;
         length = (size_t)(at - start);
+        /* What stands around the name, white space and comments aside. */
+        member = seen[1] == '.';
+        yx_warning_seen(seen, 'a');
+        after = yx_deprecated_skip_blank(at);
         name = (char *)malloc(length + 1);
         if (!name) goto memory_failure;
         memcpy(name, start, length);
         name[length] = '\0';
-        if (strcmp(name, "matches") == 0) next_regex = true;
-        else {
+        if (strcmp(name, "matches") != 0) {
             module = yx_ignored_import_module(compiler, name, namespace_name);
-            if (!module && (at[0] == '.' || at[0] == '(' || at[0] == '[') && (start == condition || start[-1] != '.')) {
+            if (!module && (after[0] == '.' || after[0] == '(' || after[0] == '[') && !member) {
                 /* An ignored module used without its import. */
                 yx_module_policy *policy = yx_find_module_policy(compiler, name);
                 bool imported = false, declared = false;
@@ -7611,7 +7795,6 @@ int yx_compiler_skip_ignored_rule(YRX_COMPILER *compiler, const char *condition,
                 module = yx_ignored_dependency_module(compiler, name, namespace_name);
                 indirect = module != NULL;
             }
-            next_regex = false;
         }
         if (!module) {
             free(name);
@@ -8997,7 +9180,12 @@ static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler, con
          * operand, the body) comes first. */
         yx_compiler_move_before_later(compiler, first_type_warning, i, position);
     }
+    /* YARA-X raises global_rule_misuse where it looks the identifier up:
+     * in source order with the deprecations and before the typed warnings
+     * raised later, as for a rule that fails (see above). */
+    first_deprecated = compiler->warning_count;
     if (!yx_compiler_warn_global_rule_references(compiler, condition, source, origin, condition_offset)) goto memory_failure;
+    yx_compiler_order_raised_warnings(compiler, first_type_warning, first_deprecated);
     expanded = yx_inv_expand_condition(condition);
     if (expanded) {
         parser.source = expanded;
@@ -12268,27 +12456,64 @@ static bool yx_make_views(YRX_SCANNER *scanner)
     return true;
 }
 
-static bool yx_append_match(YRX_PATTERN *pattern, YRX_MATCH match)
+/* Room for `total` matches, growing as appends always did (8, then twice). */
+static bool yx_reserve_matches(YRX_PATTERN *pattern, size_t total)
 {
-    size_t i;
+    size_t capacity = pattern->match_capacity;
     YRX_MATCH *grown;
-    size_t capacity;
-    for (i = 0; i < pattern->match_count; ++i)
-        if (pattern->matches[i].offset == match.offset) {
-            if (match.length > pattern->matches[i].length) pattern->matches[i].length = match.length;
-            return true;
-        }
-    if (pattern->match_count < pattern->match_capacity) {
-        pattern->matches[pattern->match_count++] = match;
-        return true;
+    if (total <= capacity) return true;
+    while (capacity < total) {
+        size_t next = capacity ? capacity * 2 : 8;
+        if (next <= capacity) return false;
+        capacity = next;
     }
-    capacity = pattern->match_capacity ? pattern->match_capacity * 2 : 8;
-    if (capacity <= pattern->match_capacity || capacity > SIZE_MAX / sizeof(*grown)) return false;
+    if (capacity > SIZE_MAX / sizeof(*grown)) return false;
     grown = (YRX_MATCH *)realloc(pattern->matches, capacity * sizeof(*grown));
     if (!grown) return false;
     pattern->matches = grown;
     pattern->match_capacity = capacity;
-    pattern->matches[pattern->match_count++] = match;
+    return true;
+}
+
+/* The first stored match at or after `offset`. A block scan keeps the
+ * matches of a pattern ordered by offset, one per offset. */
+static size_t yx_match_lower_bound(const YRX_PATTERN *pattern, size_t offset)
+{
+    size_t low = 0, high = pattern->match_count;
+    if (high && pattern->matches[high - 1].offset < offset) return high;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (pattern->matches[middle].offset < offset) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+/* Stores a run of a block's matches, `count` of them ascending by offset,
+ * as storing them one by one would until the pattern holds `limit`: a
+ * repeated offset (overlapping blocks) keeps the longer length, a new one is
+ * added. One merge with the stored matches from the run's first offset on
+ * (none, when the blocks come in order); `added` is used as scratch. */
+static bool yx_merge_block_matches(YRX_PATTERN *pattern, YRX_MATCH *added, size_t count, size_t limit)
+{
+    size_t stored = pattern->match_count, existing, taken = 0, out;
+    if (!count) return true;
+    existing = yx_match_lower_bound(pattern, added[0].offset);
+    for (size_t k = 0; k < count && stored + taken < limit; ++k) {
+        while (existing < stored && pattern->matches[existing].offset < added[k].offset) ++existing;
+        if (existing < stored && pattern->matches[existing].offset == added[k].offset) {
+            if (added[k].length > pattern->matches[existing].length) pattern->matches[existing].length = added[k].length;
+            continue;
+        }
+        added[taken++] = added[k];
+    }
+    if (!taken) return true;
+    if (!yx_reserve_matches(pattern, stored + taken)) return false;
+    pattern->match_count = out = stored + taken;
+    while (taken) {
+        if (stored && pattern->matches[stored - 1].offset > added[taken - 1].offset) pattern->matches[--out] = pattern->matches[--stored];
+        else pattern->matches[--out] = added[--taken];
+    }
     return true;
 }
 
@@ -12307,7 +12532,7 @@ static int yx_compare_matches(const void *left, const void *right)
  * keeps that order for the scanner's lifetime (matching_rules_per_ns is an
  * IndexMap whose reset only drains the rule lists). Rules are evaluated in
  * declaration order; a false global rule ends its namespace's evaluation.
- * Called with the conditions' results, before global suppression. */
+ * Called with the conditions' results; applies the global suppression. */
 static bool yx_scanner_track_namespaces(YRX_SCANNER *scanner, size_t count)
 {
     size_t namespaces = 0;
@@ -12340,6 +12565,12 @@ static bool yx_scanner_track_namespaces(YRX_SCANNER *scanner, size_t count)
             scanner->namespace_order[scanner->namespace_order_count++] = ns;
         }
     }
+    /* A false global rule leaves no matching rule in its namespace
+     * (scanner/context.rs, track_rule_no_match drains the namespace's
+     * matching rules; those after it are not evaluated). `failed` holds every
+     * namespace with such a rule: one pass, however many of them. */
+    for (size_t i = 0; i < count; ++i)
+        if (failed[scanner->views[i].namespace_index]) scanner->views[i].matched = false;
     free(failed);
     return true;
 }
@@ -12725,15 +12956,6 @@ static YRX_RESULT yx_evaluate_views(YRX_SCANNER *scanner, const uint8_t *data, s
         result = yx_fail(YRX_SCAN_ERROR, "out of memory");
         goto done;
     }
-    /* A false global rule suppresses matches in its namespace. */
-    for (i = 0; i < count; ++i) {
-        const YRX_RULE *global = &scanner->views[i];
-        if (!global->is_global || global->matched) continue;
-        for (j = 0; j < count; ++j) {
-            YRX_RULE *rule = &scanner->views[j];
-            if (global->namespace_index == rule->namespace_index) rule->matched = false;
-        }
-    }
     /* The generated code searches for the patterns before the first
      * pattern operand it evaluates (emit.rs,
      * emit_lazy_call_to_search_for_patterns): when no condition read one,
@@ -12809,6 +13031,7 @@ void yrx_compiler_destroy(YRX_COMPILER *compiler)
     free(compiler->warning_point_values);
     yx_free_globals(compiler->redefined_global_symbols, compiler->redefined_global_symbol_count);
     yx_free_rules(compiler->rules);
+    free(compiler->global_rule_slots);
     yx_rule_name_cache_free(compiler->rule_name_cache);
     yx_slow_pattern_cache_free(compiler->slow_pattern_cache);
     free(compiler->current_namespace);
@@ -13724,6 +13947,9 @@ static YRX_RULES *yx_compiler_build_impl(YRX_COMPILER *compiler, bool prepare_ca
     rules->relaxed_re_syntax = (compiler->flags & YRX_RELAXED_RE_SYNTAX) != 0;
     compiler->rules = replacement;
     compiler->global_rules_scanned = compiler->global_rule_count = 0;
+    free(compiler->global_rule_slots);
+    compiler->global_rule_slots = NULL;
+    compiler->global_rule_slot_count = 0;
     yx_rule_name_cache_free(compiler->rule_name_cache);
     compiler->rule_name_cache = NULL;
     yx_slow_pattern_cache_free(compiler->slow_pattern_cache);
@@ -19577,6 +19803,8 @@ YRX_RESULT yrx_scanner_scan_block(YRX_SCANNER *scanner, size_t base, const uint8
                 free(temporary.matches);
                 continue;
             }
+            size_t kept = 0, runs = 0;
+            bool stored = true, expired = false;
             for (k = 0; k < temporary.match_count; ++k) {
                 YRX_MATCH match = temporary.matches[k];
                 size_t end;
@@ -19588,17 +19816,28 @@ YRX_RESULT yrx_scanner_scan_block(YRX_SCANNER *scanner, size_t base, const uint8
                 end = base + match.offset + match.length;
                 match.offset += base;
                 match.length = end >= match.offset ? end - match.offset : 0;
-                if (!yx_append_match(pattern, match)) {
-                    free(temporary.matches);
-#ifdef XXYARA_ENABLE_PROFILING
-                    yx_profile_add_elapsed(&scanner->rule_profiles[i].pattern_nanoseconds, pattern_started);
-#endif
-                    return yx_fail(YRX_SCAN_ERROR, "out of memory storing block match");
-                }
-                pattern->ever_matched = true;
-                if (pattern->match_count >= limit) break;
+                temporary.matches[kept++] = match;
+            }
+            /* Stored in the order found, one run of ascending offsets at a
+             * time: a block's matches are one run unless its base wraps or
+             * the pattern's scanner reports them out of order. Each run is
+             * one merge with the stored matches, not a search of them all
+             * per match; the deadline is polled between runs. */
+            for (k = 0; k < kept && stored && !expired && pattern->match_count < limit;) {
+                size_t run = k + 1;
+                while (run < kept && temporary.matches[run - 1].offset < temporary.matches[run].offset) ++run;
+                stored = yx_merge_block_matches(pattern, temporary.matches + k, run - k, limit);
+                k = run;
+                if ((++runs & 1023) == 0) expired = yx_scan_deadline_reached(temporary.deadline);
             }
             free(temporary.matches);
+            if (!stored || expired) {
+#ifdef XXYARA_ENABLE_PROFILING
+                yx_profile_add_elapsed(&scanner->rule_profiles[i].pattern_nanoseconds, pattern_started);
+#endif
+                return stored ? yx_fail(YRX_SCAN_TIMEOUT, "timeout") : yx_fail(YRX_SCAN_ERROR, "out of memory storing block match");
+            }
+            if (kept) pattern->ever_matched = true;
         }
 #ifdef XXYARA_ENABLE_PROFILING
         yx_profile_add_elapsed(&scanner->rule_profiles[i].pattern_nanoseconds, pattern_started);

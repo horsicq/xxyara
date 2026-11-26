@@ -29182,7 +29182,9 @@ static bool yx_wasm_patch_body(uint8_t *wasm, size_t start, size_t end,
         uint8_t op;
         if (!yx_get_u8(&r, &op)) return false;
         if (op == 0x02 || op == 0x03 || op == 0x04) {          /* blocktype */
-            uint8_t b = wasm[r.at];
+            uint8_t b;
+            if (r.at >= end) return false;
+            b = wasm[r.at];
             if (b == 0x40 || (b >= 0x6f && b <= 0x7f)) ++r.at;
             else if (!yx_get_uleb(&r, &v)) return false;
         } else if (op == 0x0c || op == 0x0d || (op >= 0x20 && op <= 0x26)) {
@@ -29262,7 +29264,7 @@ static bool yx_wasm_apply_import_order(const uint8_t *data, size_t length,
         ok = yx_get_uleb(&code, &n) && n <= code_end - code.at &&
              yx_wasm_patch_body(wasm, code.at, code.at + (size_t) n, map,
                                 l->function_count);
-        code.at += (size_t) n;
+        if (ok) code.at += (size_t) n;
     }
     ok = ok && code.at == code_end;
     if (ok && l->export_start) {
