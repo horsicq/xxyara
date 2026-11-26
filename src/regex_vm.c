@@ -3152,6 +3152,162 @@ bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t 
     return ok;
 }
 
+/* Bottom-up merge sort for lists far from sorted. False on allocation
+ * failure. */
+static bool yx_rx_merge_listed(uint64_t *items, size_t count)
+{
+    if (count > SIZE_MAX / sizeof(*items)) return false;
+    uint64_t *buffer = malloc(count * sizeof(*items)), *from = items, *to = buffer;
+    if (!buffer) return false;
+    for (size_t width = 1; width < count; width = width > SIZE_MAX / 2 ? count : width * 2) {
+        for (size_t low = 0; low < count; low += 2 * width) {
+            size_t middle = count - low > width ? low + width : count;
+            size_t high = count - middle > width ? middle + width : count;
+            size_t i = low, j = middle, k = low;
+            while (i < middle && j < high) to[k++] = from[j] < from[i] ? from[j++] : from[i++];
+            while (i < middle) to[k++] = from[i++];
+            while (j < high) to[k++] = from[j++];
+            if (high == count) break;
+        }
+        uint64_t *swap = from;
+        from = to;
+        to = swap;
+    }
+    if (from != items) memcpy(items, from, count * sizeof(*items));
+    free(buffer);
+    return true;
+}
+
+/* The ruleset-wide pass lists occurrences by the offset of another window of
+ * the literal, so an occurrence is out of place only among those within a
+ * literal's length of it: insertion sort is linear then. */
+static bool yx_rx_sort_listed(uint64_t *items, size_t count)
+{
+    size_t moves = 0, budget = count < SIZE_MAX / 16 ? 8 * count + 1024 : SIZE_MAX;
+    for (size_t i = 1; i < count; ++i) {
+        uint64_t item = items[i];
+        size_t j = i;
+        if (item >= items[i - 1]) continue;
+        do {
+            items[j] = items[j - 1];
+            --j;
+            ++moves;
+        } while (j && item < items[j - 1]);
+        items[j] = item;
+        if (moves > budget) return yx_rx_merge_listed(items, count);
+    }
+    return true;
+}
+
+/* The next start, with its atom at from[s] or later, where literal s
+ * matches; from[s] is left after that atom. */
+static bool yx_rx_literal_resumed(const yx_rx_literal *literal, const uint8_t *data, size_t size, size_t *from, size_t *start)
+{
+    const yx_rx_atom *atom = literal->sub.atoms;
+    size_t end, position;
+    while (*from <= size && yx_rx_find(data, size, atom, *from, &position)) {
+        *from = position + 1;
+        *start = position - atom->backtrack;
+        if (yx_rx_literal_at(literal, data, size, *start, &end)) return true;
+    }
+    *from = SIZE_MAX;
+    return false;
+}
+
+bool yx_rx_scan_literal_hits(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *list, int order, uint64_t *hits,
+                             size_t count, const size_t *resume)
+{
+    yx_rx_heap heap = {0};
+    size_t literals = set->count, lengths[9] = {0}, steps = 0, next = 0, start;
+    uint64_t resumed_key = UINT64_MAX;
+    bool resuming = resume != NULL;
+    /* Per literal: the distance of the search order's first key (the atom's
+     * end, its offset, or the start: yx_rx_literal_hit) from the start, the
+     * rank among equal keys, where its resumed search goes on; per rank:
+     * the literal. */
+    size_t *deltas = literals && literals <= YX_RX_LITERAL_HIT_LITERALS ? malloc(literals * 4 * sizeof(*deltas)) : NULL;
+    size_t *ranks = deltas ? deltas + literals : NULL, *ranked = deltas ? ranks + literals : NULL, *from = deltas ? ranked + literals : NULL;
+    bool ok = deltas != NULL;
+    for (size_t s = 0; ok && s < literals; ++s) {
+        const yx_rx_atom *atom = set->items[s].sub.atoms;
+        ok = set->items[s].sub.atom_count == 1 && atom->length && atom->length <= 8 && atom->backtrack <= set->items[s].length;
+        if (!ok) break;
+        deltas[s] = order == YX_RX_LITERALS_ANCHORED ? 0 : atom->backtrack + (order == YX_RX_LITERALS_TEDDY ? 0 : atom->length);
+        ++lengths[atom->length];
+        if (resume) from[s] = resume[s] <= size ? resume[s] + atom->backtrack : SIZE_MAX;
+    }
+    if (ok) {
+        /* Aho-Corasick reports the longer of two atoms that end together
+         * first; otherwise, and among equal lengths, the lower index. */
+        size_t bases[9], seen = 0;
+        for (size_t length = 8; length >= 1; --length) {
+            bases[length] = seen;
+            seen += lengths[length];
+        }
+        for (size_t s = 0; s < literals; ++s) {
+            ranks[s] = order == YX_RX_LITERALS_AUTOMATON ? bases[set->items[s].sub.atoms->length]++ : s;
+            ranked[ranks[s]] = s;
+        }
+    }
+    for (size_t i = 0; ok && i < count; ++i) {
+        size_t s = (size_t)(hits[i] & (YX_RX_LITERAL_HIT_LITERALS - 1));
+        uint64_t at = hits[i] >> YX_RX_LITERAL_HIT_SHIFT;
+        ok = s < literals && at <= size && set->items[s].length <= size - at;
+        if (!ok) break;
+        /* A listed occurrence is not searched again. */
+        if (resume && from[s] != SIZE_MAX && at + set->items[s].sub.atoms->backtrack >= from[s]) from[s] = (size_t)at + set->items[s].sub.atoms->backtrack + 1;
+        hits[i] = (at + deltas[s]) << YX_RX_LITERAL_HIT_SHIFT | ranks[s];
+    }
+    ok = ok && yx_rx_sort_listed(hits, count);
+    /* The least first key a resumed occurrence can have: the listed ones
+     * below it come before every resumed one, and the limit may be reached
+     * among them. */
+    for (size_t s = 0; ok && resume && s < literals; ++s)
+        if (from[s] != SIZE_MAX && from[s] - set->items[s].sub.atoms->backtrack + deltas[s] < resumed_key)
+            resumed_key = from[s] - set->items[s].sub.atoms->backtrack + deltas[s];
+    while (ok && !list->limit_reached) {
+        if (resuming && (next >= count || hits[next] >> YX_RX_LITERAL_HIT_SHIFT >= resumed_key)) {
+            resuming = false;
+            for (size_t s = 0; ok && s < literals; ++s) {
+                const yx_rx_literal *literal = &set->items[s];
+                if (yx_rx_literal_resumed(literal, data, size, &from[s], &start))
+                    ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(&literal->sub, literal->sub.atoms, s, start + literal->sub.atoms->backtrack, order));
+            }
+            if (!ok) break;
+        }
+        if (next >= count && !heap.used) break;
+        bool listed = next < count;
+        size_t s = listed ? ranked[hits[next] & (YX_RX_LITERAL_HIT_LITERALS - 1)] : 0;
+        const yx_rx_literal *literal = &set->items[s];
+        if (!(++steps & 1023) && yx_scan_deadline_poll(deadline)) {
+            ok = false;
+            break;
+        }
+        if (listed) start = (size_t)(hits[next] >> YX_RX_LITERAL_HIT_SHIFT) - deltas[s];
+        if (listed && heap.used) {
+            /* An occurrence is listed or resumed, never both. */
+            yx_rx_hit hit = yx_rx_literal_hit(&literal->sub, literal->sub.atoms, s, start + literal->sub.atoms->backtrack, order);
+            listed = yx_rx_hit_before(&hit, &heap.items[0]);
+        }
+        if (listed) {
+            ++next;
+            /* The listed occurrence has the literal's bytes. */
+            if ((literal->sub.flags & (YX_RX_FULLWORD_LEFT | YX_RX_FULLWORD_RIGHT)) && !yx_rx_full_word(data, size, start, start + literal->length, literal->sub.flags)) continue;
+            ok = yx_rx_add(list, start, start + literal->length, false);
+        } else {
+            yx_rx_hit hit = yx_rx_heap_pop(&heap);
+            literal = (const yx_rx_literal *)hit.sub;
+            start = hit.position - hit.atom->backtrack;
+            ok = yx_rx_add(list, start, start + literal->length, false);
+            if (ok && !list->limit_reached && yx_rx_literal_resumed(literal, data, size, &from[literal - set->items], &start))
+                ok = yx_rx_heap_push(&heap, yx_rx_literal_hit(hit.sub, hit.atom, hit.index, start + hit.atom->backtrack, order));
+        }
+    }
+    free(heap.items);
+    free(deltas);
+    return ok;
+}
+
 /* The shared scanner supplies occurrences; ordering and verification stay
  * identical to the per-program scan, including cap-dependent tie semantics. */
 

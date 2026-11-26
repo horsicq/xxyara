@@ -222,6 +222,19 @@ enum {
 };
 bool yx_rx_scan_literals(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches, int order,
                          const yx_rx_candidate *starts, size_t start_count);
+/* yx_rx_scan_literals from the literals' own occurrences, found by the
+ * ruleset-wide pass: hits[i] is YX_RX_LITERAL_HIT(start, s) when literal s
+ * (none is nocase: one atom each; at most YX_RX_LITERAL_HIT_LITERALS of
+ * them) has its bytes at start; the function rewrites hits. resume is NULL
+ * when hits lists every occurrence; otherwise it lists all those of literal
+ * s that start below resume[s] and at most the one at resume[s] besides, and
+ * the literal's atom is searched for the rest. The hits and their order are
+ * those of the atom search. */
+#define YX_RX_LITERAL_HIT_SHIFT 16
+#define YX_RX_LITERAL_HIT_LITERALS ((size_t)1 << YX_RX_LITERAL_HIT_SHIFT)
+#define YX_RX_LITERAL_HIT(start, literal) ((uint64_t)(start) << YX_RX_LITERAL_HIT_SHIFT | (uint64_t)(literal))
+bool yx_rx_scan_literal_hits(const yx_rx_literals *set, const uint8_t *data, size_t size, yx_scan_deadline *deadline, yx_rx_match_list *matches, int order,
+                             uint64_t *hits, size_t count, const size_t *resume);
 
 /* A set of short atoms, each owned by a pattern, searched in one pass to
  * learn which owners have at least one atom occurrence in the input. */

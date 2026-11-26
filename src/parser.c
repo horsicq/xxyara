@@ -76,6 +76,10 @@ typedef struct {
     /* Line number of line_cursor, so declaration lines are counted
      * incrementally instead of from the start of the source. */
     const char *line_cursor;
+    /* The declaration line last copied (yx_capture_rule_declaration):
+     * rules declared on one line share the copy. *shared_line holds a
+     * reference of its own, released by yx_parse_source_items. */
+    char **shared_line;
     size_t line_number;
 } yx_parser;
 
@@ -3437,8 +3441,17 @@ static bool yx_condition_identifier_exists(void *user_data, const char *identifi
     const YRX_RULES *rules = symbols->parser->compiler->rules;
     for (size_t i = 0; i < rules->global_count; ++i)
         if (strcmp(rules->globals[i].name, identifier) == 0) return true;
-    for (size_t i = 0; i < rules->rule_count; ++i)
-        if (strcmp(rules->rules[i].identifier, identifier) == 0 && rules->rules[i].namespace_index == symbols->rule->namespace_index) return true;
+    /* The earlier rules of the namespace: the compiler's name table (a walk
+     * of every rule per reference is quadratic in a chain of rules), or the
+     * walk when the table cannot be built. */
+    {
+        bool found = false;
+        if (yx_rule_name_cache_contains(&symbols->parser->compiler->rule_name_cache, rules, symbols->rule->namespace_index, identifier, &found)) {
+            if (found) return true;
+        } else
+            for (size_t i = 0; i < rules->rule_count; ++i)
+                if (strcmp(rules->rules[i].identifier, identifier) == 0 && rules->rules[i].namespace_index == symbols->rule->namespace_index) return true;
+    }
     for (size_t i = 0; i < rules->import_count; ++i)
         if (strcmp(rules->imports[i], identifier) == 0 && strcmp(identifier, "vt") != 0) return true;
     return false;
@@ -3470,6 +3483,71 @@ static const char *yx_dotted_path_match(const char *at, const char *limit, const
     }
     if (i == name_offset && mapped) *mapped = at;
     return at;
+}
+
+/* The end of the code before `at`: the white space and the comments in front
+ * of a token are trivia (a regexp may follow `matches` after a comment). */
+static const char *yx_condition_code_before(const char *start, const char *at)
+{
+    for (;;) {
+        bool newline = false;
+        while (at > start && isspace((unsigned char)at[-1])) {
+            if (at[-1] == '\n') newline = true;
+            --at;
+        }
+        const char *open = NULL;
+        if (at - start >= 4 && at[-1] == '/' && at[-2] == '*') {
+            open = at - 3;
+            while (open > start && !(open[-1] == '/' && open[0] == '*')) --open;
+            if (open == start) open = NULL;
+            /* The comment starts at its first `/` `*`: an earlier one with
+             * no comment end between is the start. */
+            for (const char *scan = open ? open - 1 : NULL; scan && scan > start; --scan) {
+                if (scan[-1] == '*' && scan[0] == '/') break;
+                if (scan[-1] == '/' && scan[0] == '*') {
+                    /* Not one in the text of a line comment. */
+                    const char *line = scan - 1;
+                    bool commented = false;
+                    while (line > start && line[-1] != '\n') --line;
+                    for (; line + 1 < scan && !commented; ++line) commented = line[0] == '/' && line[1] == '/';
+                    if (commented) break;
+                    open = scan;
+                }
+            }
+        }
+        if (newline) {
+            /* A line comment ends the line the code is on; its text may end
+             * in `*` `/`. Only a block comment that is open where the line
+             * starts hides a `//` on it. */
+            const char *line = at, *comment = NULL;
+            bool inside = false;
+            while (line > start && line[-1] != '\n') --line;
+            if (open && open - 1 < line) {
+                inside = true;
+                for (const char *scan = open + 1; scan + 1 < line && inside; ++scan)
+                    if (scan[0] == '*' && scan[1] == '/') inside = false;
+            }
+            if (inside) line = at;
+            for (const char *scan = line; scan + 1 < at && !comment; ++scan) {
+                if (*scan == '"') {
+                    for (++scan; scan < at && *scan != '"'; ++scan)
+                        if (*scan == '\\' && scan + 1 < at) ++scan;
+                } else if (scan[0] == '/' && scan[1] == '*') {
+                    for (scan += 2; scan + 1 < at && !(scan[0] == '*' && scan[1] == '/'); ++scan) {}
+                    ++scan;
+                } else if (scan[0] == '/' && scan[1] == '/') comment = scan;
+            }
+            if (comment) {
+                at = comment;
+                continue;
+            }
+        }
+        if (open) {
+            at = open - 1;
+            continue;
+        }
+        return at;
+    }
 }
 
 static bool yx_unknown_module_condition_error(yx_parser *p, const char *start, const char *detail)
@@ -3520,7 +3598,7 @@ static bool yx_unknown_module_condition_error(yx_parser *p, const char *start, c
             const char *word_end = cursor;
             const char *word_start;
             bool in_class = false;
-            while (word_end > start && isspace((unsigned char)word_end[-1])) --word_end;
+            word_end = yx_condition_code_before(start, word_end);
             word_start = word_end;
             while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
             if ((size_t)(word_end - word_start) == 7 && memcmp(word_start, "matches", 7) == 0) {
@@ -3683,7 +3761,7 @@ static bool yx_unknown_pattern_condition_error(yx_parser *p, const char *start, 
             const char *word_end = cursor;
             const char *word_start;
             bool in_class = false;
-            while (word_end > start && isspace((unsigned char)word_end[-1])) --word_end;
+            word_end = yx_condition_code_before(start, word_end);
             word_start = word_end;
             while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
             if ((size_t)(word_end - word_start) == 7 && memcmp(word_start, "matches", 7) == 0) {
@@ -3743,7 +3821,7 @@ static const char *yx_condition_skip_noncode(const char *cursor, const char *sta
         const char *word_end = cursor;
         const char *word_start;
         bool in_class = false;
-        while (word_end > start && isspace((unsigned char)word_end[-1])) --word_end;
+        word_end = yx_condition_code_before(start, word_end);
         word_start = word_end;
         while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
         if ((size_t)(word_end - word_start) != 7 || memcmp(word_start, "matches", 7) != 0) return cursor;
@@ -5717,7 +5795,17 @@ static bool yx_condition_regexp_error(yx_parser *p, const char *start, const cha
                           (cursor + 7 == p->at || !yx_ident_continue_width(cursor + 7));
         if (is_matches || (*cursor == '=' && (cursor == start || cursor[-1] != '=') && (cursor + 1 == p->at || cursor[1] != '=')) || *cursor == '(' || *cursor == ',') {
             const char *literal = cursor + (is_matches ? 7 : 1);
-            while (literal < p->at && isspace((unsigned char)*literal)) ++literal;
+            /* White space and comments before the literal. */
+            for (;;) {
+                while (literal < p->at && isspace((unsigned char)*literal)) ++literal;
+                if (literal + 1 < p->at && literal[0] == '/' && (literal[1] == '/' || literal[1] == '*')) {
+                    const char *next = yx_condition_skip_noncode(literal, start, p->at);
+                    if (next == literal) break;
+                    literal = next;
+                    continue;
+                }
+                break;
+            }
             if (literal >= p->at || *literal != '/') {
                 ++cursor;
                 continue;
@@ -7461,7 +7549,7 @@ static int yx_parse_condition_in_scope(yx_parser *p, YRX_RULE *rule)
             const char *word_end = p->at;
             const char *word_start;
             bool after_numeric_value;
-            while (word_end > start && isspace((unsigned char)word_end[-1])) --word_end;
+            word_end = yx_condition_code_before(start, word_end);
             word_start = word_end;
             while (word_start > start && isalpha((unsigned char)word_start[-1])) --word_start;
             after_numeric_value =
@@ -7953,6 +8041,46 @@ static int yx_parse_condition(yx_parser *p, YRX_RULE *rule)
     return result;
 }
 
+/* A rule's declaration line is a counted string: the count sits before
+ * the text, and yx_free_rule releases it. */
+typedef struct yx_shared_line {
+    size_t references;
+    /* The line's span in the source it was copied from. */
+    const char *source_start, *source_end;
+    char text[];
+} yx_shared_line;
+
+static yx_shared_line *yx_shared_line_of(char *text)
+{
+    return (yx_shared_line *)(void *)(text - offsetof(yx_shared_line, text));
+}
+
+static char *yx_shared_line_new(const char *text, size_t length)
+{
+    yx_shared_line *line = length > SIZE_MAX - sizeof(*line) - 1 ? NULL : malloc(sizeof(*line) + length + 1);
+    if (!line) return NULL;
+    line->references = 1;
+    line->source_start = text;
+    line->source_end = text + length;
+    memcpy(line->text, text, length);
+    line->text[length] = 0;
+    return line->text;
+}
+
+static char *yx_shared_line_retain(char *text)
+{
+    if (text) ++((yx_shared_line *)(void *)(text - offsetof(yx_shared_line, text)))->references;
+    return text;
+}
+
+static void yx_shared_line_release(char *text)
+{
+    yx_shared_line *line;
+    if (!text) return;
+    line = (yx_shared_line *)(void *)(text - offsetof(yx_shared_line, text));
+    if (!--line->references) free(line);
+}
+
 static int yx_capture_rule_declaration(yx_parser *p, YRX_RULE *rule)
 {
     const char *start = p->at - strlen(rule->identifier);
@@ -7969,10 +8097,19 @@ static int yx_capture_rule_declaration(yx_parser *p, YRX_RULE *rule)
         if (*cursor == '\n') ++line;
     p->line_cursor = line_start;
     p->line_number = line;
-    line_end = strchr(start, '\n');
-    if (!line_end) line_end = p->begin + strlen(p->begin);
-    if (*line_end == '\n' && line_end > line_start && line_end[-1] == '\r') --line_end;
-    rule->declaration_line = yx_duplicate(line_start, (size_t)(line_end - line_start));
+    if (p->shared_line && *p->shared_line && yx_shared_line_of(*p->shared_line)->source_start == line_start) {
+        rule->declaration_line = yx_shared_line_retain(*p->shared_line);
+        line_end = yx_shared_line_of(*p->shared_line)->source_end;
+    } else {
+        line_end = strchr(start, '\n');
+        if (!line_end) line_end = p->begin + strlen(p->begin);
+        if (*line_end == '\n' && line_end > line_start && line_end[-1] == '\r') --line_end;
+        rule->declaration_line = yx_shared_line_new(line_start, (size_t)(line_end - line_start));
+        if (p->shared_line) {
+            yx_shared_line_release(*p->shared_line);
+            *p->shared_line = yx_shared_line_retain(rule->declaration_line);
+        }
+    }
     rule->declaration_origin = yx_duplicate(p->origin ? p->origin : "line", strlen(p->origin ? p->origin : "line"));
     if (!rule->declaration_line || !rule->declaration_origin) return 0;
     rule->declaration_origin_explicit = p->compiler->current_origin_explicit;
@@ -8822,7 +8959,7 @@ void yx_free_rule(YRX_RULE *rule)
     if (!rule) return;
     free(rule->identifier);
     free(rule->namespace_name);
-    free(rule->declaration_line);
+    yx_shared_line_release(rule->declaration_line);
     free(rule->declaration_origin);
     for (size_t i = 0; i < rule->tag_count; ++i) free(rule->tags[i]);
     free(rule->tags);
@@ -9307,21 +9444,26 @@ static bool yx_note_import(yx_parser *p, const char *name, size_t start, size_t 
     return true;
 }
 
-static YRX_RESULT yx_parse_source_items_in(YRX_COMPILER *compiler, const char *source, const char *origin, const yx_sc_result *syntax, struct yx_seen_imports *imports);
+static YRX_RESULT yx_parse_source_items_in(YRX_COMPILER *compiler, const char *source, const char *origin, const yx_sc_result *syntax, struct yx_seen_imports *imports,
+                                           char **shared_line);
 
 static YRX_RESULT yx_parse_source_items(YRX_COMPILER *compiler, const char *source, const char *origin, const yx_sc_result *syntax)
 {
     struct yx_seen_imports imports = {0};
-    YRX_RESULT result = yx_parse_source_items_in(compiler, source, origin, syntax, &imports);
+    char *shared_line = NULL;
+    YRX_RESULT result = yx_parse_source_items_in(compiler, source, origin, syntax, &imports, &shared_line);
+    yx_shared_line_release(shared_line);
     for (size_t i = 0; i < imports.count; ++i) free(imports.items[i].name);
     free(imports.items);
     return result;
 }
 
-static YRX_RESULT yx_parse_source_items_in(YRX_COMPILER *compiler, const char *source, const char *origin, const yx_sc_result *syntax, struct yx_seen_imports *imports)
+static YRX_RESULT yx_parse_source_items_in(YRX_COMPILER *compiler, const char *source, const char *origin, const yx_sc_result *syntax, struct yx_seen_imports *imports,
+                                           char **shared_line)
 {
     if (!compiler || !compiler->rules || !source) return YRX_INVALID_ARGUMENT;
-    yx_parser p = {.compiler = compiler, .begin = source, .at = source, .origin = origin, .source_serial = ++compiler->next_source_serial, .seen_imports = imports};
+    yx_parser p = {.compiler = compiler, .begin = source, .at = source, .origin = origin, .source_serial = ++compiler->next_source_serial, .seen_imports = imports,
+                   .shared_line = shared_line};
     bool had_errors = false;
     bool previous_statement_was_rule = false;
     char first_recoverable_error[sizeof(compiler->error)] = {0};

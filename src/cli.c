@@ -222,6 +222,7 @@ typedef struct yx_cli_options {
     bool report_all_structured_errors;
     size_t string_limit;
     size_t max_matches;
+    bool max_matches_set;
     size_t recursive_depth;
     uint64_t max_file_size;
     uint64_t timeout_seconds;
@@ -954,6 +955,7 @@ typedef struct yx_cli_scan {
     size_t matched_capacity;
     bool failed;
     bool first_json_rule;
+    bool matched_sorted;
 } yx_cli_scan;
 
 typedef struct yx_cli_json_count {
@@ -3464,20 +3466,47 @@ static void yx_cli_on_match(const YRX_RULE *rule, void *user_data)
     ++scan->matched_count;
 }
 
+static int yx_cli_name_compare_parts(const yx_cli_name *entry, const uint8_t *identifier, size_t identifier_len, const uint8_t *namespace_name,
+                                     size_t namespace_len)
+{
+    size_t entry_len = strlen(entry->identifier);
+    int order;
+    if (entry->namespace_length != namespace_len) return entry->namespace_length < namespace_len ? -1 : 1;
+    if (entry_len != identifier_len) return entry_len < identifier_len ? -1 : 1;
+    order = namespace_len ? memcmp(entry->namespace_name, namespace_name, namespace_len) : 0;
+    return order ? order : identifier_len ? memcmp(entry->identifier, identifier, identifier_len) : 0;
+}
+
+static int yx_cli_name_compare(const void *left, const void *right)
+{
+    const yx_cli_name *b = (const yx_cli_name *)right;
+    return yx_cli_name_compare_parts((const yx_cli_name *)left, (const uint8_t *)b->identifier, strlen(b->identifier), (const uint8_t *)b->namespace_name,
+                                     b->namespace_length);
+}
+
 static void yx_cli_on_unmatched(const YRX_RULE *rule, void *user_data)
 {
     yx_cli_scan *scan = (yx_cli_scan *)user_data;
     const uint8_t *identifier = NULL, *namespace_name = NULL;
-    size_t identifier_len = 0, namespace_len = 0, i;
+    size_t identifier_len = 0, namespace_len = 0, low = 0, high;
     if (rule->is_private) return;
     if (!yx_cli_rule_names(rule, &identifier, &identifier_len, &namespace_name, &namespace_len)) {
         scan->failed = true;
         return;
     }
-    for (i = 0; i < scan->matched_count; ++i) {
-        if (strlen(scan->matched[i].identifier) == identifier_len && scan->matched[i].namespace_length == namespace_len &&
-            memcmp(scan->matched[i].identifier, identifier, identifier_len) == 0 && memcmp(scan->matched[i].namespace_name, namespace_name, namespace_len) == 0)
-            return;
+    /* The matching rules were already handled (and are not printed with
+     * --negate), so their order is free: sorted once, then bisected. */
+    if (!scan->matched_sorted) {
+        if (scan->matched_count > 1) qsort(scan->matched, scan->matched_count, sizeof(*scan->matched), yx_cli_name_compare);
+        scan->matched_sorted = true;
+    }
+    high = scan->matched_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        int order = yx_cli_name_compare_parts(&scan->matched[middle], identifier, identifier_len, namespace_name, namespace_len);
+        if (!order) return;
+        if (order < 0) low = middle + 1;
+        else high = middle;
     }
     yx_cli_emit_rule(scan, rule);
 }
@@ -4072,9 +4101,9 @@ static int yx_cli_add_rule_file_impl(YRX_COMPILER *compiler, const char *argumen
         }
     }
     if (yx_cli_kind(path, false) == YX_CLI_PATH_DIRECTORY) {
-        char *normalized = options->path_as_namespace ? yx_cli_rule_directory_root(path) : NULL;
-        const char *directory = normalized ? normalized : path;
-        if (options->path_as_namespace && !normalized) return 1;
+        char *normalized = yx_cli_rule_directory_root(path);
+        const char *directory = normalized;
+        if (!normalized) return 1;
         bool collected = yx_cli_collect_directory(directory, 0, SIZE_MAX, true, &sources);
         free(normalized);
         if (!collected) {
@@ -4239,7 +4268,7 @@ static int yx_cli_scan_action(size_t index, void *user_data)
         scanner = yx_cli_worker_scanner;
         /* The CLI never block-scans: no retained copy of each file. */
         if (xxyara_scanner_retain_scan_data(scanner, false) != YRX_SUCCESS || (work->options->fast_scan && yrx_scanner_fast_scan(scanner, true) != YRX_SUCCESS) ||
-            (work->options->max_matches != SIZE_MAX && yrx_scanner_max_matches_per_pattern(scanner, work->options->max_matches) != YRX_SUCCESS) ||
+            (work->options->max_matches_set && yrx_scanner_max_matches_per_pattern(scanner, work->options->max_matches) != YRX_SUCCESS) ||
             !yx_cli_apply_module_data(scanner, work->options)) {
             fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() : "cannot create scanner");
             return 1;
@@ -4707,6 +4736,7 @@ static int yx_cli_run_scan_impl(int argc, char **argv, int start, bool parse_onl
                 status = 2;
                 goto done;
             }
+            options.max_matches_set = true;
         } else if (arg[0] == '-' && arg[1]) {
             goto unexpected_option;
         } else {
@@ -4902,7 +4932,7 @@ rules_ready:
         fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() : "cannot enable fast scan");
         goto done;
     }
-    if (options.max_matches != SIZE_MAX && yrx_scanner_max_matches_per_pattern(scanner, options.max_matches) != YRX_SUCCESS) {
+    if (options.max_matches_set && yrx_scanner_max_matches_per_pattern(scanner, options.max_matches) != YRX_SUCCESS) {
         fprintf(stderr, "yr: %s\n", yrx_last_error() ? yrx_last_error() : "invalid match limit");
         goto done;
     }
@@ -22540,8 +22570,10 @@ static bool yx_fix_hebrew_score(const uint8_t *source, size_t length, int64_t *r
     bool previous_ascii = true;
     size_t word = 0, longest_word = 0;
     int64_t score = 0;
-    for (size_t i = 0; i < length; ++i) {
-        uint8_t byte = source[i];
+    /* As chardetng does at the end of input, a space follows the last byte:
+     * it completes the last word and scores the last pair. */
+    for (size_t i = 0; i <= length; ++i) {
+        uint8_t byte = i == length ? (uint8_t)' ' : source[i];
         unsigned classified = byte < 0x80 ? model->lower[byte] : model->upper[byte & 0x7f];
         unsigned current = classified & 0x7f;
         bool ascii = byte < 0x80;
@@ -22574,8 +22606,10 @@ static bool yx_fix_thai_score(const uint8_t *source, size_t length, int64_t *res
     bool previous_ascii = true;
     size_t word = 0, longest_word = 0;
     int64_t score = 0;
-    for (size_t i = 0; i < length; ++i) {
-        uint8_t byte = source[i];
+    /* As chardetng does at the end of input, a space follows the last byte:
+     * it completes the last word and scores the last pair. */
+    for (size_t i = 0; i <= length; ++i) {
+        uint8_t byte = i == length ? (uint8_t)' ' : source[i];
         unsigned classified = byte < 0x80 ? model->lower[byte] : model->upper[byte & 0x7f];
         unsigned current = classified & 0x7f;
         bool ascii = byte < 0x80;
@@ -22608,8 +22642,10 @@ static bool yx_fix_hebrew_visual_score(const uint8_t *source, size_t length, int
     bool previous_ascii = true;
     size_t word = 0, longest_word = 0;
     int64_t score = 0;
-    for (size_t i = 0; i < length; ++i) {
-        uint8_t byte = source[i];
+    /* As chardetng does at the end of input, a space follows the last byte:
+     * it completes the last word and scores the last pair. */
+    for (size_t i = 0; i <= length; ++i) {
+        uint8_t byte = i == length ? (uint8_t)' ' : source[i];
         unsigned current = byte < 0x80 ? yx_fix_kr_iso_lower[byte] : yx_fix_nl_iso88598[byte & 0x7f];
         bool ascii = byte < 0x80;
         bool non_latin = current > 1 && current < 36;
@@ -22626,7 +22662,6 @@ static bool yx_fix_hebrew_visual_score(const uint8_t *source, size_t length, int
         previous = current;
         previous_ascii = ascii;
     }
-    if (word > longest_word) longest_word = word;
     if (longest_word < 2) return false;
     *result = score;
     return true;
@@ -22640,8 +22675,10 @@ static bool yx_fix_hebrew_visual_punctuation_wins(const uint8_t *source, size_t 
     size_t logical = 0, visual = 0, word = 0, longest_word = 0;
     bool logical_valid = true;
     bool previous_logical_letter = false, previous_visual_punctuation = false;
-    for (size_t i = 0; i < length; ++i) {
-        uint8_t byte = source[i];
+    /* As chardetng does at the end of input, a space follows the last byte:
+     * it completes the last word and scores the last pair. */
+    for (size_t i = 0; i <= length; ++i) {
+        uint8_t byte = i == length ? (uint8_t)' ' : source[i];
         unsigned logical_class = byte < 0x80 ? yx_fix_kr_iso_lower[byte] : yx_fix_nl_windows1255[byte & 0x7f];
         unsigned visual_class = byte < 0x80 ? yx_fix_kr_iso_lower[byte] : yx_fix_nl_iso88598[byte & 0x7f];
         bool punctuation, logical_letter, visual_letter;
@@ -22711,8 +22748,10 @@ static bool yx_fix_arabic_score(const uint8_t *source, size_t length, const yx_f
     bool previous_ascii = true;
     size_t word = 0, longest_word = 0;
     int64_t score = 0;
-    for (size_t i = 0; i < length; ++i) {
-        uint8_t byte = source[i];
+    /* As chardetng does at the end of input, a space follows the last byte:
+     * it completes the last word and scores the last pair. */
+    for (size_t i = 0; i <= length; ++i) {
+        uint8_t byte = i == length ? (uint8_t)' ' : source[i];
         unsigned classified = byte < 0x80 ? model->lower[byte] : model->upper[byte & 0x7f];
         unsigned current = classified & 0x7f;
         bool ascii = byte < 0x80;

@@ -1015,7 +1015,10 @@ static bool yx_sc_add_pending(yx_sc *p, size_t start, size_t end, const char *te
 
 static void yx_sc_begin(yx_sc *p, uint8_t kind)
 {
+    size_t begin;
+    if (p->broken) return;
     yx_sc_trivia(p);
+    if (p->broken) return;
     if (p->depth == YX_SC_MAX_CST_DEPTH && p->state == ST_OK) {
         /* Only the nesting error is reported: speculative errors of
          * earlier branches are dropped. */
@@ -1032,12 +1035,14 @@ static void yx_sc_begin(yx_sc *p, uint8_t kind)
     if (p->fuel) --p->fuel;
     else p->state = ST_OUT_OF_FUEL;
     if (++p->depth > YX_SC_MAX_DEPTH) p->broken = true;
+    if (p->broken) return;
     if (!yx_sc_grow((void **)&p->open_begins, &p->open_capacity, p->open_count + 1, sizeof(*p->open_begins))) {
         p->broken = true;
         return;
     }
-    p->open_begins[p->open_count++] = p->event_count;
-    yx_sc_push_event(p, EV_BEGIN, kind, 0);
+    begin = p->event_count;
+    if (!yx_sc_push_event(p, EV_BEGIN, kind, 0)) return;
+    p->open_begins[p->open_count++] = begin;
 }
 
 static size_t yx_sc_last_token_end(const yx_sc *p)
@@ -1050,11 +1055,16 @@ static size_t yx_sc_last_token_end(const yx_sc *p)
 static void yx_sc_output_end(yx_sc *p, bool error)
 {
     size_t begin;
+    if (p->broken) return;
     if (!p->open_count) {
         p->broken = true;
         return;
     }
     begin = p->open_begins[--p->open_count];
+    if (begin >= p->event_count) {
+        p->broken = true;
+        return;
+    }
     if (error) {
         /* An empty node is removed. */
         if (begin == p->event_count - 1) {
@@ -1283,6 +1293,7 @@ static void yx_sc_handle_errors(yx_sc *p)
 static void yx_sc_end(yx_sc *p)
 {
     if (p->depth) --p->depth;
+    if (p->broken) return;
     if (p->state == ST_MAX_DEPTH) {
         yx_sc_output_end(p, true);
     } else if (FAILED(p)) {
@@ -3376,9 +3387,12 @@ static void yx_sc_top_level_item(yx_sc *p)
                 p->broken = true;
                 return;
             }
-            p->open_begins[p->open_count++] = p->event_count;
-            yx_sc_push_event(p, EV_BEGIN, K_ERROR, 0);
-            while ((token = yx_sc_peek_non_trivia(p)) != NULL && token->id != T_GLOBAL_KW && token->id != T_PRIVATE_KW && token->id != T_RULE_KW) {
+            {
+                size_t begin = p->event_count;
+                if (!yx_sc_push_event(p, EV_BEGIN, K_ERROR, 0)) return;
+                p->open_begins[p->open_count++] = begin;
+            }
+            while (!p->broken && (token = yx_sc_peek_non_trivia(p)) != NULL && token->id != T_GLOBAL_KW && token->id != T_PRIVATE_KW && token->id != T_RULE_KW) {
                 yx_sc_trivia(p);
                 yx_sc_bump(p);
             }

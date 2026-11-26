@@ -176,9 +176,15 @@ static bool yx_wire_string(yx_reader *r)
     return true;
 }
 
-static bool yx_wire_bool(yx_reader *r, uint8_t *value)
+static bool yx_wire_u8(yx_reader *r, uint8_t *value)
 {
     if (!yx_get_u8(r, value)) return yx_wire_missing(1);
+    return true;
+}
+
+static bool yx_wire_bool(yx_reader *r, uint8_t *value)
+{
+    if (!yx_wire_u8(r, value)) return false;
     if (*value <= 1) return true;
     snprintf(yx_wire_decode_message, sizeof(yx_wire_decode_message), "InvalidBooleanValue(%u)", (unsigned)*value);
     yx_wire_decode_detail = yx_wire_decode_message;
@@ -187,7 +193,7 @@ static bool yx_wire_bool(yx_reader *r, uint8_t *value)
 
 static bool yx_wire_option_tag(yx_reader *r, uint8_t *value)
 {
-    if (!yx_get_u8(r, value)) return yx_wire_missing(1);
+    if (!yx_wire_u8(r, value)) return false;
     if (*value <= 1) return true;
     snprintf(yx_wire_decode_message, sizeof(yx_wire_decode_message), "UnexpectedVariant { type_name: \"Option<T>\", allowed: Range { min: 0, max: 1 }, found: %u }",
              (unsigned)*value);
@@ -219,6 +225,27 @@ static bool yx_wire_wasm_name(yx_reader *r)
     return true;
 }
 
+static bool yx_wire_wasm_valtype(yx_reader *r, bool ref_only)
+{
+    uint8_t type;
+    if (!yx_get_u8(r, &type)) return false;
+    if (type == 0x63 || type == 0x64) {
+        int64_t heap_type;
+        return yx_get_sleb_i64(r, &heap_type);
+    }
+    if (ref_only) return type >= 0x68 && type <= 0x75;
+    return (type >= 0x68 && type <= 0x75) || (type >= 0x7b && type <= 0x7f);
+}
+
+static bool yx_wire_wasm_limits(yx_reader *r)
+{
+    uint8_t flags;
+    uint64_t initial, maximum;
+    if (!yx_get_u8(r, &flags) || flags > 1 || !yx_get_uleb(r, &initial)) return false;
+    if (flags && (!yx_get_uleb(r, &maximum) || maximum < initial)) return false;
+    return true;
+}
+
 static bool yx_wire_wasm_names(yx_reader *r, bool imports)
 {
     uint64_t count, index;
@@ -226,10 +253,33 @@ static bool yx_wire_wasm_names(yx_reader *r, bool imports)
     for (uint64_t i = 0; i < count; ++i) {
         uint8_t kind;
         if (!yx_wire_wasm_name(r) || (imports && !yx_wire_wasm_name(r)) || !yx_get_u8(r, &kind)) return false;
-        /* The release's v12 imports are functions. Legacy templates also
-         * import memories/globals; leave their descriptors to their codecs. */
-        if (imports && kind) return true;
-        if (!yx_get_uleb(r, &index)) return false;
+        if (!imports) {
+            if (!yx_get_uleb(r, &index)) return false;
+            continue;
+        }
+        switch (kind) {
+            case 0: /* function: type index */
+                if (!yx_get_uleb(r, &index)) return false;
+                break;
+            case 1: /* table: reftype + limits */
+                if (!yx_wire_wasm_valtype(r, true) || !yx_wire_wasm_limits(r)) return false;
+                break;
+            case 2: /* memory: limits */
+                if (!yx_wire_wasm_limits(r)) return false;
+                break;
+            case 3: { /* global: valtype + mutability */
+                uint8_t mut;
+                if (!yx_wire_wasm_valtype(r, false) || !yx_get_u8(r, &mut) || mut > 1) return false;
+                break;
+            }
+            case 4: { /* tag: attribute + type index */
+                uint8_t attr;
+                if (!yx_get_u8(r, &attr) || attr != 0 || !yx_get_uleb(r, &index)) return false;
+                break;
+            }
+            default:
+                return false;
+        }
     }
     return r->at == r->length;
 }
@@ -244,12 +294,7 @@ static bool yx_wire_wasm_code(yx_reader *r)
         yx_reader body = {r->data + r->at, (size_t)length, 0, false, false};
         if (!yx_get_uleb(&body, &groups) || groups > body.length - body.at) return false;
         for (uint64_t group = 0; group < groups; ++group) {
-            uint8_t type;
-            if (!yx_get_uleb(&body, &locals) || !yx_get_u8(&body, &type)) return false;
-            if (type == 0x63 || type == 0x64) {
-                int64_t heap_type;
-                if (!yx_get_sleb_i64(&body, &heap_type)) return false;
-            } else if (type < 0x68 || type > 0x7f || (type > 0x75 && type < 0x7b)) return false;
+            if (!yx_get_uleb(&body, &locals) || !yx_wire_wasm_valtype(&body, false)) return false;
         }
         if (body.at >= body.length || body.data[body.length - 1] != 0x0b || body.data[body.at] == 0xf5 || body.data[body.at] == 0xff) return false;
         r->at += (size_t)length;
@@ -389,7 +434,7 @@ static int yx_ser_validate_v12_uncached(const uint8_t *data, size_t length, size
             if (!yx_wire_uint(&r, &gap, 32) || gap > 1 || !yx_wire_uint(&r, &value, 32) || (!gap && !yx_wire_uint(&r, &value, 32))) return YX_SER_WIRE_DECODE;
         }
         if (kind >= 8) {
-            if (!yx_get_u8(&r, &flag)) return YX_SER_WIRE_DECODE;
+            if (!yx_wire_u8(&r, &flag)) return YX_SER_WIRE_DECODE;
         } else if (!yx_wire_uint(&r, &value, 16)) return YX_SER_WIRE_DECODE;
     }
     /* Filesize bounds and header constraints. */

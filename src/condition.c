@@ -3630,12 +3630,34 @@ static bool yx_condition_regex_literal(yx_parser *p, const char *body, char **li
     return true;
 }
 
+/* The white space and comments yx_next skips before a token. An unterminated
+ * block comment is left in place. */
+static const char *yx_skip_trivia(const char *s)
+{
+    for (;;) {
+        size_t width;
+        while ((width = yx_condition_space_width(s)) != 0) s += width;
+        if (s[0] == '/' && s[1] == '/') {
+            s += 2;
+            while (*s && *s != '\n') ++s;
+            continue;
+        }
+        if (s[0] == '/' && s[1] == '*') {
+            const char *end = s + 2;
+            while (*end && !(end[0] == '*' && end[1] == '/')) ++end;
+            if (!*end) return s;
+            s = end + 2;
+            continue;
+        }
+        return s;
+    }
+}
+
 static bool yx_parse_condition_regex(yx_parser *p, yx_node *node)
 {
-    const char *start = (p->token.kind == TK_BAD && *p->token.begin == '/') ? p->token.begin : p->source + p->position;
+    const char *start = (p->token.kind == TK_BAD && *p->token.begin == '/') ? p->token.begin : yx_skip_trivia(p->source + p->position);
     const char *cursor;
     bool insensitive = false, dotall = false;
-    while (isspace((unsigned char)*start)) ++start;
     if (*start != '/') {
         yx_fail(p, "expected regular expression after 'matches'");
         return false;
@@ -4597,6 +4619,13 @@ typedef struct yx_fold_virtual {
 
 static bool yx_fold_bind(yx_parser *p, const char *name, const yx_node *value)
 {
+    /* `value` may point into fold_bindings (yx_fold_value): copy it before
+     * the array can move. */
+    yx_node held;
+    if (value) {
+        held = *value;
+        value = &held;
+    }
     if (p->fold_binding_count == p->fold_binding_capacity) {
         size_t next = p->fold_binding_capacity ? p->fold_binding_capacity * 2 : 8;
         yx_fold_binding *grown = realloc(p->fold_bindings, next * sizeof(*grown));
@@ -5101,12 +5130,13 @@ static yx_node *yx_parse_expr(yx_parser *p, int minimum)
             break;
         }
         if (operation == TK_MATCHES) {
-            const char *operand = p->source + p->position;
+            /* Comments are trivia before a regexp token too; `/*` left here
+             * is an unterminated comment (yx_next reports it). */
+            const char *operand = yx_skip_trivia(p->source + p->position);
             node = yx_new_node(p, N_MATCHES);
             if (!node) break;
             node->a = left;
-            while (isspace((unsigned char)*operand)) ++operand;
-            if (*operand != '/') {
+            if (operand[0] != '/' || operand[1] == '*') {
                 /* YARA-X parses any expression here and rejects it by
                  * type once it is compiled. */
                 yx_next(p);
@@ -7850,6 +7880,7 @@ typedef struct {
      * constant type value, so reads of the name and arithmetic fold. */
     bool constant, truthy, known_bits, unsigned64, non_negative;
     uint64_t bits;
+    double real;
 } yx_wc_var;
 
 typedef struct {
@@ -7874,6 +7905,7 @@ typedef struct {
     uint64_t bits;
     bool unsigned64;   /* TypeValue::is_unsigned (Uint64 only) */
     bool non_negative; /* TypeValue::is_non_negative */
+    double real;       /* a constant float's value */
 } yx_wc_info;
 
 static uint64_t yx_wc_expr(yx_wc *c, const yx_node *n);
@@ -8085,12 +8117,129 @@ static bool yx_wc_arithmetic_operator(yx_token_kind operation)
     return operation == TK_PLUS || operation == TK_MINUS || operation == TK_STAR || operation == TK_DIV || operation == TK_PERCENT;
 }
 
+/* A `with` declaration of a constant value keeps the constant. */
+static void yx_wc_var_constant(yx_wc_var *var, const yx_wc_info *value)
+{
+    if (!value->constant) return;
+    var->constant = true;
+    var->truthy = value->truthy;
+    var->known_bits = value->known_bits;
+    var->bits = value->bits;
+    var->real = value->real;
+    var->unsigned64 = value->unsigned64;
+    var->non_negative = value->non_negative;
+}
+
+/* A constant integer whose value is known (TypeValue::try_as_const_i128). */
+static bool yx_wc_const_int(const yx_wc_info *v)
+{
+    return v->constant && v->type == YX_STATIC_INT && v->known_bits;
+}
+
+static void yx_wc_set_int(yx_wc_info *info, uint64_t bits, bool is_unsigned)
+{
+    info->type = YX_STATIC_INT;
+    info->constant = true;
+    info->truthy = bits != 0;
+    info->known_bits = true;
+    info->bits = bits;
+    info->unsigned64 = is_unsigned;
+    info->non_negative = is_unsigned || (int64_t)bits >= 0;
+    info->real = 0.0;
+}
+
+static void yx_wc_set_float(yx_wc_info *info, double value)
+{
+    info->type = YX_STATIC_FLOAT;
+    info->constant = true;
+    info->truthy = value != 0.0;
+    info->known_bits = false;
+    info->bits = 0;
+    info->unsigned64 = false;
+    info->non_negative = false;
+    info->real = value;
+}
+
+/* A constant number as f64: `v as f64` of its exact value. */
+static double yx_wc_const_double(const yx_wc_info *v)
+{
+    return v->type == YX_STATIC_FLOAT ? v->real : v->unsigned64 ? (double)v->bits : (double)(int64_t)v->bits;
+}
+
+/* IR::add / sub / mul / div / modulus over constant operands: what
+ * fold_arithmetic, fold_div and fold_rem (compiler/ir/mod.rs) yield. False
+ * when the IR keeps the operation (a zero divisor, i64::MIN / -1) or fails
+ * with Error::NumberOutOfRange; *info is then not constant. */
+static bool yx_wc_fold_arithmetic(yx_token_kind operation, const yx_wc_info *values, size_t count, bool any_float, yx_wc_info *info)
+{
+    if (operation == TK_PLUS || operation == TK_MINUS || operation == TK_STAR) {
+        yx_fold_accumulator acc = {0};
+        bool is_unsigned = false;
+        if (any_float) {
+            /* Every operand as f64, reduced from the left. */
+            double value = yx_wc_const_double(&values[0]);
+            for (size_t i = 1; i < count; ++i) {
+                double next = yx_wc_const_double(&values[i]);
+                if (operation == TK_PLUS) value += next;
+                else if (operation == TK_MINUS) value -= next;
+                else value *= next;
+            }
+            yx_wc_set_float(info, value);
+            return true;
+        }
+        /* Exact i128 arithmetic; only the result has to fit its type. */
+        for (size_t i = 0; i < count; ++i) {
+            bool negative = !values[i].unsigned64 && (int64_t)values[i].bits < 0;
+            uint64_t magnitude = negative ? (uint64_t)0 - values[i].bits : values[i].bits;
+            is_unsigned = is_unsigned || values[i].unsigned64;
+            if (!i) {
+                acc.negative = negative;
+                acc.low = magnitude;
+            } else yx_fold_integer(&acc, magnitude, negative, operation);
+            if (acc.overflow) return false;
+        }
+        if (acc.high || (is_unsigned ? acc.negative : acc.negative ? acc.low > (UINT64_C(1) << 63) : acc.low > (uint64_t)INT64_MAX)) return false;
+        yx_wc_set_int(info, acc.negative ? (uint64_t)0 - acc.low : acc.low, is_unsigned);
+        return true;
+    }
+    if (operation == TK_DIV || operation == TK_PERCENT) {
+        yx_wc_info acc = values[0];
+        /* is_unsigned_result(&operands[..=i]) */
+        bool is_unsigned = values[0].type == YX_STATIC_INT && values[0].unsigned64;
+        for (size_t i = 1; i < count; ++i) {
+            const yx_wc_info *rhs = &values[i];
+            is_unsigned = is_unsigned || (rhs->type == YX_STATIC_INT && rhs->unsigned64);
+            if (acc.type == YX_STATIC_FLOAT || rhs->type == YX_STATIC_FLOAT) {
+                /* fold_rem takes integers only. */
+                if (operation == TK_PERCENT) return false;
+                yx_wc_set_float(&acc, yx_wc_const_double(&acc) / yx_wc_const_double(rhs));
+                continue;
+            }
+            if (!rhs->bits) return false;
+            if (is_unsigned) {
+                yx_wc_set_int(&acc, operation == TK_DIV ? acc.bits / rhs->bits : acc.bits % rhs->bits, true);
+            } else if (acc.bits == (UINT64_C(1) << 63) && rhs->bits == UINT64_MAX) {
+                /* checked_div fails; wrapping_rem is 0. */
+                if (operation == TK_DIV) return false;
+                yx_wc_set_int(&acc, 0, false);
+            } else {
+                int64_t x = (int64_t)acc.bits, y = (int64_t)rhs->bits;
+                yx_wc_set_int(&acc, (uint64_t)(operation == TK_DIV ? x / y : x % y), false);
+            }
+        }
+        *info = acc;
+        return true;
+    }
+    return false;
+}
+
 static yx_wc_info yx_wc_binary_info(yx_wc *c, const yx_node *n)
 {
-    yx_wc_info info = {YX_STATIC_UNKNOWN, false, false, false, 0, false, false};
+    yx_wc_info info = {YX_STATIC_UNKNOWN, false, false, false, 0, false, false, 0.0};
     const yx_node **operands;
+    yx_wc_info *values;
     size_t count;
-    bool all_constant = true, any_float = false, any_unsigned = false;
+    bool all_constant = true, all_known = true, any_float = false, any_unsigned = false;
     bool zero_divisor = false;
     switch (n->operation) {
         case TK_AND:
@@ -8137,9 +8286,26 @@ static yx_wc_info yx_wc_binary_info(yx_wc *c, const yx_node *n)
         case TK_CARET: {
             yx_wc_info left = yx_wc_info_of(c, n->a);
             yx_wc_info right = yx_wc_info_of(c, n->b);
+            bool shift = n->operation == TK_SHL || n->operation == TK_SHR;
             info.type = YX_STATIC_INT;
-            info.unsigned64 = left.unsigned64 || (n->operation != TK_SHL && n->operation != TK_SHR && right.unsigned64);
+            info.unsigned64 = left.unsigned64 || (!shift && right.unsigned64);
             info.non_negative = info.unsigned64;
+            if (yx_wc_const_int(&left) && yx_wc_const_int(&right)) {
+                /* ir.bitwise_and / or / xor fold the operands' bits; ir.shl
+                 * and ir.shr fold a count that is not negative (64 or more
+                 * gives 0), shr arithmetically when the left operand is
+                 * signed. */
+                uint64_t x = left.bits, y = right.bits, value;
+                if (shift && !right.unsigned64 && (int64_t)y < 0) return info;
+                if (n->operation == TK_AMP) value = x & y;
+                else if (n->operation == TK_PIPE) value = x | y;
+                else if (n->operation == TK_CARET) value = x ^ y;
+                else if (y >= 64) value = 0;
+                else if (n->operation == TK_SHL) value = x << y;
+                else value = y == 0 ? x : (x >> y) | (!left.unsigned64 && (int64_t)x < 0 ? UINT64_MAX << (64 - y) : 0);
+                yx_wc_set_int(&info, value, info.unsigned64);
+                return info;
+            }
             info.constant = left.constant && right.constant;
             info.truthy = true;
             return info;
@@ -8149,17 +8315,32 @@ static yx_wc_info yx_wc_binary_info(yx_wc *c, const yx_node *n)
     if (!yx_wc_arithmetic_operator(n->operation)) return info;
     operands = yx_wc_operands(c, n, &count);
     if (!operands) return info;
+    values = malloc(count * sizeof(*values));
+    if (!values) {
+        free(operands);
+        c->failed = true;
+        return info;
+    }
     for (size_t i = 0; i < count; ++i) {
         yx_wc_info operand = yx_wc_info_of(c, operands[i]);
+        values[i] = operand;
         if (operand.type == YX_STATIC_FLOAT) any_float = true;
         if (operand.unsigned64) any_unsigned = true;
         if (!operand.constant) all_constant = false;
+        if (!yx_wc_const_int(&operand) && !(operand.constant && operand.type == YX_STATIC_FLOAT)) all_known = false;
         if (i && operand.known_bits && operand.bits == 0 && (n->operation == TK_DIV || n->operation == TK_PERCENT)) zero_divisor = true;
     }
     free(operands);
     info.type = any_float && n->operation != TK_PERCENT ? YX_STATIC_FLOAT : YX_STATIC_INT;
     info.unsigned64 = info.type == YX_STATIC_INT && any_unsigned;
     info.non_negative = info.unsigned64;
+    if (all_known) {
+        yx_wc_info folded = info;
+        if (yx_wc_fold_arithmetic(n->operation, values, count, any_float, &folded)) info = folded;
+        free(values);
+        return info;
+    }
+    free(values);
     /* fold_div and fold_rem leave a zero divisor to run time. */
     info.constant = all_constant && !zero_divisor;
     info.truthy = true;
@@ -8185,11 +8366,7 @@ static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
                 info.non_negative = n->is_unsigned || (int64_t)n->number >= 0;
             }
             return info;
-        case N_FLOAT:
-            info.type = YX_STATIC_FLOAT;
-            info.constant = true;
-            info.truthy = n->floating != 0.0;
-            return info;
+        case N_FLOAT: yx_wc_set_float(&info, n->floating); return info;
         case N_STRING:
             info.type = YX_STATIC_STRING;
             info.constant = true;
@@ -8227,11 +8404,31 @@ static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
                 return info;
             }
             if (n->operation == TK_TILDE) {
+                /* ir.bitwise_not: the complement of a constant's bits,
+                 * with the operand's signedness. */
+                if (yx_wc_const_int(&operand)) {
+                    yx_wc_set_int(&info, ~operand.bits, operand.unsigned64);
+                    return info;
+                }
                 info.type = YX_STATIC_INT;
                 info.unsigned64 = operand.unsigned64;
                 info.non_negative = operand.unsigned64;
                 info.constant = operand.constant;
                 info.truthy = true;
+                return info;
+            }
+            if (n->operation == TK_MINUS && yx_wc_const_int(&operand)) {
+                /* ir.minus: a signed constant; a result outside i64 is
+                 * Error::NumberOutOfRange, not a constant. */
+                if (operand.unsigned64 ? operand.bits > (UINT64_C(1) << 63) : operand.bits == (UINT64_C(1) << 63)) {
+                    info.type = YX_STATIC_INT;
+                    return info;
+                }
+                yx_wc_set_int(&info, (uint64_t)0 - operand.bits, false);
+                return info;
+            }
+            if (n->operation == TK_MINUS && operand.constant && operand.type == YX_STATIC_FLOAT) {
+                yx_wc_set_float(&info, -operand.real);
                 return info;
             }
             info.type = operand.type;
@@ -8240,6 +8437,9 @@ static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
             if (n->operation != TK_MINUS) {
                 info.unsigned64 = operand.unsigned64;
                 info.non_negative = operand.non_negative;
+                info.known_bits = operand.known_bits;
+                info.bits = operand.bits;
+                info.real = operand.real;
             }
             return info;
         }
@@ -8255,6 +8455,7 @@ static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
                 info.truthy = var->truthy;
                 info.known_bits = var->known_bits;
                 info.bits = var->bits;
+                info.real = var->real;
                 info.unsigned64 = var->unsigned64;
                 info.non_negative = var->non_negative;
                 return info;
@@ -8269,17 +8470,33 @@ static yx_wc_info yx_wc_info_of(yx_wc *c, const yx_node *n)
         }
         case N_MODULE_FIELD: {
             bool floating;
-            if (yx_wc_module_constant(n->name, &floating)) {
-                info.type = floating ? YX_STATIC_FLOAT : YX_STATIC_INT;
-                info.constant = true;
-                info.truthy = true;
-                info.non_negative = !floating;
+            uint64_t number;
+            double real;
+            if (yx_module_constant_value(n->name, &number, &floating, &real)) {
+                if (floating) yx_wc_set_float(&info, real);
+                else yx_wc_set_int(&info, number, false);
                 return info;
             }
             info.type = yx_static_node_type(n);
             return info;
         }
-        case N_WITH: return yx_wc_info_of(c, n->body);
+        case N_WITH: {
+            /* Expr::With has its body's type value: the body reads the
+             * declarations (constants among them). */
+            size_t vars = c->var_count;
+            for (size_t i = 0; i < n->item_count && i < n->set_count; ++i) {
+                if (n->items[i]->alias_value) {
+                    yx_wc_push_var(c, "", YX_STATIC_FUNCTION, false);
+                    continue;
+                }
+                yx_wc_info value = yx_wc_info_of(c, n->items[i]);
+                yx_wc_push_var(c, n->set_names[i], value.type, false);
+                if (n->set_names[i] && c->var_count > vars && !c->failed) yx_wc_var_constant(&c->vars[c->var_count - 1], &value);
+            }
+            info = yx_wc_info_of(c, n->body);
+            c->var_count = vars;
+            return info;
+        }
         default: info.type = yx_static_node_type(n); return info;
     }
 }
@@ -8325,7 +8542,7 @@ static uint64_t yx_wc_hash(const yx_node *n, unsigned depth)
 static int yx_wc_collapse_kind(yx_wc *c, const yx_node *n, const yx_node **target)
 {
     yx_wc_info right, left;
-    if (n->kind == N_MATCHES && !n->b) {
+    if (n->kind == N_MATCHES && (!n->b || n->b->kind == N_REGEX)) {
         *target = n->a;
         return 1;
     }
@@ -8876,15 +9093,7 @@ static uint64_t yx_wc_with(yx_wc *c, const yx_node *n)
         used = yx_wc_pop_handler(c);
         if (used) cost += 6 + 1; /* set_var_undef(false), block */
         yx_wc_push_var(c, n->set_names[i], value.type, used);
-        if (value.constant && n->set_names[i] && c->var_count && !c->failed) {
-            yx_wc_var *var = &c->vars[c->var_count - 1];
-            var->constant = true;
-            var->truthy = value.truthy;
-            var->known_bits = value.known_bits;
-            var->bits = value.bits;
-            var->unsigned64 = value.unsigned64;
-            var->non_negative = value.non_negative;
-        }
+        if (n->set_names[i] && c->var_count && !c->failed) yx_wc_var_constant(&c->vars[c->var_count - 1], &value);
     }
     cost += yx_wc_expr(c, n->body);
     c->var_count = vars;
@@ -9345,6 +9554,13 @@ static bool yx_scoped_module_alias(const yx_node *node, const yx_scope_name *sco
             if (!strncmp(node->name, at->name, length) && (!node->name[length] || node->name[length] == '.')) return false;
         }
         if (!at->module_binding) continue;
+        /* yx_module_alias_node takes only a path that starts with the
+         * alias's name: resolve the alias's own path for those alone (for
+         * every entry it is exponential in the number of declarations). */
+        {
+            size_t length = strlen(at->name);
+            if (strncmp(node->name, at->name, length) != 0 || (node->name[length] && node->name[length] != '.')) continue;
+        }
         const yx_node *original = at->module_binding;
         if (yx_scoped_module_alias(original, at->parent, &base, &base_name)) original = &base;
         matched = yx_module_alias_node(node, at->name, original, result, owned_name);
@@ -10885,6 +11101,13 @@ static bool yx_call_has_regexp(const yx_node *node)
     return false;
 }
 
+/* console.log prints a boolean, a number or a string: no signature takes a
+ * structure, an array, a map, a regexp or a function. */
+static bool yx_console_value_type(yx_static_type type)
+{
+    return type == YX_STATIC_UNKNOWN || type == YX_STATIC_BOOL || type == YX_STATIC_INT || type == YX_STATIC_FLOAT || type == YX_STATIC_STRING;
+}
+
 static bool yx_validate_node_step(const yx_node *node, yx_validation *state, bool inside_for_of, const yx_scope_name *scope, const yx_node **spine)
 {
     size_t i;
@@ -12171,9 +12394,9 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state, boo
             if (is_hex)
                 valid = node->item_count == 1 ? yx_static_accepts(types[0], YX_STATIC_INT)
                                               : yx_static_accepts(types[0], YX_STATIC_STRING) && yx_static_accepts(types[1], YX_STATIC_INT);
-            else if (node->item_count == 1) valid = types[0] != YX_STATIC_REGEX;
+            else if (node->item_count == 1) valid = yx_console_value_type(types[0]);
             else if (node->item_count == 2)
-                valid = (yx_static_accepts(types[0], YX_STATIC_STRING) && types[1] != YX_STATIC_REGEX) ||
+                valid = (yx_static_accepts(types[0], YX_STATIC_STRING) && yx_console_value_type(types[1])) ||
                         (yx_static_accepts(types[0], YX_STATIC_INT) && yx_static_accepts(types[1], YX_STATIC_INT));
             else valid = yx_static_accepts(types[0], YX_STATIC_STRING) && yx_static_accepts(types[1], YX_STATIC_INT) && yx_static_accepts(types[2], YX_STATIC_INT);
             if (!valid) return yx_wrong_arguments_error(state, node);
@@ -12307,7 +12530,7 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state, boo
             for (i = 0; i < node->item_count; ++i) {
                 yx_static_type actual;
                 if (!yx_validate_node(node->items[i], state, inside_for_of, scope)) return false;
-                actual = yx_static_node_type(node->items[i]);
+                actual = yx_scoped_node_type(node->items[i], scope);
                 if (actual != YX_STATIC_UNKNOWN && actual != expected_type) return yx_wrong_arguments_error(state, node);
             }
             return true;
@@ -12380,14 +12603,18 @@ static bool yx_validate_node_step(const yx_node *node, yx_validation *state, boo
     /* Field access is checked before the enclosing operator's type. This
      * preserves ordered ACL errors even in an ill-typed expression. */
     if ((node->kind == N_MATCHES || node->kind == N_UNARY || node->kind == N_BINARY) && yx_node_uses_feature_field(node)) {
-        if (!yx_validate_node(node->a, state, inside_for_of, scope) || !yx_validate_node(node->b, state, inside_for_of, scope)) return false;
+        /* The regexp of `matches (/x/)` is checked with the operator. */
+        if (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+            (!(node->kind == N_MATCHES && node->b && node->b->kind == N_REGEX) && !yx_validate_node(node->b, state, inside_for_of, scope)))
+            return false;
         feature_operands_checked = true;
     }
     if (node->kind == N_MATCHES || (node->kind == N_BINARY && node->literal_matches)) {
         /* Operands compile before the operator's types are checked. */
         yx_static_type left, right;
         if (!feature_operands_checked &&
-            (!yx_validate_node(node->a, state, inside_for_of, scope) || (node->b && !yx_validate_node(node->b, state, inside_for_of, scope))))
+            (!yx_validate_node(node->a, state, inside_for_of, scope) ||
+             (node->b && !(node->kind == N_MATCHES && node->b->kind == N_REGEX) && !yx_validate_node(node->b, state, inside_for_of, scope))))
             return false;
         left = yx_scoped_node_type(node->a, scope);
         if (left != YX_STATIC_UNKNOWN && left != YX_STATIC_STRING) {
@@ -16608,21 +16835,22 @@ static yx_value yx_dotnet_base_type_value_at(const yx_eval_context *ctx, const y
     return yx_defined_string(text, length);
 }
 
-static bool yx_node_uses_class_array(const yx_node *node, const char *iterator, const char *member)
+/* True when some path in the tree has `member` after its first name: the
+ * class may be read through the loop variable or through any variable
+ * declared from it (`with d = c : (d.methods[0].name ...)`). */
+static bool yx_node_uses_class_array(const yx_node *node, const char *member)
 {
-    size_t root_length, member_length;
-    if (!node) return false;
-    root_length = strlen(iterator);
+    size_t member_length;
+    /* A literal's text is no path. */
+    if (!node || node->kind == N_STRING || node->kind == N_REGEX) return false;
     member_length = strlen(member);
-    if (node->name && strncmp(node->name, iterator, root_length) == 0 && node->name[root_length] == '.' &&
-        strncmp(node->name + root_length + 1, member, member_length) == 0 &&
-        (node->name[root_length + member_length + 1] == '\0' || node->name[root_length + member_length + 1] == '.'))
-        return true;
-    if (yx_node_uses_class_array(node->a, iterator, member) || yx_node_uses_class_array(node->b, iterator, member) ||
-        yx_node_uses_class_array(node->c, iterator, member) || yx_node_uses_class_array(node->body, iterator, member))
+    for (const char *dot = node->name ? strchr(node->name, '.') : NULL; dot; dot = strchr(dot + 1, '.'))
+        if (strncmp(dot + 1, member, member_length) == 0 && (dot[member_length + 1] == '\0' || dot[member_length + 1] == '.')) return true;
+    if (yx_node_uses_class_array(node->a, member) || yx_node_uses_class_array(node->b, member) || yx_node_uses_class_array(node->c, member) ||
+        yx_node_uses_class_array(node->body, member))
         return true;
     for (size_t i = 0; i < node->item_count; ++i)
-        if (yx_node_uses_class_array(node->items[i], iterator, member)) return true;
+        if (yx_node_uses_class_array(node->items[i], member)) return true;
     return false;
 }
 
@@ -16858,6 +17086,14 @@ static bool yx_eval_module_alias(const yx_node *node, const yx_eval_context *ctx
     for (const yx_binding *at = bindings; at; at = at->parent) {
         yx_node base = {0};
         char *name = NULL;
+        /* An inner variable that is not an alias (a loop variable, a `with`
+         * value) hides an outer alias of its name: in `with s = pe.sections
+         * : (for any s in s : (s.name == ".text"))` the body's s is the
+         * item (the run-time twin of yx_scoped_module_alias). */
+        if (!at->value.vt_path && !at->source && at->name && at->name[0] && node && node->name) {
+            size_t length = strlen(at->name);
+            if (!strncmp(node->name, at->name, length) && (!node->name[length] || node->name[length] == '.')) return false;
+        }
         if (!at->value.vt_path && at->source) {
             /* `with m = pe.version_info : (m.len() ...)`: the use reads the
              * declared array or map, with the declaration's literal keys. */
@@ -17348,9 +17584,9 @@ static yx_value yx_eval_for_in(const yx_node *node, const yx_eval_context *ctx, 
         }
     }
     if (dotnet_array == YX_DOTNET_ARRAY_CLASSES) {
-        need_class_methods = yx_node_uses_class_array(node->body, node->name, "methods");
-        need_class_bases = yx_node_uses_class_array(node->body, node->name, "base_types");
-        need_class_generics = yx_node_uses_class_array(node->body, node->name, "generic_parameters");
+        need_class_methods = yx_node_uses_class_array(node->body, "methods");
+        need_class_bases = yx_node_uses_class_array(node->body, "base_types");
+        need_class_generics = yx_node_uses_class_array(node->body, "generic_parameters");
     }
     if (node->map_loop) {
         yx_pe_version_key_set set = {0};
@@ -17571,7 +17807,7 @@ static yx_value yx_eval_for_in(const yx_node *node, const yx_eval_context *ctx, 
                         (yx_global_field){.name = "number_of_generic_parameters", .type = YX_GLOBAL_INT, .value.integer = (int64_t)info.number_of_generic_parameters};
                     class_fields[9] = (yx_global_field){
                         .name = "number_of_methods", .type = YX_GLOBAL_INT, .value.integer = (int64_t)yx_dotnet_class_method_count(dotnet, (size_t)done)};
-                    base_types_array.count = info.number_of_base_types;
+                    base_types_array.count = need_class_bases ? info.number_of_base_types : 0;
                     if (need_class_bases && base_types_array.count) {
                         base_types_array.items = yx_eval_alloc_items(ctx, base_types_array.count, sizeof(*base_types_array.items));
                         if (!base_types_array.items) return yx_undefined();
@@ -17581,7 +17817,7 @@ static yx_value yx_eval_for_in(const yx_node *node, const yx_eval_context *ctx, 
                             base_types_array.items[i].string = (yx_global_string){(char *)base.string, base.string_length};
                         }
                     }
-                    generic_parameters_array.count = info.number_of_generic_parameters;
+                    generic_parameters_array.count = need_class_generics ? info.number_of_generic_parameters : 0;
                     if (need_class_generics && generic_parameters_array.count) {
                         generic_parameters_array.items = yx_eval_alloc_items(ctx, generic_parameters_array.count, sizeof(*generic_parameters_array.items));
                         if (!generic_parameters_array.items) return yx_undefined();
@@ -17592,7 +17828,7 @@ static yx_value yx_eval_for_in(const yx_node *node, const yx_eval_context *ctx, 
                             generic_parameters_array.items[i].string = (yx_global_string){(char *)name, length};
                         }
                     }
-                    methods_array.count = (size_t)class_fields[9].value.integer;
+                    methods_array.count = need_class_methods ? (size_t)class_fields[9].value.integer : 0;
                     if (need_class_methods && methods_array.count) {
                         yx_global_object *objects;
                         yx_global_field *fields;

@@ -94,7 +94,7 @@ static bool yx_v12_mangle(const char *name, char *out, size_t capacity)
 
 /* The same bounded instruction walker used for import relocation, extended
  * with structured-control bookkeeping. Every branch target is retained. */
-static bool yx_v12_instructions(const uint8_t *data, size_t length, yx_v12_instruction **instructions, size_t *count, size_t *locals)
+static bool yx_v12_instructions_checked(const uint8_t *data, size_t length, yx_v12_instruction **instructions, size_t *count, size_t *locals, bool *no_memory)
 {
     yx_reader r = {data, length, 0, false, false};
     uint64_t groups, v;
@@ -108,10 +108,16 @@ static bool yx_v12_instructions(const uint8_t *data, size_t length, yx_v12_instr
         if (!yx_get_uleb(&r, &v) || !yx_get_u8(&r, &type)) return false;
     }
     *locals = r.at;
-    if (length > SIZE_MAX / sizeof(*ins) || length > SIZE_MAX / sizeof(*stack)) return false;
+    if (length > SIZE_MAX / sizeof(*ins) || length > SIZE_MAX / sizeof(*stack)) {
+        if (no_memory) *no_memory = true;
+        return false;
+    }
     ins = calloc(length ? length : 1, sizeof(*ins));
     stack = malloc((length ? length : 1) * sizeof(*stack));
-    if (!ins || !stack) goto done;
+    if (!ins || !stack) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     while (r.at < length) {
         size_t index = used++;
         yx_v12_instruction *p = &ins[index];
@@ -184,6 +190,11 @@ done:
     free(ins);
     free(stack);
     return ok;
+}
+
+static bool yx_v12_instructions(const uint8_t *data, size_t length, yx_v12_instruction **instructions, size_t *count, size_t *locals)
+{
+    return yx_v12_instructions_checked(data, length, instructions, count, locals, NULL);
 }
 
 /* The instruction after i that has i's parent: past the end of a block i
@@ -410,19 +421,22 @@ static bool yx_v12_open_adjust(const yx_v12_instruction *ins, const yx_v12_open 
 }
 
 static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functions, size_t function_count, const size_t *globals, size_t global_count, size_t search,
-                        bool explicit_or, yx_writer *out, size_t *instruction_count, const yx_v12_origins *input_origins, yx_v12_origins *output_origins)
+                        bool explicit_or, yx_writer *out, size_t *instruction_count, const yx_v12_origins *input_origins, yx_v12_origins *output_origins, bool *no_memory)
 {
     yx_v12_instruction *ins = NULL;
     size_t count = 0, locals = 0;
     yx_v12_open open = {NULL, NULL, NULL, 0, NULL};
-    bool ok = false;
+    bool ok = false, writing = false, invalid = false;
     yx_v12_chain chain = {0};
-    if (!yx_v12_instructions(data, length, &ins, &count, &locals)) return false;
+    if (!yx_v12_instructions_checked(data, length, &ins, &count, &locals, no_memory)) return false;
     open.blocks = malloc((count ? count : 1) * sizeof(size_t));
     open.removed = malloc((count ? count : 1) * sizeof(size_t));
     open.booleans = malloc((count ? count : 1) * sizeof(size_t));
     open.level = calloc(count ? count : 1, sizeof(size_t));
-    if (!open.blocks || !open.removed || !open.booleans || !open.level) goto done;
+    if (!open.blocks || !open.removed || !open.booleans || !open.level) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     yx_v12_boolean_blocks(data, ins, count);
     yx_v12_switch_blocks(ins, count);
     /* Undefined OR operands have their own catch. Upstream gives that catch
@@ -476,7 +490,11 @@ static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functi
             ins[p->mate].move_value = true;
         }
     }
-    if (!yx_v12_chain_init(&chain, count)) goto done;
+    if (!yx_v12_chain_init(&chain, count)) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
+    writing = true;
     if (!yx_put_bytes(out, data, locals)) goto done;
     *instruction_count = 0;
     open.count = 0;
@@ -522,10 +540,12 @@ static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functi
             if (!yx_put_bytes(out, tail, sizeof(tail)) || !yx_v12_origin(output_origins, 0)) goto done;
             *instruction_count += 2;
         } else if (p->op == 0x10 || p->op == 0x12 || p->op == 0xd2) {
-            if (p->argument >= function_count || !yx_put_u8(out, p->op) || !yx_put_uleb(out, functions[p->argument])) goto done;
+            if (p->argument >= function_count) { invalid = true; goto done; }
+            if (!yx_put_u8(out, p->op) || !yx_put_uleb(out, functions[p->argument])) goto done;
             if (p->guard && !yx_put_u8(out, 5)) goto done;
         } else if (p->op == 0x23 || p->op == 0x24) {
-            if (p->argument >= global_count || !yx_put_u8(out, p->op) || !yx_put_uleb(out, globals[p->argument])) goto done;
+            if (p->argument >= global_count) { invalid = true; goto done; }
+            if (!yx_put_u8(out, p->op) || !yx_put_uleb(out, globals[p->argument])) goto done;
             if (p->guard) {
                 if (!yx_put_u8(out, 0x45)) goto done;
                 ++*instruction_count;
@@ -533,17 +553,18 @@ static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functi
         } else if (p->op == 0x0c || p->op == 0x0d) {
             uint64_t depth = p->argument, adjusted = depth;
             if (!yx_v12_open_adjust(ins, &open, p, depth, p->catch_target, &adjusted)) {
-                if (!yx_v12_chain_enter(&chain, ins, count, p->parent)) goto done;
+                if (!yx_v12_chain_enter(&chain, ins, count, p->parent)) { invalid = true; goto done; }
                 adjusted = yx_v12_chain_depth(&chain, ins, depth, p->catch_target);
             }
             if (!yx_put_u8(out, p->op) || !yx_put_uleb(out, adjusted)) goto done;
         } else if (p->op == 0x0e) {
             yx_reader r = {data, p->end, p->start + 1, false, false};
             uint64_t n, d;
-            if (!yx_get_uleb(&r, &n) || !yx_put_u8(out, 0x0e) || !yx_put_uleb(out, n)) goto done;
-            if (!yx_v12_chain_enter(&chain, ins, count, p->parent)) goto done;
+            if (!yx_get_uleb(&r, &n)) { invalid = true; goto done; }
+            if (!yx_put_u8(out, 0x0e) || !yx_put_uleb(out, n)) goto done;
+            if (!yx_v12_chain_enter(&chain, ins, count, p->parent)) { invalid = true; goto done; }
             for (uint64_t j = 0; j <= n; ++j) {
-                if (!yx_get_uleb(&r, &d)) goto done;
+                if (!yx_get_uleb(&r, &d)) { invalid = true; goto done; }
                 uint64_t adjusted = d;
                 if (!yx_v12_open_adjust(ins, &open, p, d, SIZE_MAX, &adjusted)) adjusted = yx_v12_chain_depth(&chain, ins, d, SIZE_MAX);
                 if (!yx_put_uleb(out, adjusted)) goto done;
@@ -553,7 +574,7 @@ static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functi
         } else {
             if (!yx_put_bytes(out, data + p->start, p->end - p->start)) goto done;
             if (p->constant) {
-                if (input_origins && p->constant > input_origins->count) goto done;
+                if (input_origins && p->constant > input_origins->count) { invalid = true; goto done; }
                 size_t source = input_origins ? input_origins->items[p->constant - 1] : p->constant;
                 if (!yx_v12_origin(output_origins, source)) goto done;
             }
@@ -566,6 +587,7 @@ static bool yx_v12_body(const uint8_t *data, size_t length, const size_t *functi
     }
     ok = true;
 done:
+    if (!ok && writing && !invalid && no_memory) *no_memory = true;
     free(open.blocks);
     free(open.removed);
     free(open.booleans);
@@ -625,20 +647,24 @@ typedef struct yx_v12_bodies_job {
     size_t *counts;
     yx_v12_origins *origins;
     bool *ok;
+    bool *no_memory;
 } yx_v12_bodies_job;
 static void yx_v12_body_task(size_t i, void *context)
 {
     yx_v12_bodies_job *job = context;
+    bool oom = false;
     if (!job->relocate) {
         job->ok[i] = yx_v12_body(job->code + job->starts[i], job->lengths[i], job->functions, job->function_count, job->globals, job->global_count, job->search,
-                                 job->explicit_or, &job->bodies[i], &job->counts[i], NULL, job->origins ? &job->origins[i] : NULL);
+                                 job->explicit_or, &job->bodies[i], &job->counts[i], NULL, job->origins ? &job->origins[i] : NULL, &oom);
+        if (job->no_memory) job->no_memory[i] = oom;
         return;
     }
     yx_writer body = {0};
     size_t ignored;
     yx_v12_origins relocated_origins = {0};
     job->ok[i] = yx_v12_body(job->bodies[i].data, job->bodies[i].used, job->functions, job->function_count, job->globals, job->global_count, SIZE_MAX, false, &body,
-                             &ignored, job->origins ? &job->origins[i] : NULL, job->origins ? &relocated_origins : NULL);
+                             &ignored, job->origins ? &job->origins[i] : NULL, job->origins ? &relocated_origins : NULL, &oom);
+    if (job->no_memory) job->no_memory[i] = oom;
     if (job->ok[i]) {
         free(job->bodies[i].data);
         job->bodies[i] = body;
@@ -760,7 +786,7 @@ done:
 }
 
 static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profile, yx_writer *out, size_t *definition_map, size_t map_capacity,
-                             yx_v12_origins **constant_origins, size_t *origin_function_count)
+                             yx_v12_origins **constant_origins, size_t *origin_function_count, bool *no_memory)
 {
     const uint8_t *sections[13] = {0};
     size_t sizes[13] = {0};
@@ -775,7 +801,7 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
     yx_writer imp = {0}, fun = {0}, exp = {0}, code = {0};
     bool ok = false;
     size_t *body_starts = NULL, *body_lengths = NULL;
-    bool *body_ok = NULL;
+    bool *body_ok = NULL, *body_no_memory = NULL;
     if (length < 8 || memcmp(data, "\0asm\1\0\0\0", 8)) return false;
     while (r.at < length) {
         uint8_t id;
@@ -786,7 +812,13 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
         r.at += (size_t)n;
     }
     /* Already lowered by a nested encode call. */
-    if (sections[5] && sections[6]) return yx_put_bytes(out, data, length);
+    if (sections[5] && sections[6]) {
+        if (!yx_put_bytes(out, data, length)) {
+            if (no_memory) *no_memory = true;
+            return false;
+        }
+        return true;
+    }
     if (!sections[1] || !sections[3] || !sections[7] || !sections[10] || sections[8] || sections[9]) goto done;
     r = (yx_reader){sections[2], sizes[2], 0, false, false};
     uint64_t n = 0;
@@ -822,7 +854,11 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
     }
     if (r.at != r.length) goto done;
     r = (yx_reader){sections[3], sizes[3], 0, false, false};
-    if (!yx_get_uleb(&r, &n) || n > length || n > SIZE_MAX / sizeof(*types)) goto done;
+    if (!yx_get_uleb(&r, &n) || n > length) goto done;
+    if (n > SIZE_MAX / sizeof(*types)) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     defined = (size_t)n;
     types = calloc(defined ? defined : 1, sizeof(*types));
     counts = calloc(defined ? defined : 1, sizeof(*counts));
@@ -830,7 +866,10 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
     map = calloc(import_count + defined ? import_count + defined : 1, sizeof(*map));
     bodies = calloc(defined ? defined : 1, sizeof(*bodies));
     if (constant_origins) origins = calloc(defined ? defined : 1, sizeof(*origins));
-    if (!types || !counts || !order || !map || !bodies || (constant_origins && !origins)) goto done;
+    if (!types || !counts || !order || !map || !bodies || (constant_origins && !origins)) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     for (size_t i = 0; i < defined; ++i)
         if (!yx_get_uleb(&r, &types[i])) goto done;
     if (r.at != r.length) goto done;
@@ -857,7 +896,11 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
         body_starts = malloc(defined * sizeof(*body_starts));
         body_lengths = malloc(defined * sizeof(*body_lengths));
         body_ok = calloc(defined, sizeof(*body_ok));
-        if (!body_starts || !body_lengths || !body_ok) goto done;
+        body_no_memory = calloc(defined, sizeof(*body_no_memory));
+        if (!body_starts || !body_lengths || !body_ok || !body_no_memory) {
+            if (no_memory) *no_memory = true;
+            goto done;
+        }
         for (size_t i = 0; i < defined; ++i) {
             if (!yx_get_uleb(&r, &n) || n > r.length - r.at) goto done;
             body_starts[i] = r.at;
@@ -865,18 +908,26 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
             r.at += (size_t)n;
         }
         yx_v12_bodies_job job = {r.data, body_starts, body_lengths, map,     globals, import_count + defined, global_count, search, (profile & 256) != 0,
-                                 false,  bodies,      counts,       origins, body_ok};
+                                 false,  bodies,      counts,       origins, body_ok, body_no_memory};
         yx_parallel_run(defined, body_threads, yx_v12_body_task, &job);
         /* emit_rule measures before finish_rule_func appends its final
          * i32.const 0 (see below). */
-        for (size_t i = 0; i < defined; ++i)
-            if (!body_ok[i] || counts[i] > YX_ARCHIVE_MAX_FUNCTION_INSTRUCTIONS + 1u) goto done;
+        for (size_t i = 0; i < defined; ++i) {
+            if (!body_ok[i]) {
+                if (body_no_memory[i] && no_memory) *no_memory = true;
+                goto done;
+            }
+            if (counts[i] > YX_ARCHIVE_MAX_FUNCTION_INSTRUCTIONS + 1u) goto done;
+        }
     } else
         for (size_t i = 0; i < defined; ++i) {
-            if (!yx_get_uleb(&r, &n) || n > r.length - r.at ||
-                !yx_v12_body(r.data + r.at, (size_t)n, map, import_count + defined, globals, global_count, search, (profile & 256) != 0, &bodies[i], &counts[i], NULL,
-                             origins ? &origins[i] : NULL))
+            bool body_oom = false;
+            if (!yx_get_uleb(&r, &n) || n > r.length - r.at) goto done;
+            if (!yx_v12_body(r.data + r.at, (size_t)n, map, import_count + defined, globals, global_count, search, (profile & 256) != 0, &bodies[i], &counts[i], NULL,
+                             origins ? &origins[i] : NULL, &body_oom)) {
+                if (body_oom && no_memory) *no_memory = true;
                 goto done;
+            }
             /* emit_rule measures before finish_rule_func appends its final
              * i32.const 0. Check the lowered spelling too: single-rule module
              * builders and explicit OR can add instructions after chunk sizing. */
@@ -896,7 +947,10 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
             uint64_t index;
             if (yx_get_uleb(&e, &n) && n == 1 && yx_v12_read_name(&e, name, sizeof(name)) && !strcmp(name, "main") && yx_get_u8(&e, &kind) && !kind &&
                 yx_get_uleb(&e, &index) && index >= import_count && index - import_count < defined)
-                if (yx_v12_creation_ranks(sections[10], sizes[10], import_count, defined, (size_t)(index - import_count), &ranks) < 0) goto done;
+                if (yx_v12_creation_ranks(sections[10], sizes[10], import_count, defined, (size_t)(index - import_count), &ranks) < 0) {
+                    if (no_memory) *no_memory = true;
+                    goto done;
+                }
         }
         for (size_t i = 1; i < defined; ++i) {
             size_t p = order[i], j = i;
@@ -917,22 +971,30 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
     /* Relocate reduced bodies; globals are already in their final indices. */
     size_t identity_globals[3] = {0, 1, 2};
     size_t *identity_imports = calloc(import_count + defined ? import_count + defined : 1, sizeof(size_t));
-    if (!identity_imports) goto done;
+    if (!identity_imports) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     for (size_t i = 0; i < import_count; ++i) identity_imports[i] = i;
     for (size_t i = 0; i < defined; ++i) identity_imports[import_count + i] = map[import_count + i];
     bool relocated = true;
     if (body_threads > 1) {
+        memset(body_no_memory, 0, defined * sizeof(*body_no_memory));
         yx_v12_bodies_job job = {NULL, NULL,   NULL,   identity_imports, identity_globals, import_count + defined, 3, SIZE_MAX, false,
-                                 true, bodies, counts, origins,          body_ok};
+                                 true, bodies, counts, origins,          body_ok,          body_no_memory};
         yx_parallel_run(defined, body_threads, yx_v12_body_task, &job);
-        for (size_t i = 0; relocated && i < defined; ++i) relocated = body_ok[i];
+        for (size_t i = 0; relocated && i < defined; ++i) {
+            relocated = body_ok[i];
+            if (!relocated && body_no_memory[i] && no_memory) *no_memory = true;
+        }
     } else
         for (size_t i = 0; relocated && i < defined; ++i) {
             yx_writer body = {0};
             size_t ignored;
             yx_v12_origins relocated_origins = {0};
+            bool body_oom = false;
             relocated = yx_v12_body(bodies[i].data, bodies[i].used, identity_imports, import_count + defined, identity_globals, 3, SIZE_MAX, false, &body, &ignored,
-                                    origins ? &origins[i] : NULL, origins ? &relocated_origins : NULL);
+                                    origins ? &origins[i] : NULL, origins ? &relocated_origins : NULL, &body_oom);
             if (relocated) {
                 free(bodies[i].data);
                 bodies[i] = body;
@@ -941,6 +1003,7 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
                     origins[i] = relocated_origins;
                 }
             } else {
+                if (body_oom && no_memory) *no_memory = true;
                 free(body.data);
                 free(relocated_origins.items);
             }
@@ -958,17 +1021,29 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
             goto done;
         main = map[index];
     }
-    if (!yx_put_uleb(&imp, import_count) || !yx_put_uleb(&fun, defined) || !yx_put_uleb(&code, defined) || !yx_put_uleb(&exp, 5)) goto done;
+    if (!yx_put_uleb(&imp, import_count) || !yx_put_uleb(&fun, defined) || !yx_put_uleb(&code, defined) || !yx_put_uleb(&exp, 5)) {
+        if (no_memory) *no_memory = true;
+        goto done;
+    }
     for (size_t i = 0; i < import_count; ++i)
-        if (!yx_v12_name(&imp, imports[i].module) || !yx_v12_name(&imp, imports[i].wire_name) || !yx_put_u8(&imp, 0) || !yx_put_uleb(&imp, imports[i].type)) goto done;
+        if (!yx_v12_name(&imp, imports[i].module) || !yx_v12_name(&imp, imports[i].wire_name) || !yx_put_u8(&imp, 0) || !yx_put_uleb(&imp, imports[i].type)) {
+            if (no_memory) *no_memory = true;
+            goto done;
+        }
     for (size_t i = 0; i < defined; ++i) {
         size_t p = order[i];
-        if (!yx_put_uleb(&fun, types[p]) || !yx_put_uleb(&code, bodies[p].used) || !yx_put_bytes(&code, bodies[p].data, bodies[p].used)) goto done;
+        if (!yx_put_uleb(&fun, types[p]) || !yx_put_uleb(&code, bodies[p].used) || !yx_put_bytes(&code, bodies[p].data, bodies[p].used)) {
+            if (no_memory) *no_memory = true;
+            goto done;
+        }
     }
     {
         static const char *names[] = {"matching_patterns_bitmap_base", "filesize", "pattern_search_done", "main_memory", "main"};
         for (size_t i = 0; i < 5; ++i)
-            if (!yx_v12_name(&exp, names[i]) || !yx_put_u8(&exp, i < 3 ? 3 : i == 3 ? 2 : 0) || !yx_put_uleb(&exp, i < 3 ? i : i == 3 ? 0 : main)) goto done;
+            if (!yx_v12_name(&exp, names[i]) || !yx_put_u8(&exp, i < 3 ? 3 : i == 3 ? 2 : 0) || !yx_put_uleb(&exp, i < 3 ? i : i == 3 ? 0 : main)) {
+                if (no_memory) *no_memory = true;
+                goto done;
+            }
     }
     {
         static const uint8_t memory[] = {1, 0, 1};
@@ -977,11 +1052,14 @@ static bool yx_v12_wasm_impl(const uint8_t *data, size_t length, unsigned profil
                   g = {(uint8_t *)global, sizeof(global), sizeof(global)};
         ok = yx_put_bytes(out, data, 8) && yx_v12_section(out, 1, &t) && (!import_count || yx_v12_section(out, 2, &imp)) && yx_v12_section(out, 3, &fun) &&
              yx_v12_section(out, 5, &m) && yx_v12_section(out, 6, &g) && yx_v12_section(out, 7, &exp) && yx_v12_section(out, 10, &code);
+        if (!ok && no_memory) *no_memory = true;
     }
     if (ok && constant_origins) {
         yx_v12_origins *sorted = calloc(defined ? defined : 1, sizeof(*sorted));
-        if (!sorted) ok = false;
-        else {
+        if (!sorted) {
+            ok = false;
+            if (no_memory) *no_memory = true;
+        } else {
             for (size_t i = 0; i < defined; ++i) {
                 sorted[i] = origins[order[i]];
                 origins[order[i]].items = NULL;
@@ -999,6 +1077,7 @@ done:
     free(body_starts);
     free(body_lengths);
     free(body_ok);
+    free(body_no_memory);
     free(types);
     free(map);
     free(order);
@@ -1011,9 +1090,14 @@ done:
     return ok;
 }
 
+static bool yx_v12_wasm_checked(const uint8_t *data, size_t length, unsigned profile, yx_writer *out, bool *no_memory)
+{
+    return yx_v12_wasm_impl(data, length, profile, out, NULL, 0, NULL, NULL, no_memory);
+}
+
 static bool yx_v12_wasm(const uint8_t *data, size_t length, unsigned profile, yx_writer *out)
 {
-    return yx_v12_wasm_impl(data, length, profile, out, NULL, 0, NULL, NULL);
+    return yx_v12_wasm_checked(data, length, profile, out, NULL);
 }
 
 static bool yx_v12_rule_size(const uint8_t *data, size_t length, size_t search_global, uint64_t *count)
@@ -1058,10 +1142,11 @@ static bool yx_v12_archive_wasm(uint8_t **data, size_t *length, unsigned profile
     /* The rewritten archive is about as long as the original. */
     if (*length <= SIZE_MAX - 64 && (w.data = malloc(*length + 64))) w.capacity = *length + 64;
     yx_v12_memo *memo = yx_v12_memo_active;
-    bool lowered;
-    if (memo && memo->valid && memo->profile == profile && memo->input_length == size && !memcmp(memo->input, *data + start, size))
+    bool lowered, no_memory = false;
+    if (memo && memo->valid && memo->profile == profile && memo->input_length == size && !memcmp(memo->input, *data + start, size)) {
         lowered = yx_put_bytes(&wasm, memo->output, memo->output_length);
-    else if ((lowered = yx_v12_wasm(*data + start, size, profile, &wasm)) && memo) {
+        if (!lowered) no_memory = true;
+    } else if ((lowered = yx_v12_wasm_checked(*data + start, size, profile, &wasm, &no_memory)) && memo) {
         uint8_t *input = malloc(size ? size : 1), *output = malloc(wasm.used ? wasm.used : 1);
         if (input && output) {
             memcpy(input, *data + start, size);
@@ -1075,9 +1160,11 @@ static bool yx_v12_archive_wasm(uint8_t **data, size_t *length, unsigned profile
     }
     bool ok = lowered && yx_put_bytes(&w, *data, prefix) && yx_put_uint(&w, wasm.used) && yx_put_bytes(&w, wasm.data, wasm.used) &&
               yx_put_bytes(&w, *data + start + size, *length - start - size);
+    if (lowered && !ok) no_memory = true;
     free(wasm.data);
     if (!ok) {
         free(w.data);
+        if (no_memory) yx_walk_no_memory = true;
         return false;
     }
     free(*data);
@@ -1169,7 +1256,7 @@ static bool yx_v12_restore_template(const uint8_t *actual, size_t actual_length,
     if (yx_v12_code_function_count(actual, actual_length, &actual_functions) && yx_v12_code_function_count(template_data, template_length, &template_functions) &&
         actual_functions != template_functions)
         return false;
-    if (!yx_v12_wasm_impl(template_data, template_length, profile, &expected, mapping, 64, &origins, &origin_count) || !yx_v12_sections(actual, actual_length, a, az) ||
+    if (!yx_v12_wasm_impl(template_data, template_length, profile, &expected, mapping, 64, &origins, &origin_count, NULL) || !yx_v12_sections(actual, actual_length, a, az) ||
         !yx_v12_sections(expected.data, expected.used, e, ez) || !yx_v12_sections(template_data, template_length, t, tz))
         goto done;
     if (expected.used == actual_length && !memcmp(expected.data, actual, actual_length)) {

@@ -263,10 +263,21 @@ struct YRX_PATTERN {
     bool candidate_hits_overflow;
     /* Gate plans: candidate_hits lists every verified branch start unless
      * candidate_gate_dropped (an occurrence was not kept; the full scanner
-     * then searches the whole input). candidate_gate_starts is set only
-     * while that full scan runs from the sorted list. */
+     * then searches the input). candidate_gate_starts is set only while
+     * that full scan runs from the sorted list. */
     bool candidate_gate_dropped;
     bool candidate_gate_starts;
+    /* The atom offset of the first occurrence that was not kept: every
+     * occurrence whose atom lies before it is in candidate_hits. */
+    size_t candidate_gate_cut;
+    /* A gate in front of the scan of an alternation's literals keeps its
+     * occurrences in candidate_hits' memory as YX_RX_LITERAL_HIT values
+     * (regex_vm.h; candidate_hit_count and _capacity count those).
+     * candidate_gate_literals is set only while that scan runs from them
+     * (yx_rx_scan_literal_hits); with dropped occurrences
+     * candidate_gate_resume says where each literal's search goes on. */
+    bool candidate_gate_literals;
+    const size_t *candidate_gate_resume;
     /* Scanner views only: the reference's atom order for rx_program's atoms
      * (global atom ids and Teddy buckets), owned by the view. */
     size_t *rx_order_ids, *rx_order_buckets;

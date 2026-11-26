@@ -5831,6 +5831,10 @@ static bool yx_condition_filesize_identity(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         if (yx_bool_keyword(&parser, "and") &&
             yx_bool_keyword(&parser, "true"))
@@ -5874,6 +5878,10 @@ static bool yx_condition_filesize_double(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -5913,6 +5921,10 @@ static bool yx_condition_filesize_triple(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -5970,6 +5982,10 @@ static bool yx_condition_filesize_quad(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6029,6 +6045,10 @@ static bool yx_condition_filesize_five(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6085,6 +6105,10 @@ static bool yx_condition_filesize_six(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6141,6 +6165,10 @@ static bool yx_condition_filesize_seven(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6197,6 +6225,10 @@ static bool yx_condition_filesize_eight(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6252,6 +6284,10 @@ static bool yx_condition_filesize_right_grouped(
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, is_or ? "or" : "and")) continue;
@@ -6311,6 +6347,10 @@ static bool yx_condition_filesize_mixed(const char *condition,
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, and_or ? "and" : "or")) continue;
@@ -6375,6 +6415,10 @@ static bool yx_condition_filesize_mixed_and_or_left(
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, "or")) continue;
@@ -6425,6 +6469,10 @@ static bool yx_condition_filesize_mixed_or_and_left(
         if (split != condition &&
             !isspace((unsigned char) split[-1]) && split[-1] != ')')
             continue;
+        /* Within a run of white space every position parses alike (the
+         * keyword parser skips it, the left side ends in it): only the
+         * last one is tried, or a long run costs its square. */
+        if (isspace((unsigned char) split[0])) continue;
         parser.at = (const unsigned char *) split;
         parser.depth = 0;
         if (!yx_bool_keyword(&parser, "and")) continue;

@@ -783,7 +783,8 @@ static size_t yx_utf8_sequence_length(const unsigned char *text)
 char *yx_regex_group_utf8_literals(const char *regexp)
 {
     size_t length = strlen(regexp), used = 0;
-    char *out = malloc(length * 2 + 1);
+    /* A wrapped character takes at least two input bytes and adds four. */
+    char *out = length > (SIZE_MAX - 1) / 3 ? NULL : malloc(length * 3 + 1);
     bool in_class = false, quoted = false;
     if (!out) return NULL;
     for (size_t i = 0; i < length;) {
@@ -4030,7 +4031,7 @@ static int yx_regex_lazy_fullword_retry(const char *regexp, bool nocase, bool do
         const unsigned char *branch = at + (noncapturing ? 3 : 1);
         unsigned char literal = branch[0];
         if (((literal >= '0' && literal <= '9') || (literal >= 'A' && literal <= 'Z') || (literal >= 'a' && literal <= 'z')) && branch[1] == '|' &&
-            branch[2] == literal && branch[3] == literal && branch[4] == ')' && branch[6] == '?' && branch[7] == literal &&
+            branch[2] == literal && branch[3] == literal && branch[4] == ')' && branch[5] && branch[6] == '?' && branch[7] == literal &&
             ((branch[5] == '?' && ((!noncapturing && branch[8] == '\0') || (branch[8] == literal && branch[9] == '\0'))) ||
              (branch[5] == '*' && branch[8] == literal && branch[9] == '\0')))
             return 1;
@@ -10012,14 +10013,33 @@ YRX_RESULT yx_scan_pattern(YRX_PATTERN *pattern, const uint8_t *data, size_t siz
          * the first sub-pattern that matches at an offset has the match. */
         yx_rx_match_list list = {0};
         bool ok;
+        int order = pattern->fixed_at_enabled                                            ? YX_RX_LITERALS_ANCHORED
+                    : pattern->atom_search_teddy && size >= pattern->atom_search_minimum ? YX_RX_LITERALS_TEDDY
+                                                                                         : YX_RX_LITERALS_AUTOMATON;
         list.limit = max_matches;
-        ok = yx_rx_scan_literals(pattern->rx_literals, data, size, pattern->deadline, &list,
-                                 pattern->fixed_at_enabled                                            ? YX_RX_LITERALS_ANCHORED
-                                 : pattern->atom_search_teddy && size >= pattern->atom_search_minimum ? YX_RX_LITERALS_TEDDY
-                                                                                                      : YX_RX_LITERALS_AUTOMATON,
-                                 /* A gate's sorted branch starts (yx_candidate_finalize). */
-                                 pattern->candidate_gate_starts ? pattern->candidate_hits : NULL, pattern->candidate_gate_starts ? pattern->candidate_hit_count : 0);
-        for (size_t i = 0; ok && i < list.count; ++i) ok = yx_add_match(pattern, list.items[i].start, list.items[i].end - list.items[i].start, max_matches);
+        /* A gate's occurrences of the literals (yx_candidate_finalize). */
+        if (pattern->candidate_gate_literals)
+            ok = yx_rx_scan_literal_hits(pattern->rx_literals, data, size, pattern->deadline, &list, order, (uint64_t *)pattern->candidate_hits,
+                                         pattern->candidate_hit_count, pattern->candidate_gate_resume);
+        else
+            ok = yx_rx_scan_literals(pattern->rx_literals, data, size, pattern->deadline, &list, order,
+                                     /* A gate's sorted branch starts (yx_candidate_finalize). */
+                                     pattern->candidate_gate_starts ? pattern->candidate_hits : NULL, pattern->candidate_gate_starts ? pattern->candidate_hit_count : 0);
+        /* yx_add_match of each, up to the limit, in one allocation. */
+        size_t kept = max_matches && list.count > max_matches ? max_matches : list.count;
+        if (ok && kept) {
+            pattern->matches = kept <= SIZE_MAX / sizeof(YRX_MATCH) ? malloc(kept * sizeof(YRX_MATCH)) : NULL;
+            ok = pattern->matches != NULL;
+        }
+        if (ok && kept) {
+            pattern->match_count = pattern->match_capacity = kept;
+            for (size_t i = 0; i < kept; ++i) {
+                YRX_MATCH *match = &pattern->matches[i];
+                match->offset = list.items[i].start;
+                match->length = list.items[i].end - list.items[i].start;
+                match->xor_key = -1;
+            }
+        }
         yx_rx_match_list_free(&list);
         if (yx_scan_deadline_reached(pattern->deadline)) return YRX_SCAN_TIMEOUT;
         return ok ? YRX_SUCCESS : YRX_SCAN_ERROR;
@@ -11084,6 +11104,48 @@ static YRX_RESULT yx_candidate_verify_spread(YRX_PATTERN *pattern, const yx_cand
     return YRX_SUCCESS;
 }
 
+/* Whether a fired gate hands the pattern to yx_scan_pattern's scan of its
+ * Literal sub-patterns, one per gate needle (yx_candidate_gate_plan and
+ * yx_ser_literal_set walk the same branches and encodings), and an
+ * occurrence in size bytes fits YX_RX_LITERAL_HIT with any atom's end. */
+static bool yx_candidate_gate_literal_scan(const YRX_PATTERN *pattern, const yx_candidate_plan *plan, size_t size)
+{
+    return pattern->rx_literals && (pattern->atom_search_known || pattern->fixed_at_enabled) && pattern->rx_literals->count == plan->atom_count &&
+           plan->atom_count <= YX_RX_LITERAL_HIT_LITERALS && (uint64_t)size >> (62 - YX_RX_LITERAL_HIT_SHIFT) == 0;
+}
+
+/* The gate's kept occurrences (YX_RX_LITERAL_HIT of the branch start and the
+ * atom's tag) are occurrences of the pattern's literals for
+ * yx_rx_scan_literal_hits: sets candidate_gate_literals and, when
+ * occurrences were dropped, candidate_gate_resume (the caller frees it).
+ * False when the needles are not the literals or on allocation failure: the
+ * caller's full scan finds the same matches. */
+static bool yx_candidate_gate_occurrences(YRX_PATTERN *pattern, const yx_candidate_plan *plan, bool dropped)
+{
+    const yx_rx_literals *set = pattern->rx_literals;
+    size_t literals = set->count;
+    size_t *resume = NULL;
+    for (size_t k = 0; k < literals; ++k) {
+        const yx_rx_literal *literal = &set->items[k];
+        size_t from = plan->gate_offsets[k];
+        if (plan->atoms[k].tag != k || plan->atoms[k].variant != k || (literal->sub.flags & YX_RX_NOCASE) || literal->sub.atom_count != 1 ||
+            !literal->sub.atoms->length || literal->sub.atoms->backtrack > literal->length || literal->length != plan->gate_offsets[k + 1] - from ||
+            memcmp(literal->bytes, plan->gate_bytes + from, literal->length))
+            return false;
+    }
+    if (dropped) {
+        /* Occurrences are kept by increasing atom offset: those with the
+         * atom before candidate_gate_cut are all there. */
+        resume = literals <= SIZE_MAX / sizeof(*resume) ? malloc((literals ? literals : 1) * sizeof(*resume)) : NULL;
+        if (!resume) return false;
+        for (size_t k = 0; k < literals; ++k)
+            resume[k] = pattern->candidate_gate_cut > plan->atoms[k].backtrack ? pattern->candidate_gate_cut - plan->atoms[k].backtrack : 0;
+    }
+    pattern->candidate_gate_literals = true;
+    pattern->candidate_gate_resume = resume;
+    return true;
+}
+
 YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern, const yx_candidate_plan *plan, uint32_t tag, size_t atom_position, const uint8_t *data, size_t size, size_t limit,
                                bool fast_scan)
 {
@@ -11093,20 +11155,42 @@ YRX_RESULT yx_candidate_verify(YRX_PATTERN *pattern, const yx_candidate_plan *pl
     if (plan->gate) {
         /* A whole branch occurrence hands the pattern to the full scanner.
          * Every match starts at such an occurrence, so a regexp gate keeps
-         * their starts for its search (up to the retained-candidate bound). */
-        bool keep = plan->kind == YX_PATTERN_REGEX && plan->regex;
+         * their starts for its search, and a gate in front of the scan of
+         * the literals the occurrences (up to the retained-candidate bound). */
+        bool literals = yx_candidate_gate_literal_scan(pattern, plan, size);
+        bool keep = literals || (plan->kind == YX_PATTERN_REGEX && plan->regex);
         if ((pattern->candidate_hits_overflow && (!keep || pattern->candidate_gate_dropped)) || atom_position < atom->backtrack) return YRX_SUCCESS;
         size_t start = atom_position - atom->backtrack;
         size_t first = plan->gate_offsets[atom->variant];
         size_t length = plan->gate_offsets[atom->variant + 1] - first;
-        if (!(start <= size && length <= size - start && memcmp(data + start, plan->gate_bytes + first, length) == 0)) return YRX_SUCCESS;
+        /* An atom that is the whole branch is its occurrence. */
+        if (!(start <= size && length <= size - start && (atom->length == length || memcmp(data + start, plan->gate_bytes + first, length) == 0))) return YRX_SUCCESS;
         pattern->candidate_hits_overflow = true;
         if (!keep || pattern->candidate_gate_dropped) return YRX_SUCCESS;
+        if (literals) {
+            /* The scan of the literals takes the occurrences themselves,
+             * eight bytes each in the same memory bound. */
+            uint64_t *hits = (uint64_t *)pattern->candidate_hits;
+            if (pattern->candidate_hit_count == pattern->candidate_hit_capacity) {
+                size_t capacity = pattern->candidate_hit_capacity ? pattern->candidate_hit_capacity * 2 : 64;
+                hits = capacity <= 2000000 ? realloc(hits, capacity * sizeof(*hits)) : NULL;
+                if (!hits) {
+                    pattern->candidate_gate_dropped = true;
+                    pattern->candidate_gate_cut = atom_position;
+                    return YRX_SUCCESS;
+                }
+                pattern->candidate_hits = (yx_rx_candidate *)hits;
+                pattern->candidate_hit_capacity = capacity;
+            }
+            hits[pattern->candidate_hit_count++] = YX_RX_LITERAL_HIT(start, tag);
+            return YRX_SUCCESS;
+        }
         if (pattern->candidate_hit_count == pattern->candidate_hit_capacity) {
             size_t capacity = pattern->candidate_hit_capacity ? pattern->candidate_hit_capacity * 2 : 32;
             yx_rx_candidate *grown = capacity <= 1000000 ? realloc(pattern->candidate_hits, capacity * sizeof(*grown)) : NULL;
             if (!grown) {
                 pattern->candidate_gate_dropped = true;
+                pattern->candidate_gate_cut = atom_position;
                 return YRX_SUCCESS;
             }
             pattern->candidate_hits = grown;
@@ -11218,11 +11302,16 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
         /* No whole branch occurred: the full scanner has no match to find.
          * Otherwise run it exactly as the scanner's per-pattern loop does
          * (yx_scan_pattern_fixed_at in xxyara.c); its regexp search visits
-         * only the recorded branch starts (yx_scan_regex_buffer). */
+         * only the recorded branch starts (yx_scan_regex_buffer), its scan
+         * of the literals takes the recorded occurrences. */
         bool fired = pattern->candidate_hits_overflow;
-        bool starts = fired && !pattern->candidate_gate_dropped && pattern->candidate_hit_count;
+        bool listed = fired && yx_candidate_gate_literal_scan(pattern, plan, size) && !(pattern->fixed_at_enabled && pattern->fixed_at_offset >= size) &&
+                      yx_candidate_gate_occurrences(pattern, plan, pattern->candidate_gate_dropped);
+        /* Without the literals' scan candidate_hits holds branch starts. */
+        bool starts = fired && !yx_candidate_gate_literal_scan(pattern, plan, size) && !pattern->candidate_gate_dropped && pattern->candidate_hit_count;
         pattern->candidate_hits_overflow = false;
         pattern->candidate_gate_dropped = false;
+        pattern->candidate_gate_cut = 0;
         if (starts) {
             /* Sorted, unique starts; the branch tags are not needed. */
             yx_rx_candidate *hits = pattern->candidate_hits;
@@ -11241,6 +11330,9 @@ YRX_RESULT yx_candidate_finalize(YRX_PATTERN *pattern, const yx_candidate_plan *
             result = yx_scan_pattern(pattern, data, size, limit, fast_scan);
             pattern->candidate_gate_starts = false;
         }
+        free((void *)pattern->candidate_gate_resume);
+        pattern->candidate_gate_resume = NULL;
+        pattern->candidate_gate_literals = false;
         free(pattern->candidate_hits);
         pattern->candidate_hits = NULL;
         pattern->candidate_hit_count = pattern->candidate_hit_capacity = 0;
