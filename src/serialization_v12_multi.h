@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Decode typed pattern/rule operands before regenerating the complete module.
  * This avoids enumerating combinations of independent rule conditions. The
  * regenerated v12 module must still equal every byte of the input module. */

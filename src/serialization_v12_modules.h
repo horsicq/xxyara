@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Reverse the shared v12 control-flow reduction for module expressions.
  * This operates on bounded instructions, then requires whole-module lowering
  * equality before handing the private representation to a schema decoder. */

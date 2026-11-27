@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 #ifndef XXYARA_SCAN_CANDIDATES_H
 #define XXYARA_SCAN_CANDIDATES_H
 

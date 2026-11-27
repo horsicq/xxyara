@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Archive-only lowering from the codec's template IR to YARA-X 1.23 WASM.
  * Keeping this at the archive boundary also covers the specialized emitters.
  * No scanner or condition-evaluator instructions are changed here. */

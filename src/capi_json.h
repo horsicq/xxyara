@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* JSON syntax diagnostics used by the C API before argument validation.
  * The grammar and byte positions follow serde_json's string deserializer.
  * Semantic conversion remains in the existing global-variable parser. */

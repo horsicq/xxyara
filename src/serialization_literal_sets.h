@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Literal-set lowering for scalar string disjunctions in archive version 12.
  * The expression codec keeps its semantic kinds and import spelling; the
  * archive boundary supplies the v12 WASM structure and exact wire names. */

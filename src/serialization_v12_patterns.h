@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Recover the codec's pattern expression grammars at the v12 boundary.
  * Every recovered module is checked against the complete lowered template;
  * archive immediates are copied only after instruction and origin checks. */

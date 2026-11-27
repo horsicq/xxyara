@@ -1,3 +1,5 @@
+/* Copyright (c) 2026 hors<horsicq@gmail.com> */
+
 /* Numeric rule chunks are decoded from their bounded operands, then the
  * complete legacy module is independently rebuilt and lowered for validation.
  * Rule-match immediates identify rules after instruction-count sorting. */
