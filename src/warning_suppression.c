@@ -592,6 +592,16 @@ static yx_suppression_scope *yx_text_scope(const char *source)
     return NULL;
 }
 
+void *yx_suppression_scopes_current(void)
+{
+    return yx_suppress_scopes;
+}
+
+void yx_suppression_scopes_adopt(void *scopes)
+{
+    yx_suppress_scopes = (yx_suppression_scope *)scopes;
+}
+
 size_t yx_source_text_length(const char *source)
 {
     yx_suppression_scope *scope = yx_text_scope(source);

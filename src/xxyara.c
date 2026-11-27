@@ -9114,26 +9114,28 @@ static char *yx_inv_expand_condition(const char *condition)
  * on that YARA-X raises after source position `position`. non_bool_expr,
  * unused_identifier and potentially_slow_loop are raised at their recorded
  * point (after their expression); the other typed kinds at their label. */
+/* The source position warning `warning` is ordered by, false when it takes
+ * no part in the ordering. */
+static bool yx_compiler_raised_position(YRX_COMPILER *compiler, const char *warning, size_t *position)
+{
+    const char *other;
+    for (size_t point = 0; point < compiler->warning_point_count; ++point)
+        if (compiler->warning_point_keys[point] == warning) {
+            *position = compiler->warning_point_values[point];
+            return true;
+        }
+    if (!strstr(warning, "\"type\":\"UnsatisfiableExpression\"") && !strstr(warning, "\"type\":\"BooleanIntegerComparison\"") &&
+        !strstr(warning, "\"type\":\"NonBooleanAsBoolean\"") && !strstr(warning, "\"type\":\"DeprecatedField\""))
+        return false;
+    other = strstr(warning, "\"span\":{\"start\":");
+    return other && yx_compiler_json_span(compiler, other, position, NULL);
+}
+
 static void yx_compiler_move_before_later(YRX_COMPILER *compiler, size_t first_type_warning, size_t index, size_t position)
 {
     for (size_t j = first_type_warning; j < index; ++j) {
-        const char *warning = compiler->warnings[j];
-        size_t other_position = 0, point;
-        bool raised_after = false;
-        for (point = 0; point < compiler->warning_point_count; ++point)
-            if (compiler->warning_point_keys[point] == warning) {
-                other_position = compiler->warning_point_values[point];
-                raised_after = true;
-                break;
-            }
-        if (!raised_after) {
-            const char *other;
-            if (!strstr(warning, "\"type\":\"UnsatisfiableExpression\"") && !strstr(warning, "\"type\":\"BooleanIntegerComparison\"") &&
-                !strstr(warning, "\"type\":\"NonBooleanAsBoolean\"") && !strstr(warning, "\"type\":\"DeprecatedField\""))
-                continue;
-            other = strstr(warning, "\"span\":{\"start\":");
-            if (!other || !yx_compiler_json_span(compiler, other, &other_position, NULL)) continue;
-        }
+        size_t other_position = 0;
+        if (!yx_compiler_raised_position(compiler, compiler->warnings[j], &other_position)) continue;
         if (other_position > position) {
             char *saved = compiler->warnings[index];
             memmove(compiler->warnings + j + 1, compiler->warnings + j, (index - j) * sizeof(*compiler->warnings));
@@ -9172,13 +9174,25 @@ static int yx_compiler_warn_invariant_condition_impl(YRX_COMPILER *compiler, con
     /* The typed visitor and legacy schema deprecations are separate passes.
      * Merge deprecations into those local type warnings in source order,
      * retaining the order of every other warning category. */
+    /* `latest` is the largest ordering position among the warnings from
+     * `first_type_warning` up to the one in work: a deprecation at or after
+     * it has nothing to move before, so deprecations already in source
+     * order cost one step each. */
+    size_t latest = 0;
+    /* Nothing to order without a deprecation. */
+    for (size_t i = first_type_warning; first_deprecated < compiler->warning_count && i < first_deprecated; ++i) {
+        size_t other_position;
+        if (yx_compiler_raised_position(compiler, compiler->warnings[i], &other_position) && other_position > latest) latest = other_position;
+    }
     for (size_t i = first_deprecated; i < compiler->warning_count; ++i) {
-        const char *span = strstr(compiler->warnings[i], "\"span\":{\"start\":");
-        size_t position;
-        if (!yx_compiler_json_span(compiler, span, &position, NULL)) continue;
+        const char *current = compiler->warnings[i];
+        const char *span = strstr(current, "\"span\":{\"start\":");
+        size_t position, own_position;
         /* A deprecated field read before a typed warning's point (in an
          * operand, the body) comes first. */
-        yx_compiler_move_before_later(compiler, first_type_warning, i, position);
+        if (yx_compiler_json_span(compiler, span, &position, NULL) && position < latest)
+            yx_compiler_move_before_later(compiler, first_type_warning, i, position);
+        if (yx_compiler_raised_position(compiler, current, &own_position) && own_position > latest) latest = own_position;
     }
     /* YARA-X raises global_rule_misuse where it looks the identifier up:
      * in source order with the deprecations and before the typed warnings

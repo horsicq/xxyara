@@ -69,6 +69,14 @@ void yx_suppression_scope_end(yx_suppression_scope *scope);
  * question. The text must not change while its scope is open. */
 void yx_suppression_scope_begin_text(yx_suppression_scope *scope, const char *source);
 
+/* The calling thread's open scopes, and their adoption by a thread that
+ * does a part of the caller's work while the caller waits for it (the
+ * deep-stack walker): without them that thread measures the source and
+ * counts its lines anew for every diagnostic. Scopes the adopting thread
+ * opens itself are closed before it hands the list back (NULL). */
+void *yx_suppression_scopes_current(void);
+void yx_suppression_scopes_adopt(void *scopes);
+
 /* strlen(source). */
 size_t yx_source_text_length(const char *source);
 

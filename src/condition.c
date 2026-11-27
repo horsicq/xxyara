@@ -22,6 +22,7 @@
 #include "condition.h"
 #include "internal.h"
 #include "serialization.h"
+#include "warning_suppression.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -363,6 +364,11 @@ typedef struct yx_node {
     unsigned valid_generation;
     const void *valid_scope;
     bool valid_inside_for_of;
+    /* The operands of the n-ary chain this link belongs to were validated
+     * in this walk, in this scope (see yx_validate_nary_operands). */
+    unsigned nary_generation;
+    const void *nary_scope;
+    bool nary_inside_for_of;
     /* A `with` statement that is the first operand of an `and` (1) or `or`
      * (2): set by yx_condition_alias_free_text. */
     uint8_t alias_chain_parent;
@@ -396,6 +402,8 @@ typedef struct {
     void (*call)(void *);
     void *data;
     size_t stack;
+    /* The starting thread's source scopes (it waits for this one). */
+    void *scopes;
 } yx_deep_job;
 /* The deep stack the current thread runs on: its first frame's address and
  * its reservation, set by the thread's entry while `call` runs. A nested
@@ -413,7 +421,9 @@ static void yx_deep_entry(yx_deep_job *job)
     char base;
     yx_deep_base = (uintptr_t)(void *)&base;
     yx_deep_size = job->stack;
+    yx_suppression_scopes_adopt(job->scopes);
     job->call(job->data);
+    yx_suppression_scopes_adopt(NULL);
     yx_deep_base = 0;
     yx_deep_size = 0;
 }
@@ -454,7 +464,7 @@ static size_t yx_deep_room(void)
 #define YX_DEEP_INLINE_MAXIMUM 1024
 static bool yx_run_deep(size_t depth, void (*call)(void *), void *data)
 {
-    yx_deep_job job = {call, data, 0};
+    yx_deep_job job = {call, data, 0, yx_suppression_scopes_current()};
     size_t stack, minimum;
     if (depth < YX_DEEP_TREE_DEPTH) {
         call(data);
@@ -13079,6 +13089,16 @@ static bool yx_validate_nary_operands(const yx_node *top, yx_validation *state, 
         if (operand && operand->kind != N_REGEX) ok = yx_validate_node(operand, state, inside_for_of, scope);
     }
     if (operands != local) free((void *)operands);
+    /* Every link below `top` has the same operands or a prefix of them: a
+     * validation that starts at one of them (a link reached through its
+     * parent's own check) need not walk the chain again. */
+    if (ok && yx_type_cache_generation)
+        for (link = top; link && link->self == link; link = yx_nary_link(link) ? link->a : NULL) {
+            yx_node *mark = (yx_node *)link;
+            mark->nary_generation = yx_type_cache_generation;
+            mark->nary_scope = scope;
+            mark->nary_inside_for_of = inside_for_of;
+        }
     return ok;
 }
 
@@ -13102,7 +13122,10 @@ static bool yx_validate_node(const yx_node *node, yx_validation *state, bool ins
         const yx_node *spine;
         size_t failures;
         bool step;
-        if (node != chain && yx_nary_operation(node) && !yx_validate_nary_operands(node, state, inside_for_of, scope)) {
+        if (node != chain && yx_nary_operation(node) &&
+            !(node->self == node && yx_type_cache_generation && node->nary_generation == yx_type_cache_generation && node->nary_scope == (const void *)scope &&
+              node->nary_inside_for_of == inside_for_of) &&
+            !yx_validate_nary_operands(node, state, inside_for_of, scope)) {
             ok = false;
             break;
         }
